@@ -228,10 +228,10 @@ static BOOL IsLowSurrogateW(WCHAR c)  { return c >= 0xDC00 && c <= 0xDFFF; }
 
 /* 字符类别：决定跳词边界。连续同类字符串视为"一个词"，
    跳词就停在这些词(与词/分隔符)的边界处。
-   英文与数字同组（21M 是一个词）；
-   采用"反向"判定：先把 字母数字/符号 归类，
+   英文与数字同组（21M 是一个词）；谚文（韩文）自成一组；
+   采用"反向"判定：先把 字母数字/谚文/符号 归类，
    其余兜底一律算 CH_OTHER（汉字、其他语言字符、生僻字、emoji 等）。 */
-typedef enum { CH_OTHER, CH_ALPHA, CH_SEP } CharClass;
+typedef enum { CH_OTHER, CH_HANGUL, CH_ALPHA, CH_SEP } CharClass;
 
 static CharClass ClassOf(WCHAR c) {
     unsigned cp = (unsigned)c;
@@ -242,6 +242,13 @@ static CharClass ClassOf(WCHAR c) {
     if ((cp >= 0xFF10 && cp <= 0xFF19) || (cp >= 0xFF21 && cp <= 0xFF3A) ||
         (cp >= 0xFF41 && cp <= 0xFF5A))
         return CH_ALPHA;
+    /* 谚文（韩文）自成一组，完全按指定范围匹配：
+       Hangul Jamo / 兼容 Jamo / Jamo Extended-A / 音节 */
+    if ((cp >= 0x1100 && cp <= 0x11FF) ||
+        (cp >= 0x3130 && cp <= 0x318F) ||
+        (cp >= 0xA960 && cp <= 0xA97F) ||
+        (cp >= 0xAC00 && cp <= 0xD7FF))
+        return CH_HANGUL;
     /* 分隔符：空白 + 标点 */
     if (c == L'\0') return CH_SEP;
     if (iswspace(c)) return CH_SEP;
