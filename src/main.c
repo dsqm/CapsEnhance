@@ -105,7 +105,7 @@ static void TrayShowMenu(void) {
         g_cMod = FALSE; g_dMod = FALSE; g_fMod = FALSE;
         g_btnCount = 0;
         ResetEngine();
-        if (!g_state.paused) TrayAddHint(L"CapsEnhance：正在映射（C 为增强键）");
+        if (!g_state.paused) TrayAddHint(L"CapsEnhance：正在映射");
         else TrayAddHint(L"CapsEnhance：已暂停（CapsLock 恢复原功能）");
     } else if (cmd == IDM_EXIT) {
         g_quit = TRUE;
@@ -161,7 +161,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else {
             CapLog("===== REC END =====");
             MessageBeep(MB_ICONHAND);       /* 系统"手形"音：结束记录（低而不同） */
-            TrayAddHint(L"CapsEnhance：正在映射（C 为增强键）");
+            TrayAddHint(L"CapsEnhance：正在映射");
         }
         return 0;
     case WM_TRIG_DOWN: {             /* 触发电按下：进入稳定期待开火 */
@@ -260,7 +260,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     AppendMenuW(g_menu, MF_STRING, IDM_EXIT, L"退出");
 
     TrayAdd();
-    TrayAddHint(L"CapsEnhance：正在映射（C 为增强键）");
+    TrayAddHint(L"CapsEnhance：正在映射");
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
