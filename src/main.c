@@ -2,6 +2,7 @@
 
 #include <shellapi.h>
 #include <commctrl.h>
+#include <mmsystem.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,7 @@
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -150,10 +152,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_PROBE:
         /* C+`：切换诊断记录。开始=探测当前焦点并记录；再按=结束记录。
-           重启程序即自然结束上一段记录。 */
+           重启程序即自然结束上一段记录。结束时机出系统提示音。 */
         g_recording = !g_recording;
         if (g_recording) { CapLog("===== REC START ====="); NavProbe(); }
-        else              CapLog("===== REC END =====");
+        else {
+            CapLog("===== REC END =====");
+            PlaySoundW(L"SystemExit", NULL, SND_ALIAS | SND_ASYNC);
+        }
         return 0;
     case WM_TRIG_DOWN: {             /* 触发电按下：进入稳定期待开火 */
         int act = (int)wp;
@@ -242,7 +247,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
         return 1;
     }
 
-    CapLog("===== CapsEnhance 启动 =====");
+    /* 启动不写日志文件；采集系统/环境基线供 C+` 诊断使用，并出区别于结束音的开机提示音 */
+    NavBaseInfo();
+    PlaySoundW(L"SystemStart", NULL, SND_ALIAS | SND_ASYNC);
 
     g_menu = CreatePopupMenu();
     AppendMenuW(g_menu, MF_STRING, IDM_PAUSE, L"暂停映射");

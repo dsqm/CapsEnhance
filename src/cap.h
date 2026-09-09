@@ -75,6 +75,7 @@ extern HWND g_mainWnd;
 /* ---------- 诊断/日志 ---------- */
 void CapLog(const char* fmt, ...);   /* 追加写 CapsEnhance.log（可多线程调用） */
 void NavProbe(void);                 /* 探测当前焦点控件并写入日志 + 弹窗 */
+void NavBaseInfo(void);              /* 启动时采集系统/环境基线（不落盘，C+` 诊断时输出） */
 
 /* ---------- 词跳模块 ---------- */
 int NavJump(int dir, BOOL shift);      /* 前台控件 + dir + shift(位移=F) -> 移动；返回移动格数(<0失败) */

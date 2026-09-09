@@ -10,8 +10,9 @@
 
 /* nav.c 内部已改为非 static 供测试调用 */
 int ComputeSteps(const WCHAR* s, int len, int caret, int dir);
-/* 单测未链接 main.c，补两个符号 */
+/* 单测未链接 main.c，补若干符号 */
 volatile BOOL g_recording = FALSE;
+HHOOK g_hook = NULL;   /* NavBaseInfo 会读 g_hook，需提供定义 */
 void CapLog(const char* fmt, ...) { (void)fmt; }
 
 static int fails = 0;

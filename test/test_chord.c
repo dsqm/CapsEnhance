@@ -13,6 +13,7 @@
 /* 词跳桩：本测试只验证 D/F 与补齐，不测文本解析 */
 int NavJump(int dir, BOOL shift) { (void)dir; (void)shift; return 0; }
 void NavProbe(void) { /* 诊断探测：本测试桩掉 */ }
+void NavBaseInfo(void) { /* 启动基线采集：本测试桩掉 */ }
 
 /* ---- 捕获钩子：统计注入的按键（只计按下，按下+抬起=一次点按） ---- */
 typedef struct { int vk; int n; } Rec;

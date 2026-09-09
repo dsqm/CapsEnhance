@@ -514,6 +514,75 @@ static void RepAppend(WCHAR* rep, int cap, int* o, const WCHAR* fmt, ...) {
     else *o += n;
 }
 
+/* ---- 启动时采集的系统/环境基线信息 ----
+   启动即采集并保存在内存（不写日志文件），C+` 诊断时随探测一并输出，
+   便于遇到无法使用的窗口时判断问题根源（位宽/权限/UIA 等）。 */
+static WCHAR g_baseInfo[1800] = L"";
+static volatile LONG g_baseReady = 0;
+
+static BOOL IsElevated(void) {
+    HANDLE h = NULL;
+    TOKEN_ELEVATION e; DWORD sz = 0; BOOL ok = FALSE;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &h)) {
+        if (GetTokenInformation(h, TokenElevation, &e, sizeof(e), &sz)) ok = !!e.TokenIsElevated;
+        CloseHandle(h);
+    }
+    return ok;
+}
+
+void NavBaseInfo(void) {
+    WCHAR b[1700] = L"";
+    int o = 0;
+
+    RepAppend(b, 1700, &o, L"进程位宽 = %d-bit\n", (int)(8 * sizeof(void*)));
+    RepAppend(b, 1700, &o, L"钩子状态 = %s\n", g_hook ? L"已安装" : L"未安装");
+
+    /* OS 版本：RtlGetVersion（GetVersionEx 受兼容层遮蔽，Win10+ 不可靠） */
+    {
+        typedef struct { ULONG cb; DWORD major, minor, build, plt; WCHAR csd[128]; } MYROV;
+        typedef LONG (WINAPI *PGETV)(void*);
+        PGETV pGetV = (PGETV)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
+        if (pGetV) {
+            MYROV ro; memset(&ro, 0, sizeof(ro)); ro.cb = sizeof(ro);
+            if (pGetV(&ro) == 0)
+                RepAppend(b, 1700, &o, L"系统版本 = %u.%u (build %u)\n",
+                          (unsigned)ro.major, (unsigned)ro.minor,
+                          (unsigned)(ro.build & 0xFFFF));
+        }
+    }
+    RepAppend(b, 1700, &o, L"管理员特权 = %s\n", IsElevated() ? L"是" : L"否");
+
+    /* 键盘布局主语言 / 用户 locale */
+    RepAppend(b, 1700, &o, L"键盘布局(主语言) = 0x%04X  用户locale = 0x%04X\n",
+              (unsigned)LOWORD(GetKeyboardLayout(0)), (unsigned)GetUserDefaultLCID());
+
+    /* UIA 自动化是否可用 */
+    {
+        BOOL uiaOK = FALSE;
+        HRESULT hr = CoInitialize(NULL);
+        if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE) {
+            IUIAutomation* ua = NULL;
+            if (SUCCEEDED(CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
+                                           &IID_IUIAutomation, (void**)&ua)) && ua) {
+                uiaOK = TRUE;
+                IUIAutomation_Release(ua);
+            }
+            CoUninitialize();
+        }
+        RepAppend(b, 1700, &o, L"UIA 自动化可用 = %s\n", uiaOK ? L"是" : L"否");
+    }
+
+    /* 屏幕信息 */
+    HDC dc = GetDC(NULL);
+    RepAppend(b, 1700, &o, L"屏幕 = %d x %d  每英寸点数 = %d\n",
+              GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
+              dc ? GetDeviceCaps(dc, LOGPIXELSX) : 0);
+    if (dc) ReleaseDC(NULL, dc);
+
+    memcpy(g_baseInfo, b, ((size_t)o + 1) * sizeof(WCHAR));
+    g_baseReady = 1;
+}
+
 void NavProbe(void) {
     HWND fg = GetForegroundWindow();
     WCHAR cls[96] = L"?"; WCHAR title[128] = L"?";
@@ -526,20 +595,22 @@ void NavProbe(void) {
         GetWindowTextW(fg, title, 128);
     }
 
-    WCHAR rep[2200] = L"";
+    WCHAR rep[2800] = L"";
     int o = 0;
-    RepAppend(rep, 2200, &o,
+    if (g_baseReady)
+        RepAppend(rep, 2800, &o, L"[启动基线]\n%ls\n----------\n", g_baseInfo);
+    RepAppend(rep, 2800, &o,
         L"前台窗口: class=[%s] title=[%s]\n焦点控件 hwnd=0x%p\n",
         cls, title, (void*)focus);
 
     BOOL textOK = FALSE;
     if (focus) {
         WCHAR fcls[96]; GetClassNameW(focus, fcls, 96);
-        RepAppend(rep, 2200, &o, L"焦点控件类名=[%s]\n", fcls);
+        RepAppend(rep, 2800, &o, L"焦点控件类名=[%s]\n", fcls);
 
         LRESULT len = SendMessageTimeoutW(focus, WM_GETTEXTLENGTH, 0, 0,
                                           SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-        RepAppend(rep, 2200, &o, L"WM_GETTEXTLENGTH = %lld\n", (LONGLONG)len);
+        RepAppend(rep, 2800, &o, L"WM_GETTEXTLENGTH = %lld\n", (LONGLONG)len);
         if (len > 0 && len < 1 << 20) {
             WCHAR* buf = (WCHAR*)malloc(((size_t)len + 1) * sizeof(WCHAR));
             if (buf) {
@@ -550,17 +621,17 @@ void NavProbe(void) {
                     DWORD sel = (DWORD)SendMessageTimeout(focus, EM_GETSEL, 0, 0,
                                                           SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
                     int caret = (sel != 0xFFFFFFFF) ? (int)LOWORD(sel) : -1;
-                    RepAppend(rep, 2200, &o,
+                    RepAppend(rep, 2800, &o,
                         L"EM_GETSEL(sel) = 0x%08X  caret=%d\n文本长度=%lld\n",
                         sel, caret, (LONGLONG)got);
                     buf[got < 160 ? got : 160] = 0;
-                    RepAppend(rep, 2200, &o, L"文本样本(前160) = [%s]\n", buf);
+                    RepAppend(rep, 2800, &o, L"文本样本(前160) = [%s]\n", buf);
                 }
                 free(buf);
             }
         }
         if (!textOK)
-            RepAppend(rep, 2200, &o, L"WM_GETTEXT/WM_GETSEL 不可用（非经典编辑控件）\n");
+            RepAppend(rep, 2800, &o, L"WM_GETTEXT/WM_GETSEL 不可用（非经典编辑控件）\n");
     }
 
     /* UIA 是否支持文本模式 */
@@ -575,15 +646,15 @@ void NavProbe(void) {
                 BOOL txt = SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPatternId,
                               &IID_IUIAutomationTextPattern, (void**)&tp)) && tp;
                 if (tp) IUIAutomationTextPattern_Release(tp);
-                RepAppend(rep, 2200, &o,
+                RepAppend(rep, 2800, &o,
                     L"UIA 焦点元素支持 TextPattern = %s\n", txt ? L"YES" : L"NO");
                 IUIAutomationElement_Release(el);
             } else {
-                RepAppend(rep, 2200, &o, L"UIA 取不到焦点元素\n");
+                RepAppend(rep, 2800, &o, L"UIA 取不到焦点元素\n");
             }
             IUIAutomation_Release(ua);
         } else {
-            RepAppend(rep, 2200, &o, L"UIA 初始化失败\n");
+            RepAppend(rep, 2800, &o, L"UIA 初始化失败\n");
         }
         CoUninitialize();
     }
@@ -596,23 +667,23 @@ void NavProbe(void) {
             if (SUCCEEDED(acc->lpVtbl->QueryInterface(acc, &kIID_IAccessibleText, (void**)&at)) && at) {
                 long co = -1;
                 BOOL ok2 = SUCCEEDED(at->lpVtbl->caretOffset(at, &co)) && co >= 0;
-                RepAppend(rep, 2200, &o,
+                RepAppend(rep, 2800, &o,
                     L"IA2 IAccessibleText = YES (caret=%ld)\n", co);
                 at->lpVtbl->Release(at);
                 if (ok2) textOK = TRUE;
             } else {
-                RepAppend(rep, 2200, &o, L"IA2 IAccessibleText = NO\n");
+                RepAppend(rep, 2800, &o, L"IA2 IAccessibleText = NO\n");
             }
             acc->lpVtbl->Release(acc);
         } else {
-            RepAppend(rep, 2200, &o, L"IA2 取不到 IAccessible\n");
+            RepAppend(rep, 2800, &o, L"IA2 取不到 IAccessible\n");
         }
     }
 
     /* 写日志（UTF-8）并存一份供弹窗 */
     CapLog("%S focus=0x%p class=[%S] textOK=%d", title, (void*)focus, cls, textOK);
-    char utf[2400];
-    WideCharToMultiByte(CP_UTF8, 0, rep, -1, utf, 2400, NULL, NULL);
+    char utf[3000];
+    WideCharToMultiByte(CP_UTF8, 0, rep, -1, utf, 3000, NULL, NULL);
     CapLog("%s", utf);
 
     MessageBoxW(NULL, rep, L"CapsEnhance 焦点探测", MB_OK);
