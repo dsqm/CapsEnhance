@@ -10,6 +10,8 @@
 #include <ole2.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <wchar.h>
 
 #pragma comment(lib, "ole32.lib")
@@ -61,7 +63,10 @@ static BOOL ClassicSetSel(HWND hwnd, int start, int end, BOOL shift) {
 
 /* 逐方向键移动：发送 n 个左/右箭头（可带 Shift 位移）。
    每个箭头单独 SendInput 并微小间隔，避免大批量 SendInput 在部分
-   程序中只认第一个键；Shift 在整个跳词期间持续按住以维持选区。 */
+   程序中只认第一个键；Shift 在整个跳词期间持续按住以维持选区。
+   上限 MAX_ARROW_STEPS：给无法直接置光标的通道(UIA/IA2)留足远程跳转
+   能力，避免超过上限导致跳不到位。 */
+#define MAX_ARROW_STEPS 256
 static void SendArrows(int dir, int n, BOOL shift) {
     WORD vk = (dir == DIR_LEFT) ? VK_LEFT : VK_RIGHT;
     WORD scd = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
@@ -76,7 +81,7 @@ static void SendArrows(int dir, int n, BOOL shift) {
         su = sd; su.ki.dwFlags = KEYEVENTF_KEYUP;
         SendInput(1, &sd, sizeof(INPUT));
     }
-    for (int i = 0; i < n && i < 64; i++) {
+    for (int i = 0; i < n && i < MAX_ARROW_STEPS; i++) {
         SendInput(1, &kd, sizeof(INPUT));
         SendInput(1, &ku, sizeof(INPUT));
         Sleep(8);
@@ -479,25 +484,36 @@ int NavJump(int dir, BOOL shift) {
     if (g_recording) CapLog("  path=%s len=%d caret=%d -> steps=%d tgt=%d",
                             path, len, caret, steps, tgt);
 
-    if (steps > 0) {
-        /* 经典 Edit/RichEdit：距离较大时直接用 EM_SETSEL 一步置到目标(瞬跳)，
-           避免逐格发方向键拖慢；小距离仍走箭头以保持完全一致的键行为。
-           非经典通道(UIA/IA2)仍发箭头(无法直接设光标)。 */
-        BOOL direct = FALSE;
-        if (path[0] == 'E' && focus && steps >= DIRECT_JUMP_MIN) {
-            direct = ClassicSetSel(focus, caret, tgt, shift);
-            if (direct && g_recording) CapLog("  -> 直接 EM_SETSEL [%d,%d]", caret, tgt);
-        }
-        if (!direct) SendArrows(dir, steps, shift);
-    } else {
-        SendNativeWordJump(dir, shift);
+    if (steps <= 0) {
+        /* 已到边界，无可跳转；此时读文本已成功，只是边界无可跳。
+           不再触发 native 兜底，避免多跳一次。 */
+        return 0;
     }
+    /* 经典 Edit/RichEdit：距离较大时直接用 EM_SETSEL 一步置到目标(瞬跳)，
+       避免逐格发方向键拖慢；小距离仍走箭头以保持完全一致的键行为。
+       非经典通道(UIA/IA2)仍发箭头(无法直接设光标)。 */
+    BOOL direct = FALSE;
+    if (path[0] == 'E' && focus && steps >= DIRECT_JUMP_MIN) {
+        direct = ClassicSetSel(focus, caret, tgt, shift);
+        if (direct && g_recording) CapLog("  -> 直接 EM_SETSEL [%d,%d]", caret, tgt);
+    }
+    if (!direct) SendArrows(dir, steps, shift);
     return steps;
 }
 
 /* ================= 诊断：探测当前焦点控件 =================
    把「前台窗口 / 焦点控件 / 能否读文本 / 光标 / 是否支持 UIA」写日志并弹窗，
    用于排查跳词为何不生效。 */
+/* 安全地向 rep 追加格式化文本；超容量即截断并不再追加，避免越界。 */
+static void RepAppend(WCHAR* rep, int cap, int* o, const WCHAR* fmt, ...) {
+    if (!rep || !o || *o < 0 || *o >= cap || cap <= 0) return;
+    va_list ap; va_start(ap, fmt);
+    int n = _vsnwprintf_s(rep + *o, (size_t)(cap - *o), _TRUNCATE, fmt, ap);
+    va_end(ap);
+    if (n < 0) *o = cap;          /* 超过容量/编码错误：停写 */
+    else *o += n;
+}
+
 void NavProbe(void) {
     HWND fg = GetForegroundWindow();
     WCHAR cls[96] = L"?"; WCHAR title[128] = L"?";
@@ -512,18 +528,18 @@ void NavProbe(void) {
 
     WCHAR rep[2200] = L"";
     int o = 0;
-    o += swprintf_s(rep + o, 2200 - o,
+    RepAppend(rep, 2200, &o,
         L"前台窗口: class=[%s] title=[%s]\n焦点控件 hwnd=0x%p\n",
         cls, title, (void*)focus);
 
     BOOL textOK = FALSE;
     if (focus) {
         WCHAR fcls[96]; GetClassNameW(focus, fcls, 96);
-        o += swprintf_s(rep + o, 2200 - o, L"焦点控件类名=[%s]\n", fcls);
+        RepAppend(rep, 2200, &o, L"焦点控件类名=[%s]\n", fcls);
 
         LRESULT len = SendMessageTimeoutW(focus, WM_GETTEXTLENGTH, 0, 0,
                                           SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-        o += swprintf_s(rep + o, 2200 - o, L"WM_GETTEXTLENGTH = %lld\n", (LONGLONG)len);
+        RepAppend(rep, 2200, &o, L"WM_GETTEXTLENGTH = %lld\n", (LONGLONG)len);
         if (len > 0 && len < 1 << 20) {
             WCHAR* buf = (WCHAR*)malloc(((size_t)len + 1) * sizeof(WCHAR));
             if (buf) {
@@ -534,17 +550,17 @@ void NavProbe(void) {
                     DWORD sel = (DWORD)SendMessageTimeout(focus, EM_GETSEL, 0, 0,
                                                           SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
                     int caret = (sel != 0xFFFFFFFF) ? (int)LOWORD(sel) : -1;
-                    o += swprintf_s(rep + o, 2200 - o,
+                    RepAppend(rep, 2200, &o,
                         L"EM_GETSEL(sel) = 0x%08X  caret=%d\n文本长度=%lld\n",
                         sel, caret, (LONGLONG)got);
                     buf[got < 160 ? got : 160] = 0;
-                    o += swprintf_s(rep + o, 2200 - o, L"文本样本(前160) = [%s]\n", buf);
+                    RepAppend(rep, 2200, &o, L"文本样本(前160) = [%s]\n", buf);
                 }
                 free(buf);
             }
         }
         if (!textOK)
-            o += swprintf_s(rep + o, 2200 - o, L"WM_GETTEXT/WM_GETSEL 不可用（非经典编辑控件）\n");
+            RepAppend(rep, 2200, &o, L"WM_GETTEXT/WM_GETSEL 不可用（非经典编辑控件）\n");
     }
 
     /* UIA 是否支持文本模式 */
@@ -559,15 +575,15 @@ void NavProbe(void) {
                 BOOL txt = SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPatternId,
                               &IID_IUIAutomationTextPattern, (void**)&tp)) && tp;
                 if (tp) IUIAutomationTextPattern_Release(tp);
-                o += swprintf_s(rep + o, 2200 - o,
+                RepAppend(rep, 2200, &o,
                     L"UIA 焦点元素支持 TextPattern = %s\n", txt ? L"YES" : L"NO");
                 IUIAutomationElement_Release(el);
             } else {
-                o += swprintf_s(rep + o, 2200 - o, L"UIA 取不到焦点元素\n");
+                RepAppend(rep, 2200, &o, L"UIA 取不到焦点元素\n");
             }
             IUIAutomation_Release(ua);
         } else {
-            o += swprintf_s(rep + o, 2200 - o, L"UIA 初始化失败\n");
+            RepAppend(rep, 2200, &o, L"UIA 初始化失败\n");
         }
         CoUninitialize();
     }
@@ -580,16 +596,16 @@ void NavProbe(void) {
             if (SUCCEEDED(acc->lpVtbl->QueryInterface(acc, &kIID_IAccessibleText, (void**)&at)) && at) {
                 long co = -1;
                 BOOL ok2 = SUCCEEDED(at->lpVtbl->caretOffset(at, &co)) && co >= 0;
-                o += swprintf_s(rep + o, 2200 - o,
+                RepAppend(rep, 2200, &o,
                     L"IA2 IAccessibleText = YES (caret=%ld)\n", co);
                 at->lpVtbl->Release(at);
                 if (ok2) textOK = TRUE;
             } else {
-                o += swprintf_s(rep + o, 2200 - o, L"IA2 IAccessibleText = NO\n");
+                RepAppend(rep, 2200, &o, L"IA2 IAccessibleText = NO\n");
             }
             acc->lpVtbl->Release(acc);
         } else {
-            o += swprintf_s(rep + o, 2200 - o, L"IA2 取不到 IAccessible\n");
+            RepAppend(rep, 2200, &o, L"IA2 取不到 IAccessible\n");
         }
     }
 

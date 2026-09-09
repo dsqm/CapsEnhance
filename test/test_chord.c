@@ -84,8 +84,10 @@ int main(void) {
     wc.hInstance = GetModuleHandleW(NULL);
     wc.lpszClassName = L"CapsEnhanceTest";
     RegisterClassW(&wc);
-    g_mainWnd = CreateWindowW(L"CapsEnhanceTest", L"t", 0, 0, 0, 0, 0,
-                              HWND_MESSAGE, NULL, GetModuleHandleW(NULL), NULL);
+    g_mainWnd = CreateWindowW(L"CapsEnhanceTest", L"t",
+                              WS_POPUP | WS_OVERLAPPEDWINDOW,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 1, 1,
+                              NULL, NULL, GetModuleHandleW(NULL), NULL);
 
     /* ---- 场景A：J 先于 D 到达（乱序和弦），点按 -= 3 左键 ---- */
     Reset();

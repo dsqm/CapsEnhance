@@ -76,6 +76,7 @@ static const WCHAR* APP_NAME = L"CapsEnhance";
 #define IDM_EXIT   2
 
 static void SetMenuPauseText(void);
+static void ResetEngine(void);   /* 前向声明（定义在下方，TrayShowMenu 先调用） */
 void TrayAddHint(const WCHAR* s);
 static void TrayAdd(void) {
     memset(&g_nid, 0, sizeof(g_nid));
@@ -100,6 +101,10 @@ static void TrayShowMenu(void) {
                              pt.x, pt.y, 0, g_mainWnd, NULL);
     if (cmd == IDM_PAUSE) {
         g_state.paused = !g_state.paused;
+        /* 切换暂停时清掉残留的修饰/引擎状态，避免恢复后粘滞 */
+        g_cMod = FALSE; g_dMod = FALSE; g_fMod = FALSE;
+        g_btnCount = 0;
+        ResetEngine();
         if (!g_state.paused) TrayAddHint(L"CapsEnhance：正在映射（C 为增强键）");
         else TrayAddHint(L"CapsEnhance：已暂停（CapsLock 恢复原功能）");
     } else if (cmd == IDM_EXIT) {
@@ -226,8 +231,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     wc.lpszClassName = L"CapsEnhanceMain";
     RegisterClassW(&wc);
 
-    g_mainWnd = CreateWindowW(L"CapsEnhanceMain", APP_NAME, 0, 0, 0, 0, 0,
-                              HWND_MESSAGE, NULL, hInst, NULL);
+    g_mainWnd = CreateWindowW(L"CapsEnhanceMain", APP_NAME,
+                              WS_POPUP | WS_OVERLAPPEDWINDOW,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 1, 1,
+                              NULL, NULL, hInst, NULL);
     if (!g_mainWnd) return 1;
 
     if (!HookInstall()) {
