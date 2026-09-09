@@ -150,15 +150,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_PROBE:
         /* C+`：切换诊断记录。开始=探测当前焦点并记录；再按=结束记录。
-           开始/结束各出不同频率提示音（Beep，不依赖系统声效方案）。 */
+           用 MesaBeep 的两个不同系统事件音（走声卡，无需内置蜂鸣器），
+           并同步托盘悬停提示内容。 */
         g_recording = !g_recording;
         if (g_recording) {
             CapLog("===== REC START =====");
-            Beep(988, 120);              /* 高音：开始记录 */
+            MessageBeep(MB_ICONASTERISK);   /* 系统"星号"音：开始记录（与结束不同） */
+            TrayAddHint(L"CapsEnhance：正在记录日志（C+\x60 结束）");
             NavProbe();
         } else {
             CapLog("===== REC END =====");
-            Beep(523, 160);              /* 低音：结束记录 */
+            MessageBeep(MB_ICONHAND);       /* 系统"手形"音：结束记录（低而不同） */
+            TrayAddHint(L"CapsEnhance：正在映射（C 为增强键）");
         }
         return 0;
     case WM_TRIG_DOWN: {             /* 触发电按下：进入稳定期待开火 */
