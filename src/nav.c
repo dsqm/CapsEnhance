@@ -276,7 +276,11 @@ static int CharStartBefore(const WCHAR* s, int len, int i) {
 /* 词跳核心：返回跳转后光标应处的 code-unit 位置，同时写出"需发送的箭头次数"。
    左右箭头在编辑框内按"字符"（code point）移动，因此步数(箭头数)按字符单位计数，
    代理对整体只计 1 步；目标 code-unit 位置供经典 Edit 直接置光标(瞬跳)。
-   步数由 target 与 caret 的字符数差得到，与逐箭头移动完全等价。 */
+   步数由 target 与 caret 的字符数差得到，与逐箭头移动完全等价。
+
+   行边界规则：词跳默认不跨行（\r/\n 是分隔符，但分隔符串只在行内跨）。
+   只有出发点已经在行尾时，右跳才跨过换行落到下一行行首词；
+   只有出发点已经在行首时，左跳才跨过换行落到上一行行尾词。 */
 static int WordJumpTarget(const WCHAR* s, int len, int caret, int dir, int* steps) {
     *steps = 0;
     if (!s || len < 1) return caret;
@@ -287,35 +291,55 @@ static int WordJumpTarget(const WCHAR* s, int len, int caret, int dir, int* step
     if (caret > len) caret = len;
 
     int i = caret, st = 0;
-    if (dir == DIR_LEFT) {
-        /* 向左跳到上一词的首字：先跨掉左侧分隔符串，再跨到同类型词串首。 */
-        while (i > 0) {                          /* 跨左侧分隔符串 */
+
+    if (dir == DIR_RIGHT) {
+        int atEOL = (i >= len || s[i] == L'\n' || s[i] == L'\r');
+        /* 跨当前同类型词串（\n 是分隔符，词串自然停在行尾） */
+        CharClass cur = ClassOfAt(s, len, i);
+        if (cur != CH_SEP) {
+            while (i < len) {
+                if (ClassOfAt(s, len, i) != cur) break;
+                st++;
+                i = (i + 1 < len && IsHighSurrogateW(s[i])) ? (i + 2) : (i + 1);
+            }
+        }
+        /* 跨本行右侧分隔符（空格/制表等，不含换行） */
+        while (i < len && ClassOfAt(s, len, i) == CH_SEP &&
+               s[i] != L'\n' && s[i] != L'\r') {
+            st++;
+            i = (i + 1 < len && IsHighSurrogateW(s[i])) ? (i + 2) : (i + 1);
+        }
+        /* 出发点就在行尾：跨过换行与下一行行首缩进，停在下一行词首 */
+        if (atEOL) {
+            while (i < len && ClassOfAt(s, len, i) == CH_SEP) {
+                st++;
+                i = (i + 1 < len && IsHighSurrogateW(s[i])) ? (i + 2) : (i + 1);
+            }
+        }
+    } else {
+        int atBOL = (i <= 0 || s[i-1] == L'\n' || s[i-1] == L'\r');
+        /* 跨本行左侧分隔符（空格/制表等，不含换行） */
+        while (i > 0) {
             int st0 = CharStartBefore(s, len, i);
             if (ClassOfAt(s, len, st0) != CH_SEP) break;
+            if (s[st0] == L'\n' || s[st0] == L'\r') break;
             st++; i = st0;
         }
-        if (i > 0) {                             /* 跨到左侧词串首 */
+        if (atBOL && i > 0) {
+            /* 出发点就在行首：跨过换行与上一行行尾缩进，停在上一行词尾 */
+            while (i > 0) {
+                int st0 = CharStartBefore(s, len, i);
+                if (ClassOfAt(s, len, st0) != CH_SEP) break;
+                st++; i = st0;
+            }
+        } else if (i > 0) {
+            /* 跨到左侧同类型词串首 */
             CharClass cur = ClassOfAt(s, len, CharStartBefore(s, len, i));
             while (i > 0) {
                 int st0 = CharStartBefore(s, len, i);
                 if (ClassOfAt(s, len, st0) != cur) break;
                 st++; i = st0;
             }
-        }
-    } else {
-        /* 向右跳到下一词首：先跨当前同类型词串，再跨分隔符串。 */
-        CharClass cur = ClassOfAt(s, len, i);
-        if (cur != CH_SEP) {
-            while (i < len) {                    /* 跨当前词 */
-                if (ClassOfAt(s, len, i) != cur) break;
-                st++;
-                i = (i + 1 < len && IsHighSurrogateW(s[i])) ? (i + 2) : (i + 1);
-            }
-        }
-        while (i < len) {                        /* 跨分隔符到下一词首 */
-            if (ClassOfAt(s, len, i) != CH_SEP) break;
-            st++;
-            i = (i + 1 < len && IsHighSurrogateW(s[i])) ? (i + 2) : (i + 1);
         }
     }
     *steps = st;
