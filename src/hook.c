@@ -45,37 +45,6 @@ static int ActOfVk(int vk) {
     return ACT_NONE;
 }
 
-/* 发送按键：后半段按住 shift（Shift↓ 要点↓点↑… Shift↑），缺移位生效 */
-static void SendClick(int vkcode, BOOL shift, int count) {
-    WORD vd = (WORD)vkcode;
-    WORD scd = (WORD)MapVirtualKeyW((UINT)vkcode, MAPVK_VK_TO_VSC);
-    INPUT arr[1 + 2 * 8 + 1];   /* count<=8（本程序恒为 1），留足余量 */
-    int k = 0;
-    if (shift) {
-        memset(&arr[k], 0, sizeof(INPUT));
-        arr[k].type = INPUT_KEYBOARD;
-        arr[k].ki.wVk = VK_LSHIFT;
-        arr[k].ki.wScan = (WORD)MapVirtualKeyW(VK_LSHIFT, MAPVK_VK_TO_VSC);
-        k++;
-    }
-    for (int i = 0; i < count && i < 8; i++) {
-        arr[k].type = INPUT_KEYBOARD;
-        arr[k].ki.wVk = vd; arr[k].ki.wScan = scd;
-        arr[k].ki.dwFlags = 0; k++;
-        arr[k].type = INPUT_KEYBOARD;
-        arr[k].ki.wVk = vd; arr[k].ki.wScan = scd;
-        arr[k].ki.dwFlags = KEYEVENTF_KEYUP; k++;
-    }
-    if (shift) {
-        memset(&arr[k], 0, sizeof(INPUT));
-        arr[k].type = INPUT_KEYBOARD;
-        arr[k].ki.wVk = VK_LSHIFT;
-        arr[k].ki.wScan = (WORD)MapVirtualKeyW(VK_LSHIFT, MAPVK_VK_TO_VSC);
-        arr[k].ki.dwFlags = KEYEVENTF_KEYUP; k++;
-    }
-    SendInput(k, arr, sizeof(INPUT));
-}
-
 /* act -> 目标虚拟键 */
 static int ActToVk(int act) {
     switch (act) {
@@ -97,12 +66,8 @@ static int ActToVk(int act) {
 void SendActOnce(int act) {
     int vk = ActToVk(act);
     if (!vk) return;
-    BOOL shift = g_actF;
-    if (act == ACT_CAPSLOCK) {
-        SendClick(VK_CAPITAL, FALSE, 1);   /* 恢复真实 CapsLock 切换 */
-        return;
-    }
-    SendClick(vk, shift, 1);
+    /* 真实 CapsLock 切换不需要带 Shift */
+    SendKeyOnce(vk, (act == ACT_CAPSLOCK) ? FALSE : g_actF);
 }
 
 /* 松手补齐：仅增益模式 + 非词跳动作；若开火次数<3 补齐到3 */

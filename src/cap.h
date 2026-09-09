@@ -69,6 +69,14 @@ void HookUninstall(void);
 void SendActOnce(int act);       /* 发一次动作（用开火快照修饰） */
 void ReleaseFill(int act);       /* 松手补齐：增益模式点按 -> 补到3 */
 
+/* ---------- 按键发送模块（src/send.c） ----------
+   所有模拟按键集中在这里：扩展键标志、逐条发送节奏、Shift/Ctrl 组合。
+   之前 hook.c(SendClick) 与 nav.c(SendArrows/兜底) 各写一份，两边的
+   缺陷也不一样（缺 KEYEVENTF_EXTENDEDKEY / Ctrl 提前抬起），统一后只修一处。 */
+void SendKeyOnce(int vk, BOOL shift);        /* 单击一个键，shift 全程按住 */
+void SendArrows(int dir, int n, BOOL shift); /* n 个左/右箭头，shift 全程按住 */
+void SendNativeWordJump(int dir, BOOL shift);/* 原生 Ctrl(+Shift)+方向：词跳兜底 */
+
 /* ---------- 主窗口 ---------- */
 extern HWND g_mainWnd;
 
