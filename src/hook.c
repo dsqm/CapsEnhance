@@ -18,7 +18,7 @@ volatile BOOL g_actD = FALSE;
 volatile BOOL g_actF = FALSE;
 volatile int  g_btnCount = 0;
 
-/* 当前被按住的触发电 act（钩子线程去抖用） */
+/* 当前被按住的触发键 act（钩子线程去抖用） */
 static volatile int g_downAct = ACT_NONE;
 
 /* 映射表：虚拟键码 -> 动作 */
@@ -156,7 +156,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             return 1;
         }
 
-        /* ---- 触发电 ---- */
+        /* ---- 触发键 ---- */
         int act = ActOfVk(vk);
         if (act != ACT_NONE) {
             if (down) {

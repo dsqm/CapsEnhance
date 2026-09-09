@@ -164,7 +164,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             TrayAddHint(L"CapsEnhance：正在映射");
         }
         return 0;
-    case WM_TRIG_DOWN: {             /* 触发电按下：进入稳定期待开火 */
+    case WM_TRIG_DOWN: {             /* 触发键按下：进入稳定期待开火 */
         int act = (int)wp;
         if (g_activeAct != ACT_NONE || g_pendingAct != ACT_NONE)
             break;                    /* 已占用，忽略 */
@@ -173,7 +173,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EnsEngine();
         return 0;
     }
-    case WM_TRIG_UP: {               /* 触发电抬起 */
+    case WM_TRIG_UP: {               /* 触发键抬起 */
         int act = (int)wp;
         if (g_pendingAct == act) {
             /* 短点：稳定期内即抬起，立即开火一次并补齐（修饰用门闩快照） */

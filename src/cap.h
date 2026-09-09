@@ -8,8 +8,8 @@
 /* 主线程事件消息（均由钩子线程投递，按 FIFO 顺序处理） */
 #define WM_CAPS_DOWN  (WM_APP + 1)  /* C 按下 */
 #define WM_CAPS_UP    (WM_APP + 2)  /* C 抬起 */
-#define WM_TRIG_DOWN  (WM_APP + 3)  /* 触发电按下   wParam=act */
-#define WM_TRIG_UP    (WM_APP + 4)  /* 触发电抬起   wParam=act */
+#define WM_TRIG_DOWN  (WM_APP + 3)  /* 触发键按下   wParam=act */
+#define WM_TRIG_UP    (WM_APP + 4)  /* 触发键抬起   wParam=act */
 #define WM_TOGGLE_TRAY (WM_APP + 5) /* 托盘自定义回调消息 */
 #define WM_PROBE       (WM_APP + 6) /* 探测焦点控件（钩子线程投递） */
 
