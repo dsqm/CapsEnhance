@@ -18,6 +18,10 @@
 
 #define SAFE_RELEASE(p) do { if (p) { (p)->Release(); (p)=NULL; } } while(0)
 
+/* 经典 Edit 直接置光标的最少字符步数：小于该值用真实箭头（行为一致），
+   等于或大于则用 EM_SETSEL 一步跳(瞬跳)，避免远距离逐格发送方向键拖慢。 */
+#define DIRECT_JUMP_MIN 6
+
 /* ============ IAccessibleText（IAccessible2）手工声明 ============
    SDK 不带 IA2 头文件，这里按官方 AccessibleText.idl 手工声明 vtable。
    IID: {24FD2FFB-3AAD-4a08-8335-A3AD89C0FB4B}
@@ -45,6 +49,15 @@ struct IAccessibleText { const IAccessibleTextVtbl* lpVtbl; };
 static const IID kIID_IAccessibleText =
     {0x24FD2FFB, 0x3AAD, 0x4a08, {0x83,0x35,0xA3,0xAD,0x89,0xC0,0xFB,0x4B}};
 
+
+/* 经典 Edit 控件直接置光标（或选区）位置。若可成功则无需发送箭头，瞬跳。 */
+static BOOL ClassicSetSel(HWND hwnd, int start, int end, BOOL shift) {
+    if (!shift) end = start;
+    LRESULT ok = SendMessageTimeoutW(hwnd, EM_SETSEL, (WPARAM)start, (LPARAM)end,
+                                  SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
+    if (ok == 0) return FALSE;
+    return TRUE;
+}
 
 /* 逐方向键移动：发送 n 个左/右箭头（可带 Shift 位移）。
    每个箭头单独 SendInput 并微小间隔，避免大批量 SendInput 在部分
@@ -145,46 +158,56 @@ static int CharStartBefore(const WCHAR* s, int len, int i) {
     return i - 1;
 }
 
-/* 在 s 中以 caret 为起点，dir 方向跳一个词应发送的箭头次数。
-   左右箭头在编辑框内按"字符"（code point）移动，因此步数按字符单位计数，
-   代理对整体只计 1 步；若已到边界返回 0。
-   非 static 仅供词跳单元测试（test_nav.c）直接调用。 */
-int ComputeSteps(const WCHAR* s, int len, int caret, int dir) {
-    if (!s || len < 1) return 0;
+/* 词跳核心：返回跳转后光标应处的 code-unit 位置，同时写出"需发送的箭头次数"。
+   左右箭头在编辑框内按"字符"（code point）移动，因此步数(箭头数)按字符单位计数，
+   代理对整体只计 1 步；目标 code-unit 位置供经典 Edit 直接置光标(瞬跳)。
+   步数由 target 与 caret 的字符数差得到，与逐箭头移动完全等价。 */
+static int WordJumpTarget(const WCHAR* s, int len, int caret, int dir, int* steps) {
+    *steps = 0;
+    if (!s || len < 1) return caret;
     /* 归一光标：落在代理对中间(异常，不该发生)时，视为整个字符未跨过 */
     if (caret > 0 && caret < len && IsHighSurrogateW(s[caret-1]) && IsLowSurrogateW(s[caret]))
         caret--;
     if (caret < 0) caret = 0;
     if (caret > len) caret = len;
 
-    int steps = 0, i = caret;
+    int i = caret, st = 0;
     if (dir == DIR_LEFT) {
-        if (i <= 0) return 0;
         while (i > 0) {                    /* 跨结尾分隔符 */
-            int st = CharStartBefore(s, len, i);
-            if (IsWordCharAt(s, len, st)) break;
-            steps++; i = st;
+            int stt = CharStartBefore(s, len, i);
+            if (IsWordCharAt(s, len, stt)) break;
+            st++; i = stt;
         }
         while (i > 0) {                    /* 跨整个词 */
-            int st = CharStartBefore(s, len, i);
-            if (!IsWordCharAt(s, len, st)) break;
-            steps++; i = st;
+            int stt = CharStartBefore(s, len, i);
+            if (!IsWordCharAt(s, len, stt)) break;
+            st++; i = stt;
         }
-        return steps;
     } else {
-        if (i >= len) return 0;
-        for (; i < len; ) {                /* 跨当前词 */
-            if (!IsWordCharAt(s, len, i)) break;
-            steps++;
+        /* 右跳：用一个循环同时处理"跨当前词"和"跨分隔符到下一词首"，
+           避免拆成两个 for 段时第二段被跳过。 */
+        int skw = 1;                     /* 1=还在跨词；0=已转入跨分隔符 */
+        for (; i < len; ) {
+            int w = IsWordCharAt(s, len, i);
+            if (skw) {
+                if (!w) skw = 0;         /* 词结束，转入跨分隔符 */
+            } else if (w) {
+                break;                   /* 遇下一词首，停下 */
+            }
+            st++;
             i = (i + 1 < len && IsHighSurrogateW(s[i])) ? (i + 2) : (i + 1);
         }
-        for (; i < len; ) {                /* 跨分隔符到下一词首 */
-            if (IsWordCharAt(s, len, i)) break;
-            steps++;
-            i = (i + 1 < len && IsHighSurrogateW(s[i])) ? (i + 2) : (i + 1);
-        }
-        return steps;
+        /* fallthrough to `*steps = st; return i;` */
     }
+    *steps = st;
+    return i;
+}
+
+/* 非 static 仅供词跳单元测试（test_nav.c）直接调用。 */
+int ComputeSteps(const WCHAR* s, int len, int caret, int dir) {
+    int steps = 0;
+    WordJumpTarget(s, len, caret, dir, &steps);
+    return steps;
 }
 
 /* 取当前前台窗口的焦点控件 */
@@ -442,12 +465,25 @@ int NavJump(int dir, BOOL shift) {
     }
     if (!got) { SendNativeWordJump(dir, shift); if (g_recording) CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
 
-    int steps = ComputeSteps(text, len, caret, dir);
+    int steps = 0;
+    int tgt = WordJumpTarget(text, len, caret, dir, &steps);
     free(text);
-    if (g_recording) CapLog("  path=%s len=%d caret=%d -> steps=%d", path, len, caret, steps);
+    if (g_recording) CapLog("  path=%s len=%d caret=%d -> steps=%d tgt=%d",
+                            path, len, caret, steps, tgt);
 
-    if (steps > 0) SendArrows(dir, steps, shift);
-    else SendNativeWordJump(dir, shift);
+    if (steps > 0) {
+        /* 经典 Edit/RichEdit：距离较大时直接用 EM_SETSEL 一步置到目标(瞬跳)，
+           避免逐格发方向键拖慢；小距离仍走箭头以保持完全一致的键行为。
+           非经典通道(UIA/IA2)仍发箭头(无法直接设光标)。 */
+        BOOL direct = FALSE;
+        if (path[0] == 'E' && focus && steps >= DIRECT_JUMP_MIN) {
+            direct = ClassicSetSel(focus, caret, tgt, shift);
+            if (direct && g_recording) CapLog("  -> 直接 EM_SETSEL [%d,%d]", caret, tgt);
+        }
+        if (!direct) SendArrows(dir, steps, shift);
+    } else {
+        SendNativeWordJump(dir, shift);
+    }
     return steps;
 }
 
