@@ -17,7 +17,7 @@ cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
    /Isrc ^
    /Fobin\test_chord.obj test\test_chord.c ^
    /link /OUT:bin/test_chord.exe ^
-   user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib winmm.lib ^
+   user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib ^
    /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
 echo [OK] compiled. running...

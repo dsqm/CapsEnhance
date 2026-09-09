@@ -2,7 +2,6 @@
 
 #include <shellapi.h>
 #include <commctrl.h>
-#include <mmsystem.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,7 +9,6 @@
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -152,15 +150,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_PROBE:
         /* C+`：切换诊断记录。开始=探测当前焦点并记录；再按=结束记录。
-           开始/结束各出一个不同提示音。 */
+           开始/结束各出不同频率提示音（Beep，不依赖系统声效方案）。 */
         g_recording = !g_recording;
         if (g_recording) {
             CapLog("===== REC START =====");
-            PlaySoundW(L"SystemStart", NULL, SND_ALIAS | SND_ASYNC);
+            Beep(988, 120);              /* 高音：开始记录 */
             NavProbe();
         } else {
             CapLog("===== REC END =====");
-            PlaySoundW(L"SystemExit", NULL, SND_ALIAS | SND_ASYNC);
+            Beep(523, 160);              /* 低音：结束记录 */
         }
         return 0;
     case WM_TRIG_DOWN: {             /* 触发电按下：进入稳定期待开火 */
