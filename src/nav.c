@@ -52,69 +52,154 @@ static const IID kIID_IAccessibleText =
     {0x24FD2FFB, 0x3AAD, 0x4a08, {0x83,0x35,0xA3,0xAD,0x89,0xC0,0xFB,0x4B}};
 
 
-/* 经典 Edit 控件直接置光标（或选区）位置。若可成功则无需发送箭头，瞬跳。 */
-static BOOL ClassicSetSel(HWND hwnd, int start, int end, BOOL shift) {
-    if (!shift) end = start;
-    LRESULT ok = SendMessageTimeoutW(hwnd, EM_SETSEL, (WPARAM)start, (LPARAM)end,
-                                  SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-    if (ok == 0) return FALSE;
+/* ---- 跨进程发消息：取窗口过程的"真实返回值" ----
+   坑：SendMessageTimeout 自己的返回值只表示"有没有发成功(非0)"，窗口过程的
+   返回值写进最后一个参数 lpdwResult。之前所有调用都传 NULL，于是拿到的恒为 1
+   —— 表现为 WM_GETTEXTLENGTH 恒等于 1、读到的文本恒被截成一个字符，
+   词边界算法只能在"长度 1 的文本"上算，自然跳不动。 */
+static BOOL SendMsg(HWND hwnd, UINT msg, WPARAM w, LPARAM l, LONGLONG* out) {
+    DWORD_PTR r = 0;
+    if (!SendMessageTimeoutW(hwnd, msg, w, l,
+                             SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, &r))
+        return FALSE;
+    if (out) *out = (LONGLONG)(LONG_PTR)r;
     return TRUE;
 }
 
-/* 逐方向键移动：发送 n 个左/右箭头（可带 Shift 位移）。
-   每个箭头单独 SendInput 并微小间隔，避免大批量 SendInput 在部分
-   程序中只认第一个键；Shift 在整个跳词期间持续按住以维持选区。
-   上限 MAX_ARROW_STEPS：给无法直接置光标的通道(UIA/IA2)留足远程跳转
-   能力，避免超过上限导致跳不到位。 */
-#define MAX_ARROW_STEPS 256
-static void SendArrows(int dir, int n, BOOL shift) {
-    WORD vk = (dir == DIR_LEFT) ? VK_LEFT : VK_RIGHT;
-    WORD scd = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-    INPUT kd, ku, sd, su;
-    memset(&kd, 0, sizeof(kd)); kd.type = INPUT_KEYBOARD;
-    kd.ki.wVk = vk; kd.ki.wScan = scd;
-    ku = kd; ku.ki.dwFlags = KEYEVENTF_KEYUP;
-    if (shift) {
-        memset(&sd, 0, sizeof(sd)); sd.type = INPUT_KEYBOARD;
-        sd.ki.wVk = VK_LSHIFT;
-        sd.ki.wScan = (WORD)MapVirtualKeyW(VK_LSHIFT, MAPVK_VK_TO_VSC);
-        su = sd; su.ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(1, &sd, sizeof(INPUT));
-    }
-    for (int i = 0; i < n && i < MAX_ARROW_STEPS; i++) {
-        SendInput(1, &kd, sizeof(INPUT));
-        SendInput(1, &ku, sizeof(INPUT));
-        Sleep(8);
-    }
-    if (shift) SendInput(1, &su, sizeof(INPUT));
+/* 经典 Edit 控件直接置光标（或选区）位置。若可成功则无需发送箭头，瞬跳。
+   无 Shift：光标瞬移到 target；有 Shift：从当前光标(anchor)选到 target。 */
+static BOOL ClassicSetSel(HWND hwnd, int caret, int target, BOOL shift) {
+    if (shift)
+        return SendMsg(hwnd, EM_SETSEL, (WPARAM)caret, (LPARAM)target, NULL);
+    return SendMsg(hwnd, EM_SETSEL, (WPARAM)target, (LPARAM)target, NULL);
 }
 
-/* 兜底：文字读取失败时，用系统原生 Ctrl+/Shift+ 方向键做词跳 */
-static void SendNativeWordJump(int dir, BOOL shift) {
-    WORD vk = (dir == DIR_LEFT) ? VK_LEFT : VK_RIGHT;
-    INPUT ki[9];
-    memset(ki, 0, sizeof(ki));
-    int k = 0;
-    if (shift) {
-        ki[k].type = INPUT_KEYBOARD; ki[k].ki.wVk = VK_LSHIFT;
-        ki[k].ki.wScan = (WORD)MapVirtualKeyW(VK_LSHIFT, MAPVK_VK_TO_VSC); k++;
-    }
-    ki[k].type = INPUT_KEYBOARD; ki[k].ki.wVk = VK_LCONTROL;
-    ki[k].ki.wScan = (WORD)MapVirtualKeyW(VK_LCONTROL, MAPVK_VK_TO_VSC); k++;
-    ki[k] = ki[k-1]; ki[k].ki.dwFlags = KEYEVENTF_KEYUP; k++;
-    ki[k].type = INPUT_KEYBOARD; ki[k].ki.wVk = vk;
-    ki[k].ki.wScan = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC); k++;
-    ki[k] = ki[k-1]; ki[k].ki.dwFlags = KEYEVENTF_KEYUP; k++;
-    /* Ctrl 释放 */
-    ki[k].type = INPUT_KEYBOARD; ki[k].ki.wVk = VK_LCONTROL;
-    ki[k].ki.wScan = (WORD)MapVirtualKeyW(VK_LCONTROL, MAPVK_VK_TO_VSC);
-    ki[k].ki.dwFlags = KEYEVENTF_KEYUP; k++;
-    if (shift) {
-        ki[k].type = INPUT_KEYBOARD; ki[k].ki.wVk = VK_LSHIFT;
-        ki[k].ki.wScan = (WORD)MapVirtualKeyW(VK_LSHIFT, MAPVK_VK_TO_VSC);
-        ki[k].ki.dwFlags = KEYEVENTF_KEYUP; k++;
-    }
-    SendInput(k, ki, sizeof(INPUT));
+/* ================= Scintilla 通道（Notepad3 / Notepad++ / SciTE ...） =================
+   Scintilla 不暴露 UIA/IA2 文本，但对窗口消息很配合：
+     SCI_GETTEXTLENGTH(2183)                 -> 文档字节数
+     SCI_GETTEXT(2182)                       -> 把文档字节写进缓冲区
+     SCI_GETCURRENTPOS(2008)/GETANCHOR(2009) -> 光标/锚点（文档字节偏移）
+     SCI_SETSEL(2160)                        -> (caret, anchor) 直接置光标
+     SCI_SCROLLCARET(2169)                   -> 滚动到光标
+   两个必须注意的点：
+   · SCI_GETTEXT 的缓冲区指针属于对方进程地址空间，跨进程直传本地指针会读崩
+     对方（v1 的"SCI 直读"就栽在这）—— 必须先在目标进程 VirtualAllocEx。
+   · 文档位置是"字节"，而 WM_GETTEXT 给出的是 UTF-16 文本、EM_GETSEL 给出的是
+     字节位置，混用会在中文（UTF-8 下 3 字节/字）处错位。所以整条通道统一在
+     字节域读出原始文本，再一次性转成 UTF-16 交给词边界算法。 */
+#define SCI_GETCURRENTPOS 2008
+#define SCI_GETANCHOR     2009
+#define SCI_GETCODEPAGE   2137
+#define SCI_SETSEL        2160
+#define SCI_SCROLLCARET   2169
+#define SCI_GETTEXT       2182
+#define SCI_GETTEXTLENGTH 2183
+
+/* 超过这个体积就不读全文，交给原生 Ctrl+方向兜底（不给巨型文件开大内存） */
+#define SCI_MAX_BYTES     (2 * 1024 * 1024)
+
+/* 光标/锚点的文档字节位置（供 SCI_SETSEL 瞬跳用） */
+typedef struct {
+    UINT     cp;           /* 文档代码页：65001=UTF-8，0 视为 CP_ACP */
+    LONGLONG caretBytes;
+    LONGLONG anchorBytes;
+} SciPos;
+
+static BOOL IsScintilla(HWND hwnd) {
+    WCHAR c[96];
+    if (!GetClassNameW(hwnd, c, 96)) return FALSE;
+    return wcsstr(c, L"Scintilla") != NULL;
+}
+
+/* UTF-16 偏移 -> 文档字节偏移；编码不可逆（往返不一致）时返回 -1，
+   上层收到 -1 就放弃瞬跳、改用逐格箭头（宁可慢也不能跳错位置）。 */
+static LONGLONG Utf16ToDocBytes(const WCHAR* s, int u16len, UINT cp) {
+    if (u16len < 0) return -1;
+    if (u16len == 0) return 0;              /* 文档首：0 个前缀字符 = 字节 0 */
+    int nb = WideCharToMultiByte(cp, 0, s, u16len, NULL, 0, NULL, NULL);
+    if (nb <= 0) return -1;
+    char* tmp = (char*)malloc((size_t)nb + 2);
+    if (!tmp) return -1;
+    WideCharToMultiByte(cp, 0, s, u16len, tmp, nb, NULL, NULL);
+    tmp[nb] = 0;
+    int back = MultiByteToWideChar(cp, 0, tmp, nb, NULL, 0);
+    free(tmp);
+    return (back == u16len) ? (LONGLONG)nb : -1;
+}
+
+/* 直接置光标：SCI_SETSEL(caret, anchor)。置完立即回读校验，
+   位置不符就返回 FALSE，让上层退回逐格箭头。 */
+static BOOL SciSetSel(HWND hwnd, LONGLONG caretB, LONGLONG anchorB) {
+    LONGLONG now = 0;
+    SendMsg(hwnd, SCI_SETSEL, (WPARAM)caretB, (LPARAM)anchorB, NULL);
+    SendMsg(hwnd, SCI_GETCURRENTPOS, 0, 0, &now);
+    SendMsg(hwnd, SCI_SCROLLCARET, 0, 0, NULL);
+    return now == caretB;
+}
+
+/* 读 Scintilla 全文 + 光标（UTF-16 域），并给出字节域位置供瞬跳 */
+static BOOL SciGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut,
+                            SciPos* pos) {
+    if (!hwnd || !IsScintilla(hwnd)) return FALSE;
+
+    LONGLONG n = 0;
+    if (!SendMsg(hwnd, SCI_GETTEXTLENGTH, 0, 0, &n)) return FALSE;
+    if (n <= 0 || n > SCI_MAX_BYTES) return FALSE;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (!pid) return FALSE;
+    /* 只要"在对方进程开内存 + 读回来"两项权限；权限不够就整条通道放弃 */
+    HANDLE hp = OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ, FALSE, pid);
+    if (!hp) return FALSE;
+
+    BOOL   ok  = FALSE;
+    char*  buf = (char*)malloc((size_t)n + 2);
+    void*  rem = VirtualAllocEx(hp, NULL, (SIZE_T)n + 2,
+                                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!buf || !rem) goto done;
+
+    LONGLONG got = 0;
+    if (!SendMsg(hwnd, SCI_GETTEXT, (WPARAM)(n + 1), (LPARAM)rem, &got)) goto done;
+    if (got <= 0 || got > n + 1) goto done;
+
+    SIZE_T read = 0;
+    if (!ReadProcessMemory(hp, rem, buf, (SIZE_T)got, &read) || read < (SIZE_T)got)
+        goto done;
+    buf[got] = 0;
+
+    LONGLONG cpRaw = 0;
+    if (!SendMsg(hwnd, SCI_GETCODEPAGE, 0, 0, &cpRaw)) goto done;
+    int cp = (int)cpRaw;
+    UINT ucp = (cp == 65001) ? CP_UTF8 : (cp == 0 ? CP_ACP : (UINT)cp);
+
+    int nw = MultiByteToWideChar(ucp, 0, buf, (int)got, NULL, 0);
+    if (nw <= 0) goto done;
+    WCHAR* w = (WCHAR*)malloc(((size_t)nw + 1) * sizeof(WCHAR));
+    if (!w) goto done;
+    if (MultiByteToWideChar(ucp, 0, buf, (int)got, w, nw) != nw) { free(w); goto done; }
+    w[nw] = 0;
+
+    LONGLONG cb = 0, ab = 0;
+    SendMsg(hwnd, SCI_GETCURRENTPOS, 0, 0, &cb);
+    if (cb < 0) cb = 0;
+    if (cb > got) cb = got;
+    SendMsg(hwnd, SCI_GETANCHOR, 0, 0, &ab);
+    if (ab < 0) ab = cb;
+
+    int caretU16 = MultiByteToWideChar(ucp, 0, buf, (int)cb, NULL, 0);
+    if (caretU16 < 0) caretU16 = 0;
+    if (caretU16 > nw) caretU16 = nw;
+
+    *text = w; *lenOut = nw; *caretOut = caretU16;
+    pos->cp = ucp; pos->caretBytes = cb; pos->anchorBytes = ab;
+    ok = TRUE;
+
+done:
+    if (rem) VirtualFreeEx(hp, rem, 0, MEM_RELEASE);
+    if (buf) free(buf);
+    CloseHandle(hp);
+    return ok;
 }
 
 /* 代理对判定：补充平面字符用两个 UTF-16 code unit 表示（高+低代理），
@@ -255,22 +340,23 @@ static BOOL FastGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut
     if (!IsClassicEdit(hwnd)) return FALSE;   /* 非经典编辑：交给 Scintilla/UIA/原生 */
 
     /* 试探窗口是否支持 WM_GETTEXT（Edit/RichEdit 类） */
-    int size = (int)SendMessageTimeoutW(hwnd, WM_GETTEXTLENGTH, 0, 0,
-                                        SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
+    LONGLONG size = 0;
+    if (!SendMsg(hwnd, WM_GETTEXTLENGTH, 0, 0, &size)) return FALSE;
     if (size <= 0 || size > 1 << 20) return FALSE;   /* 过长或过短视为不支持 */
 
     WCHAR* buf = (WCHAR*)malloc((size_t)((size + 2) * sizeof(WCHAR)));
     if (!buf) return FALSE;
 
-    LRESULT got = SendMessageTimeoutW(hwnd, WM_GETTEXT, (WPARAM)(size + 1),
-                                      (LPARAM)buf,
-                                      SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-    if (got <= 0) { free(buf); return FALSE; }
+    LONGLONG got = 0;
+    if (!SendMsg(hwnd, WM_GETTEXT, (WPARAM)(size + 1), (LPARAM)buf, &got) || got <= 0) {
+        free(buf);
+        return FALSE;
+    }
 
     /* 光标位置：EM_GETSEL */
-    DWORD sel = (DWORD)SendMessageTimeout(hwnd, EM_GETSEL, 0, 0,
-                                          SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-    int caret = (sel != 0xFFFFFFFF) ? (int)LOWORD(sel) : 0;
+    LONGLONG sel = 0;
+    if (!SendMsg(hwnd, EM_GETSEL, 0, 0, &sel)) { free(buf); return FALSE; }
+    int caret = ((DWORD)sel != 0xFFFFFFFF) ? (int)LOWORD((DWORD)sel) : 0;
     if (caret < 0 || caret > (int)got) caret = (int)got;
 
     *text = buf;
@@ -317,6 +403,63 @@ static IUIAutomationElement* FindDocElement(IUIAutomation* ua, IUIAutomationElem
     return result;
 }
 
+/* 在子树里找第一个"带 DocumentRange"的元素。
+   Chromium 系（QQ / Edge / VSCode）的 UIA 焦点有时落在 Pane 上：Pane 自身没有
+   DocumentRange，沿祖先链向上也找不到（顶层 Chrome_WidgetWin_1 同样没有）——
+   必须往下找真正的文本框。用 UIA 自己的条件检索（FindAll +
+   IsTextPatternAvailable），避免在客户端逐个节点遍历。 */
+#define UIA_SCAN_LIMIT 24
+static IUIAutomationElement* FindDocInSubtree(IUIAutomation* ua,
+                                              IUIAutomationElement* root) {
+    IUIAutomationCondition* cond = NULL;
+    IUIAutomationElementArray* arr = NULL;
+    IUIAutomationElement* result = NULL;
+    VARIANT v;
+    VariantInit(&v);
+    v.vt = VT_BOOL;
+    v.boolVal = VARIANT_TRUE;
+    if (FAILED(IUIAutomation_CreatePropertyCondition(ua,
+            UIA_IsTextPatternAvailablePropertyId, v, &cond)) || !cond) {
+        VariantClear(&v);
+        return NULL;
+    }
+    VariantClear(&v);
+
+    if (SUCCEEDED(IUIAutomationElement_FindAll(root, TreeScope_Subtree, cond, &arr))
+        && arr) {
+        int n = 0;
+        arr->lpVtbl->get_Length(arr, &n);
+        if (n > UIA_SCAN_LIMIT) n = UIA_SCAN_LIMIT;
+        for (int i = 0; i < n; i++) {
+            IUIAutomationElement* e = NULL;
+            if (FAILED(arr->lpVtbl->GetElement(arr, i, &e)) || !e) continue;
+            IUIAutomationTextPattern* t = NULL;
+            if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(e, UIA_TextPatternId,
+                    &IID_IUIAutomationTextPattern, (void**)&t)) && t) {
+                IUIAutomationTextRange* d = NULL;
+                if (SUCCEEDED(IUIAutomationTextPattern_get_DocumentRange(t, &d)) && d) {
+                    IUIAutomationTextRange_Release(d);
+                    IUIAutomationTextPattern_Release(t);
+                    result = e;              /* 命中：引用交给调用者 */
+                    break;
+                }
+                IUIAutomationTextPattern_Release(t);
+            }
+            IUIAutomationElement_Release(e);
+        }
+        arr->lpVtbl->Release(arr);
+    }
+    if (cond) IUIAutomationCondition_Release(cond);
+    return result;
+}
+
+/* UIA 每一步的 HRESULT 只在 C+` 记录期间写日志，便于定位"为什么读不到文本" */
+static void UiaLog(const char* what, HRESULT hr) {
+    if (g_recording)
+        CapLog("  UIA %-26s hr=0x%08lX %s", what, (unsigned long)hr,
+               SUCCEEDED(hr) ? "OK" : "FAIL");
+}
+
 static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
     HRESULT hr;
     BSTR all = NULL, pre = NULL;
@@ -332,30 +475,44 @@ static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut)
 
     hr = CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
                           &IID_IUIAutomation, (void**)&ua);
+    UiaLog("CoCreateInstance", hr);
     if (FAILED(hr) || !ua) return FALSE;
 
     /* 锚定候选：优先 UIA 焦点元素（GetFocusedElement 能命中 Chromium/WinUI 的
        真正文本框），取不到 TextPattern 时再回退 ElementFromHandle(hwnd)。
        曾改为 ElementFromHandle 直取顶层窗口，但 Chromium(Chrome_WidgetWin_1)
-       顶层窗口本身无 TextPattern，向上也找不到 → 造成 QQ/Edge 跳词回归。 */
+       顶层窗口本身无 TextPattern，向上也找不到 → 造成 QQ/Edge 跳词回归。
+       现在补第三级：句柄元素沿祖先链找不到时，往子树里找真正的文本框。 */
     IUIAutomationElement *owner = NULL, *ef = NULL, *eh = NULL;
-    if (SUCCEEDED(IUIAutomation_GetFocusedElement(ua, &ef)) && ef) {
+    hr = IUIAutomation_GetFocusedElement(ua, &ef);
+    if (SUCCEEDED(hr) && ef) {
         owner = FindDocElement(ua, ef);
+        UiaLog("focus/ancestors", owner ? S_OK : E_FAIL);
         IUIAutomationElement_Release(ef);
+    } else {
+        UiaLog("GetFocusedElement", hr);
     }
     if (!owner && hwnd) {
         if (SUCCEEDED(IUIAutomation_ElementFromHandle(ua, hwnd, &eh)) && eh) {
             owner = FindDocElement(ua, eh);
+            UiaLog("handle/ancestors", owner ? S_OK : E_FAIL);
+            if (!owner) {
+                owner = FindDocInSubtree(ua, eh);
+                UiaLog("handle/subtree", owner ? S_OK : E_FAIL);
+            }
             IUIAutomationElement_Release(eh);
         }
     }
-    if (!owner) goto done;
+    if (!owner) { UiaLog("no doc element", E_FAIL); goto done; }
     el = owner;
 
     /* owner 上应有 TextPattern；取其 DocumentRange 与 selection 兜底 */
-    if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPatternId,
-                        &IID_IUIAutomationTextPattern, (void**)&tp)) && tp) {
-        IUIAutomationTextPattern_get_DocumentRange(tp, &doc);
+    hr = IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPatternId,
+                    &IID_IUIAutomationTextPattern, (void**)&tp);
+    UiaLog("TextPattern", hr);
+    if (SUCCEEDED(hr) && tp) {
+        hr = IUIAutomationTextPattern_get_DocumentRange(tp, &doc);
+        UiaLog("DocumentRange", hr);
     }
     if (!doc) goto done;
 
@@ -365,36 +522,35 @@ static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut)
         if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPattern2Id,
                             &IID_IUIAutomationTextPattern2, (void**)&tp2)) && tp2) {
             BOOL active = FALSE;
-            if (SUCCEEDED(IUIAutomationTextPattern2_GetCaretRange(tp2, &active, &caret))
-                && caret) {
-                /* ok，拿到 caret range */
-            } else {
-                caret = NULL;
-            }
+            hr = IUIAutomationTextPattern2_GetCaretRange(tp2, &active, &caret);
+            if (FAILED(hr) || !caret) caret = NULL;
+            UiaLog("GetCaretRange", caret ? hr : E_FAIL);
             IUIAutomationTextPattern2_Release(tp2);
         }
     }
     if (!caret) {
-        /* 回退：selection 的第一个 range 作为 caret */
+        /* 回退：selection 的第一个 range 作为 caret（Chromium 系常走这里） */
         IUIAutomationTextRangeArray* sel = NULL;
-        if (SUCCEEDED(IUIAutomationTextPattern_GetSelection(tp, &sel)) && sel) {
+        hr = IUIAutomationTextPattern_GetSelection(tp, &sel);
+        if (SUCCEEDED(hr) && sel) {
             int len = 0;
             sel->lpVtbl->get_Length(sel, &len);
             if (len > 0) sel->lpVtbl->GetElement(sel, 0, &caret);
             sel->lpVtbl->Release(sel);
         }
+        UiaLog("GetSelection", caret ? hr : E_FAIL);
     }
     if (!caret) goto done;
 
     /* 截取 [文档起点, caret 起点) → 长度即光标偏移 */
     if (FAILED(IUIAutomationTextRange_Clone(doc, &tmp)) || !tmp) goto done;
-    IUIAutomationTextRange_MoveEndpointByRange(tmp,
+    hr = IUIAutomationTextRange_MoveEndpointByRange(tmp,
                 TextPatternRangeEndpoint_End, caret, TextPatternRangeEndpoint_Start);
-    if (FAILED(IUIAutomationTextRange_GetText(tmp, 0x7FFFFFFF, &pre)) || !pre)
-        goto done;
+    UiaLog("MoveEndpointByRange", hr);
+    if (FAILED(IUIAutomationTextRange_GetText(tmp, -1, &pre)) || !pre) goto done;
     {
         int idx = (int)wcslen(pre);
-        if (SUCCEEDED(IUIAutomationTextRange_GetText(doc, 0x7FFFFFFF, &all)) && all) {
+        if (SUCCEEDED(IUIAutomationTextRange_GetText(doc, -1, &all)) && all) {
             int alen = (int)wcslen(all);
             if (idx > alen) idx = alen;
             if (idx < 0) idx = 0;
@@ -465,38 +621,53 @@ int NavJump(int dir, BOOL shift) {
 
     BOOL got = FALSE;
     const char* path = "native";
+    SciPos sp;
+    memset(&sp, 0, sizeof(sp));
     HWND focus = GetFocusControl();
     if (focus) got = FastGetTextCaret(focus, &text, &len, &caret);  /* 仅经典 Edit/RichEdit */
     if (got) path = "Edit";
-    else {
-        got = UiaGetTextCaret(focus, &text, &len, &caret);   /* 现代控件 → 向上找 TextPattern */
+    if (!got) {                                                     /* Scintilla 系 */
+        got = SciGetTextCaret(focus, &text, &len, &caret, &sp);
+        if (got) path = "Sci";
+    }
+    if (!got) {
+        got = UiaGetTextCaret(focus, &text, &len, &caret);   /* 现代控件 → UIA TextPattern */
         if (got) path = "UIA";
     }
     if (!got) {
-        got = MsaaGetTextCaret(focus, &text, &len, &caret);  /* Scintilla 系 → IAccessible2 */
+        got = MsaaGetTextCaret(focus, &text, &len, &caret);  /* 兜底无障碍 → IAccessible2 */
         if (got) path = "IA2";
     }
     if (!got) { SendNativeWordJump(dir, shift); if (g_recording) CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
 
     int steps = 0;
     int tgt = WordJumpTarget(text, len, caret, dir, &steps);
-    free(text);
     if (g_recording) CapLog("  path=%s len=%d caret=%d -> steps=%d tgt=%d",
                             path, len, caret, steps, tgt);
 
     if (steps <= 0) {
         /* 已到边界，无可跳转；此时读文本已成功，只是边界无可跳。
            不再触发 native 兜底，避免多跳一次。 */
+        free(text);
         return 0;
     }
-    /* 经典 Edit/RichEdit：距离较大时直接用 EM_SETSEL 一步置到目标(瞬跳)，
+    /* 能直接设光标的通道（经典 Edit / Scintilla）：距离较大时一步置到目标(瞬跳)，
        避免逐格发方向键拖慢；小距离仍走箭头以保持完全一致的键行为。
-       非经典通道(UIA/IA2)仍发箭头(无法直接设光标)。 */
+       UIA/IA2 通道无法直接设光标，一律发箭头。 */
     BOOL direct = FALSE;
     if (path[0] == 'E' && focus && steps >= DIRECT_JUMP_MIN) {
         direct = ClassicSetSel(focus, caret, tgt, shift);
         if (direct && g_recording) CapLog("  -> 直接 EM_SETSEL [%d,%d]", caret, tgt);
+    } else if (path[0] == 'S' && focus && steps >= DIRECT_JUMP_MIN) {
+        LONGLONG tb = Utf16ToDocBytes(text, tgt, sp.cp);
+        if (tb >= 0) {
+            LONGLONG anchorB = shift ? sp.anchorBytes : tb;
+            direct = SciSetSel(focus, tb, anchorB);
+            if (direct && g_recording)
+                CapLog("  -> 直接 SCI_SETSEL caret=%lld anchor=%lld", tb, anchorB);
+        }
     }
+    free(text);
     if (!direct) SendArrows(dir, steps, shift);
     return steps;
 }
@@ -608,22 +779,22 @@ void NavProbe(void) {
         WCHAR fcls[96]; GetClassNameW(focus, fcls, 96);
         RepAppend(rep, 2800, &o, L"焦点控件类名=[%s]\n", fcls);
 
-        LRESULT len = SendMessageTimeoutW(focus, WM_GETTEXTLENGTH, 0, 0,
-                                          SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-        RepAppend(rep, 2800, &o, L"WM_GETTEXTLENGTH = %lld\n", (LONGLONG)len);
+        LONGLONG len = 0;
+        SendMsg(focus, WM_GETTEXTLENGTH, 0, 0, &len);
+        RepAppend(rep, 2800, &o, L"WM_GETTEXTLENGTH = %lld\n", len);
         if (len > 0 && len < 1 << 20) {
             WCHAR* buf = (WCHAR*)malloc(((size_t)len + 1) * sizeof(WCHAR));
             if (buf) {
-                LRESULT got = SendMessageTimeoutW(focus, WM_GETTEXT, (WPARAM)(len + 1), (LPARAM)buf,
-                                                  SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-                if (got > 0) {
+                LONGLONG got = 0;
+                if (SendMsg(focus, WM_GETTEXT, (WPARAM)(len + 1), (LPARAM)buf, &got)
+                    && got > 0) {
                     textOK = TRUE;
-                    DWORD sel = (DWORD)SendMessageTimeout(focus, EM_GETSEL, 0, 0,
-                                                          SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-                    int caret = (sel != 0xFFFFFFFF) ? (int)LOWORD(sel) : -1;
+                    LONGLONG sel = 0;
+                    SendMsg(focus, EM_GETSEL, 0, 0, &sel);
+                    int caret = ((DWORD)sel != 0xFFFFFFFF) ? (int)LOWORD((DWORD)sel) : -1;
                     RepAppend(rep, 2800, &o,
-                        L"EM_GETSEL(sel) = 0x%08X  caret=%d\n文本长度=%lld\n",
-                        sel, caret, (LONGLONG)got);
+                        L"EM_GETSEL(sel) = 0x%08llX  caret=%d\n文本长度=%lld\n",
+                        (unsigned long long)(DWORD)sel, caret, got);
                     buf[got < 160 ? got : 160] = 0;
                     RepAppend(rep, 2800, &o, L"文本样本(前160) = [%s]\n", buf);
                 }
