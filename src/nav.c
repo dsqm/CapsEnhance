@@ -113,16 +113,15 @@ static HWND GetFocusControl(void) {
     return NULL;
 }
 
-/* 是否真正的经典编辑控件（Edit/RichEdit），只有它们才可靠支持
-   WM_GETTEXT + EM_GETSEL。Scintilla、Chrome/Edge 等自定义控件返回的是
-   无效长度(如 1)，必须走 UIA / 原生通道，否则跳词会被假数据带偏。 */
+/* 是否经典 Win32 编辑控件（只有它们可靠支持 WM_GETTEXT + EM_GETSEL）。
+   现代控件（RichEditD2DPT / Scintilla / Chrome 等）必须走 UIA，
+   否则 WM_GETTEXT 返回垃圾长度(常为 1)把跳词带偏。 */
 static BOOL IsClassicEdit(HWND hwnd) {
-    WCHAR cls[96];
-    if (!GetClassNameW(hwnd, cls, 96)) return FALSE;
-    if (_wcsicmp(cls, L"Edit") == 0) return TRUE;
-    if (cls[0] == L'R' || cls[0] == L'r')
-        if (_wcsnicmp(cls, L"RichEdit", 8) == 0 || _wcsicmp(cls, L"RICHEDIT") == 0)
-            return TRUE;
+    WCHAR c[96];
+    if (!GetClassNameW(hwnd, c, 96)) return FALSE;
+    if (_wcsicmp(c, L"Edit") == 0 || _wcsicmp(c, L"RICHEDIT") == 0) return TRUE;
+    if (_wcsicmp(c, L"RichEdit20A") == 0 || _wcsicmp(c, L"RichEdit20W") == 0) return TRUE;
+    if (_wcsicmp(c, L"RichEdit50W") == 0) return TRUE;
     return FALSE;
 }
 
