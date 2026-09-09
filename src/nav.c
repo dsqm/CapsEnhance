@@ -18,10 +18,9 @@
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "oleacc.lib")
 
-#define SAFE_RELEASE(p) do { if (p) { (p)->Release(); (p)=NULL; } } while(0)
-
-/* 经典 Edit 直接置光标的最少字符步数：小于该值用真实箭头（行为一致），
-   等于或大于则用 EM_SETSEL 一步跳(瞬跳)，避免远距离逐格发送方向键拖慢。 */
+/* 能直接设光标的通道（经典 Edit / Scintilla）瞬跳的最少步数：小于该值用
+   真实箭头（行为一致），等于或大于则一步置到目标(瞬跳)，避免远距离逐格
+   发送方向键拖慢。UIA/IA2 通道无法直接设光标，不受此值影响。 */
 #define DIRECT_JUMP_MIN 6
 
 /* ============ IAccessibleText（IAccessible2）手工声明 ============
@@ -387,16 +386,19 @@ static BOOL IsClassicEdit(HWND hwnd) {
     return FALSE;
 }
 
-/* ================= 快速通道：标准 Edit / RichEdit ================= */
-/* 通过 WM_GETTEXT + EM_GETSEL 读取文本与光标。仅对经典编辑控件生效。 */
+/* ================= 快速通道：经典 Edit / RichEdit / EmEditorView ================= */
+/* 通过 WM_GETTEXT + EM_GETSEL 读取文本与光标。仅对白名单内的控件生效。 */
 static BOOL FastGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
     if (!hwnd) return FALSE;
     if (!IsClassicEdit(hwnd)) return FALSE;   /* 非经典编辑：交给 Scintilla/UIA/原生 */
 
-    /* 试探窗口是否支持 WM_GETTEXT（Edit/RichEdit 类） */
+    /* 试探窗口是否支持 WM_GETTEXT（白名单控件） */
     LONGLONG size = 0;
     if (!SendMsg(hwnd, WM_GETTEXTLENGTH, 0, 0, &size)) return FALSE;
-    if (size <= 0 || size > 1 << 20) return FALSE;   /* 过长或过短视为不支持 */
+    /* 过短视为不支持；超过 64K 也不走本通道——EM_GETSEL 的打包返回值按
+       LOWORD/HIWORD 拆，长文档读回的光标会回绕成错位值（宁可走原生兜底，
+       也不能算出错误的目标位置）。 */
+    if (size <= 0 || size > 64000) return FALSE;
 
     WCHAR* buf = (WCHAR*)malloc((size_t)((size + 2) * sizeof(WCHAR)));
     if (!buf) return FALSE;
@@ -530,12 +532,11 @@ static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut)
 
     hr = CoInitialize(NULL);
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return FALSE;
-    (void)ok;
 
     hr = CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
                           &IID_IUIAutomation, (void**)&ua);
     UiaLog("CoCreateInstance", hr);
-    if (FAILED(hr) || !ua) return FALSE;
+    if (FAILED(hr) || !ua) { CoUninitialize(); return FALSE; }
 
     /* 锚定候选：优先 UIA 焦点元素（GetFocusedElement 能命中 Chromium/WinUI 的
        真正文本框），取不到 TextPattern 时再回退 ElementFromHandle(hwnd)。
@@ -639,8 +640,8 @@ done:
 }
 
 /* ================= IA2 通道：IAccessible2 (IAccessibleText) =================
-   Scintilla(Notepad3/Notepad++ 等)在 Windows 上的无障碍接口是 IAccessible2，
-   不暴露 UIA TextPattern —— 这正是读屏器(NVDA)读它们的通道。
+   兜底无障碍通道，面向"既不是经典 Edit、也不暴露 UIA/SCI 文本"的控件。
+   （Scintilla 系现在优先走更快的 SCI 直读通道，不再依赖这里。）
    COM 调用全程系统封送，跨进程/跨位宽安全。 */
 static BOOL MsaaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
     if (!hwnd) return FALSE;
@@ -859,7 +860,9 @@ void NavProbe(void) {
         SendMsg(focus, WM_GETTEXTLENGTH, 0, 0, &len);
         RepAppend(rep, 2800, &o, L"WM_GETTEXTLENGTH = %lld\n", len);
         if (len > 0 && len < 1 << 20) {
-            WCHAR* buf = (WCHAR*)malloc(((size_t)len + 1) * sizeof(WCHAR));
+            /* 多留 2 个 slot：EmEditor 类控件 WM_GETTEXT 的返回计数含结尾 NUL
+               （got 可能 = len+1），下面的 buf[got]=0 才不会越界写 */
+            WCHAR* buf = (WCHAR*)malloc(((size_t)len + 2) * sizeof(WCHAR));
             if (buf) {
                 LONGLONG got = 0;
                 if (SendMsg(focus, WM_GETTEXT, (WPARAM)(len + 1), (LPARAM)buf, &got)

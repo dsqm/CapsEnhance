@@ -130,7 +130,7 @@
 
 ## 四、日志与诊断
 
-- **日志文件**：`CapsEnhance.log`（与 exe 同目录）。**程序启动不生成日志**，仅当按下 **C + \`** 时开始写入，再按一次结束记录。结束记录时会把进程工作集压回（UIA/MSAA 的 COM 基础设施首次使用后常驻约 6~15MB，DLL 无法卸载；实测压测 400 次调用仅一次性增长 ~0.5MB 后平稳，非泄漏）。
+- **日志文件**：`CapsEnhance.log`（与 exe 同目录）。**程序启动不生成日志**，仅当按下 **C + \`** 时开始写入，再按一次结束记录。结束记录时会把进程工作集压回（UIA/MSAA 的 COM 基础设施首次使用后常驻约 6~15MB，DLL 无法卸载；实测压测 400 次调用仅一次性增长 ~0.5MB 后平稳，非泄漏）。**注意隐私**：记录期间会写入焦点控件的文本样本（前 160 字符）与跳词位置，请在敏感内容上自行斟酌是否开启。
 - **开始 / 结束提示音**：开始记录响"系统星号音"，结束记录响"系统手形音"，两音不同；同时托盘悬停提示变为"正在记录日志"。
 - **启动环境基线**：启动时静默采集系统信息（进程位宽、钩子状态、OS 版本、管理员权限、键盘布局 / locale、UIA 自动化是否可用、屏幕与 DPI），保存在内存；开始记录时会随日志一并输出 `[启动基线]` 段，便于排查"某个窗口无法使用"时的环境问题。
 - **托盘**：正常运行悬停提示"正在映射"；日志记录中提示"正在记录日志"；暂停时提示"已暂停"。菜单含 **重启程序**：对可能注入过的修饰键补"抬起"清掉卡键（物理按住的不动），随后拉起新实例（新实例带 `--wait-exit <旧PID>` 等旧进程完全退出后才装钩子）并退出本进程，钩子/和弦状态全部回到干净初态；退出时同样补一轮修饰键抬起。
@@ -140,18 +140,20 @@
 
 ## 五、构建与测试
 
-依赖 **MSVC**（`vswhere` 定位 `vcvars64.bat`），Windows x64。
+依赖 **MSVC x64**（Windows 10/11），工具链由 `build_env.bat` 统一定位。
 
 ```bat
-build.bat                  @echo  # 生成 bin/CapsEnhance.exe
+build.bat                  rem 生成 bin/CapsEnhance.exe
 ```
 
-运行测试：
+运行测试与诊断工具：
 
 ```bat
-test\build_nav.bat         # 词跳测试：算法单测(ComputeSteps) + Scintilla/Edit 通道集成测试(test_sci)
-test\build_test.bat        # 和弦引擎回归（D/F 乱序、长按、增益补齐）
-test\build_keytest.bat     # 诊断工具：keytest(按键投递实测) + uiprobe(UIA 逐步探测)
+test\build_nav.bat         rem 词跳测试：算法单测(ComputeSteps) + Scintilla/Edit 通道集成测试(test_sci)
+test\build_test.bat        rem 和弦引擎回归（D/F 乱序、长按、增益补齐）
+test\build_keytest.bat     rem 诊断工具：keytest(按键投递实测) + uiprobe(UIA 逐步探测)
+                           rem            + memtest(UIA 内存压测) + restarttest(重启握手)
+                           rem            + traymemtest(托盘菜单内存定位)
 ```
 
 工具链脚本 `build_env.bat` 被所有构建脚本共用：定位 VS/MSVC/SDK 并显式设置
@@ -173,4 +175,5 @@ C + ` 开始/结束日志记录。
 
 - 本程序拦截并屏蔽了 `CapsLock` 键本身；需要真实大小写切换时，用映射里的 `C + Tab` 发送 CapsLock，或从托盘"暂停"映射恢复原键。
 - 现代编辑框（UIA/IA2 通道）无法像经典 Edit 那样一次设置光标，超长距离跳转会逐格发送方向键（上限 256 步）。
+- 经典 Edit 通道（含 EmEditor）只处理 **64K 字符以内**的文档：`EM_GETSEL` 的打包返回值按 16 位拆读，更长的文档读回的光标会回绕出错——超大文档自动改走原生 `Ctrl+方向` 兜底。Scintilla 通道无此限制（文档字节位置全宽读取，上限 2MB）。
 - 托盘弹出菜单需要可聚焦窗口，CapsEnhance 启动时会创建 1×1 的隐藏顶层窗口用于承载系统菜单。

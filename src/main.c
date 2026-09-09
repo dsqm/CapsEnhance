@@ -24,24 +24,30 @@ static BOOL  g_quit = FALSE;
 volatile BOOL g_recording = FALSE;
 
 static CRITICAL_SECTION g_logcs;
-static void init_logcs(void) { static int once=0; if(!once){once=1; InitializeCriticalSection(&g_logcs);} }
+/* 惰性初始化。用 InterlockedCompareExchange 防双线程竞态；
+   当前 CapLog 只在主线程调用，这里按可跨线程的标准写。 */
+static void init_logcs(void) {
+    static volatile LONG once = 0;
+    if (InterlockedCompareExchange(&once, 1, 0) == 0)
+        InitializeCriticalSection(&g_logcs);
+}
 
-/* ============ 日志（追加写 CapsEnhance.log，进程目录） ============ */
-static void log_path(char* out, size_t cap) {
+/* ============ 日志（追加写 CapsEnhance.log，exe 同目录） ============ */
+static void log_path(WCHAR* out, size_t cap) {
     WCHAR wexe[MAX_PATH]; DWORD n = GetModuleFileNameW(NULL, wexe, MAX_PATH);
     /* 找到最后一个 '\'，截成目录 */
     WCHAR* slash = NULL;
     for (DWORD i = 0; i < n; i++) if (wexe[i] == L'\\') slash = &wexe[i];
     if (slash) *slash = 0;
-    WideCharToMultiByte(CP_ACP, 0, wexe, -1, out, (int)cap, 0, 0);
-    strncat_s(out, cap, "\\CapsEnhance.log", _TRUNCATE);
+    /* 全程用宽字符拼路径：经 ANSI 转换会在安装路径含非 ACP 字符时写错文件 */
+    _snwprintf_s(out, cap, _TRUNCATE, L"%s\\CapsEnhance.log", wexe);
 }
 void CapLog(const char* fmt, ...) {
     init_logcs();
     EnterCriticalSection(&g_logcs);
-    char path[MAX_PATH]; log_path(path, MAX_PATH);
+    WCHAR wpath[MAX_PATH]; log_path(wpath, MAX_PATH);
     FILE* f = NULL;
-    if (fopen_s(&f, path, "a") == 0 && f) {
+    if (_wfopen_s(&f, wpath, L"a") == 0 && f) {
         SYSTEMTIME st; GetLocalTime(&st);
         fprintf(f, "%02d:%02d:%02d.%03d  ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
         va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
@@ -208,7 +214,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_PROBE:
         /* C+`：切换诊断记录。开始=探测当前焦点并记录；再按=结束记录。
-           用 MesaBeep 的两个不同系统事件音（走声卡，无需内置蜂鸣器），
+           用 MessageBeep 的两个不同系统事件音（走声卡，无需内置蜂鸣器），
            并同步托盘悬停提示内容。 */
         g_recording = !g_recording;
         if (g_recording) {
