@@ -152,10 +152,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_PROBE:
         /* C+`：切换诊断记录。开始=探测当前焦点并记录；再按=结束记录。
-           重启程序即自然结束上一段记录。结束时机出系统提示音。 */
+           开始/结束各出一个不同提示音。 */
         g_recording = !g_recording;
-        if (g_recording) { CapLog("===== REC START ====="); NavProbe(); }
-        else {
+        if (g_recording) {
+            CapLog("===== REC START =====");
+            PlaySoundW(L"SystemStart", NULL, SND_ALIAS | SND_ASYNC);
+            NavProbe();
+        } else {
             CapLog("===== REC END =====");
             PlaySoundW(L"SystemExit", NULL, SND_ALIAS | SND_ASYNC);
         }
@@ -247,9 +250,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
         return 1;
     }
 
-    /* 启动不写日志文件；采集系统/环境基线供 C+` 诊断使用，并出区别于结束音的开机提示音 */
+    /* 启动不写日志文件；采集系统/环境基线供 C+` 诊断时输出。程序启动本身不发声。 */
     NavBaseInfo();
-    PlaySoundW(L"SystemStart", NULL, SND_ALIAS | SND_ASYNC);
 
     g_menu = CreatePopupMenu();
     AppendMenuW(g_menu, MF_STRING, IDM_PAUSE, L"暂停映射");
