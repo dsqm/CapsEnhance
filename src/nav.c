@@ -99,7 +99,13 @@ static void SendNativeWordJump(int dir, BOOL shift) {
     SendInput(k, ki, sizeof(INPUT));
 }
 
-/* 词字符判定：CJK 与字母数字视为"词内"，其余（空白+标点）为分隔符 */
+/* 代理对判定：补充平面字符用两个 UTF-16 code unit 表示（高+低代理），
+   必须当作"一个字符"整体推进，否则会把它们拆散导致跳词错乱。 */
+static BOOL IsHighSurrogateW(WCHAR c) { return c >= 0xD800 && c <= 0xDBFF; }
+static BOOL IsLowSurrogateW(WCHAR c)  { return c >= 0xDC00 && c <= 0xDFFF; }
+
+/* 词字符判定（BMP 直接判，编码点 >= 0x10000 的取其整体）：
+   CJK 与字母数字视为"词内"，其余（空白+标点）为分隔符。 */
 static BOOL IsWordChar(WCHAR c) {
     unsigned cp = (unsigned)c;
     if (c == L'\0') return FALSE;
@@ -107,26 +113,77 @@ static BOOL IsWordChar(WCHAR c) {
     if (cp >= 0x3400 && cp <= 0x4DBF) return TRUE;   /* 扩展A */
     if (cp >= 0x4E00 && cp <= 0x9FFF) return TRUE;   /* 基本区 */
     if (cp >= 0xF900 && cp <= 0xFAFF) return TRUE;   /* 兼容区 */
-    if (cp >= 0x20000 && cp <= 0x2FA1F) return TRUE; /* 扩展B+ */
     return FALSE;
 }
 
-/* 在 s 中以 caret 为起点，dir 方向跳一个词的移动格数/字符数。
-   返回"应发送的箭头次数"；若已到边界返回 0。
+/* 以 s[i] 为"字符起点"（可能是一个代理对的首字）判定是否词内。 */
+static BOOL IsWordCharAt(const WCHAR* s, int len, int i) {
+    if (i < 0 || i >= len) return FALSE;
+    unsigned cp;
+    if (i + 1 < len && IsHighSurrogateW(s[i]) && IsLowSurrogateW(s[i+1])) {
+        cp = 0x10000u + (((unsigned)(s[i] - 0xD800) << 10) | (unsigned)(s[i+1] - 0xDC00));
+    } else if (IsHighSurrogateW(s[i]) || IsLowSurrogateW(s[i])) {
+        return FALSE;   /* 孤立的半个代理对：按分隔符处理，避免拆散群组 */
+    } else {
+        cp = (unsigned)s[i];
+    }
+    if (cp == 0) return FALSE;
+    if (cp > 0xFFFF) {
+        /* 补充平面：CJK 扩展 B~H 视为"字内"，其余 Astral 字符按分隔符 */
+        return (cp >= 0x20000 && cp <= 0x323AF);
+    }
+    return IsWordChar((WCHAR)cp);
+}
+
+/* 由 code-unit 位置 i 反推其左侧那个"字符"的起点（代理对整体归为一句）。 */
+static int CharStartBefore(const WCHAR* s, int len, int i) {
+    (void)len;
+    if (i <= 0) return 0;
+    /* 前一 code unit 是 low 代理，则它属于 high 起头的那个字符 */
+    if (IsLowSurrogateW(s[i-1]) && i >= 2 && IsHighSurrogateW(s[i-2]))
+        return i - 2;
+    return i - 1;
+}
+
+/* 在 s 中以 caret 为起点，dir 方向跳一个词应发送的箭头次数。
+   左右箭头在编辑框内按"字符"（code point）移动，因此步数按字符单位计数，
+   代理对整体只计 1 步；若已到边界返回 0。
    非 static 仅供词跳单元测试（test_nav.c）直接调用。 */
 int ComputeSteps(const WCHAR* s, int len, int caret, int dir) {
-    int i = caret;
+    if (!s || len < 1) return 0;
+    /* 归一光标：落在代理对中间(异常，不该发生)时，视为整个字符未跨过 */
+    if (caret > 0 && caret < len && IsHighSurrogateW(s[caret-1]) && IsLowSurrogateW(s[caret]))
+        caret--;
+    if (caret < 0) caret = 0;
+    if (caret > len) caret = len;
+
+    int steps = 0, i = caret;
     if (dir == DIR_LEFT) {
-        /* 跳到左边界：跨过分隔符后跨过词，落在"分隔符右侧"（即前一词之后） */
         if (i <= 0) return 0;
-        while (i > 0 && !IsWordChar(s[i-1])) i--;   /* 跨结尾分隔符 */
-        while (i > 0 &&  IsWordChar(s[i-1])) i--;   /* 跨整个词 */
-        return (caret > i) ? (caret - i) : 0;
+        while (i > 0) {                    /* 跨结尾分隔符 */
+            int st = CharStartBefore(s, len, i);
+            if (IsWordCharAt(s, len, st)) break;
+            steps++; i = st;
+        }
+        while (i > 0) {                    /* 跨整个词 */
+            int st = CharStartBefore(s, len, i);
+            if (!IsWordCharAt(s, len, st)) break;
+            steps++; i = st;
+        }
+        return steps;
     } else {
         if (i >= len) return 0;
-        while (i < len &&  IsWordChar(s[i])) i++;   /* 跨当前词 */
-        while (i < len && !IsWordChar(s[i])) i++;   /* 跨分隔符到下一词首 */
-        return (i > caret) ? (i - caret) : 0;
+        for (; i < len; ) {                /* 跨当前词 */
+            if (!IsWordCharAt(s, len, i)) break;
+            steps++;
+            i = (i + 1 < len && IsHighSurrogateW(s[i])) ? (i + 2) : (i + 1);
+        }
+        for (; i < len; ) {                /* 跨分隔符到下一词首 */
+            if (IsWordCharAt(s, len, i)) break;
+            steps++;
+            i = (i + 1 < len && IsHighSurrogateW(s[i])) ? (i + 2) : (i + 1);
+        }
+        return steps;
     }
 }
 
@@ -188,6 +245,42 @@ static BOOL FastGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut
 
 /* ================= UIA 回退通道 ================= */
 /* 以 C 宏接口访问 UIA COM（uiautomationclient.h 在纯 C 下提供 *_宏） */
+/* 从 start 出发沿祖先链向上定位拥有 DocumentRange 的元素。
+   命中的元素结果会 AddRef 一份交给调用者持有，沿途其余元素全部 Release。 */
+static IUIAutomationElement* FindDocElement(IUIAutomation* ua, IUIAutomationElement* start) {
+    IUIAutomationElement* chain[32];
+    int n = 0;
+    IUIAutomationElement* cur = start;
+    IUIAutomationTreeWalker* wk = NULL;
+    IUIAutomation_get_RawViewWalker(ua, &wk);
+    IUIAutomationElement* result = NULL;
+
+    while (cur && n < 32) {
+        chain[n++] = cur;
+        IUIAutomationTextPattern* t = NULL;
+        if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(cur, UIA_TextPatternId,
+                            &IID_IUIAutomationTextPattern, (void**)&t)) && t) {
+            IUIAutomationTextRange* d = NULL;
+            if (SUCCEEDED(IUIAutomationTextPattern_get_DocumentRange(t, &d)) && d) {
+                IUIAutomationTextRange_Release(d);
+                result = cur;
+            }
+            IUIAutomationTextPattern_Release(t);
+            if (result) break;
+        }
+        IUIAutomationElement* parent = NULL;
+        if (!wk || FAILED(IUIAutomationTreeWalker_GetParentElement(wk, cur, &parent)))
+            break;
+        cur = parent;
+    }
+    if (wk) IUIAutomationTreeWalker_Release(wk);
+
+    if (result) IUIAutomationElement_AddRef(result);   /* 抄一份给调用者 */
+    for (int i = 0; i < n; i++)
+        if (chain[i] && chain[i] != result) IUIAutomationElement_Release(chain[i]);
+    return result;
+}
+
 static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
     HRESULT hr;
     BSTR all = NULL, pre = NULL;
@@ -205,43 +298,30 @@ static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut)
                           &IID_IUIAutomation, (void**)&ua);
     if (FAILED(hr) || !ua) return FALSE;
 
-    /* 锚定真实焦点 HWND（优先 ElementFromHandle），再向上找 TextPattern；
-       UIA 的 GetFocusedElement 可能与 Win32 焦点不一致，故用 handle 直取。 */
-    if (hwnd) {
-        IUIAutomation_ElementFromHandle(ua, hwnd, &el);
-        if (!el) IUIAutomation_GetFocusedElement(ua, &el);
-    } else {
-        IUIAutomation_GetFocusedElement(ua, &el);
+    /* 锚定候选：优先 UIA 焦点元素（GetFocusedElement 能命中 Chromium/WinUI 的
+       真正文本框），取不到 TextPattern 时再回退 ElementFromHandle(hwnd)。
+       曾改为 ElementFromHandle 直取顶层窗口，但 Chromium(Chrome_WidgetWin_1)
+       顶层窗口本身无 TextPattern，向上也找不到 → 造成 QQ/Edge 跳词回归。 */
+    IUIAutomationElement *owner = NULL, *ef = NULL, *eh = NULL;
+    if (SUCCEEDED(IUIAutomation_GetFocusedElement(ua, &ef)) && ef) {
+        owner = FindDocElement(ua, ef);
+        IUIAutomationElement_Release(ef);
     }
-    if (!el) goto done;
-
-    /* 某些控件(如 Scintilla)的 TextPattern 在焦点元素或某个祖先上。
-       从焦点元素向上逐层找可用的 DocumentRange；el 最终指向拥有者。 */
-    {
-        IUIAutomationTreeWalker* wk = NULL;
-        IUIAutomation_get_RawViewWalker(ua, &wk);
-        for (int depth = 0; el && depth < 24; depth++) {
-            IUIAutomationTextPattern* t = NULL;
-            if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPatternId,
-                                &IID_IUIAutomationTextPattern, (void**)&t)) && t) {
-                IUIAutomationTextRange* d = NULL;
-                if (SUCCEEDED(IUIAutomationTextPattern_get_DocumentRange(t, &d)) && d) {
-                    doc = d;                /* 找到文档，el 即拥有者 */
-                    tp = t;                 /* 保留供 selection 兜底 */
-                    break;
-                }
-                IUIAutomationTextPattern_Release(t); t = NULL;
-            }
-            IUIAutomationElement* parent = NULL;
-            if (wk && SUCCEEDED(IUIAutomationTreeWalker_GetParentElement(wk, el, &parent))) {
-                IUIAutomationElement_Release(el);
-                el = parent;
-            } else
-                break;      /* 已到根 */
+    if (!owner && hwnd) {
+        if (SUCCEEDED(IUIAutomation_ElementFromHandle(ua, hwnd, &eh)) && eh) {
+            owner = FindDocElement(ua, eh);
+            IUIAutomationElement_Release(eh);
         }
-        if (wk) IUIAutomationTreeWalker_Release(wk);
-        if (!doc) goto done;
     }
+    if (!owner) goto done;
+    el = owner;
+
+    /* owner 上应有 TextPattern；取其 DocumentRange 与 selection 兜底 */
+    if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPatternId,
+                        &IID_IUIAutomationTextPattern, (void**)&tp)) && tp) {
+        IUIAutomationTextPattern_get_DocumentRange(tp, &doc);
+    }
+    if (!doc) goto done;
 
     /* 光标位置：优先 TextPattern2 的 caret range */
     {

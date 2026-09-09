@@ -44,7 +44,16 @@ int main(void) {
     R(en, 5, 1,  "EN: 空格右 5->6(world)");
     R(en, 6, 6,  "EN: world 右 6->12(foo起)");
     L(en, 15, 3, "EN: 末尾左 15->12(foo起)");
-    L(en, 6, 6,  "EN: world起 左 6->0(跨 world+空格)");
+    L(en, 6, 6, "EN: world起 左 6->0(跨 world+空格)");
+
+    /* 代理对（补充平面字符，如扩展G区"𰻝"=U+30E0D）必须整体跳，不拆散 */
+    const wchar_t* sp = L"X𰻝Y";         /* code units: X | high,low | Y  (len=4) */
+    R(sp, 0, 3, "SP: 头右 0->3(整串皆词，直达末尾，𰻝计 1 字)");
+    L(sp, 3, 2, "SP: caret3(𰻝后) 左 3->0(跨 𰻝+X)");
+    L(sp, 4, 3, "SP: 末尾左 4->0(跨 Y+𰻝+X，均为 1 字/字)");
+    R(sp, 1, 2, "SP: 𰻝前 1->4(跨 𰻝+Y 到末尾)");
+    L(sp, 1, 1, "SP: 𰻝前 1->0(跨 X)");
+    L(sp, 2, 1, "SP: caret=2(代理对中) 归一后左跳 = 1(跨 X 到 0)");
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
     return fails;
