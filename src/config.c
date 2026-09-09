@@ -164,6 +164,8 @@ void ConfigLoad(void) {
             "; 命中名单的程序：Caps+N / Caps+M 不做文本探测，\n"
             "; 直接发送 Ctrl+\xe2\x86\x90 / Ctrl+\xe2\x86\x92，\n"
             "; 由该程序自身的词导航完成按词跳转（Shift 位移同样支持）。\n"
+            "; 适用于文本读取不到、或读到的文本坐标与实际光标不符\n"
+            "; （跳词超调、光标乱飘）的程序。\n"
             "; 每行一个进程名：完全匹配、大小写不敏感、.exe 后缀可写可不写\n"
             ";\n"
             "; 示例（去掉行首 ; 即可生效）：\n"
@@ -195,8 +197,10 @@ BOOL ConfigMatchName(const WCHAR* exeName) {
     return FALSE;
 }
 
-BOOL ConfigIsNativeWordJump(HWND focus) {
-    if (g_count == 0 || !focus) return FALSE;
+/* 取焦点窗口所属进程的 exe 文件名（含后缀）；失败返回 FALSE */
+BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap) {
+    if (!focus || !out || cap == 0) return FALSE;
+    out[0] = 0;
     DWORD pid = 0;
     GetWindowThreadProcessId(focus, &pid);
     if (!pid) return FALSE;
@@ -211,6 +215,14 @@ BOOL ConfigIsNativeWordJump(HWND focus) {
 
     WCHAR* fname = exe;
     for (WCHAR* q = exe; *q; q++) if (*q == L'\\') fname = q + 1;
+    _snwprintf_s(out, cap, _TRUNCATE, L"%s", fname);
+    return out[0] != 0;
+}
+
+BOOL ConfigIsNativeWordJump(HWND focus) {
+    if (g_count == 0 || !focus) return FALSE;
+    WCHAR fname[MAX_PATH];
+    if (!ConfigGetProcessName(focus, fname, MAX_PATH)) return FALSE;
     return ConfigMatchName(fname);
 }
 

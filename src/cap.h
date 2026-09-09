@@ -87,6 +87,7 @@ void ConfigLoadFrom(const WCHAR* path);      /* 从指定路径加载（单测�
 BOOL ConfigMatchName(const WCHAR* exeName);  /* 进程名是否命中原生词跳名单 */
 BOOL ConfigGetRunAsAdmin(void);             /* [General] RunAsAdmin：启动时提权 */
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中名单 */
+BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口的进程 exe 名 */
 BOOL IsRunElevated(void);                   /* 真实运行权限（查进程令牌） */
 
 /* ---------- 诊断/日志 ---------- */

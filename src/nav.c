@@ -770,6 +770,34 @@ int NavJump(int dir, BOOL shift) {
                 CapLog("  -> 箭头补正 %lld (caret=%lld -> %d)", diff, now, tgt);
         }
     }
+    /* 自校验补正（UIA / IA2）：部分自定义编辑器（Electron 里带渲染装饰的
+       编辑器，如实时预览下把语法/装饰渲染成整块 widget 的编辑器）的无障碍
+       文本含"光标不可停靠"的字符——按文本算出的步数发完箭头会整块跳过而
+       超调（日志表现：短跳准、长跳偏）。跳完重读一次：
+       仅当读回的仍是同一页文本（长度与内容都一致，坐标可比）才按差值补一轮；
+       差值超过原步数说明坐标系统性不可靠，放弃补正（不做任何自动切换，
+       只提示）—— 这类程序请把进程名写进配置文件的 [NativeWordJump] 名单。 */
+    if (!direct && !shift && (path[0] == 'U' || path[0] == 'I') && focus) {
+        WCHAR* t2 = NULL; int l2 = 0, c2 = 0;
+        BOOL ok2 = (path[0] == 'U') ? UiaGetTextCaret(focus, &t2, &l2, &c2)
+                                    : MsaaGetTextCaret(focus, &t2, &l2, &c2);
+        if (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0 && c2 != tgt) {
+            int diff = tgt - c2;
+            if (diff > 0 && diff <= steps)        SendArrows(DIR_RIGHT,  diff, FALSE);
+            else if (diff < 0 && diff >= -steps)  SendArrows(DIR_LEFT,  -diff, FALSE);
+            if (diff > steps || diff < -steps) {
+                /* 偏差比整个步长还大：坐标系统性不可靠，补也补不准，
+                   放弃本次补正（只提示，不做任何自动切换）。 */
+                if (g_recording)
+                    CapLog("  -> 文本坐标与实际光标不符(caret=%d 期望 %d)，差 %d 超出步数 %d，"
+                           "放弃补正。建议把该程序加入 [NativeWordJump] 名单",
+                           c2, tgt, diff, steps);
+            } else if (g_recording) {
+                CapLog("  -> 箭头补正 %d (caret=%d -> %d)", diff, c2, tgt);
+            }
+        }
+        free(t2);
+    }
     free(text);
     return steps;
 }
