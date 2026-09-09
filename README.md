@@ -72,9 +72,12 @@
 ### 文本读取通道（按优先级尝试）
 
 1. **经典 Edit / RichEdit**：`WM_GETTEXT` + `EM_GETSEL`。
-2. **UIA（UI Automation）** `TextPattern`/`TextPattern2`：支持 QQ、Edge、Win11 记事本等现代控件；沿焦点元素的祖先链向上定位带文档的控件。
-3. **IAccessible2** (`IAccessibleText`)：面向 Scintilla 系（Notepad3、Notepad++）等不暴露 UIA 文本的控件。
-4. 全失败则需原生 `Ctrl+方向键` 兜底。
+2. **Scintilla 系**（Notepad3 / Notepad++ / SciTE）：`SCI_*` 窗口消息。文档以字节为单位（UTF-8 下中文 3 字节/字），整条通道在字节域取原始文本再转成 UTF-16 交给词边界算法；`SCI_GETTEXT` 的缓冲区指针属于对方进程，必须先 `VirtualAllocEx` 再读回（直传本地指针会读崩对方）。跳距 ≥ 6 时用 `SCI_SETSEL` 瞬跳（置位后回读校验，不符则退回逐格箭头）。
+3. **UIA（UI Automation）** `TextPattern`/`TextPattern2`：支持 QQ、Edge、VSCode 等 Chromium/WinUI 控件。锚定顺序：焦点元素沿祖先链 → 焦点 HWND 沿祖先链 → 焦点 HWND 子树检索（焦点有时落在没有 `DocumentRange` 的 Pane 上，必须往下找）。
+4. **IAccessible2** (`IAccessibleText`)：其余无障碍文本控件。
+5. 全失败则原生 `Ctrl(+Shift)+方向键` 兜底 —— **Ctrl 必须真的按住**（在方向键之前按下、之后抬起），否则目标收到的只是单格方向键。
+
+> 跨进程消息坑：`SendMessageTimeout` 的返回值只表示"是否发送成功"，窗口过程的返回值必须通过最后一个参数 `lpdwResult` 取。传 `NULL` 的话拿到的是恒为 1 的状态值 —— 曾导致 `WM_GETTEXTLENGTH` 恒等于 1、文本永远只读到一个字符，词边界算法整个失效。
 
 ### 直接置光标（远跳提速）
 
@@ -93,13 +96,13 @@
    │  · 维护 D/F 门闩 │────────────────▶ │  · DoFireOnce() 分发      │
    │  · 屏蔽无效按键  │────────────────▶ │  · 托盘 / 暂停 / 日志      │
    └──────────────────┘   WM_PROBE/TOGGLE└────────────┬─────────────┘
-                                                      │ NavJump()
+                                                      │ NavJump() / SendActOnce()
                                                       ▼
                                                ┌──────────────────┐
-                                               │ nav.c            │
-                                               │  词跳：读取文本通道│
-                                               │  + 边界算法       │
-                                               │  + 诊断(NavProbe) │
+                                               │ nav.c   send.c   │
+                                               │  词跳：读取文本通道│ 模拟按键：扩展键
+                                               │  + 边界算法       │ 标志/逐条节奏/
+                                               │  + 诊断(NavProbe) │ Ctrl·Shift 组合
                                                └──────────────────┘
 ```
 
@@ -107,7 +110,8 @@
 
 - **hook.c** —— 底层键盘钩子线程。识别 C / 触发键 / D·F 修饰，维护 `volatile` 状态与"和弦门闩快照"（应对按键乱序到达），屏蔽映射期间的无效按键，并把动作需求投递给主线程。
 - **main.c** —— 消息窗口 + 消息循环。和弦引擎（按住稳定期 → 首次开火 → 重复节奏）；路由：词跳动作用 `NavJump`，其余用 `SendActOnce` 发送；托盘菜单（暂停 / 退出）；日志 `CapLog`；启动时调用 `NavBaseInfo()` 采集环境基线（不落盘）。
-- **nav.c** —— 词跳核心。多通道读取文本与光标、字符分类算法、代理对处理、经典 Edit 直接置光标、诊断 `NavProbe` / `NavBaseInfo`。
+- **nav.c** —— 词跳核心。多通道读取文本与光标（Edit / Scintilla / UIA / IA2）、字符分类算法、代理对处理、直接置光标、诊断 `NavProbe` / `NavBaseInfo`。
+- **send.c** —— 模拟按键的唯一出口。扩展键标志（方向键/Home/End/Del 等必须带 `KEYEVENTF_EXTENDEDKEY`，否则扫描码被当成小键盘键）、逐条发送节奏、Ctrl/Shift 组合键的正确按住与释放。
 
 ### 和弦引擎要点（跨线程安全）
 
@@ -138,9 +142,14 @@ build.bat                  @echo  # 生成 bin/CapsEnhance.exe
 运行测试：
 
 ```bat
-test\build_nav.bat         # 词跳算法单测（ComputeSteps 断言，中文/英文/全角/代理对/混排）
+test\build_nav.bat         # 词跳测试：算法单测(ComputeSteps) + Scintilla/Edit 通道集成测试(test_sci)
 test\build_test.bat        # 和弦引擎回归（D/F 乱序、长按、增益补齐）
+test\build_keytest.bat     # 诊断工具：keytest(按键投递实测) + uiprobe(UIA 逐步探测)
 ```
+
+工具链脚本 `build_env.bat` 被所有构建脚本共用：定位 VS/MSVC/SDK 并显式设置
+`PATH/INCLUDE/LIB`（不走 vcvars64，避开它的注册表探测；批处理里含 `(x86)` 的
+路径不能内联展开，也无法出现在 `( )` 块 / FOR 集合里，脚本已按此约定编写）。
 
 手动验证：
 
