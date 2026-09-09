@@ -127,6 +127,18 @@ static LONGLONG Utf16ToDocBytes(const WCHAR* s, int u16len, UINT cp) {
     return (back == u16len) ? (LONGLONG)nb : -1;
 }
 
+/* EM_SETSEL 之后回读校验：有些"类 Edit"控件只实现半套协议
+   （能回 EM_GETSEL 不一定能收 EM_SETSEL），置位失败就退回逐格箭头，
+   宁可慢也不能光标原地不动。EM_GETSEL 返回值按 LOWORD/HIWORD 拆
+   （跨进程不能传指针参数，文本超过 64K 时该返回值会截断，此为已知限制）。 */
+static BOOL EditVerifySel(HWND hwnd, int caret, int target, BOOL shift) {
+    LONGLONG sel = 0;
+    if (!SendMsg(hwnd, EM_GETSEL, 0, 0, &sel)) return FALSE;
+    DWORD v = (DWORD)sel;
+    int start = (int)LOWORD(v), end = (int)HIWORD(v);
+    return (end == target) && (shift ? (start == caret) : (start == target));
+}
+
 /* 直接置光标：SCI_SETSEL(caret, anchor)。置完立即回读校验，
    位置不符就返回 FALSE，让上层退回逐格箭头。 */
 static BOOL SciSetSel(HWND hwnd, LONGLONG caretB, LONGLONG anchorB) {
@@ -321,15 +333,17 @@ static HWND GetFocusControl(void) {
     return NULL;
 }
 
-/* 是否经典 Win32 编辑控件（只有它们可靠支持 WM_GETTEXT + EM_GETSEL）。
-   现代控件（RichEditD2DPT / Scintilla / Chrome 等）必须走 UIA，
-   否则 WM_GETTEXT 返回垃圾长度(常为 1)把跳词带偏。 */
+/* 是否"经典 Edit 协议"控件（可靠支持 WM_GETTEXT + EM_GETSEL）。
+   白名单外不放行：Chromium 系窗口对 WM_GETTEXT 回的是标题、EM_GETSEL 是
+   垃圾值，混进来会把跳词带偏。EmEditor 的 EmEditorView 实测完美支持这套
+   协议（文本/光标都是 UTF-16 下标），只是类名不在经典名单里。 */
 static BOOL IsClassicEdit(HWND hwnd) {
     WCHAR c[96];
     if (!GetClassNameW(hwnd, c, 96)) return FALSE;
     if (_wcsicmp(c, L"Edit") == 0 || _wcsicmp(c, L"RICHEDIT") == 0) return TRUE;
     if (_wcsicmp(c, L"RichEdit20A") == 0 || _wcsicmp(c, L"RichEdit20W") == 0) return TRUE;
     if (_wcsicmp(c, L"RichEdit50W") == 0) return TRUE;
+    if (_wcsicmp(c, L"EmEditorView") == 0) return TRUE;   /* EmEditor */
     return FALSE;
 }
 
@@ -657,7 +671,8 @@ int NavJump(int dir, BOOL shift) {
     BOOL direct = FALSE;
     if (path[0] == 'E' && focus && steps >= DIRECT_JUMP_MIN) {
         direct = ClassicSetSel(focus, caret, tgt, shift);
-        if (direct && g_recording) CapLog("  -> 直接 EM_SETSEL [%d,%d]", caret, tgt);
+        if (direct) direct = EditVerifySel(focus, caret, tgt, shift);
+        if (direct && g_recording) CapLog("  -> 直接 EM_SETSEL [%d,%d] 已校验", caret, tgt);
     } else if (path[0] == 'S' && focus && steps >= DIRECT_JUMP_MIN) {
         LONGLONG tb = Utf16ToDocBytes(text, tgt, sp.cp);
         if (tb >= 0) {
