@@ -118,34 +118,30 @@ static BOOL IsHighSurrogateW(WCHAR c) { return c >= 0xD800 && c <= 0xDBFF; }
 static BOOL IsLowSurrogateW(WCHAR c)  { return c >= 0xDC00 && c <= 0xDFFF; }
 
 /* 词字符判定（BMP 直接判，编码点 >= 0x10000 的取其整体）：
-   CJK 与字母数字视为"词内"，其余（空白+标点）为分隔符。 */
-static BOOL IsWordChar(WCHAR c) {
+   CJK 与字母数字视为"词内"，其余（空白+标点）为分隔符。
+   采用"仅枚举分隔符"的反向思路：非分隔符一律算词内，
+   因此汉字(含扩展区/补充平面)无需逐个枚举码位即可正确归为词内。 */
+/* 分隔符：空白 / 标点，其余(汉字·字母·数字·符号)都算词内。 */
+static BOOL IsSeparator(WCHAR c) {
+    if (c == L'\0') return TRUE;
+    if (iswspace(c)) return TRUE;                       /* 空格/制表/换行 */
+    if (iswpunct(c)) return TRUE;                       /* ASCII 及按 locale 的标点 */
     unsigned cp = (unsigned)c;
-    if (c == L'\0') return FALSE;
-    if (IsCharAlphaNumericW(c)) return TRUE;
-    if (cp >= 0x3400 && cp <= 0x4DBF) return TRUE;   /* 扩展A */
-    if (cp >= 0x4E00 && cp <= 0x9FFF) return TRUE;   /* 基本区 */
-    if (cp >= 0xF900 && cp <= 0xFAFF) return TRUE;   /* 兼容区 */
+    if (cp >= 0x2000 && cp <= 0x206F) return TRUE;      /* 通用标点 */
+    if (cp >= 0x3000 && cp <= 0x303F) return TRUE;      /* CJK 符号/标点(含全角空格) */
+    if (cp >= 0xFF00 && cp <= 0xFFEF) return TRUE;      /* 全角形式(含全角标点 ，。！？) */
     return FALSE;
 }
+static BOOL IsWordChar(WCHAR c) { return !IsSeparator(c); }
 
 /* 以 s[i] 为"字符起点"（可能是一个代理对的首字）判定是否词内。 */
 static BOOL IsWordCharAt(const WCHAR* s, int len, int i) {
     if (i < 0 || i >= len) return FALSE;
-    unsigned cp;
-    if (i + 1 < len && IsHighSurrogateW(s[i]) && IsLowSurrogateW(s[i+1])) {
-        cp = 0x10000u + (((unsigned)(s[i] - 0xD800) << 10) | (unsigned)(s[i+1] - 0xDC00));
-    } else if (IsHighSurrogateW(s[i]) || IsLowSurrogateW(s[i])) {
-        return FALSE;   /* 孤立的半个代理对：按分隔符处理，避免拆散群组 */
-    } else {
-        cp = (unsigned)s[i];
-    }
-    if (cp == 0) return FALSE;
-    if (cp > 0xFFFF) {
-        /* 补充平面：CJK 扩展 B~H 视为"字内"，其余 Astral 字符按分隔符 */
-        return (cp >= 0x20000 && cp <= 0x323AF);
-    }
-    return IsWordChar((WCHAR)cp);
+    if (i + 1 < len && IsHighSurrogateW(s[i]) && IsLowSurrogateW(s[i+1]))
+        return TRUE;                                    /* 补充平面字符：整体视为词内 */
+    if (IsHighSurrogateW(s[i]) || IsLowSurrogateW(s[i]))
+        return FALSE;    /* 孤立半代理：按分隔符，避免拆散群组 */
+    return IsWordChar(s[i]);
 }
 
 /* 由 code-unit 位置 i 反推其左侧那个"字符"的起点（代理对整体归为一句）。 */
