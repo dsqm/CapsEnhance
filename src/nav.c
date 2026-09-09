@@ -159,7 +159,7 @@ static BOOL FastGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut
 
 /* ================= UIA 回退通道 ================= */
 /* 以 C 宏接口访问 UIA COM（uiautomationclient.h 在纯 C 下提供 *_宏） */
-static BOOL UiaGetTextCaret(WCHAR** text, int* lenOut, int* caretOut) {
+static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
     HRESULT hr;
     BSTR all = NULL, pre = NULL;
     IUIAutomation         *ua  = NULL;
@@ -170,12 +170,21 @@ static BOOL UiaGetTextCaret(WCHAR** text, int* lenOut, int* caretOut) {
 
     hr = CoInitialize(NULL);
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return FALSE;
+    (void)ok;
 
     hr = CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
                           &IID_IUIAutomation, (void**)&ua);
-    if (FAILED(hr) || !ua) goto done;
+    if (FAILED(hr) || !ua) return FALSE;
 
-    if (FAILED(IUIAutomation_GetFocusedElement(ua, &el)) || !el) goto done;
+    /* 锚定真实焦点 HWND（优先 ElementFromHandle），再向上找 TextPattern；
+       UIA 的 GetFocusedElement 可能与 Win32 焦点不一致，故用 handle 直取。 */
+    if (hwnd) {
+        IUIAutomation_ElementFromHandle(ua, hwnd, &el);
+        if (!el) IUIAutomation_GetFocusedElement(ua, &el);
+    } else {
+        IUIAutomation_GetFocusedElement(ua, &el);
+    }
+    if (!el) goto done;
 
     /* 某些控件(如 Scintilla)的 TextPattern 在焦点元素或某个祖先上。
        从焦点元素向上逐层找可用的 DocumentRange；el 最终指向拥有者。 */
@@ -281,7 +290,7 @@ int NavJump(int dir, BOOL shift) {
     if (focus) got = FastGetTextCaret(focus, &text, &len, &caret);  /* 仅经典 Edit/RichEdit */
     if (got) path = "Edit";
     else {
-        got = UiaGetTextCaret(&text, &len, &caret);   /* 含 Scintilla 等 → 向上找 TextPattern */
+        got = UiaGetTextCaret(focus, &text, &len, &caret);   /* 含 Scintilla 等 → 向上找 TextPattern */
         if (got) path = "UIA";
     }
     if (!got) { SendNativeWordJump(dir, shift); if (g_recording) CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
