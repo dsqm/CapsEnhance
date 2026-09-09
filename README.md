@@ -75,10 +75,10 @@
 
 1. **经典 Edit / RichEdit / EmEditorView**：`WM_GETTEXT` + `EM_GETSEL`。白名单外不放行（Chromium 系窗口对这两条消息回的是标题和垃圾值）；直接置位后回读校验，控件只实现半套协议时自动退回逐格箭头。
 2. **Scintilla 系**（Notepad3 / Notepad++ / SciTE）：`SCI_*` 窗口消息。文档以字节为单位（UTF-8 下中文 3 字节/字），整条通道在字节域取原始文本再转成 UTF-16 交给词边界算法；`SCI_GETTEXT` 的缓冲区指针属于对方进程，必须先 `VirtualAllocEx` 再读回（直传本地指针会读崩对方）。跳距 ≥ 6 时用 `SCI_SETSEL` 瞬跳（置位后回读校验，不符则退回逐格箭头）。
-3. **UIA（UI Automation）** `TextPattern`/`TextPattern2`：支持 QQ、Edge、VSCode 等 Chromium/WinUI 控件。锚定顺序：焦点元素沿祖先链 → 焦点 HWND 沿祖先链 → 焦点 HWND 子树检索（焦点有时落在没有 `DocumentRange` 的 Pane 上，必须往下找）。**读回的文本短于 2 字符时视为占位假文本弃用**。
-   - **VSCode 专属**：其无障碍节点（`role=textbox` 的 div）只有在 `editor.accessibilitySupport: "on"`（或检测到读屏器）时才写入光标附近的真实文本并同步选区——见其源码 `screenReaderContentSimple.ts` 的 `updateScreenReaderContent()`，未开启时会主动把节点内容清空，因此外部读到的是 1 字符占位。**在 VSCode 设置里开启该项后，词跳引擎（含中文混排、不跨行规则）即可完整工作**；未开启则走原生 `Ctrl+方向` 兜底。`cursorSmoothCaretAnimation`（平滑光标）只影响视觉动画，与此无关。
+3. **UIA（UI Automation）** `TextPattern`/`TextPattern2`：支持 QQ、Edge 等 Chromium/WinUI 控件。锚定顺序：焦点元素沿祖先链 → 焦点 HWND 沿祖先链 → 焦点 HWND 子树检索（焦点有时落在没有 `DocumentRange` 的 Pane 上，必须往下找）。**读回的文本短于 2 字符时视为占位假文本弃用**。
+   - **Electron 类编辑器**：其无障碍节点（`role=textbox` 的 div）只有在 开启无障碍模式（或系统检测到读屏器）时才写入光标附近的真实文本并同步选区——未开启时会主动把节点内容清空，因此外部读到的是 1 字符占位。**开启该项后，词跳引擎（含中文混排、不跨行规则）即可完整工作**；未开启则走原生 `Ctrl+方向` 兜底，或通过配置文件把该程序加入原生词跳名单。平滑光标一类只影响视觉动画，与此无关。
 4. **IAccessible2** (`IAccessibleText`)：其余无障碍文本控件（同样弃用短于 2 字符的占位读回）。
-5. 全失败则原生 `Ctrl(+Shift)+方向键` 兜底 —— **Ctrl 必须真的按住**（在方向键之前按下、之后抬起），否则目标收到的只是单格方向键。VSCode 即走这条兜底：由 VSCode 自己的词导航（`cursorWordLeft/Right`）完成按词跳转。
+5. 全失败则原生 `Ctrl(+Shift)+方向键` 兜底 —— **Ctrl 必须真的按住**（在方向键之前按下、之后抬起），否则目标收到的只是单格方向键。由目标程序自身的词导航完成按词跳转。
 
 > 跨进程消息坑：`SendMessageTimeout` 的返回值只表示"是否发送成功"，窗口过程的返回值必须通过最后一个参数 `lpdwResult` 取。传 `NULL` 的话拿到的是恒为 1 的状态值 —— 曾导致 `WM_GETTEXTLENGTH` 恒等于 1、文本永远只读到一个字符，词边界算法整个失效。
 
@@ -89,6 +89,32 @@
 两个实测坑：
 - EmEditor 的 `WM_GETTEXT` 返回计数把结尾 NUL 也算进去（比 `WM_GETTEXTLENGTH` 多 1），多出的 `'\0'` 会被当成一个分隔符字符参与跳词、算出越界目标——已剥掉。
 - EmEditor 会在直接置位后吞掉第一支方向键（逐格跳少走一格）——经典 Edit 通道能读回光标，跳完按差值**自校验补发**（只补一轮，带 Shift 的选区不补）。
+
+---
+
+## 二点五、配置文件（CapsEnhance.ini）
+
+与 exe 同目录，首次运行自动生成带注释的模板；**改动后需重启程序生效**（或用托盘"重启程序"）。
+
+格式（INI 风格，零依赖）：`;` 或 `#` 开头的行是注释，空行忽略，`[段名]` 行用于切段。
+
+```ini
+[General]
+; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）
+; 只认 0/1：1=启用，0=禁用（其它写法一律视为 0）
+RunAsAdmin = 0
+
+[NativeWordJump]
+; 命中名单的程序：Caps+N / Caps+M 不做文本探测
+; 直接发送 Ctrl+← / Ctrl+→，由程序自身的词导航完成按词跳转（Shift 位移同样支持）
+; 每行一个进程名：完全匹配、大小写不敏感、.exe 后缀可写可不写
+; Editor.exe
+; SomeApp
+```
+
+- **`RunAsAdmin`**：启用后双击启动即以管理员身份运行（自动弹 UAC）。只申请一次——已提权的实例不会重复申请；用户取消 UAC 时按普通权限继续运行，不会循环重启。
+- **`[NativeWordJump]`**：适用于编辑器文本无法通过系统接口读取的程序。
+- **托盘提示会标注真实运行权限**：按进程令牌检测（不是照抄配置值），以管理员运行时提示形如 `CapsEnhance：正在映射（管理员）`——配置与实际不一致时以此为准。
 
 ---
 

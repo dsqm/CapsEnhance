@@ -95,6 +95,15 @@ static void SetMenuPauseText(void);
 static void ResetEngine(void);   /* 前向声明（定义在下方，TrayShowMenu 先调用） */
 static void DoRestart(void);     /* 前向声明（定义在下方，TrayShowMenu 先调用） */
 void TrayAddHint(const WCHAR* s);
+/* 托盘悬停提示统一入口：按"真实运行权限"追加管理员标注
+   （查进程令牌，不看配置值，避免配置与实际不一致时误导） */
+static void TrayHint(const WCHAR* state) {
+    WCHAR buf[160];
+    _snwprintf_s(buf, 160, _TRUNCATE,
+                 IsRunElevated() ? L"%s%s（管理员）" : L"%s%s",
+                 L"CapsEnhance：", state);
+    TrayAddHint(buf);
+}
 static void TrayAdd(void) {
     memset(&g_nid, 0, sizeof(g_nid));
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
@@ -122,8 +131,8 @@ static void TrayShowMenu(void) {
         g_cMod = FALSE; g_dMod = FALSE; g_fMod = FALSE;
         g_btnCount = 0;
         ResetEngine();
-        if (!g_state.paused) TrayAddHint(L"CapsEnhance：正在映射");
-        else TrayAddHint(L"CapsEnhance：已暂停（CapsLock 恢复原功能）");
+        if (!g_state.paused) TrayHint(L"正在映射");
+        else TrayHint(L"已暂停（CapsLock 恢复原功能）");
     } else if (cmd == IDM_RESTART) {
         DoRestart();
     } else if (cmd == IDM_EXIT) {
@@ -175,7 +184,7 @@ static void DoRestart(void) {
     memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
     memset(&pi, 0, sizeof(pi));
     if (!CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-        TrayAddHint(L"CapsEnhance：重启失败");
+        TrayHint(L"重启失败");
         return;
     }
     CloseHandle(pi.hThread);
@@ -220,12 +229,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_recording) {
             CapLog("===== REC START =====");
             MessageBeep(MB_ICONASTERISK);   /* 系统"星号"音：开始记录（与结束不同） */
-            TrayAddHint(L"CapsEnhance：正在记录日志（C+\x60 结束）");
+            TrayHint(L"正在记录日志（C+\x60 结束）");
             NavProbe();
         } else {
             CapLog("===== REC END =====");
             MessageBeep(MB_ICONHAND);       /* 系统"手形"音：结束记录（低而不同） */
-            TrayAddHint(L"CapsEnhance：正在映射");
+            TrayHint(L"正在映射");
             /* 诊断期间 UIA/MSAA 等 COM 基础设施已加载，结束记录后压回工作集 */
             TrimWorkingSet();
         }
@@ -326,12 +335,23 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     ImmAssociateContext(g_mainWnd, NULL);
 
     if (!HookInstall()) {
-        TrayAddHint(L"CapsEnhance：钩子安装失败");
+        TrayHint(L"钩子安装失败");
         return 1;
     }
 
     /* 启动不写日志文件；采集系统/环境基线供 C+` 诊断时输出。程序启动本身不发声。 */
     NavBaseInfo();
+    ConfigLoad();   /* 读 CapsEnhance.ini（缺失则写注释模板） */
+
+    /* 配置要求以管理员运行且当前不是管理员：申请提权重启一次。
+       只试一次——提权起来的实例 IsRunElevated() 为真，不会循环；
+       用户取消 UAC 则按普通权限继续运行。 */
+    if (ConfigGetRunAsAdmin() && !IsRunElevated()) {
+        WCHAR exe[MAX_PATH];
+        GetModuleFileNameW(NULL, exe, MAX_PATH);
+        HINSTANCE r = ShellExecuteW(NULL, L"runas", exe, NULL, NULL, SW_SHOWNORMAL);
+        if ((int)(INT_PTR)r > 32) return 0;    /* 提权实例已拉起，本实例退出 */
+    }
 
     g_menu = CreatePopupMenu();
     AppendMenuW(g_menu, MF_STRING, IDM_PAUSE, L"暂停映射");
@@ -340,7 +360,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     AppendMenuW(g_menu, MF_STRING, IDM_EXIT, L"退出");
 
     TrayAdd();
-    TrayAddHint(L"CapsEnhance：正在映射");
+    TrayHint(L"正在映射");
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {

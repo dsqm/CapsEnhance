@@ -702,6 +702,13 @@ int NavJump(int dir, BOOL shift) {
     SciPos sp;
     memset(&sp, 0, sizeof(sp));
     HWND focus = GetFocusControl();
+    /* 配置名单内的程序（如 VSCode）：跳过全部文本探测，直接原生 Ctrl+方向 */
+    if (focus && ConfigIsNativeWordJump(focus)) {
+        SendNativeWordJump(dir, shift);
+        if (g_recording)
+            CapLog("  -> 进程命中原生词跳名单，直接 Ctrl+arrow");
+        return -1;
+    }
     if (focus) got = FastGetTextCaret(focus, &text, &len, &caret);  /* 仅经典 Edit/RichEdit */
     if (got) path = "Edit";
     if (!got) {                                                     /* Scintilla 系 */
@@ -786,15 +793,7 @@ static void RepAppend(WCHAR* rep, int cap, int* o, const WCHAR* fmt, ...) {
 static WCHAR g_baseInfo[1800] = L"";
 static volatile LONG g_baseReady = 0;
 
-static BOOL IsElevated(void) {
-    HANDLE h = NULL;
-    TOKEN_ELEVATION e; DWORD sz = 0; BOOL ok = FALSE;
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &h)) {
-        if (GetTokenInformation(h, TokenElevation, &e, sizeof(e), &sz)) ok = !!e.TokenIsElevated;
-        CloseHandle(h);
-    }
-    return ok;
-}
+/* 提权判定统一用 config.c 的 IsRunElevated()（查进程令牌） */
 
 void NavBaseInfo(void) {
     WCHAR b[1700] = L"";
@@ -816,7 +815,7 @@ void NavBaseInfo(void) {
                           (unsigned)(ro.build & 0xFFFF));
         }
     }
-    RepAppend(b, 1700, &o, L"管理员特权 = %s\n", IsElevated() ? L"是" : L"否");
+    RepAppend(b, 1700, &o, L"管理员特权 = %s\n", IsRunElevated() ? L"是" : L"否");
 
     /* 键盘布局主语言 / 用户 locale */
     RepAppend(b, 1700, &o, L"键盘布局(主语言) = 0x%04X  用户locale = 0x%04X\n",

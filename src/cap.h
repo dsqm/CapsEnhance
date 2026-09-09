@@ -81,6 +81,14 @@ void SendClearStuckModifiers(void);          /* 补齐修饰键"抬起"，清卡
 /* ---------- 主窗口 ---------- */
 extern HWND g_mainWnd;
 
+/* ---------- 配置模块（CapsEnhance.ini，与 exe 同目录） ---------- */
+void ConfigLoad(void);                       /* 启动时读配置；缺失则写注释模板 */
+void ConfigLoadFrom(const WCHAR* path);      /* 从指定路径加载（单测用） */
+BOOL ConfigMatchName(const WCHAR* exeName);  /* 进程名是否命中原生词跳名单 */
+BOOL ConfigGetRunAsAdmin(void);             /* [General] RunAsAdmin：启动时提权 */
+BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中名单 */
+BOOL IsRunElevated(void);                   /* 真实运行权限（查进程令牌） */
+
 /* ---------- 诊断/日志 ---------- */
 void CapLog(const char* fmt, ...);   /* 追加写 CapsEnhance.log（可多线程调用） */
 void NavProbe(void);                 /* 探测当前焦点控件并写入日志 + 弹窗 */
