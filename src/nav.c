@@ -221,18 +221,20 @@ static BOOL IsLowSurrogateW(WCHAR c)  { return c >= 0xDC00 && c <= 0xDFFF; }
 
 /* 字符类别：决定跳词边界。连续同类字符串视为"一个词"，
    跳词就停在这些词(与词/分隔符)的边界处。
-   采用"反向"判定：先用枚举把 字母/数字/符号 归类，
+   英文与数字同组（21M 是一个词）；
+   采用"反向"判定：先把 字母数字/符号 归类，
    其余兜底一律算 CH_OTHER（汉字、其他语言字符、生僻字、emoji 等）。 */
-typedef enum { CH_OTHER, CH_DIGIT, CH_ALPHA, CH_SEP } CharClass;
+typedef enum { CH_OTHER, CH_ALPHA, CH_SEP } CharClass;
 
 static CharClass ClassOf(WCHAR c) {
     unsigned cp = (unsigned)c;
-    /* 数字（含全角 ０-９） */
-    if (cp >= 0x30 && cp <= 0x39) return CH_DIGIT;
-    if (cp >= 0xFF10 && cp <= 0xFF19) return CH_DIGIT;
-    /* 字母（含全角 Ａ-Ｚ ａ-ｚ） */
-    if ((cp >= 0x41 && cp <= 0x5A) || (cp >= 0x61 && cp <= 0x7A)) return CH_ALPHA;
-    if ((cp >= 0xFF21 && cp <= 0xFF3A) || (cp >= 0xFF41 && cp <= 0xFF5A)) return CH_ALPHA;
+    /* 字母+数字（含全角 Ａ-Ｚ ａ-ｚ ０-９）同属一组 */
+    if ((cp >= 0x30 && cp <= 0x39) || (cp >= 0x41 && cp <= 0x5A) ||
+        (cp >= 0x61 && cp <= 0x7A))
+        return CH_ALPHA;
+    if ((cp >= 0xFF10 && cp <= 0xFF19) || (cp >= 0xFF21 && cp <= 0xFF3A) ||
+        (cp >= 0xFF41 && cp <= 0xFF5A))
+        return CH_ALPHA;
     /* 分隔符：空白 + 标点 */
     if (c == L'\0') return CH_SEP;
     if (iswspace(c)) return CH_SEP;
