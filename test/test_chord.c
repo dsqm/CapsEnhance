@@ -46,6 +46,13 @@ static void Key(int vk, BOOL down) {
     LowLevelKeyboardProc(HC_ACTION,
         down ? WM_KEYDOWN : WM_KEYUP, (LPARAM)&ks);
 }
+/* 系统键路径：真实 Alt 的按下/抬起是 WM_SYSKEYDOWN / WM_SYSKEYUP */
+static void KeyAlt(int vk, BOOL down) {
+    KBDLLHOOKSTRUCT ks; memset(&ks, 0, sizeof(ks));
+    ks.vkCode = (DWORD)vk; ks.flags = 0;
+    LowLevelKeyboardProc(HC_ACTION,
+        down ? WM_SYSKEYDOWN : WM_SYSKEYUP, (LPARAM)&ks);
+}
 /* 排干所有待处理消息（含残留 TIMER/TRIG） */
 static void Sink(void) {
     MSG m;
@@ -206,6 +213,18 @@ int main(void) {
     CHECK(leftAfterKUp > leftAtK, "I: 松开 K 后退回仍按着的 J（继续左键）");
     CHECK(CountVk(VK_LEFT) == leftFinal && CountVk(VK_DOWN) == downFinal,
           "I: 全部抬起后重复停止（不再无限输出左键）");
+
+    /* ---- 场景J：左 Alt 等同 D（增益），走系统键消息路径 ---- */
+    Reset();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    KeyAlt(VK_LMENU, TRUE);  Pump(2);   /* WM_SYSKEYDOWN：门闩 D */
+    Key('J', TRUE);  Pump(2);
+    Key('J', FALSE); Pump(2);           /* 短点：增益补齐到 3 */
+    KeyAlt(VK_LMENU, FALSE); Pump(2);
+    Key(CLI_CAPS, FALSE);
+    Pump(50);
+    CHECK(CountVk(VK_LEFT) == 3, "J: 左Alt 等同 D（Caps+Alt+J = 3 次左键）");
+    CHECK(CountVk(VK_LMENU) == 0, "J: Alt 本身不外泄（被屏蔽）");
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
     return fails;

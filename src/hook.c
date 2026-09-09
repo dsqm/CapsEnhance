@@ -139,8 +139,11 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         /* ---- 未进入映射模式：放行 ---- */
         if (!g_cMod) return CallNextHookEx(g_hook, nCode, wParam, lParam);
 
-        /* ---- C 按住期间：D/F 修饰 ---- */
-        if (vk == 'D') { g_dMod = down; g_pendD = down; return 1; }
+        /* ---- C 按住期间：D/F 修饰 ----
+           左 Alt 等同 D（增益）：Caps+Alt+… 与 Caps+D+… 完全一样。
+           Alt 单独按下时系统发 WM_SYSKEYDOWN（上面的 down 判断已覆盖），
+           且这里全程屏蔽，不会出现"Alt 被系统看到后激活菜单栏"的情况。 */
+        if (vk == 'D' || vk == VK_LMENU) { g_dMod = down; g_pendD = down; return 1; }
         if (vk == 'F') { g_fMod = down; g_pendF = down; return 1; }
 
         /* ---- C 按住期间：` 键触发焦点探测（仅按下沿） ---- */
