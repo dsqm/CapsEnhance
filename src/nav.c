@@ -139,6 +139,13 @@ static BOOL EditVerifySel(HWND hwnd, int caret, int target, BOOL shift) {
     return (end == target) && (shift ? (start == caret) : (start == target));
 }
 
+/* 读回光标位置（EM_GETSEL 的 LOWORD）；读不到返回 -1 */
+static LONGLONG EditGetCaret(HWND hwnd) {
+    LONGLONG sel = 0;
+    if (!SendMsg(hwnd, EM_GETSEL, 0, 0, &sel)) return -1;
+    return (LONGLONG)LOWORD((DWORD)sel);
+}
+
 /* 直接置光标：SCI_SETSEL(caret, anchor)。置完立即回读校验，
    位置不符就返回 FALSE，让上层退回逐格箭头。 */
 static BOOL SciSetSel(HWND hwnd, LONGLONG caretB, LONGLONG anchorB) {
@@ -368,6 +375,11 @@ static BOOL FastGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut
         free(buf);
         return FALSE;
     }
+    /* EmEditor 等控件的 WM_GETTEXT 返回计数把结尾 NUL 也算进去（got=长度+1）。
+       多出的 '\0' 会被当成一个分隔符参与跳词，算出越界目标（tgt=文档长+1），
+       必须剥掉。 */
+    while (got > 0 && buf[got - 1] == L'\0') got--;
+    if (got <= 0) { free(buf); return FALSE; }
 
     /* 光标位置：EM_GETSEL */
     LONGLONG sel = 0;
@@ -684,8 +696,24 @@ int NavJump(int dir, BOOL shift) {
                 CapLog("  -> 直接 SCI_SETSEL caret=%lld anchor=%lld", tb, anchorB);
         }
     }
-    free(text);
     if (!direct) SendArrows(dir, steps, shift);
+    /* 自校验补正：经典 Edit 通道能读回光标。实测 EmEditor 会在直接置位后
+       吞掉第一支箭头（虚拟机里也可能丢键），导致逐格跳少走一格——
+       读回实际位置，按差值补发（只补一轮、差值不超过原步数，防打转）。
+       带 Shift 的选区移动不做补正（anchor 校验复杂，收益低）。 */
+    if (!direct && !shift && path[0] == 'E' && focus) {
+        LONGLONG now = EditGetCaret(focus);
+        if (now >= 0 && now != (LONGLONG)tgt) {
+            LONGLONG diff = (LONGLONG)tgt - now;
+            if (diff > 0 && diff <= steps)
+                SendArrows(DIR_RIGHT, (int)diff, FALSE);
+            else if (diff < 0 && -diff <= steps)
+                SendArrows(DIR_LEFT, (int)-diff, FALSE);
+            if (g_recording)
+                CapLog("  -> 箭头补正 %lld (caret=%lld -> %d)", diff, now, tgt);
+        }
+    }
+    free(text);
     return steps;
 }
 
