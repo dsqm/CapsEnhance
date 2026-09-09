@@ -18,6 +18,9 @@ static HMENU g_menu;
 static NOTIFYICONDATAW g_nid;
 static BOOL  g_quit = FALSE;
 
+/* 诊断记录开关：C+` 切换（主线程读写，hook 线程投递 WM_PROBE） */
+volatile BOOL g_recording = FALSE;
+
 static CRITICAL_SECTION g_logcs;
 static void init_logcs(void) { static int once=0; if(!once){once=1; InitializeCriticalSection(&g_logcs);} }
 
@@ -141,7 +144,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         ResetEngine();
         return 0;
     case WM_PROBE:
-        NavProbe();
+        /* C+`：切换诊断记录。开始=探测当前焦点并记录；再按=结束记录。
+           重启程序即自然结束上一段记录。 */
+        g_recording = !g_recording;
+        if (g_recording) { CapLog("===== REC START ====="); NavProbe(); }
+        else              CapLog("===== REC END =====");
         return 0;
     case WM_TRIG_DOWN: {             /* 触发电按下：进入稳定期待开火 */
         int act = (int)wp;
@@ -173,11 +180,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TIMER: {
-        if (wp == 3) {            /* 启动自检：延时一次后探测当前焦点 */
-            KillTimer(g_mainWnd, 3);
-            NavProbe();
-            return 0;
-        }
         if (wp != 2) break;
         if (!g_cMod) { ResetEngine(); return 0; }
         ULONGLONG now = GetTickCount64();
@@ -233,8 +235,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
         return 1;
     }
 
-    CapLog("==== CapsEnhance 启动 (build probe-self-test) ====");
-    SetTimer(g_mainWnd, 3, 1500, NULL);   /* 1.5s 后自动探测当前焦点 */
+    CapLog("===== CapsEnhance 启动 =====");
 
     g_menu = CreatePopupMenu();
     AppendMenuW(g_menu, MF_STRING, IDM_PAUSE, L"暂停映射");

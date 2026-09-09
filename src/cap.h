@@ -47,6 +47,9 @@ typedef struct {
 
 extern GlobalState g_state;
 
+/* 诊断记录开关：C+` 触发开始/结束（主线程读写） */
+extern volatile BOOL g_recording;
+
 /* 修饰键实时状态与"开火快照"（volatile，跨线程） */
 extern volatile BOOL g_cMod;    /* C 按住 */
 extern volatile BOOL g_dMod;    /* 增益 D 按住（实时） */

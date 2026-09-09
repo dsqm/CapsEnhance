@@ -305,30 +305,28 @@ done:
 int NavJump(int dir, BOOL shift) {
     WCHAR* text = NULL;
     int len = 0, caret = 0;
-    CapLog("NavJump dir=%d shift=%d", dir, shift);
+    if (g_recording) CapLog("NavJump dir=%d shift=%d", dir, shift);
 
     BOOL got = FALSE;
     const char* path = "native";
     HWND focus = GetFocusControl();
     if (focus && IsScintilla(focus)) {
         got = ScintGetTextCaret(focus, &text, &len, &caret);
-        path = got ? "Scintilla" : "scint->UIA";
+        path = "Scintilla";
     } else {
         got = FastGetTextCaret(focus, &text, &len, &caret);
-        path = got ? "Edit" : "edit->UIA";
+        path = "Edit";
     }
-    CapLog("  read-path=%s len=%d caret=%d", path, len, caret);
 
     if (!got) {
         got = UiaGetTextCaret(&text, &len, &caret);
-        CapLog("  uia-read=%d len=%d caret=%d", got, len, caret);
         if (got) path = "UIA";
     }
-    if (!got) { SendNativeWordJump(dir, shift); CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
+    if (!got) { SendNativeWordJump(dir, shift); if (g_recording) CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
 
     int steps = ComputeSteps(text, len, caret, dir);
     free(text);
-    CapLog("  path=%s -> steps=%d", path, steps);
+    if (g_recording) CapLog("  path=%s len=%d caret=%d -> steps=%d", path, len, caret, steps);
 
     if (steps > 0) SendArrows(dir, steps, shift);
     else SendNativeWordJump(dir, shift);

@@ -10,7 +10,8 @@
 
 /* nav.c 内部已改为非 static 供测试调用 */
 int ComputeSteps(const WCHAR* s, int len, int caret, int dir);
-/* 单测里 CapLog 无真实日志目标，做成空桩 */
+/* 单测未链接 main.c，补两个符号 */
+volatile BOOL g_recording = FALSE;
 void CapLog(const char* fmt, ...) { (void)fmt; }
 
 static int fails = 0;
