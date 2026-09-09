@@ -119,8 +119,9 @@ static BOOL IsLowSurrogateW(WCHAR c)  { return c >= 0xDC00 && c <= 0xDFFF; }
 
 /* 字符类别：决定跳词边界。连续同类字符串视为"一个词"，
    跳词就停在这些词(与词/分隔符)的边界处。
-   汉字、数字(含全角)、字母(含全角)各成一类；其余(空白+标点)为分隔符。 */
-typedef enum { CH_CJK, CH_DIGIT, CH_ALPHA, CH_SEP } CharClass;
+   采用"反向"判定：先用枚举把 字母/数字/符号 归类，
+   其余兜底一律算 CH_OTHER（汉字、其他语言字符、生僻字、emoji 等）。 */
+typedef enum { CH_OTHER, CH_DIGIT, CH_ALPHA, CH_SEP } CharClass;
 
 static CharClass ClassOf(WCHAR c) {
     unsigned cp = (unsigned)c;
@@ -137,14 +138,15 @@ static CharClass ClassOf(WCHAR c) {
     if (cp >= 0x2000 && cp <= 0x206F) return CH_SEP;  /* 通用标点 */
     if (cp >= 0x3000 && cp <= 0x303F) return CH_SEP;  /* CJK 标点(含全角空格) */
     if (cp >= 0xFF00 && cp <= 0xFFEF) return CH_SEP;  /* 其余全角符号标点 */
-    return CH_CJK;                                     /* 汉字等 */
+    /* 兜底：纯反向判定——非英文/数字/符号，一律归"其他"(含汉字与其他语言字符) */
+    return CH_OTHER;
 }
 
 /* 以 s[i] 为"字符起点"（可能是一个代理对的首字）分类。 */
 static CharClass ClassOfAt(const WCHAR* s, int len, int i) {
     if (i < 0 || i >= len) return CH_SEP;
     if (i + 1 < len && IsHighSurrogateW(s[i]) && IsLowSurrogateW(s[i+1]))
-        return CH_CJK;                                 /* 补充平面字符与汉字同类 */
+        return CH_OTHER;                               /* 补充平面字符：生僻字/emoji 等 → 其他 */
     if (IsHighSurrogateW(s[i]) || IsLowSurrogateW(s[i]))
         return CH_SEP;                                 /* 孤立半代理按分隔 */
     return ClassOf(s[i]);
