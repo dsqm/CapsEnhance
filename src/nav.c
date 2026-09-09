@@ -132,33 +132,35 @@ static BOOL IsScintilla(HWND hwnd) {
     return GetClassNameW(hwnd, cls, 96) && _wcsicmp(cls, L"Scintilla") == 0;
 }
 
-/* Scintilla 内部消息编号（WM_USER + code），避免引入其 SDK 头 */
-#define SCI_GETTEXT      2181
-#define SCI_GETTEXTLENGTH 2182
-#define SCI_GETCURRENTPOS 2008
-#define SCI_GETCODEPAGE  2137
+/* Scintilla 消息编号（WM_USER + code），来自官方 Scintilla.h */
+#define SCI_GETLENGTH      2006   /* 文档字节长度（不含结尾\0） */
+#define SCI_GETCURRENTPOS  2008   /* 当前光标（字节偏移） */
+#define SCI_GETTEXT        2182   /* 取文本：SCI_GETTEXT(len+1, buf) */
 
-/* 通过 Scintilla 自身的 SCI_* 读取 UTF-8 文本与光标位置 */
+/* 通过 Scintilla 自身的 SCI_* 读取文本与光标位置（UTF-8/ACP 自适应） */
 static BOOL ScintGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
-    int cp = (int)SendMessageTimeoutW(hwnd, WM_USER + SCI_GETCODEPAGE, 0, 0,
-                                      SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-    UINT acp = (cp == 65001) ? CP_UTF8 : CP_ACP;
-
-    LONG blen = (LONG)SendMessageTimeoutW(hwnd, WM_USER + SCI_GETTEXTLENGTH, 0, 0,
+    LONG blen = (LONG)SendMessageTimeoutW(hwnd, WM_USER + SCI_GETLENGTH, 0, 0,
                                           SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
     if (blen <= 0 || blen > 1 << 22) return FALSE;
     char* u8 = (char*)malloc((size_t)blen + 1);
     if (!u8) return FALSE;
-    LRESULT got = SendMessageTimeoutW(hwnd, WM_USER + SCI_GETTEXT, (WPARAM)(blen + 1), (LPARAM)u8,
-                                      SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-    if (got <= 0) { free(u8); return FALSE; }
+    LONG got = (LONG)SendMessageTimeoutW(hwnd, WM_USER + SCI_GETTEXT, (WPARAM)(blen + 1), (LPARAM)u8,
+                                         SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
+    if (got < 0) { free(u8); return FALSE; }
+    if (got > blen) got = blen;
+    u8[got] = 0;
 
     LONG bcaret = (LONG)SendMessageTimeoutW(hwnd, WM_USER + SCI_GETCURRENTPOS, 0, 0,
                                             SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-    if (bcaret < 0 || bcaret > blen) bcaret = (LONG)got;
+    if (bcaret < 0 || bcaret > blen) bcaret = got;
 
-    /* 全文转 WCHAR；同时以 caret 截断字节，转出 WCHAR 数作为光标 */
-    int wlen = MultiByteToWideChar(acp, 0, u8, blen, NULL, 0);
+    /* 先按 UTF-8 严格解码；失败（如 GBK）再退回系统 ACP */
+    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, u8, blen, NULL, 0);
+    UINT acp = CP_UTF8;
+    if (wlen <= 0) {
+        acp = CP_ACP;
+        wlen = MultiByteToWideChar(acp, 0, u8, blen, NULL, 0);
+    }
     if (wlen <= 0) { free(u8); return FALSE; }
     WCHAR* w = (WCHAR*)malloc(((size_t)wlen + 1) * sizeof(WCHAR));
     if (!w) { free(u8); return FALSE; }
