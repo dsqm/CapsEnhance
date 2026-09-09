@@ -162,6 +162,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             CapLog("===== REC END =====");
             MessageBeep(MB_ICONHAND);       /* 系统"手形"音：结束记录（低而不同） */
             TrayAddHint(L"CapsEnhance：正在映射");
+            /* 诊断期间 UIA/MSAA 等 COM 基础设施已加载（工作集涨到 20MB 上下），
+               结束记录后把工作集压回去；页面会换出到待机内存，下次用到自动换回，
+               不影响功能。这属于"不回落"的外观修正——DLL 本身无法卸载。 */
+            SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
         }
         return 0;
     case WM_TRIG_DOWN: {             /* 触发键按下：进入稳定期待开火 */

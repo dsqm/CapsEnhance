@@ -16,7 +16,12 @@ cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
    test\uiprobe.c /link /OUT:bin/uiprobe.exe user32.lib ole32.lib oleaut32.lib oleacc.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 
-echo [OK] bin/keytest.exe + bin/uiprobe.exe built.
+rem memtest: include nav.c/send.c directly, link only its own obj
+cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Isrc /Fobin\ ^
+   test\memtest.c /link /OUT:bin/memtest.exe user32.lib gdi32.lib advapi32.lib ole32.lib oleaut32.lib oleacc.lib psapi.lib /SUBSYSTEM:CONSOLE
+if errorlevel 1 goto fail
+
+echo [OK] bin/keytest.exe + bin/uiprobe.exe + bin/memtest.exe built.
 exit /b 0
 :fail
 echo [ERROR] build failed
