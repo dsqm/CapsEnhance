@@ -64,6 +64,30 @@ static ULONGLONG     g_pendingTick = 0;
 static int           g_activeAct  = ACT_NONE;   /* 已开火（正在重复） */
 static ULONGLONG     g_activeNext = 0;
 
+/* 当前仍按着的触发键（按按下顺序）。多个键同时按住时"最后按下的"生效，
+   松开它之后退回上一个仍按着的键 —— 与真实键盘的多键行为一致。
+   也保证任何一个键的抬起都能被正确处理（此前引擎只认一个动作，
+   第二个键的 DOWN/UP 全被忽略，重复停不下来）。 */
+#define ACT_STACK_MAX 8
+static int g_actStack[ACT_STACK_MAX];
+static int g_actStackN = 0;
+
+static void StackClear(void) { g_actStackN = 0; }
+static void StackPush(int act) {
+    for (int i = 0; i < g_actStackN; i++)        /* 去重（重复 keydown） */
+        if (g_actStack[i] == act) return;
+    if (g_actStackN < ACT_STACK_MAX) g_actStack[g_actStackN++] = act;
+}
+static void StackRemove(int act) {
+    int w = 0;
+    for (int i = 0; i < g_actStackN; i++)
+        if (g_actStack[i] != act) g_actStack[w++] = g_actStack[i];
+    g_actStackN = w;
+}
+static int StackTop(void) {
+    return g_actStackN ? g_actStack[g_actStackN - 1] : ACT_NONE;
+}
+
 static void StopEngine(void) {
     if (g_timer) { KillTimer(g_mainWnd, g_timer); g_timer = 0; }
 }
@@ -161,6 +185,7 @@ static void ResetEngine(void) {
     g_activeAct  = ACT_NONE;
     g_actD = FALSE; g_actF = FALSE;
     g_pendD = FALSE; g_pendF = FALSE;
+    StackClear();
 }
 
 /* 重启程序：清键盘状态 -> 拉起新实例（新实例带 --wait-exit <本进程PID>，
@@ -241,31 +266,58 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_TRIG_DOWN: {             /* 触发键按下：进入稳定期待开火 */
         int act = (int)wp;
-        if (g_activeAct != ACT_NONE || g_pendingAct != ACT_NONE)
-            break;                    /* 已占用，忽略 */
-        g_pendingAct = act;
-        g_pendingTick = GetTickCount64();
+        StackPush(act);
+        if (g_activeAct != ACT_NONE && g_activeAct != act) {
+            /* 已在重复时又按下另一个键：立刻切到新键（最后按下优先），
+               重新走重复节奏。此前这里直接忽略，导致第二个键完全失灵。 */
+            g_actD = g_pendD; g_actF = g_pendF;
+            g_activeAct = act;
+            g_btnCount = 1;
+            DoFireOnce(act);
+            g_activeNext = GetTickCount64() + REPEAT_FIRST_DELAY;
+        } else if (g_pendingAct != act) {
+            /* 稳定期内后按下的键优先 */
+            g_pendingAct = act;
+            g_pendingTick = GetTickCount64();
+        }
         EnsEngine();
         return 0;
     }
     case WM_TRIG_UP: {               /* 触发键抬起 */
         int act = (int)wp;
+        StackRemove(act);
         if (g_pendingAct == act) {
             /* 短点：稳定期内即抬起，立即开火一次并补齐（修饰用门闩快照） */
-            g_pendingAct = ACT_NONE; g_activeAct = ACT_NONE;
+            g_pendingAct = ACT_NONE;
             g_actD = g_pendD; g_actF = g_pendF;
             g_btnCount = 1;
             DoFireOnce(act);
             ReleaseFill(act);
             g_actD = FALSE; g_actF = FALSE;
-            StopEngine();
+            /* 还有别的键按着就继续（退回上一个），否则停 */
+            int top = StackTop();
+            if (top != ACT_NONE) {
+                g_pendingAct = top;
+                g_pendingTick = GetTickCount64();
+                EnsEngine();
+            } else StopEngine();
         } else if (g_activeAct == act) {
             /* 长按之后抬起：停止重复，若有增益短板则补齐 */
             g_activeAct = ACT_NONE;
             ReleaseFill(act);
             g_actD = FALSE; g_actF = FALSE;
-            StopEngine();
+            int top = StackTop();
+            if (top != ACT_NONE) {
+                /* 别的键还按着：切回它并继续重复 */
+                g_actD = g_pendD; g_actF = g_pendF;
+                g_activeAct = top;
+                g_btnCount = 1;
+                DoFireOnce(top);
+                g_activeNext = GetTickCount64() + REPEAT_FIRST_DELAY;
+                EnsEngine();
+            } else StopEngine();
         }
+        /* 其余情况：不是当前动作的抬起，已从栈中移除，不影响当前重复 */
         return 0;
     }
     case WM_TIMER: {
@@ -314,6 +366,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     (void)hInst; (void)hPrev; (void)lpCmd; (void)nShow;
     g_state.paused = FALSE;
 
+    /* --reset-keys：无条件把所有修饰键补一次"抬起"然后退出。
+       用于程序已被杀死（状态表随进程消失）留下的卡键，等价于 AHK 社区
+       常用的"把所有修饰键 Send Up 一遍"。可自建快捷方式随时调用。 */
+    if (wcsstr(GetCommandLineW(), L"--reset-keys")) {
+        SendForceResetKeys();
+        return 0;
+    }
+
     WaitOldInstanceExit();   /* 重启场景：等旧实例完全退出再初始化 */
 
     WNDCLASSW wc = {0};
@@ -338,6 +398,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
         TrayHint(L"钩子安装失败");
         return 1;
     }
+    PhysSeedFromLogical();   /* 启动前就按着的键按物理按住处理（防误清） */
 
     /* 启动不写日志文件；采集系统/环境基线供 C+` 诊断时输出。程序启动本身不发声。 */
     NavBaseInfo();

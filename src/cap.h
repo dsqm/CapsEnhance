@@ -64,6 +64,8 @@ extern volatile int  g_btnCount;/* 本次动作已发送次数 */
 extern HHOOK g_hook;
 BOOL HookInstall(void);
 void HookUninstall(void);
+BOOL PhysKeyDown(int vk);   /* 真实（非注入）按键是否物理按住 —— 判断卡键用 */
+void PhysSeedFromLogical(void); /* 装钩子后：把当前已按下的键视为物理按住，防误清 */
 
 /* ---------- 发送/补齐 ---------- */
 void SendActOnce(int act);       /* 发一次动作（用开火快照修饰） */
@@ -76,7 +78,8 @@ void ReleaseFill(int act);       /* 松手补齐：增益模式点按 -> 补到3
 void SendKeyOnce(int vk, BOOL shift);        /* 单击一个键，shift 全程按住 */
 void SendArrows(int dir, int n, BOOL shift); /* n 个左/右箭头，shift 全程按住 */
 void SendNativeWordJump(int dir, BOOL shift);/* 原生 Ctrl(+Shift)+方向：词跳兜底 */
-void SendClearStuckModifiers(void);          /* 补齐修饰键"抬起"，清卡键（重启/退出用） */
+void SendClearStuckModifiers(void);          /* 清卡键：逻辑按下且物理未按的补抬起（重启/退出用） */
+void SendForceResetKeys(void);               /* 无条件对所有修饰键补抬起（--reset-keys 强制重置） */
 
 /* ---------- 主窗口 ---------- */
 extern HWND g_mainWnd;

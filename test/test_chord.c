@@ -185,6 +185,28 @@ int main(void) {
     CHECK(CountVk(VK_LEFT) == 1 && CountVk(VK_DOWN) == 1 && CountVk(VK_LSHIFT) >= 2,
           "H: C+F 按住点 J/K 均带 Shift");
 
+    /* ---- 场景I：J、K 同时按住（曾导致"一直输出左键"）----
+       旧实现钩子只记一个按住的键：J 按住时再按 K 会把 J 顶掉，
+       J 的抬起事件再也发不出去，引擎收不到 UP 就永远重复 LEFT。 */
+    Reset();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Key('J', TRUE);  Pump(200);      /* 长按 J：重复左键 */
+    int leftAtK = CountVk(VK_LEFT);
+    Key('K', TRUE);  Pump(200);      /* J 未抬起时按 K：应切到下键 */
+    int downAtK = CountVk(VK_DOWN);
+    Key('K', FALSE); Pump(120);      /* 松开 K：退回仍按着的 J，继续左键 */
+    int leftAfterKUp = CountVk(VK_LEFT);
+    Key('J', FALSE); Pump(2);        /* 松开 J：必须停止 */
+    int leftFinal = CountVk(VK_LEFT);
+    int downFinal = CountVk(VK_DOWN);
+    Pump(400);                       /* 再等 400ms：不应再有任何注入 */
+    Key(CLI_CAPS, FALSE);
+    Pump(50);
+    CHECK(downAtK >= 1, "I: J 按住时再按 K -> 切到下键");
+    CHECK(leftAfterKUp > leftAtK, "I: 松开 K 后退回仍按着的 J（继续左键）");
+    CHECK(CountVk(VK_LEFT) == leftFinal && CountVk(VK_DOWN) == downFinal,
+          "I: 全部抬起后重复停止（不再无限输出左键）");
+
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
     return fails;
 }

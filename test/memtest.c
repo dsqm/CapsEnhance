@@ -19,6 +19,8 @@
 volatile BOOL g_recording = FALSE;
 HHOOK g_hook = NULL;
 void CapLog(const char* fmt, ...) { (void)fmt; }
+/* 未链接 hook.c：物理按键状态桩 */
+BOOL PhysKeyDown(int vk) { (void)vk; return FALSE; }
 
 #include "nav.c"
 #include "send.c"

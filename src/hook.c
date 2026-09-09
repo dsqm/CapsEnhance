@@ -18,8 +18,33 @@ volatile BOOL g_actD = FALSE;
 volatile BOOL g_actF = FALSE;
 volatile int  g_btnCount = 0;
 
-/* 当前被按住的触发键 act（钩子线程去抖用） */
-static volatile int g_downAct = ACT_NONE;
+/* 物理按键状态表：只记录真实（非注入）按键的按下/抬起。
+   GetAsyncKeyState 反映的是 OS 的"逻辑"状态——被注入的键同样会置位，
+   因此它区分不了"用户真的按着"和"键卡住了"。必须由钩子自己维护物理状态，
+   这正是 AHK 安装键盘钩子后能分辨 GetKeyState(,"P") 物理状态的原因。 */
+static volatile BYTE g_phys[256];
+BOOL PhysKeyDown(int vk) {
+    if (vk < 0 || vk > 255) return FALSE;
+    return g_phys[vk] != 0;
+}
+
+/* 装好钩子后调用：把"此刻逻辑按下"的键视为物理按住。
+   否则用户在程序启动之前就按住的键（钩子没见过它的按下）会在清理时
+   被误判成卡键而清掉。 */
+void PhysSeedFromLogical(void) {
+    static const int vks[] = {
+        VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL,
+        VK_LMENU,  VK_RMENU,  VK_LWIN,     VK_RWIN, VK_CAPITAL
+    };
+    for (int i = 0; i < (int)(sizeof(vks) / sizeof(vks[0])); i++)
+        if (GetAsyncKeyState(vks[i]) & 0x8000) g_phys[vks[i]] = 1;
+}
+
+/* 同时按住的触发键集合（每个动作一个 bit）。
+   原来只用一个 g_downAct：J 按住时再按 K 会把 J 顶掉，于是 J 的抬起
+   再也发不出去（g_downAct 已不是 J），引擎收不到 UP 就永远重复 J —— 
+   "按住 Caps 同时按 J 和 K 会一直输出左键"就是这么来的。 */
+static volatile DWORD g_downMask = 0;
 
 /* 映射表：虚拟键码 -> 动作 */
 typedef struct { int vk; int act; } KeyMap;
@@ -94,13 +119,18 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         BOOL down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
         int  vk   = (int)p->vkCode;
 
+        /* 物理状态：注入的键在上面已放行，这里记录的都是真实按键 */
+        if (vk >= 0 && vk < 256) g_phys[vk] = (BYTE)(down ? 1 : 0);
+
         /* ---- C 键（CapsLock）自身 ---- */
         if (vk == CLI_CAPS) {
             if (down && !g_cMod) {
                 g_cMod = TRUE;
+                g_downMask = 0;
                 PostMessageW(g_mainWnd, WM_CAPS_DOWN, 0, 0);   /* 通知主线程复位 */
             } else if (!down && g_cMod) {
                 g_cMod = FALSE;
+                g_downMask = 0;
                 PostMessageW(g_mainWnd, WM_CAPS_UP, 0, 0);
             }
             return 1;   /* 全程屏蔽，无效果 */
@@ -124,14 +154,15 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         /* ---- 触发键 ---- */
         int act = ActOfVk(vk);
         if (act != ACT_NONE) {
+            DWORD bit = (DWORD)1 << act;
             if (down) {
-                if (g_downAct != act) {          /* 去抖：忽略系统自动重复 */
-                    g_downAct = act;
+                if (!(g_downMask & bit)) {       /* 去抖：忽略系统自动重复 */
+                    g_downMask |= bit;
                     PostMessageW(g_mainWnd, WM_TRIG_DOWN, (WPARAM)act, 0);
                 }
             } else {
-                if (g_downAct == act) {
-                    g_downAct = ACT_NONE;
+                if (g_downMask & bit) {          /* 每个键都能拿到自己的抬起 */
+                    g_downMask &= ~bit;
                     PostMessageW(g_mainWnd, WM_TRIG_UP, (WPARAM)act, 0);
                 }
             }

@@ -14,6 +14,8 @@ int ComputeSteps(const WCHAR* s, int len, int caret, int dir);
 volatile BOOL g_recording = FALSE;
 HHOOK g_hook = NULL;   /* NavBaseInfo 会读 g_hook，需提供定义 */
 void CapLog(const char* fmt, ...) { (void)fmt; }
+/* 未链接 hook.c：物理按键状态桩（本测试不涉及卡键清理） */
+BOOL PhysKeyDown(int vk) { (void)vk; return FALSE; }
 
 static int fails = 0;
 #define EXPECT(cond, name) do { \

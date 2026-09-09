@@ -33,8 +33,25 @@ static BOOL IsExtendedVk(int vk) {
     }
 }
 
+/* 我们注入过"按下"但还没配"抬起"的修饰键：进程在组合键中途退出/重启时
+   会留下真正的卡键，退出前无条件补发抬起（与用户是否物理按住无关，
+   因为这些键本来就只该由我们按下）。 */
+#define MOD_COUNT 8
+static const int kMods[MOD_COUNT] = {
+    VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL,
+    VK_LMENU,  VK_RMENU,  VK_LWIN,     VK_RWIN
+};
+static BOOL g_injectedDown[MOD_COUNT] = { 0 };
+
+static int ModIndex(int vk) {
+    for (int i = 0; i < MOD_COUNT; i++) if (kMods[i] == vk) return i;
+    return -1;
+}
+
 /* 单条键盘事件（按下 / 抬起） */
 static void SendEvent(int vk, BOOL up) {
+    int mi = ModIndex(vk);
+    if (mi >= 0) g_injectedDown[mi] = !up;
     INPUT i;
     memset(&i, 0, sizeof(i));
     i.type = INPUT_KEYBOARD;
@@ -89,17 +106,42 @@ void SendNativeWordJump(int dir, BOOL shift) {
     if (shift) { Sleep(KEY_GAP); SendEvent(VK_LSHIFT, TRUE); }
 }
 
-/* 重启 / 退出时清键盘状态：对我们可能注入过的修饰键逐个补"抬起"。
-   卡键的典型成因是和弦进行到一半程序退出或目标吃掉键，修饰键停在下位。
-   只补异步状态里"当前没被物理按着"的键，不破坏用户真实按住的修饰键。 */
-void SendClearStuckModifiers(void) {
-    static const int vks[] = {
-        VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL,
-        VK_LMENU,  VK_RMENU,  VK_LWIN,     VK_RWIN,
-        VK_CAPITAL
-    };
-    for (int i = 0; i < (int)(sizeof(vks) / sizeof(vks[0])); i++) {
-        if (!(GetAsyncKeyState(vks[i]) & 0x8000))
-            SendEvent(vks[i], TRUE);
+/* 释放一个修饰键。Alt / Win 的"抬起"被系统单独看到时会被解释为
+   "按下并释放了 Alt/Win" —— 从而激活菜单栏或开始菜单（AHK 为此专门
+   引入 #MenuMaskKey：用一个中性键插在中间，让系统认为中间按过别的键）。
+   这里用未定义虚拟键 0xFF 作掩码键，行为与 AHK 的 vkFF 一致。 */
+#define MASK_VK 0xFF
+static void ReleaseMod(int vk) {
+    if (vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN) {
+        SendEvent(MASK_VK, FALSE);
+        SendEvent(MASK_VK, TRUE);
     }
+    SendEvent(vk, TRUE);
+}
+
+/* 重启 / 退出时清键盘状态（AHK 同理：区分"逻辑状态"与"物理状态"）。
+   GetAsyncKeyState 反映的是 OS 的逻辑状态——被注入的键同样置位，
+   所以卡键恰恰表现为"OS 认为它按着"。判据是：
+       逻辑按下（OS 认为按着） && 物理未按（用户没真的按） == 卡键
+   物理状态只能由低级钩子自己记录（见 hook.c 的 PhysKeyDown）。
+   注：此前写成"逻辑未按才补发抬起"，等于把所有真正卡住的键全跳过了，
+   这就是"重启程序清不掉卡键"的原因。 */
+void SendClearStuckModifiers(void) {
+    for (int i = 0; i < MOD_COUNT; i++) {
+        int vk = kMods[i];
+        BOOL logicalDown = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        if (logicalDown && !PhysKeyDown(vk)) ReleaseMod(vk);
+    }
+    /* 我们注入过的修饰键：无条件补抬起（这些键本不该残留 down 状态） */
+    for (int i = 0; i < MOD_COUNT; i++)
+        if (g_injectedDown[i]) ReleaseMod(kMods[i]);
+    /* CapsLock 是开关键，逻辑状态表示"灯亮"，不是卡键；只在明确没物理按住
+       且灯亮时才切一次，避免把用户的大小写状态改乱 —— 保守起见不处理。 */
+}
+
+/* 强制重置键盘状态（命令行 --reset-keys）：不看任何状态，对所有修饰键
+   各补一次抬起。用于程序已被杀死、状态表丢失的场合（等价 AHK 社区常用的
+   "把所有修饰键 Send Up 一遍"）。 */
+void SendForceResetKeys(void) {
+    for (int i = 0; i < MOD_COUNT; i++) ReleaseMod(kMods[i]);
 }
