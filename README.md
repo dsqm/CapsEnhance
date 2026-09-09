@@ -75,9 +75,10 @@
 
 1. **经典 Edit / RichEdit / EmEditorView**：`WM_GETTEXT` + `EM_GETSEL`。白名单外不放行（Chromium 系窗口对这两条消息回的是标题和垃圾值）；直接置位后回读校验，控件只实现半套协议时自动退回逐格箭头。
 2. **Scintilla 系**（Notepad3 / Notepad++ / SciTE）：`SCI_*` 窗口消息。文档以字节为单位（UTF-8 下中文 3 字节/字），整条通道在字节域取原始文本再转成 UTF-16 交给词边界算法；`SCI_GETTEXT` 的缓冲区指针属于对方进程，必须先 `VirtualAllocEx` 再读回（直传本地指针会读崩对方）。跳距 ≥ 6 时用 `SCI_SETSEL` 瞬跳（置位后回读校验，不符则退回逐格箭头）。
-3. **UIA（UI Automation）** `TextPattern`/`TextPattern2`：支持 QQ、Edge、VSCode 等 Chromium/WinUI 控件。锚定顺序：焦点元素沿祖先链 → 焦点 HWND 沿祖先链 → 焦点 HWND 子树检索（焦点有时落在没有 `DocumentRange` 的 Pane 上，必须往下找）。
-4. **IAccessible2** (`IAccessibleText`)：其余无障碍文本控件。
-5. 全失败则原生 `Ctrl(+Shift)+方向键` 兜底 —— **Ctrl 必须真的按住**（在方向键之前按下、之后抬起），否则目标收到的只是单格方向键。
+3. **UIA（UI Automation）** `TextPattern`/`TextPattern2`：支持 QQ、Edge、VSCode 等 Chromium/WinUI 控件。锚定顺序：焦点元素沿祖先链 → 焦点 HWND 沿祖先链 → 焦点 HWND 子树检索（焦点有时落在没有 `DocumentRange` 的 Pane 上，必须往下找）。**读回的文本短于 2 字符时视为占位假文本弃用**。
+   - **VSCode 专属**：其无障碍节点（`role=textbox` 的 div）只有在 `editor.accessibilitySupport: "on"`（或检测到读屏器）时才写入光标附近的真实文本并同步选区——见其源码 `screenReaderContentSimple.ts` 的 `updateScreenReaderContent()`，未开启时会主动把节点内容清空，因此外部读到的是 1 字符占位。**在 VSCode 设置里开启该项后，词跳引擎（含中文混排、不跨行规则）即可完整工作**；未开启则走原生 `Ctrl+方向` 兜底。`cursorSmoothCaretAnimation`（平滑光标）只影响视觉动画，与此无关。
+4. **IAccessible2** (`IAccessibleText`)：其余无障碍文本控件（同样弃用短于 2 字符的占位读回）。
+5. 全失败则原生 `Ctrl(+Shift)+方向键` 兜底 —— **Ctrl 必须真的按住**（在方向键之前按下、之后抬起），否则目标收到的只是单格方向键。VSCode 即走这条兜底：由 VSCode 自己的词导航（`cursorWordLeft/Right`）完成按词跳转。
 
 > 跨进程消息坑：`SendMessageTimeout` 的返回值只表示"是否发送成功"，窗口过程的返回值必须通过最后一个参数 `lpdwResult` 取。传 `NULL` 的话拿到的是恒为 1 的状态值 —— 曾导致 `WM_GETTEXTLENGTH` 恒等于 1、文本永远只读到一个字符，词边界算法整个失效。
 

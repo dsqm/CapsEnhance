@@ -612,6 +612,18 @@ static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut)
         int idx = (int)wcslen(pre);
         if (SUCCEEDED(IUIAutomationTextRange_GetText(doc, -1, &all)) && all) {
             int alen = (int)wcslen(all);
+            /* VSCode 等 Electron 应用：DOM 焦点落在 a11y 节点（role=textbox 的
+               div）上。VSCode 源码 screenReaderContentSimple.ts 的
+               updateScreenReaderContent()：只有 isScreenReaderOptimized() 时
+               才把真实文本写进节点并同步 DOM selection；否则主动清空——
+               所以我们读到的是 1 字符占位。弃用本通道交给原生兜底，
+               并在日志里给出开启方法。 */
+            if (alen < 2) {
+                if (g_recording)
+                    CapLog("  UIA doc text len=%d -> a11y 占位。VSCode 请在 settings.json "
+                           "设 \"editor.accessibilitySupport\": \"on\" 后即可用词跳引擎", alen);
+                goto done;
+            }
             if (idx > alen) idx = alen;
             if (idx < 0) idx = 0;
             WCHAR* copy = (WCHAR*)malloc((size_t)(alen + 1) * sizeof(WCHAR));
@@ -664,6 +676,12 @@ static BOOL MsaaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut
     if (FAILED(hr) || !b) return FALSE;
 
     int len = (int)SysStringLen(b);
+    /* 与 UIA 通道同理：短于 2 字符视为占位文本（非真实编辑器内容），弃用 */
+    if (len < 2) {
+        SysFreeString(b);
+        if (g_recording) CapLog("  IA2 text len=%d -> 占位文本，弃用走原生", len);
+        return FALSE;
+    }
     WCHAR* copy = (WCHAR*)malloc(((size_t)len + 1) * sizeof(WCHAR));
     if (copy) { memcpy(copy, b, (size_t)len * sizeof(WCHAR)); copy[len] = 0; }
     SysFreeString(b);
