@@ -72,11 +72,13 @@ static void DoFireOnce(int act) {
 
 /* ============ 托盘 ============ */
 static const WCHAR* APP_NAME = L"CapsEnhance";
-#define IDM_PAUSE  1
-#define IDM_EXIT   2
+#define IDM_PAUSE   1
+#define IDM_EXIT    2
+#define IDM_RESTART 3
 
 static void SetMenuPauseText(void);
 static void ResetEngine(void);   /* 前向声明（定义在下方，TrayShowMenu 先调用） */
+static void DoRestart(void);     /* 前向声明（定义在下方，TrayShowMenu 先调用） */
 void TrayAddHint(const WCHAR* s);
 static void TrayAdd(void) {
     memset(&g_nid, 0, sizeof(g_nid));
@@ -107,6 +109,8 @@ static void TrayShowMenu(void) {
         ResetEngine();
         if (!g_state.paused) TrayAddHint(L"CapsEnhance：正在映射");
         else TrayAddHint(L"CapsEnhance：已暂停（CapsLock 恢复原功能）");
+    } else if (cmd == IDM_RESTART) {
+        DoRestart();
     } else if (cmd == IDM_EXIT) {
         g_quit = TRUE;
         PostMessageW(g_mainWnd, WM_CLOSE, 0, 0);
@@ -132,6 +136,50 @@ static void ResetEngine(void) {
     g_activeAct  = ACT_NONE;
     g_actD = FALSE; g_actF = FALSE;
     g_pendD = FALSE; g_pendF = FALSE;
+}
+
+/* 重启程序：清键盘状态 -> 拉起新实例（新实例带 --wait-exit <本进程PID>，
+   等本进程退出后才安装钩子）-> 本进程退出。
+   清键盘 = 对可能注入过的修饰键补"抬起"，消除目标程序里的卡键；
+   钩子 / 和弦引擎 / 修饰门闩随进程重启全部回到干净初态。 */
+static void DoRestart(void) {
+    ResetEngine();
+    g_cMod = FALSE; g_dMod = FALSE; g_fMod = FALSE;
+    g_pendD = FALSE; g_pendF = FALSE; g_btnCount = 0;
+    SendClearStuckModifiers();
+
+    WCHAR exe[MAX_PATH] = L"";
+    GetModuleFileNameW(NULL, exe, MAX_PATH);
+    WCHAR cmd[MAX_PATH + 64];
+    _snwprintf_s(cmd, MAX_PATH + 64, _TRUNCATE,
+                 L"\"%s\" --wait-exit %lu", exe,
+                 (unsigned long)GetCurrentProcessId());
+
+    STARTUPINFOW si; PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+    if (!CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        TrayAddHint(L"CapsEnhance：重启失败");
+        return;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    g_quit = TRUE;
+    PostMessageW(g_mainWnd, WM_CLOSE, 0, 0);
+}
+
+/* 重启流程：新实例带 --wait-exit <pid>，等旧实例退出（最多 5 秒）后再
+   创建窗口/安装钩子，避免两个实例的钩子与托盘图标短暂并存。 */
+static void WaitOldInstanceExit(void) {
+    const WCHAR* flag = wcsstr(GetCommandLineW(), L"--wait-exit");
+    if (!flag) return;
+    DWORD pid = (DWORD)wcstoul(flag + 11, NULL, 10);
+    if (!pid) return;
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    if (!h) return;                      /* 旧实例已退出 */
+    WaitForSingleObject(h, 5000);
+    CloseHandle(h);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -223,7 +271,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             TrayShowMenu();
         return 0;
     case WM_CLOSE:
-        g_quit = TRUE;
+        /* 必须销毁窗口 -> WM_DESTROY -> PostQuitMessage；
+           只设 g_quit 的话循环还堵在 GetMessage 上，要等下一条消息才退出 */
+        DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
         PostQuitMessage(0);
@@ -237,6 +287,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     (void)hInst; (void)hPrev; (void)lpCmd; (void)nShow;
     g_state.paused = FALSE;
+
+    WaitOldInstanceExit();   /* 重启场景：等旧实例完全退出再初始化 */
 
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = WndProc;
@@ -260,6 +312,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
 
     g_menu = CreatePopupMenu();
     AppendMenuW(g_menu, MF_STRING, IDM_PAUSE, L"暂停映射");
+    AppendMenuW(g_menu, MF_STRING, IDM_RESTART, L"重启程序");
     AppendMenuW(g_menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(g_menu, MF_STRING, IDM_EXIT, L"退出");
 
@@ -275,6 +328,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
 
     StopEngine();
     HookUninstall();
+    SendClearStuckModifiers();   /* 退出前清掉可能卡住的注入修饰键 */
     TrayRemove();
     DestroyMenu(g_menu);
     return 0;

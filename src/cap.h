@@ -76,6 +76,7 @@ void ReleaseFill(int act);       /* 松手补齐：增益模式点按 -> 补到3
 void SendKeyOnce(int vk, BOOL shift);        /* 单击一个键，shift 全程按住 */
 void SendArrows(int dir, int n, BOOL shift); /* n 个左/右箭头，shift 全程按住 */
 void SendNativeWordJump(int dir, BOOL shift);/* 原生 Ctrl(+Shift)+方向：词跳兜底 */
+void SendClearStuckModifiers(void);          /* 补齐修饰键"抬起"，清卡键（重启/退出用） */
 
 /* ---------- 主窗口 ---------- */
 extern HWND g_mainWnd;

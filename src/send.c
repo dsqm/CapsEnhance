@@ -88,3 +88,18 @@ void SendNativeWordJump(int dir, BOOL shift) {
     SendEvent(VK_LCONTROL, TRUE);
     if (shift) { Sleep(KEY_GAP); SendEvent(VK_LSHIFT, TRUE); }
 }
+
+/* 重启 / 退出时清键盘状态：对我们可能注入过的修饰键逐个补"抬起"。
+   卡键的典型成因是和弦进行到一半程序退出或目标吃掉键，修饰键停在下位。
+   只补异步状态里"当前没被物理按着"的键，不破坏用户真实按住的修饰键。 */
+void SendClearStuckModifiers(void) {
+    static const int vks[] = {
+        VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL,
+        VK_LMENU,  VK_RMENU,  VK_LWIN,     VK_RWIN,
+        VK_CAPITAL
+    };
+    for (int i = 0; i < (int)(sizeof(vks) / sizeof(vks[0])); i++) {
+        if (!(GetAsyncKeyState(vks[i]) & 0x8000))
+            SendEvent(vks[i], TRUE);
+    }
+}
