@@ -117,31 +117,37 @@ static void SendNativeWordJump(int dir, BOOL shift) {
 static BOOL IsHighSurrogateW(WCHAR c) { return c >= 0xD800 && c <= 0xDBFF; }
 static BOOL IsLowSurrogateW(WCHAR c)  { return c >= 0xDC00 && c <= 0xDFFF; }
 
-/* 词字符判定（BMP 直接判，编码点 >= 0x10000 的取其整体）：
-   CJK 与字母数字视为"词内"，其余（空白+标点）为分隔符。
-   采用"仅枚举分隔符"的反向思路：非分隔符一律算词内，
-   因此汉字(含扩展区/补充平面)无需逐个枚举码位即可正确归为词内。 */
-/* 分隔符：空白 / 标点，其余(汉字·字母·数字·符号)都算词内。 */
-static BOOL IsSeparator(WCHAR c) {
-    if (c == L'\0') return TRUE;
-    if (iswspace(c)) return TRUE;                       /* 空格/制表/换行 */
-    if (iswpunct(c)) return TRUE;                       /* ASCII 及按 locale 的标点 */
-    unsigned cp = (unsigned)c;
-    if (cp >= 0x2000 && cp <= 0x206F) return TRUE;      /* 通用标点 */
-    if (cp >= 0x3000 && cp <= 0x303F) return TRUE;      /* CJK 符号/标点(含全角空格) */
-    if (cp >= 0xFF00 && cp <= 0xFFEF) return TRUE;      /* 全角形式(含全角标点 ，。！？) */
-    return FALSE;
-}
-static BOOL IsWordChar(WCHAR c) { return !IsSeparator(c); }
+/* 字符类别：决定跳词边界。连续同类字符串视为"一个词"，
+   跳词就停在这些词(与词/分隔符)的边界处。
+   汉字、数字(含全角)、字母(含全角)各成一类；其余(空白+标点)为分隔符。 */
+typedef enum { CH_CJK, CH_DIGIT, CH_ALPHA, CH_SEP } CharClass;
 
-/* 以 s[i] 为"字符起点"（可能是一个代理对的首字）判定是否词内。 */
-static BOOL IsWordCharAt(const WCHAR* s, int len, int i) {
-    if (i < 0 || i >= len) return FALSE;
+static CharClass ClassOf(WCHAR c) {
+    unsigned cp = (unsigned)c;
+    /* 数字（含全角 ０-９） */
+    if (cp >= 0x30 && cp <= 0x39) return CH_DIGIT;
+    if (cp >= 0xFF10 && cp <= 0xFF19) return CH_DIGIT;
+    /* 字母（含全角 Ａ-Ｚ ａ-ｚ） */
+    if ((cp >= 0x41 && cp <= 0x5A) || (cp >= 0x61 && cp <= 0x7A)) return CH_ALPHA;
+    if ((cp >= 0xFF21 && cp <= 0xFF3A) || (cp >= 0xFF41 && cp <= 0xFF5A)) return CH_ALPHA;
+    /* 分隔符：空白 + 标点 */
+    if (c == L'\0') return CH_SEP;
+    if (iswspace(c)) return CH_SEP;
+    if (iswpunct(c)) return CH_SEP;
+    if (cp >= 0x2000 && cp <= 0x206F) return CH_SEP;  /* 通用标点 */
+    if (cp >= 0x3000 && cp <= 0x303F) return CH_SEP;  /* CJK 标点(含全角空格) */
+    if (cp >= 0xFF00 && cp <= 0xFFEF) return CH_SEP;  /* 其余全角符号标点 */
+    return CH_CJK;                                     /* 汉字等 */
+}
+
+/* 以 s[i] 为"字符起点"（可能是一个代理对的首字）分类。 */
+static CharClass ClassOfAt(const WCHAR* s, int len, int i) {
+    if (i < 0 || i >= len) return CH_SEP;
     if (i + 1 < len && IsHighSurrogateW(s[i]) && IsLowSurrogateW(s[i+1]))
-        return TRUE;                                    /* 补充平面字符：整体视为词内 */
+        return CH_CJK;                                 /* 补充平面字符与汉字同类 */
     if (IsHighSurrogateW(s[i]) || IsLowSurrogateW(s[i]))
-        return FALSE;    /* 孤立半代理：按分隔符，避免拆散群组 */
-    return IsWordChar(s[i]);
+        return CH_SEP;                                 /* 孤立半代理按分隔 */
+    return ClassOf(s[i]);
 }
 
 /* 由 code-unit 位置 i 反推其左侧那个"字符"的起点（代理对整体归为一句）。 */
@@ -169,31 +175,35 @@ static int WordJumpTarget(const WCHAR* s, int len, int caret, int dir, int* step
 
     int i = caret, st = 0;
     if (dir == DIR_LEFT) {
-        while (i > 0) {                    /* 跨结尾分隔符 */
-            int stt = CharStartBefore(s, len, i);
-            if (IsWordCharAt(s, len, stt)) break;
-            st++; i = stt;
+        /* 向左跳到上一词的首字：先跨掉左侧分隔符串，再跨到同类型词串首。 */
+        while (i > 0) {                          /* 跨左侧分隔符串 */
+            int st0 = CharStartBefore(s, len, i);
+            if (ClassOfAt(s, len, st0) != CH_SEP) break;
+            st++; i = st0;
         }
-        while (i > 0) {                    /* 跨整个词 */
-            int stt = CharStartBefore(s, len, i);
-            if (!IsWordCharAt(s, len, stt)) break;
-            st++; i = stt;
+        if (i > 0) {                             /* 跨到左侧词串首 */
+            CharClass cur = ClassOfAt(s, len, CharStartBefore(s, len, i));
+            while (i > 0) {
+                int st0 = CharStartBefore(s, len, i);
+                if (ClassOfAt(s, len, st0) != cur) break;
+                st++; i = st0;
+            }
         }
     } else {
-        /* 右跳：用一个循环同时处理"跨当前词"和"跨分隔符到下一词首"，
-           避免拆成两个 for 段时第二段被跳过。 */
-        int skw = 1;                     /* 1=还在跨词；0=已转入跨分隔符 */
-        for (; i < len; ) {
-            int w = IsWordCharAt(s, len, i);
-            if (skw) {
-                if (!w) skw = 0;         /* 词结束，转入跨分隔符 */
-            } else if (w) {
-                break;                   /* 遇下一词首，停下 */
+        /* 向右跳到下一词首：先跨当前同类型词串，再跨分隔符串。 */
+        CharClass cur = ClassOfAt(s, len, i);
+        if (cur != CH_SEP) {
+            while (i < len) {                    /* 跨当前词 */
+                if (ClassOfAt(s, len, i) != cur) break;
+                st++;
+                i = (i + 1 < len && IsHighSurrogateW(s[i])) ? (i + 2) : (i + 1);
             }
+        }
+        while (i < len) {                        /* 跨分隔符到下一词首 */
+            if (ClassOfAt(s, len, i) != CH_SEP) break;
             st++;
             i = (i + 1 < len && IsHighSurrogateW(s[i])) ? (i + 2) : (i + 1);
         }
-        /* fallthrough to `*steps = st; return i;` */
     }
     *steps = st;
     return i;
