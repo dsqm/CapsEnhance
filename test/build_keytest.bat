@@ -25,7 +25,11 @@ cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
    test\restarttest.c /link /OUT:bin/restarttest.exe user32.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 
-echo [OK] bin/keytest.exe + bin/uiprobe.exe + bin/memtest.exe + bin/restarttest.exe built.
+cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
+   test\traymemtest.c /link /OUT:bin/traymemtest.exe user32.lib psapi.lib /SUBSYSTEM:CONSOLE
+if errorlevel 1 goto fail
+
+echo [OK] bin/keytest.exe + bin/uiprobe.exe + bin/memtest.exe + bin/restarttest.exe + bin/traymemtest.exe built.
 exit /b 0
 :fail
 echo [ERROR] build failed

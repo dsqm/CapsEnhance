@@ -2,6 +2,7 @@
 
 #include <shellapi.h>
 #include <commctrl.h>
+#include <imm.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,7 @@
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "imm32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -76,6 +78,13 @@ static const WCHAR* APP_NAME = L"CapsEnhance";
 #define IDM_EXIT    2
 #define IDM_RESTART 3
 
+/* 把进程工作集压回待机内存：UIA/TSF 等 DLL 一旦加载无法卸载，只能压页。
+   用于"诊断结束"和"托盘菜单关闭"这类低频节点，让内存数值回落；
+   页面被换出后再次使用时会自动换回，仅一次软缺页开销。 */
+static void TrimWorkingSet(void) {
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+}
+
 static void SetMenuPauseText(void);
 static void ResetEngine(void);   /* 前向声明（定义在下方，TrayShowMenu 先调用） */
 static void DoRestart(void);     /* 前向声明（定义在下方，TrayShowMenu 先调用） */
@@ -115,6 +124,7 @@ static void TrayShowMenu(void) {
         g_quit = TRUE;
         PostMessageW(g_mainWnd, WM_CLOSE, 0, 0);
     }
+    TrimWorkingSet();   /* 菜单交互会拉起 TSF/DWM 等模块，关完菜单压回 */
 }
 void TrayAddHint(const WCHAR* s) {
     wcscpy_s(g_nid.szTip, 128, s);
@@ -210,10 +220,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             CapLog("===== REC END =====");
             MessageBeep(MB_ICONHAND);       /* 系统"手形"音：结束记录（低而不同） */
             TrayAddHint(L"CapsEnhance：正在映射");
-            /* 诊断期间 UIA/MSAA 等 COM 基础设施已加载（工作集涨到 20MB 上下），
-               结束记录后把工作集压回去；页面会换出到待机内存，下次用到自动换回，
-               不影响功能。这属于"不回落"的外观修正——DLL 本身无法卸载。 */
-            SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+            /* 诊断期间 UIA/MSAA 等 COM 基础设施已加载，结束记录后压回工作集 */
+            TrimWorkingSet();
         }
         return 0;
     case WM_TRIG_DOWN: {             /* 触发键按下：进入稳定期待开火 */
@@ -270,6 +278,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP)
             TrayShowMenu();
         return 0;
+    case WM_IME_SETCONTEXT:
+        /* 不给 IME 关联 UI：见 ImmAssociateContext 注释 */
+        return 0;
     case WM_CLOSE:
         /* 必须销毁窗口 -> WM_DESTROY -> PostQuitMessage；
            只设 g_quit 的话循环还堵在 GetMessage 上，要等下一条消息才退出 */
@@ -301,6 +312,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
                               CW_USEDEFAULT, CW_USEDEFAULT, 1, 1,
                               NULL, NULL, hInst, NULL);
     if (!g_mainWnd) return 1;
+
+    /* 本窗口只承载托盘菜单，永不接收文字输入。禁掉 IME/TSF：
+       SetForegroundWindow 让它获得键盘焦点时，系统会为它初始化输入法
+       上下文并加载 textinputframework/CoreUIComponents 等（实测 +4MB
+       上下）。禁用后这些模块不再加载。 */
+    ImmAssociateContext(g_mainWnd, NULL);
 
     if (!HookInstall()) {
         TrayAddHint(L"CapsEnhance：钩子安装失败");
