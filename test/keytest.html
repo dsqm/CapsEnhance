@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>KEYTEST idle</title>
+</head>
+<body style="font-family:Consolas;margin:0">
+<!-- 说明写进注释：正文只留 textarea，doc range 文本 == textarea 文本，便于核对光标偏移。
+     页面把 keydown/keyup 与 selectionStart 写进 document.title，供 keytest.exe 回读。 -->
+<textarea id="t" rows="8" cols="90" style="font-size:16px">hello world foo bar baz qux 中文测试 abc 123 end</textarea>
+<script>
+var t = document.getElementById('t');
+var log = [];
+function upd() {
+    var s = 'pos=' + t.selectionStart + ',' + t.selectionEnd + ' | ' + log.slice(-5).join(' ; ');
+    document.title = 'KEYTEST ' + s;
+}
+t.addEventListener('keydown', function (e) {
+    log.push('kd[' + e.key + ' kc=' + e.keyCode + ' code=' + e.code + ' ctrl=' + (e.ctrlKey ? 1 : 0) + ' shift=' + (e.shiftKey ? 1 : 0) + ']');
+    upd();
+});
+t.addEventListener('keyup', function (e) {
+    log.push('ku[' + e.key + ']');
+    upd();
+});
+t.addEventListener('input', function (e) { log.push('INPUT'); upd(); });
+t.focus();
+t.setSelectionRange(5, 5);
+upd();
+</script>
+</body>
+</html>

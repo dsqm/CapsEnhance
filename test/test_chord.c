@@ -8,6 +8,7 @@
 #include "main.c"
 #undef WinMain
 #include "hook.c"
+#include "send.c"      /* hook.c 的 SendActOnce 现在走统一发送模块 */
 #include <stdio.h>
 
 /* 词跳桩：本测试只验证 D/F 与补齐，不测文本解析 */
