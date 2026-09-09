@@ -126,61 +126,6 @@ static BOOL IsClassicEdit(HWND hwnd) {
     return FALSE;
 }
 
-/* 是否 Scintilla（Notepad++ 等）控件 */
-static BOOL IsScintilla(HWND hwnd) {
-    WCHAR cls[96];
-    return GetClassNameW(hwnd, cls, 96) && _wcsicmp(cls, L"Scintilla") == 0;
-}
-
-/* Scintilla 消息编号（WM_USER + code），来自官方 Scintilla.h */
-#define SCI_GETLENGTH      2006   /* 文档字节长度（不含结尾\0） */
-#define SCI_GETCURRENTPOS  2008   /* 当前光标（字节偏移） */
-#define SCI_GETTEXT        2182   /* 取文本：SCI_GETTEXT(len+1, buf) */
-
-/* 通过 Scintilla 自身的 SCI_* 读取文本与光标位置（UTF-8/ACP 自适应） */
-static BOOL ScintGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
-    LONG blen = (LONG)SendMessageTimeoutW(hwnd, WM_USER + SCI_GETLENGTH, 0, 0,
-                                          SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-    if (blen <= 0 || blen > 1 << 22) return FALSE;
-    char* u8 = (char*)malloc((size_t)blen + 1);
-    if (!u8) return FALSE;
-    LONG got = (LONG)SendMessageTimeoutW(hwnd, WM_USER + SCI_GETTEXT, (WPARAM)(blen + 1), (LPARAM)u8,
-                                         SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-    if (got < 0) { free(u8); return FALSE; }
-    if (got > blen) got = blen;
-    u8[got] = 0;
-
-    LONG bcaret = (LONG)SendMessageTimeoutW(hwnd, WM_USER + SCI_GETCURRENTPOS, 0, 0,
-                                            SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, NULL);
-    if (bcaret < 0 || bcaret > blen) bcaret = got;
-
-    /* 先按 UTF-8 严格解码；失败（如 GBK）再退回系统 ACP */
-    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, u8, blen, NULL, 0);
-    UINT acp = CP_UTF8;
-    if (wlen <= 0) {
-        acp = CP_ACP;
-        wlen = MultiByteToWideChar(acp, 0, u8, blen, NULL, 0);
-    }
-    if (wlen <= 0) { free(u8); return FALSE; }
-    WCHAR* w = (WCHAR*)malloc(((size_t)wlen + 1) * sizeof(WCHAR));
-    if (!w) { free(u8); return FALSE; }
-    MultiByteToWideChar(acp, 0, u8, blen, w, wlen);
-    w[wlen] = 0;
-
-    int wcaret = 0;
-    if (bcaret > 0) {
-        char t = u8[bcaret]; u8[bcaret] = 0;
-        wcaret = MultiByteToWideChar(acp, 0, u8, bcaret, NULL, 0);
-        u8[bcaret] = t;
-    }
-    free(u8);
-    if (wcaret < 0) wcaret = 0;
-    if (wcaret > wlen) wcaret = wlen;
-
-    *text = w; *lenOut = wlen; *caretOut = wcaret;
-    return TRUE;
-}
-
 /* ================= 快速通道：标准 Edit / RichEdit ================= */
 /* 通过 WM_GETTEXT + EM_GETSEL 读取文本与光标。仅对经典编辑控件生效。 */
 static BOOL FastGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
@@ -232,12 +177,33 @@ static BOOL UiaGetTextCaret(WCHAR** text, int* lenOut, int* caretOut) {
 
     if (FAILED(IUIAutomation_GetFocusedElement(ua, &el)) || !el) goto done;
 
-    if (FAILED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPatternId,
-                        &IID_IUIAutomationTextPattern, (void**)&tp)) || !tp)
-        goto done;
-
-    if (FAILED(IUIAutomationTextPattern_get_DocumentRange(tp, &doc)) || !doc)
-        goto done;
+    /* 某些控件(如 Scintilla)的 TextPattern 在焦点元素或某个祖先上。
+       从焦点元素向上逐层找可用的 DocumentRange；el 最终指向拥有者。 */
+    {
+        IUIAutomationTreeWalker* wk = NULL;
+        IUIAutomation_get_RawViewWalker(ua, &wk);
+        for (int depth = 0; el && depth < 24; depth++) {
+            IUIAutomationTextPattern* t = NULL;
+            if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPatternId,
+                                &IID_IUIAutomationTextPattern, (void**)&t)) && t) {
+                IUIAutomationTextRange* d = NULL;
+                if (SUCCEEDED(IUIAutomationTextPattern_get_DocumentRange(t, &d)) && d) {
+                    doc = d;                /* 找到文档，el 即拥有者 */
+                    tp = t;                 /* 保留供 selection 兜底 */
+                    break;
+                }
+                IUIAutomationTextPattern_Release(t); t = NULL;
+            }
+            IUIAutomationElement* parent = NULL;
+            if (wk && SUCCEEDED(IUIAutomationTreeWalker_GetParentElement(wk, el, &parent))) {
+                IUIAutomationElement_Release(el);
+                el = parent;
+            } else
+                break;      /* 已到根 */
+        }
+        if (wk) IUIAutomationTreeWalker_Release(wk);
+        if (!doc) goto done;
+    }
 
     /* 光标位置：优先 TextPattern2 的 caret range */
     {
@@ -312,16 +278,10 @@ int NavJump(int dir, BOOL shift) {
     BOOL got = FALSE;
     const char* path = "native";
     HWND focus = GetFocusControl();
-    if (focus && IsScintilla(focus)) {
-        got = ScintGetTextCaret(focus, &text, &len, &caret);
-        path = "Scintilla";
-    } else {
-        got = FastGetTextCaret(focus, &text, &len, &caret);
-        path = "Edit";
-    }
-
-    if (!got) {
-        got = UiaGetTextCaret(&text, &len, &caret);
+    if (focus) got = FastGetTextCaret(focus, &text, &len, &caret);  /* 仅经典 Edit/RichEdit */
+    if (got) path = "Edit";
+    else {
+        got = UiaGetTextCaret(&text, &len, &caret);   /* 含 Scintilla 等 → 向上找 TextPattern */
         if (got) path = "UIA";
     }
     if (!got) { SendNativeWordJump(dir, shift); if (g_recording) CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
