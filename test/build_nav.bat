@@ -20,7 +20,7 @@ cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    bin\test_nav.obj bin\nav_test.obj ^
    /link /OUT:bin\test_nav.exe ^
-   user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib advapi32.lib ^
+   user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib ^
    /SUBSYSTEM:CONSOLE || exit /b 1
 echo [OK] compiled. running...
 ".\bin\test_nav.exe"

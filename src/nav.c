@@ -4,6 +4,7 @@
 #include <initguid.h>  /* 在本 TU 内为 UIA 的 CLSID/IID 提供存储定义 */
 
 #include <oleauto.h>
+#include <oleacc.h>
 #include <uiautomationcore.h>
 #include <uiautomationclient.h>
 #include <ole2.h>
@@ -13,8 +14,37 @@
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "oleacc.lib")
 
 #define SAFE_RELEASE(p) do { if (p) { (p)->Release(); (p)=NULL; } } while(0)
+
+/* ============ IAccessibleText（IAccessible2）手工声明 ============
+   SDK 不带 IA2 头文件，这里按官方 AccessibleText.idl 手工声明 vtable。
+   IID: {24FD2FFB-3AAD-4a08-8335-A3AD89C0FB4B}
+   方法槽位（IUnknown 后依次）：
+     addSelection, attributes, caretOffset, characterExtents, nSelections,
+     offsetAtPoint, selection, text, textAtOffset, ...
+   仅声明用到的槽位，其余以 void* 占位保持布局。 */
+typedef struct IAccessibleText IAccessibleText;
+typedef struct IAccessibleTextVtbl {
+    /* IUnknown */
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IAccessibleText*, REFIID, void**);
+    ULONG   (STDMETHODCALLTYPE *AddRef)(IAccessibleText*);
+    ULONG   (STDMETHODCALLTYPE *Release)(IAccessibleText*);
+    void* slot3_addSelection;        /* addSelection(start,end) */
+    void* slot4_attributes;         /* attributes(offset,...) */
+    HRESULT (STDMETHODCALLTYPE *caretOffset)(IAccessibleText*, long*);
+    void* slot6_characterExtents;
+    void* slot7_nSelections;
+    void* slot8_offsetAtPoint;
+    void* slot9_selection;
+    HRESULT (STDMETHODCALLTYPE *text)(IAccessibleText*, long start, long end, BSTR*);
+} IAccessibleTextVtbl;
+struct IAccessibleText { const IAccessibleTextVtbl* lpVtbl; };
+
+static const IID kIID_IAccessibleText =
+    {0x24FD2FFB, 0x3AAD, 0x4a08, {0x83,0x35,0xA3,0xAD,0x89,0xC0,0xFB,0x4B}};
+
 
 /* 逐方向键移动：发送 n 个左/右箭头（可带 Shift 位移）。
    每个箭头单独 SendInput 并微小间隔，避免大批量 SendInput 在部分
@@ -277,7 +307,41 @@ done:
     return ok;
 }
 
-/* ================= 对外接口 ================= */
+/* ================= IA2 通道：IAccessible2 (IAccessibleText) =================
+   Scintilla(Notepad3/Notepad++ 等)在 Windows 上的无障碍接口是 IAccessible2，
+   不暴露 UIA TextPattern —— 这正是读屏器(NVDA)读它们的通道。
+   COM 调用全程系统封送，跨进程/跨位宽安全。 */
+static BOOL MsaaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
+    if (!hwnd) return FALSE;
+    IAccessible* acc = NULL;
+    HRESULT hr = AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, &IID_IAccessible, (void**)&acc);
+    if (FAILED(hr) || !acc) return FALSE;
+
+    IAccessibleText* at = NULL;
+    hr = acc->lpVtbl->QueryInterface(acc, &kIID_IAccessibleText, (void**)&at);
+    acc->lpVtbl->Release(acc);
+    if (FAILED(hr) || !at) return FALSE;
+
+    long caret = -1;
+    hr = at->lpVtbl->caretOffset(at, &caret);
+    if (FAILED(hr) || caret < 0) { at->lpVtbl->Release(at); return FALSE; }
+
+    BSTR b = NULL;
+    hr = at->lpVtbl->text(at, 0, -1, &b);   /* -1 = IA2_TEXT_OFFSET_LENGTH(文本末尾) */
+    at->lpVtbl->Release(at);
+    if (FAILED(hr) || !b) return FALSE;
+
+    int len = (int)SysStringLen(b);
+    WCHAR* copy = (WCHAR*)malloc(((size_t)len + 1) * sizeof(WCHAR));
+    if (copy) { memcpy(copy, b, (size_t)len * sizeof(WCHAR)); copy[len] = 0; }
+    SysFreeString(b);
+    if (!copy) return FALSE;
+    if (caret > len) caret = len;
+
+    *text = copy; *lenOut = len; *caretOut = (int)caret;
+    return TRUE;
+}
+
 int NavJump(int dir, BOOL shift) {
     WCHAR* text = NULL;
     int len = 0, caret = 0;
@@ -289,8 +353,12 @@ int NavJump(int dir, BOOL shift) {
     if (focus) got = FastGetTextCaret(focus, &text, &len, &caret);  /* 仅经典 Edit/RichEdit */
     if (got) path = "Edit";
     else {
-        got = UiaGetTextCaret(focus, &text, &len, &caret);   /* 含 Scintilla 等 → 向上找 TextPattern */
+        got = UiaGetTextCaret(focus, &text, &len, &caret);   /* 现代控件 → 向上找 TextPattern */
         if (got) path = "UIA";
+    }
+    if (!got) {
+        got = MsaaGetTextCaret(focus, &text, &len, &caret);  /* Scintilla 系 → IAccessible2 */
+        if (got) path = "IA2";
     }
     if (!got) { SendNativeWordJump(dir, shift); if (g_recording) CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
 
@@ -378,6 +446,27 @@ void NavProbe(void) {
             o += swprintf_s(rep + o, 2200 - o, L"UIA 初始化失败\n");
         }
         CoUninitialize();
+    }
+
+    /* IA2 (IAccessibleText) 是否可用 —— Scintilla 系编辑器的通道 */
+    if (focus) {
+        IAccessible* acc = NULL;
+        if (SUCCEEDED(AccessibleObjectFromWindow(focus, OBJID_CLIENT, &IID_IAccessible, (void**)&acc)) && acc) {
+            IAccessibleText* at = NULL;
+            if (SUCCEEDED(acc->lpVtbl->QueryInterface(acc, &kIID_IAccessibleText, (void**)&at)) && at) {
+                long co = -1;
+                BOOL ok2 = SUCCEEDED(at->lpVtbl->caretOffset(at, &co)) && co >= 0;
+                o += swprintf_s(rep + o, 2200 - o,
+                    L"IA2 IAccessibleText = YES (caret=%ld)\n", co);
+                at->lpVtbl->Release(at);
+                if (ok2) textOK = TRUE;
+            } else {
+                o += swprintf_s(rep + o, 2200 - o, L"IA2 IAccessibleText = NO\n");
+            }
+            acc->lpVtbl->Release(acc);
+        } else {
+            o += swprintf_s(rep + o, 2200 - o, L"IA2 取不到 IAccessible\n");
+        }
     }
 
     /* 写日志（UTF-8）并存一份供弹窗 */
