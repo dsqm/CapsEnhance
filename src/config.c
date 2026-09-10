@@ -25,11 +25,13 @@
 #define STR2(x) #x
 #define STR(x)  STR2(x)
 
-/* 自动滚动的基础节奏（ms）：自动滚动每 N 毫秒滚一格。
-   档位（每格补发几格）在 1..WheelScrollMul 之间由滚轮次数调整，
-   所以这个值决定的是**最慢档**的速度。120ms 约 8 格/秒，是"读文档时
-   不至于看丢行"的量级；嫌慢就再滚一下提速，或把这里调小。 */
-#define AUTOSCROLL_INTERVAL_DEFAULT 120
+/* 自动滚动的**初始**节拍（ms）：启动后每 N 毫秒滚一格，即最慢档的速度。
+   同向继续滚会逐档提速，最快档的节拍 = 本值 / WheelScrollMul
+   —— 所以本值同时定了"初始速度"和"最快速度"的基准。
+   默认 300ms ≈ 3 格/秒：读文档时不至于看丢行。原来是 120ms（8 格/秒），
+   而系统默认每次滚 3 行 —— 相当于 25 行/秒，实际手感明显偏快。
+   嫌慢就再滚一下提速，或把这里调小。 */
+#define AUTOSCROLL_INTERVAL_DEFAULT 300
 
 /* 通用字符串项：明确解析的键之外，[General] 里其它键值原样留存，
    供上层模块按名字取（见 ConfigGetStr）。
@@ -273,10 +275,10 @@ void ConfigLoad(void) {
             ";   实现方式：原始刻度照常送达，再补发 (N-1) 个同值刻度。\n"
             ";   只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），\n"
             ";   也不写注册表。\n"
-            ";   同一个开关也决定\"自动滚动\"能否用：N >= 2 才启用（自动滚动的档位上限就是 N）。\n"
+            ";   同一个开关也决定\"自动滚动\"能否用：N >= 2 才启用（自动滚动最快档 = N 倍）。\n"
             "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n"
-            "; 自动滚动的基础节奏（毫秒）：增强模式 + 滚轮启动自动滚动后，\n"
-            "; 每 N 毫秒滚一格。越小越快，可调范围 20..1000。\n"
+            "; 自动滚动的初始节拍（毫秒）：启动后每 N 毫秒滚一格（最慢档）。\n"
+            "; 同向继续滚会逐档提速，最快档节拍 = N / WheelScrollMul。可调范围 20..1000。\n"
             "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n"
             "; ---- 和弦修饰的激活键 ----\n"
             "; 按住 C（CapsLock）期间，这些键作为\"模式修饰\"生效。\n"
@@ -343,11 +345,11 @@ static const struct {
       ";   实现方式：原始刻度照常送达，再补发 (N-1) 个同值刻度。\n"
       ";   只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），\n"
       ";   也不写注册表。\n"
-      ";   同一个开关也决定\"自动滚动\"能否用：N >= 2 才启用。\n"
+      ";   同一个开关也决定\"自动滚动\"能否用：N >= 2 才启用（最快档 = N 倍）。\n"
       "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n" },
     { "autoscrollinterval",
-      "; 自动滚动的基础节奏（毫秒）：增强模式 + 滚轮启动自动滚动后，\n"
-      "; 每 N 毫秒滚一格。越小越快，可调范围 20..1000。\n"
+      "; 自动滚动的初始节拍（毫秒）：启动后每 N 毫秒滚一格（最慢档）。\n"
+      "; 同向继续滚会逐档提速，最快档节拍 = N / WheelScrollMul。可调范围 20..1000。\n"
       "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n" },
     { "enhancekeys",
       "; ---- 和弦修饰的激活键 ----\n"

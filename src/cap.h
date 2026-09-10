@@ -139,17 +139,20 @@ void ActWheelClear(void);                /* 丢弃未补发的滚轮请求（松
 
 /* 自动滚动专用通道（同样在 act.c：独立状态 + 独立线程）。
    增强模式（默认 Alt / D）+ 滚轮 = 持续滚动：
-     · 同向再滚 -> 提速一档，上限 = WheelScrollMul
-     · 反向滚   -> 立即终止
+     · 第一次滚 -> 启动，第 1 档 = 最慢档（AutoScrollInterval 每格）
+     · 同向再滚 -> 逐档平滑提速，最快档 = WheelScrollMul 倍
+     · 反向滚   -> 立即终止，并把速度**清零**（下次从最慢档重来）
      · 增强模式失效 / 松开 C -> 立即终止
+   每拍恒定只发一格，只用节拍长度调速（不是"每拍补一撮"），所以提速不会抖。
    主线程只投递"发生了一次滚轮"，状态机与注入都在本通道内，主线程不阻塞。
    启用条件：`WheelScrollMul >= 2`（与滚轮加速同一个开关：0/1 = 整个滚轮增强关闭）。 */
 void ActAutoScrollWheel(int delta);   /* 主线程：增强模式下的一次滚轮 */
 void ActAutoScrollStop(void);         /* 立即终止（松手 / 复位 / 退出） */
 BOOL ActAutoScrollActive(void);       /* 单测用 */
-int  ActAutoScrollGear(void);         /* 单测用：当前档位（1..cap，未启动为 0） */
+int  ActAutoScrollGear(void);         /* 单测用：当前速度档（1..总档数，未启动为 0） */
 int  ActAutoScrollDir(void);          /* 单测用：+1 上滚 / -1 下滚 / 0 未启动 */
-int  ActAutoScrollCap(void);          /* 单测用：档位上限 = WheelScrollMul；<2 表示未启用 */
+int  ActAutoScrollCap(void);          /* 单测用：速度上限倍数 = WheelScrollMul；<2 表示未启用 */
+int  ActAutoScrollTick(void);         /* 单测用：当前节拍(ms)；最快 = AutoScrollInterval/WheelScrollMul */
 
 /* ---------- 钩子模块 ---------- */
 extern HHOOK g_hook;

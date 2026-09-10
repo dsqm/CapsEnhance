@@ -205,17 +205,48 @@ static void WheelLaneStop(void) {
      · 每个节拍都要等待，和滚轮加速一样**绝不能跑在主线程上**（主线程不在
        "等消息"状态会让系统跳过它的低级钩子事件，见文件头）。
 
+   速度模型：**每拍恒定只发一格**，只用"节拍长度"调速。
+     · 第 1 档（刚启动）节拍 = AutoScrollInterval，也就是最慢档、初始速度；
+     · 同向每再滚一次进一档，节拍线性插值缩短，到末档恰好缩到
+       AutoScrollInterval / WheelScrollMul —— 最快档的吞吐量仍等于
+       WheelScrollMul 倍，但中间还有若干档，不会"一滚就翻倍"；
+     · 变速**不打断当前节拍**（下一拍才生效）。否则滚轮每动一下就立刻多插
+       一格，"档位越高抖得越厉害"；
+     · 反向滚 = 立即终止**并把档位清零**，之后再滚从第 1 档（最慢）重新开始。
+   旧写法是"每拍补 `档位` 格"：第 2 档起就是"一小串脉冲 + 一大段静默"，
+   看上去在抖 —— 这就是本模型要替换掉的东西。
+
    状态机（active/dir/gear）由主线程在锁内更新，工作线程只按拍输出。
    终止路径：反向滚（主线程置停）、松开修饰键（钩子投 WM_MODE_UP）、
    松开 C / 引擎复位（ResetEngine -> ActAutoScrollStop）。工作线程另外每拍
    自查 ModeDown 与 g_cMod 作兜底 —— 不依赖任何消息也能自愈。 */
+
+/* 速度档数与节拍下限。档位 i ∈ 1..AUTOSCROLL_SPEED_STEPS：
+     tick(i) = base * (S-1) / ((S-1) + (cap-1)*(i-1))
+       i = 1 -> base        （初始速度，最慢）
+       i = S -> base / cap  （最快 = WheelScrollMul 倍）
+   线性插值把中间几档均匀铺开；档数 S 与 cap 无关，所以缺省 cap=2 时也有
+   6 档可走 —— 这正是"调速不平滑"的修法（原先只有 1x / 2x 两个速度点）。 */
+#define AUTOSCROLL_SPEED_STEPS 6
+#define AUTOSCROLL_TICK_MIN    20   /* 节拍下限（ms）：再快没有意义，注入也太密 */
+
+static DWORD AutoScrollTickMs(int gear, int cap) {
+    int base = ConfigGetAutoScrollInterval();
+    if (cap  < 2) cap  = 2;
+    if (gear < 1) gear = 1;
+    if (gear > AUTOSCROLL_SPEED_STEPS) gear = AUTOSCROLL_SPEED_STEPS;
+    int den = (AUTOSCROLL_SPEED_STEPS - 1) + (cap - 1) * (gear - 1);
+    DWORD ms = (DWORD)(base * (AUTOSCROLL_SPEED_STEPS - 1) / den);
+    return (ms < AUTOSCROLL_TICK_MIN) ? AUTOSCROLL_TICK_MIN : ms;
+}
+
 static CRITICAL_SECTION s_asCs;
-static HANDLE          s_asEvPoke = NULL;  /* auto-reset：状态变了（启动/提速/停止） */
+static HANDLE          s_asEvPoke = NULL;  /* auto-reset：状态变了（启动/变速/停止） */
 static HANDLE          s_asThread = NULL;
 static volatile LONG   s_asStop   = 0;
 static BOOL            s_asInit   = FALSE;
 static volatile LONG   s_asActive = 0;
-static volatile LONG   s_asGear   = 0;
+static volatile LONG   s_asGear   = 0;     /* 速度档：1..AUTOSCROLL_SPEED_STEPS */
 static volatile LONG   s_asDir    = 0;     /* +1 上滚 / -1 下滚 */
 static volatile LONG   s_asCap    = 0;
 
@@ -226,6 +257,10 @@ int ActAutoScrollCap(void) {
 BOOL ActAutoScrollActive(void) { return s_asActive != 0; }
 int  ActAutoScrollGear(void)   { return s_asActive ? (int)s_asGear : 0; }
 int  ActAutoScrollDir(void)    { return s_asActive ? (int)s_asDir  : 0; }
+/* 单测用：当前节拍。变速只改节拍、不改每拍格数，所以断言它最直观。 */
+int  ActAutoScrollTick(void)   {
+    return s_asActive ? (int)AutoScrollTickMs((int)s_asGear, (int)s_asCap) : 0;
+}
 
 /* 立即终止。非阻塞：只置状态 + 唤醒工作线程，绝不在调用线程里等它收尾
    （调用方可能是键盘钩子所在的主线程）。 */
@@ -244,11 +279,14 @@ void ActAutoScrollWheel(int delta) {
     EnterCriticalSection(&s_asCs);
     s_asCap = cap;
     if (!s_asActive) {
-        s_asActive = 1; s_asDir = dir; s_asGear = 1;    /* 第一滚：基础档 */
+        s_asActive = 1; s_asDir = dir; s_asGear = 1;    /* 第一滚：最慢档启动 */
     } else if ((int)s_asDir == dir) {
-        if ((int)s_asGear < cap) s_asGear++;            /* 同向：提速一档 */
+        if ((int)s_asGear < AUTOSCROLL_SPEED_STEPS)
+            s_asGear++;                                 /* 同向：平滑进一档 */
     } else {
-        s_asActive = 0; s_asDir = 0; s_asGear = 0;      /* 反向：立即终止 */
+        /* 反向：立即终止，并**清零档位** —— 下次启动从最慢档重来，
+           不残留打断前的速度（用户要的"反向打断后重置滚动速度"）。 */
+        s_asActive = 0; s_asDir = 0; s_asGear = 0;
     }
     LeaveCriticalSection(&s_asCs);
     SetEvent(s_asEvPoke);
@@ -256,28 +294,46 @@ void ActAutoScrollWheel(int delta) {
 
 static DWORD WINAPI AutoScrollThread(LPVOID p) {
     (void)p;
+    BOOL running = FALSE;
     for (;;) {
         if (InterlockedCompareExchange(&s_asStop, 0, 0)) break;
-        /* 空闲：等一次状态变化（1s 超时兜底，防事件被吞） */
-        WaitForSingleObject(s_asEvPoke, 1000);
-        if (InterlockedCompareExchange(&s_asStop, 0, 0)) break;
+
+        if (!running) {
+            /* 空闲：等一次状态变化（1s 超时兜底，防事件被吞）。
+               先看状态再看事件 —— 否则"激活事件已被上一轮吃掉"时会白等 1s。 */
+            if (!InterlockedCompareExchange(&s_asActive, 0, 0))
+                WaitForSingleObject(s_asEvPoke, 1000);
+            if (InterlockedCompareExchange(&s_asStop, 0, 0)) break;
+            if (!InterlockedCompareExchange(&s_asActive, 0, 0)) continue;
+            running = TRUE;          /* 落到下面立刻发第一格：启动要即时响应 */
+        }
+
+        if (!InterlockedCompareExchange(&s_asActive, 0, 0)) { running = FALSE; continue; }
+        /* 兜底：增强模式或映射模式已失效（松开 Alt/D 或 C）就停 */
+        if (!g_cMod || !ModeDown(MODE_ENHANCE)) {
+            ActAutoScrollStop(); running = FALSE; continue;
+        }
+        int dir = (int)s_asDir;
+        if (dir == 0) { running = FALSE; continue; }   /* 防御：不该出现 */
+
+        DWORD tick = AutoScrollTickMs((int)s_asGear, (int)s_asCap);
+        SendWheelNotches(dir > 0 ? WHEEL_STD_DELTA : -WHEEL_STD_DELTA, 1);
+
+        /* 等满这一个节拍。**变速不打断本拍**（下一拍才生效）：未选中的唤醒
+           （提速）继续等剩下的时间；只有停止/反向（active 被清 0）才提前返回。
+           这就是"档位越高越抖"的修法之一。 */
+        ULONGLONG deadline = GetTickCount64() + tick;
+        BOOL ended = FALSE;
         for (;;) {
-            if (!InterlockedCompareExchange(&s_asActive, 0, 0)) break;
-            /* 兜底：增强模式或映射模式已失效（松开 Alt/D 或 C）就停 */
-            if (!g_cMod || !ModeDown(MODE_ENHANCE)) { ActAutoScrollStop(); break; }
-            int g   = (int)s_asGear;
-            int cap = (int)s_asCap;
-            int dir = (int)s_asDir;
-            if (g < 1) g = 1;
-            if (cap > 0 && g > cap) g = cap;
-            SendWheelNotches(dir > 0 ? WHEEL_STD_DELTA : -WHEEL_STD_DELTA, g);
-            /* 等下一个节拍。停止/提速/反向都会 SetEvent，所以能立即响应；
-               没有事件就是正常节拍（间隔由配置给，20..1000ms）。 */
-            if (WaitForSingleObject(s_asEvPoke,
-                                    (DWORD)ConfigGetAutoScrollInterval()) == WAIT_OBJECT_0) {
-                if (InterlockedCompareExchange(&s_asStop, 0, 0)) break;
-                if (!InterlockedCompareExchange(&s_asActive, 0, 0)) break;
-            }
+            ULONGLONG now = GetTickCount64();
+            if (now >= deadline) break;
+            if (WaitForSingleObject(s_asEvPoke, (DWORD)(deadline - now)) == WAIT_TIMEOUT) break;
+            if (InterlockedCompareExchange(&s_asStop, 0, 0)) { ended = TRUE; break; }
+            if (!InterlockedCompareExchange(&s_asActive, 0, 0)) { ended = TRUE; break; }
+        }
+        if (ended) {
+            if (InterlockedCompareExchange(&s_asStop, 0, 0)) break;
+            running = FALSE;
         }
     }
     return 0;

@@ -199,13 +199,13 @@ int main(void) {
     EXPECT(ConfigGetAutoScrollInterval() == 1000, "CFG: AutoScrollInterval 上限钳到 1000");
     WriteIni("[General]\r\nAutoScrollInterval = abc\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollInterval() == 120, "CFG: AutoScrollInterval 非法值回落默认 120");
+    EXPECT(ConfigGetAutoScrollInterval() == 300, "CFG: AutoScrollInterval 非法值回落默认 300");
     WriteIni("[Other]\r\nAutoScrollInterval = 300\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollInterval() == 120, "CFG: 非 General 段的 AutoScrollInterval 不生效");
+    EXPECT(ConfigGetAutoScrollInterval() == 300, "CFG: 非 General 段的 AutoScrollInterval 不生效");
     WriteIni("[General]\r\n\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollInterval() == 120, "CFG: AutoScrollInterval 缺省为 120");
+    EXPECT(ConfigGetAutoScrollInterval() == 300, "CFG: AutoScrollInterval 缺省为 300");
 
     /* 激活键列表 EnhanceKeys / ShiftKeys：配置层只作"通用字符串项"留存，
        由键位映射模块（keymap.c）解析。这里断言**解析结果** ——
@@ -270,7 +270,7 @@ int main(void) {
                "UPG: 用户已有内容保留 (RunAsAdmin=1 / 名单)");
         EXPECT(ConfigGetLogMaxKB() == 2048 && ConfigGetMaxArrowSteps() == 32,
                "UPG: 缺失键补齐默认值");
-        EXPECT(ConfigGetAutoScrollInterval() == 120, "UPG: 补齐 AutoScrollInterval 默认值");
+        EXPECT(ConfigGetAutoScrollInterval() == 300, "UPG: 补齐 AutoScrollInterval 默认值");
         KeyMapInit();
         EXPECT(ModeKeyCount(MODE_ENHANCE) == 2 && ModeKeyCount(MODE_SHIFT) == 1,
                "UPG: 补齐的 EnhanceKeys/ShiftKeys 可被解析（Alt+D / F）");
@@ -284,7 +284,7 @@ int main(void) {
                 if (strstr(line, "MaxArrowSteps = 32")) hasSteps = 1;
                 if (strstr(line, "OverStepMode = 0")) hasMode = 1;
                 if (strstr(line, "WheelScrollMul = 2")) hasWheel = 1;
-                if (strstr(line, "AutoScrollInterval = 120")) hasInterval = 1;
+                if (strstr(line, "AutoScrollInterval = 300")) hasInterval = 1;
                 if (strstr(line, "EnhanceKeys = Alt, D")) hasEnh = 1;
                 if (strstr(line, "ShiftKeys = F")) hasShift = 1;
             }
@@ -429,7 +429,7 @@ int main(void) {
     EXPECT(TemplateHas("MaxArrowSteps = 32"),"CFG: 模板含 MaxArrowSteps 默认值");
     EXPECT(TemplateHas("OverStepMode = 0"),  "CFG: 模板含 OverStepMode 默认值");
     EXPECT(TemplateHas("WheelScrollMul = 2"),"CFG: 模板含 WheelScrollMul 默认值");
-    EXPECT(TemplateHas("AutoScrollInterval = 120"), "CFG: 模板含 AutoScrollInterval 默认值");
+    EXPECT(TemplateHas("AutoScrollInterval = 300"), "CFG: 模板含 AutoScrollInterval 默认值");
     EXPECT(TemplateHas("EnhanceKeys = Alt, D"), "CFG: 模板含 EnhanceKeys 默认值");
     EXPECT(TemplateHas("ShiftKeys = F"),     "CFG: 模板含 ShiftKeys 默认值");
     EXPECT(TemplateHas("[NativeWordJump]"),  "CFG: 模板含 NativeWordJump 段");

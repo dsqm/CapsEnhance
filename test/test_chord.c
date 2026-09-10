@@ -562,34 +562,58 @@ int main(void) {
        计数钩子只数**我们注入的**滚轮（LLMHF_INJECTED），与场景Q共用，
        所以每段观测前先 ResetWheelRec。 */
     Reset();
-    CHECK(ActAutoScrollCap() == 2, "R: 档位上限 = WheelScrollMul 缺省值 2");
+    CHECK(ActAutoScrollCap() == 2, "R: 速度上限 = WheelScrollMul 缺省值 2");
+    CHECK(ActAutoScrollTick() == 0, "R: 未启动时节拍为 0");
     CHECK(!ActAutoScrollActive(), "R: 初始未在自动滚动");
 
     Key(CLI_CAPS, TRUE); Pump(2);
     KeyAlt(VK_LMENU, TRUE); Pump(2);              /* 默认增强键：左 Alt */
     CHECK(ModeDown(MODE_ENHANCE), "R: 按住 Alt -> 增强模式生效");
 
-    ActAutoScrollWheel(120);                      /* 第一滚：基础档、方向向上 */
+    /* 初始速度不能太快：第 1 档节拍就是配置值（缺省 300ms ≈ 3 格/秒） */
+    int base = ConfigGetAutoScrollInterval();
+    CHECK(base == 300, "R: 初始节拍缺省 300ms（放慢过，原来 120ms）");
+
+    ActAutoScrollWheel(120);                      /* 第一滚：启动、最慢档、向上 */
     CHECK(ActAutoScrollActive() && ActAutoScrollDir() == 1 && ActAutoScrollGear() == 1,
           "R: 增强模式滚轮 -> 启动自动滚动（档 1 / 向上）");
+    CHECK(ActAutoScrollTick() == base, "R: 第 1 档节拍 = AutoScrollInterval");
 
-    ActAutoScrollWheel(120);                      /* 同向再滚：提速一档 */
-    CHECK(ActAutoScrollGear() == 2, "R: 同向再滚 -> 提速到档 2");
-    ActAutoScrollWheel(120);                      /* 已达上限 */
-    CHECK(ActAutoScrollGear() == 2, "R: 档位被钳在 WheelScrollMul 以内");
+    /* 平滑提速：缺省 cap=2 时也有多档（不是"一滚就翻倍"），节拍单调变短 */
+    int t1 = ActAutoScrollTick();
+    ActAutoScrollWheel(120);
+    int t2 = ActAutoScrollTick();
+    CHECK(ActAutoScrollGear() == 2 && t2 < t1, "R: 同向再滚 -> 进第 2 档、节拍变短");
+    ActAutoScrollWheel(120);
+    int t3 = ActAutoScrollTick();
+    CHECK(ActAutoScrollGear() == 3 && t3 < t2, "R: 再滚 -> 第 3 档（中间档不止两档）");
+
+    /* 到顶：节拍恰好缩到 AutoScrollInterval / WheelScrollMul */
+    for (int i = 0; i < 10; i++) ActAutoScrollWheel(120);
+    int tTop = ActAutoScrollTick(), gTop = ActAutoScrollGear();
+    ActAutoScrollWheel(120);
+    CHECK(ActAutoScrollGear() == gTop && ActAutoScrollTick() == tTop,
+          "R: 到顶档后不再提速（档位饱和）");
+    CHECK(tTop == base / 2, "R: 顶档节拍 = AutoScrollInterval / WheelScrollMul");
 
     ResetWheelRec();
-    Pump(300);                                    /* 至少几个节拍（缺省 120ms） */
+    Pump(600);                                    /* 至少一个节拍（缺省 300ms） */
     CHECK(g_wheelInj >= 1 && g_wheelSum > 0, "R: 自动滚动确实在持续注入上滚");
 
-    ActAutoScrollWheel(-120);                     /* 反向：立即终止 */
-    CHECK(!ActAutoScrollActive() && ActAutoScrollDir() == 0,
-          "R: 反向滚动 -> 立即终止");
+    ActAutoScrollWheel(-120);                     /* 反向：立即终止 + 清零速度 */
+    CHECK(!ActAutoScrollActive() && ActAutoScrollDir() == 0 && ActAutoScrollGear() == 0,
+          "R: 反向滚动 -> 立即终止并清零档位");
+
+    /* 反向打断后再滚：必须从**最慢档**重来，不残留打断前的速度 */
+    ActAutoScrollWheel(120);
+    CHECK(ActAutoScrollActive() && ActAutoScrollGear() == 1 && ActAutoScrollTick() == base,
+          "R: 反向打断后重置速度 -> 再滚从第 1 档（最慢）重来");
+    ActAutoScrollWheel(-120);                     /* 收起，免得影响后面的用例 */
 
     ResetWheelRec();
     ActAutoScrollWheel(-120);                     /* 下滚启动（方向 -1） */
     CHECK(ActAutoScrollActive() && ActAutoScrollDir() == -1, "R: 下滚启动（方向 -1）");
-    Pump(300);
+    Pump(600);
     CHECK(g_wheelSum < 0, "R: 下滚方向正确（与上方上滚大致抵消）");
 
     /* 松开修饰键：钩子投递 WM_MODE_UP -> 终止 */
