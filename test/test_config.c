@@ -443,9 +443,13 @@ int main(void) {
             }
             whole[wn] = 0;
             int allBom = 0;
+            /* 用 unsigned char 比较：char 在本工具链下是有符号的，
+               `(char)0xEF` 会被 /W4 判为"截断常量值"（C4310），
+               而且有符号比较对 >= 0x80 的字节本来就不正确。 */
+            const unsigned char* ub = (const unsigned char*)whole;
             for (size_t i = 0; i + 2 < wn; i++)
-                if (whole[i] == (char)0xEF && whole[i+1] == (char)0xBB &&
-                    whole[i+2] == (char)0xBF) allBom++;
+                if (ub[i] == 0xEF && ub[i+1] == 0xBB &&
+                    ub[i+2] == 0xBF) allBom++;
             EXPECT(allBom == 1, "UPG(BOM边界): 全文只有一个 BOM（未被复制进正文）");
         }
     }
