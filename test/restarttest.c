@@ -39,7 +39,8 @@ int main(void) {
     memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
     memset(&pi, 0, sizeof(pi));
     if (!CreateProcessW(exe, exe, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-        printf("cannot start CapsEnhance.exe\n");
+        wprintf(L"cannot start CapsEnhance.exe (path='%s') GetLastError=%lu\n",
+                exe, GetLastError());
         return 2;
     }
     DWORD pidA = pi.dwProcessId;

@@ -20,18 +20,24 @@ jobs:
         shell: cmd
         run: call test\build_keytest.bat
 
-      # 真实进程级检查：重启握手 / 单实例 / 日志轮转。
-      # 这些会启动 CapsEnhance.exe（windows-latest 是完整交互会话，可运行 GUI）。
-      - name: Runtime checks (restart handshake / single instance / log rotate)
-        shell: cmd
-        run: |
-          bin\restarttest.exe || exit /b 1
-          bin\logsmoke.exe || exit /b 1
-          taskkill /IM CapsEnhance.exe /F 2>nul & exit /b 0
-
+      # 先编译主程序：restarttest / logsmoke 会用 CreateProcessW 启动
+      # bin\CapsEnhance.exe 做真实进程级检查，必须先有它。
       - name: Build release exe
         shell: cmd
         run: call build.bat
+
+      # 真实进程级检查：重启握手 / 单实例 / 日志轮转。
+      # windows-latest 是完整交互会话，可运行 GUI 进程。
+      - name: Runtime checks (restart handshake / single instance / log rotate)
+        shell: cmd
+        run: |
+          if not exist "bin\CapsEnhance.exe" (
+            echo bin\CapsEnhance.exe not found - ensure build.bat ran successfully
+            exit /b 1
+          )
+          bin\restarttest.exe || exit /b 1
+          bin\logsmoke.exe || exit /b 1
+          taskkill /IM CapsEnhance.exe /F 2>nul & exit /b 0
 
       - name: Upload CapsEnhance.exe
         uses: actions/upload-artifact@v4
