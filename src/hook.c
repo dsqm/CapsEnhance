@@ -131,6 +131,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             } else if (!down && g_cMod) {
                 g_cMod = FALSE;
                 g_downMask = 0;
+                SendArrowsRequestInterrupt();   /* C 松开：立即打断逐格输出 */
                 PostMessageW(g_mainWnd, WM_CAPS_UP, 0, 0);
             }
             return 1;   /* 全程屏蔽，无效果 */
@@ -161,6 +162,9 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             if (down) {
                 if (!(g_downMask & bit)) {       /* 去抖：忽略系统自动重复 */
                     g_downMask |= bit;
+                    /* 正在逐格输出且按下了不同触发键（改道）：立即打断 */
+                    if (SendArrowsConflicts(act))
+                        SendArrowsRequestInterrupt();
                     PostMessageW(g_mainWnd, WM_TRIG_DOWN, (WPARAM)act, 0);
                 }
             } else {

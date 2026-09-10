@@ -78,6 +78,8 @@ void ReleaseFill(int act);       /* 松手补齐：增益模式点按 -> 补到3
    缺陷也不一样（缺 KEYEVENTF_EXTENDEDKEY / Ctrl 提前抬起），统一后只修一处。 */
 void SendKeyOnce(int vk, BOOL shift);        /* 单击一个键，shift 全程按住 */
 void SendArrows(int dir, int n, BOOL shift); /* n 个左/右箭头，shift 全程按住 */
+void SendArrowsRequestInterrupt(void);       /* 请求打断正在进行的逐格输出（钩子线程调用） */
+BOOL SendArrowsConflicts(int act);           /* act 是否与正在逐格输出的方向冲突 */
 void SendNativeWordJump(int dir, BOOL shift);/* 原生 Ctrl(+Shift)+方向：词跳兜底 */
 void SendClearStuckModifiers(void);          /* 清卡键：逻辑按下且物理未按的补抬起（重启/退出用） */
 void SendForceResetKeys(void);               /* 无条件对所有修饰键补抬起（--reset-keys 强制重置） */

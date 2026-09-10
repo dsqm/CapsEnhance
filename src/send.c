@@ -75,20 +75,47 @@ void SendKeyOnce(int vk, BOOL shift) {
     if (shift) { Sleep(KEY_GAP); SendEvent(VK_LSHIFT, TRUE); }
 }
 
+/* 逐格输出的打断机制：
+   SendArrows 的循环跑在主线程，期间主线程被占用、无法处理任何消息，
+   所以"松开 C"和"改道按键"这些打断意图只能由钩子线程置 volatile 标志，
+   循环里每发完一对键检查一次（最坏 ~13ms 内响应）。
+   触发条件（hook.c 调用）：
+     1) C（CapsLock）松开 —— 映射模式结束，立即停；
+     2) 按下与当前输出方向不同的触发键 —— 改道（如正在 ← 时按 L）。
+   打断后循环立即退出，循环外的收尾（抬起 Shift）照常执行；
+   改道按键的 TRIG_DOWN 已在主线程队列里，循环结束后自然开火衔接。 */
+static volatile BOOL g_arrBusy = FALSE;    /* 正在逐格输出 */
+static volatile int  g_arrDir  = -1;       /* 当前输出方向 (DIR_*) */
+static volatile BOOL g_arrBreak = FALSE;   /* 打断请求 */
+
+void SendArrowsRequestInterrupt(void) { g_arrBreak = TRUE; }
+
+/* act 是否与正在逐格输出的方向冲突（不同触发键即改道） */
+BOOL SendArrowsConflicts(int act) {
+    if (!g_arrBusy) return FALSE;
+    int curAct = (g_arrDir == DIR_LEFT) ? ACT_WORD_L : ACT_WORD_R;
+    return act != curAct;
+}
+
 /* 逐方向键移动：发送 n 个左/右箭头（可带 Shift 位移）。
    每个箭头单独发送并微小间隔，避免大批量 SendInput 在部分程序中只认第一个键；
    Shift 在整个跳词期间持续按住以维持选区。 */
 #define MAX_ARROW_STEPS 256
 void SendArrows(int dir, int n, BOOL shift) {
     int vk = (dir == DIR_LEFT) ? VK_LEFT : VK_RIGHT;
+    g_arrDir = dir; g_arrBusy = TRUE; g_arrBreak = FALSE;
     if (shift) { SendEvent(VK_LSHIFT, FALSE); Sleep(KEY_GAP); }
     for (int i = 0; i < n && i < MAX_ARROW_STEPS; i++) {
+        if (g_arrBreak) break;
         SendEvent(vk, FALSE);
         Sleep(KEY_GAP);
+        if (g_arrBreak) break;
         SendEvent(vk, TRUE);
+        if (g_arrBreak) break;
         Sleep(ARROW_GAP);
     }
-    if (shift) SendEvent(VK_LSHIFT, TRUE);
+    g_arrBusy = FALSE;
+    if (shift) SendEvent(VK_LSHIFT, TRUE);   /* 打断时也要抬 Shift，选区停在此处 */
 }
 
 /* 兜底：文字读取失败时，用系统原生 Ctrl(+Shift)+方向键做词跳。
