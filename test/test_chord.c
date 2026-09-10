@@ -55,6 +55,24 @@ static int SeqIdx(int vk, int up) {
 }
 static void ResetRec(void) { g_recN = 0; g_seqN = 0; }
 
+/* ---- 滚轮注入计数钩子（场景Q用）----
+   统计"我们注入出去的滚轮事件"格数与方向和：验证挪到专用线程以后仍然逐格
+   补发、格数换算正确。这**不是**生产那个 LowLevelMouseProc（它做加速决策），
+   所以不存在"注入事件被自己再放大"的风险 —— 本钩子只计数。 */
+static int g_wheelInj = 0;     /* 注入的滚轮事件条数 */
+static int g_wheelSum = 0;     /* 注入的 delta 之和（方向也在这里） */
+static void ResetWheelRec(void) { g_wheelInj = 0; g_wheelSum = 0; }
+LRESULT CALLBACK WheelCapProc(int n, WPARAM w, LPARAM l) {
+    if (n == HC_ACTION && w == WM_MOUSEWHEEL) {
+        const MSLLHOOKSTRUCT* m = (const MSLLHOOKSTRUCT*)l;
+        if (m && (m->flags & LLMHF_INJECTED)) {
+            g_wheelInj++;
+            g_wheelSum += (int)(short)HIWORD(m->mouseData);
+        }
+    }
+    return CallNextHookEx(NULL, n, w, l);
+}
+
 /* ---- 仿真工具 ---- */
 static void Key(int vk, BOOL down) {
     KBDLLHOOKSTRUCT ks; memset(&ks, 0, sizeof(ks));
@@ -171,6 +189,8 @@ static void WriteChordIni(const char* body) {
 int main(void) {
     g_state.paused = FALSE;
     SetWindowsHookExW(WH_KEYBOARD_LL, CapProc, GetModuleHandleW(NULL), 0);
+    /* 滚轮注入计数（场景Q）：只计数，不做任何加速决策 */
+    SetWindowsHookExW(WH_MOUSE_LL, WheelCapProc, GetModuleHandleW(NULL), 0);
 
     /* 生产路径里动作由 act.c 的执行线程发送，测试必须起同一个线程，
        否则测的是"同步兜底"分支，覆盖不到真实时序。 */
@@ -403,6 +423,34 @@ int main(void) {
     CHECK(SendWheelExtraCount(999) == 15, "N: 超过上限也只补发 15 格");
 
     Key(CLI_CAPS, FALSE); Pump(2);
+
+    /* ---- 场景Q：滚轮加速搬到专用线程后仍逐格补发 ----
+       原来主线程自己在 Sleep(2ms) 循环里补发：主线程不在"等消息"状态期间，
+       系统对低级钩子的事件是**直接跳过**（不是延后补发）——松开 Caps 的 keyup
+       被漏掉就卡住 g_cMod，表现是"松开 C 后滚轮还在滚 + 之后按 Tab 冒出大写锁定"。
+       这里验证搬运之后行为不变：格数换算与方向都正确。
+       上下各来一次（净滚动量为 0），避免测试真的把光标下的窗口滚走。 */
+    Reset();
+    Pump(150); Sink();                   /* 先把残留的加速请求冲干净 */
+    ResetWheelRec();
+
+    ActWheelPost(120, 3);                /* mul=3 -> 补发 2 格 */
+    Pump(100); Drain();
+    CHECK(g_wheelInj == 2 && g_wheelSum == 240,
+          "Q: mul=3 补发 2 格 delta=120（由工作线程注入）");
+
+    ResetWheelRec();
+    ActWheelPost(-120, 3);               /* 方向原样带过去 */
+    Pump(100); Drain();
+    CHECK(g_wheelInj == 2 && g_wheelSum == -240,
+          "Q: 下滚同样补发 2 格 delta=-120");
+
+    ResetWheelRec();
+    ActWheelPost(120, 1);                /* 不放大 */
+    ActWheelPost(120, 0);
+    ActWheelPost(0, 3);
+    Pump(100); Drain();
+    CHECK(g_wheelInj == 0, "Q: mul<=1 或 delta=0 -> 一格都不补发");
 
     /* ---- 场景O：超限"改道"的落点校验契约 ----
        背景（QQ 实测）：MaxArrowSteps 超限后 SendArrows 改发原生 Ctrl+方向，

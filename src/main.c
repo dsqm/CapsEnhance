@@ -259,6 +259,9 @@ static void ResetEngine(void) {
     /* 丢掉还没开始的"重复开火"尾流，但保留"松手补齐" —— 后者是用户本次
        点按的一部分，不能因为紧接着松开 C 就被清掉。 */
     ActClearKeepFill();
+    /* 滚轮加速的待补队列也一起丢：松开 C 之后不该再有加速尾流
+       （用户预期"松开 C 就是普通滚轮"）。 */
+    ActWheelClear();
     g_pendingAct = ACT_NONE;
     g_activeAct  = ACT_NONE;
     g_actD = FALSE; g_actF = FALSE;
@@ -377,8 +380,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                    ConfigGetLogMaxKB(), ConfigGetRunAsAdmin() ? 1 : 0);
             MessageBeep(MB_ICONASTERISK);   /* 系统"星号"音：开始记录（与结束不同） */
             TrayHint(L"正在记录日志（C+\x60 结束）");
-            NavProbe();
-            TrayBalloon(L"焦点探测已写入 CapsEnhance.log");
+            /* 探测交给执行线程：NavProbe 会做跨进程 SendMsg + UIA COM 往返，
+               是几百毫秒级的阻塞。留在主线程就是同一个根因 —— 期间松开 Caps
+               的 keyup 会被系统跳过，g_cMod 卡住，之后按 Tab 冒出大写锁定。 */
+            { ActJob j; memset(&j, 0, sizeof(j)); j.act = ACT_PROBE; ActPost(&j); }
+            TrayBalloon(L"焦点探测写入 CapsEnhance.log");
         } else {
             CapLog("===== REC END =====");
             MessageBeep(MB_ICONHAND);       /* 系统"手形"音：结束记录（低而不同） */
@@ -472,10 +478,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_WHEEL_ACCEL:
-        /* 滚轮加速：主线程直接注入。一条 SendInput 数组调用（微秒级）不会
-           阻塞，所以不走 act.c 的队列 —— 队列是给"会阻塞数百毫秒的发送"
-           准备的，滚轮排在词跳后面反而会毁掉滚动的手感。 */
-        SendWheelAccel((int)wp, (int)lp);
+        /* 滚轮加速：只投递给专用线程，**主线程绝不在这里做注入**。
+           原来在这里直接 SendWheelAccel（内含 Sleep 逐格补发），主线程一进
+           Sleep 就不在"等消息"状态，系统会把这段时间到达的低级钩子事件**直接
+           跳过**：松开 Caps 的 keyup 被漏掉 -> g_cMod 卡在 TRUE -> 松开 C 后
+           滚轮还在加速、随后按 Tab 又冒出大写锁定。同一根因也造成 mul>=3 卡顿。 */
+        ActWheelPost((int)wp, (int)lp);
         return 0;
     /* ---- 托盘 ---- */
     case WM_TOGGLE_TRAY:

@@ -84,6 +84,14 @@ void ActClearKeepFill(void);      /* 同上，但保留"松手补齐"类请求  
 int  ActInFlight(void);           /* 队列中 + 正在执行的动作数                */
 void ActDrain(void);              /* 等队列清空且当前动作结束                 */
 
+/* 滚轮加速专用通道（独立队列 + 独立线程，见 act.c）。
+   ActWheelPost 由主线程调用，绝不阻塞：原来的实现是在主线程 Sleep(2ms)
+   逐格补发，主线程不在"等消息"状态期间系统会**跳过**低级钩子，
+   于是松开 Caps 的 keyup 可能被漏掉（g_cMod 卡住 → 滚轮停不下来 +
+   之后按 Tab 冒出大写锁定），同一根因也是 mul>=3 卡顿的来源。 */
+void ActWheelPost(int delta, int mul);   /* 投递一次滚轮加速（非阻塞）      */
+void ActWheelClear(void);                /* 丢弃未补发的滚轮请求（松开 C）  */
+
 /* ---------- 钩子模块 ---------- */
 extern HHOOK g_hook;
 BOOL HookInstall(void);
