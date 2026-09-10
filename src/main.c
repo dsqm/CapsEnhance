@@ -308,6 +308,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_recording = !g_recording;
         if (g_recording) {
             CapLog("===== REC START =====");
+            /* 配置值入日志：排查"配置没生效"类问题时一目了然 */
+            CapLog("配置: MaxArrowSteps=%d OverStepCtrl=%d LogMaxKB=%d RunAsAdmin=%d",
+                   ConfigGetMaxArrowSteps(), ConfigGetOverStepCtrl() ? 1 : 0,
+                   ConfigGetLogMaxKB(), ConfigGetRunAsAdmin() ? 1 : 0);
             MessageBeep(MB_ICONASTERISK);   /* 系统"星号"音：开始记录（与结束不同） */
             TrayHint(L"正在记录日志（C+\x60 结束）");
             NavProbe();

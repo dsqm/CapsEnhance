@@ -541,6 +541,33 @@ static void UiaLog(const char* what, HRESULT hr) {
                SUCCEEDED(hr) ? "OK" : "FAIL");
 }
 
+/* 诊断：把 WCHAR 文本片段转成 UTF-8 写日志，控制字符转义可见。
+   用于核对"UIA 读到的文本"与实际显示是否一致（WPF 等实现可能夹带
+   不可见字符，词边界在其上计算会错位）。 */
+static void LogTextSample(const WCHAR* s, int start, int count, const char* tag) {
+    if (!g_recording || !s || count <= 0) return;
+    char utf8[1200];
+    size_t o = 0;
+    for (int i = 0; i < count; i++) {
+        WCHAR c = s[start + i];
+        char one[8];
+        int n = 0;
+        if (c == L'\r')      { one[0]='\\'; one[1]='r'; n=2; }
+        else if (c == L'\n') { one[0]='\\'; one[1]='n'; n=2; }
+        else if (c == L'\t') { one[0]='\\'; one[1]='t'; n=2; }
+        else {
+            WCHAR w[2] = { c, 0 };
+            n = WideCharToMultiByte(CP_UTF8, 0, w, 1, one, sizeof(one), NULL, NULL);
+            if (n <= 0) { one[0]='?'; n=1; }
+        }
+        if (o + n >= sizeof(utf8) - 1) break;
+        memcpy(utf8 + o, one, (size_t)n);
+        o += (size_t)n;
+    }
+    utf8[o] = 0;
+    CapLog("  UIA 文本%s=[%s] (start=%d count=%d)", tag, utf8, start, count);
+}
+
 static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
     HRESULT hr;
     BSTR all = NULL, pre = NULL;
@@ -654,6 +681,10 @@ static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut)
                 *lenOut = alen;
                 *caretOut = idx;
                 ok = TRUE;
+                /* 头/尾样本入日志：核对 UIA 文本与显示是否一致 */
+                LogTextSample(copy, 0, alen < 24 ? alen : 24, "头");
+                LogTextSample(copy, alen > 48 ? alen - 48 : 0,
+                              alen > 48 ? 48 : alen, "尾");
             }
         }
     }
