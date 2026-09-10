@@ -56,14 +56,22 @@ void PhysSeedFromLogical(void) {
    "按住 Caps 同时按 J 和 K 会一直输出左键"就是这么来的。 */
 static volatile DWORD g_downMask = 0;
 
+/* `（探测键）的按下沿闩锁：**必须是文件作用域** ——
+   它原来写成一个 `static volatile BOOL armed` 的函数内静态变量，于是复位路径
+   （ModHoldReset）够不到它，而"松 C 之前先松 `" 的场景下，那个 keyup 会走
+   `if (!g_cMod) 放行` 分支直接出去，闩锁永远保持 TRUE：下一次 C+` 的首次按下
+   不触发探测（"有时要按两下"）。复位时必须能清它，所以提到文件作用域。 */
+static volatile BOOL g_probeArmed = FALSE;
+
 /* 清"按住状态"。暂停/重启时会漏掉抬起事件（钩子被跳过），留着就会粘住 ——
    比如暂停期间松开 Shift，恢复后 g_shiftMod 还是 TRUE，Caps+滚轮会莫名变成
-   横向滚动。所以复位时主动清掉。 */
+   横向滚动；` 的按下沿闩锁同理。所以复位时主动清掉。 */
 void ModHoldReset(void) {
     g_cMod = FALSE;
     s_shiftMask = 0;
     g_shiftMod = FALSE;
     g_downMask = 0;
+    g_probeArmed = FALSE;
     ModeResetAll();
 }
 
@@ -124,10 +132,15 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             if (down && !g_cMod) {
                 g_cMod = TRUE;
                 g_downMask = 0;
+                g_probeArmed = FALSE;   /* 新一轮和弦：探测键从"未按过"开始 */
                 PostMessageW(g_mainWnd, WM_CAPS_DOWN, 0, 0);   /* 通知主线程复位 */
             } else if (!down && g_cMod) {
                 g_cMod = FALSE;
                 g_downMask = 0;
+                /* 必须先清探测闩锁：若用户"按着 ` 直接松开 C"，` 的 keyup
+                   会在上面 `if (!g_cMod) 放行` 分支出去，没人再清闩锁 ——
+                   下一次 C+` 的首次按下就哑了。 */
+                g_probeArmed = FALSE;
                 SendArrowsRequestInterrupt();   /* C 松开：立即打断逐格输出 */
                 PostMessageW(g_mainWnd, WM_CAPS_UP, 0, 0);
             }
@@ -158,9 +171,12 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
         /* ---- C 按住期间：` 键触发焦点探测（仅按下沿） ---- */
         if (vk == PROBE_KEY) {
-            static volatile BOOL armed = FALSE;
-            if (down && !armed) { armed = TRUE; PostMessageW(g_mainWnd, WM_PROBE, 0, 0); }
-            else if (!down) armed = FALSE;
+            if (down && !g_probeArmed) {
+                g_probeArmed = TRUE;
+                PostMessageW(g_mainWnd, WM_PROBE, 0, 0);
+            } else if (!down) {
+                g_probeArmed = FALSE;
+            }
             return 1;
         }
 

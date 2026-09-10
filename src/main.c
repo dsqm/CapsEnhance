@@ -624,9 +624,24 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
        调 TrayHint，但托盘图标还没创建，提示全部落空 —— 用户看不到原因。 */
     TrayAdd();
 
+    /* 装钩子之前的准备**必须全部做完**再装钩子 ——
+       钩子一生效，C 按住期间的普通键就会被 hook.c 直接吞掉（return 1）。
+       此前顺序是 ActStart -> HookInstall -> ConfigLoad -> KeyMapInit，于是
+       "钩子已生效、键位表还是空的"这个窗口期里：所有键既不是触发键也不是
+       模式键，Caps+任意键被吞且没有任何动作；滚轮也读到的是静态初值而不是
+       用户配置。实测只有数毫秒，但正是"启动瞬间按 Caps 不响应"这类难复现
+       问题的标准成因。现在：配置 -> 键位表 -> 执行线程 -> 物理状态种子
+       -> 最后才装钩子。 */
+    ConfigLoad();   /* 读 CapsEnhance.ini（缺失则写注释模板） */
+    KeyMapInit();   /* 装配修饰激活键（编译期常量 Alt+D / F，见 cap.h） */
+
     /* 执行线程要在装钩子之前起来：装了钩子就随时可能有动作要发。 */
     if (!ActStart())
         CapLog("ActStart 失败：动作退回主线程同步执行（输入响应性下降）");
+
+    /* 物理状态种子也要在装钩子之前：装完之后才"补种"，会漏掉装钩瞬间
+       那一小段真实按键。 */
+    PhysSeedFromLogical();   /* 启动前就按着的键按物理按住处理（防误清） */
 
     if (!HookInstall()) {
         TrayHint(L"钩子安装失败（可能被安全软件拦截）");
@@ -637,12 +652,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     }
 
     if (!g_quit) {
-        PhysSeedFromLogical();   /* 启动前就按着的键按物理按住处理（防误清） */
-
         /* 启动不写日志文件；采集系统/环境基线供 C+` 诊断时输出。启动不发声。 */
         NavBaseInfo();
-        ConfigLoad();   /* 读 CapsEnhance.ini（缺失则写注释模板） */
-        KeyMapInit();   /* 装配修饰激活键（编译期常量 Alt+D / F，见 cap.h） */
 
         /* 配置要求以管理员运行且当前不是管理员：申请提权重启一次。
            提权实例带 --wait-exit —— 必须等本实例释放单实例互斥量之后再装
