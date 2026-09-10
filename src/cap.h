@@ -13,6 +13,7 @@
 #define WM_TOGGLE_TRAY (WM_APP + 5) /* 托盘自定义回调消息 */
 #define WM_ALREADY_RUNNING (WM_APP + 7) /* 已有实例在跑：新实例通知它提示后退出 */
 #define WM_PROBE       (WM_APP + 6) /* 探测焦点控件（钩子线程投递） */
+#define WM_WHEEL_ACCEL (WM_APP + 8) /* 滚轮加速：wParam=原始 delta，lParam=倍数 */
 
 #define PROBE_KEY      VK_OEM_3    /* 按住 C 时按 ` 触发焦点探测 */
 
@@ -87,6 +88,7 @@ void ActDrain(void);              /* 等队列清空且当前动作结束       
 extern HHOOK g_hook;
 BOOL HookInstall(void);
 void HookUninstall(void);
+BOOL HookMouseAvailable(void); /* 滚轮加速用的鼠标钩子是否装上了（装不上不影响主映射） */
 BOOL PhysKeyDown(int vk);   /* 真实（非注入）按键是否物理按住 —— 判断卡键用 */
 void PhysSeedFromLogical(void); /* 装钩子后：把当前已按下的键视为物理按住，防误清 */
 
@@ -105,6 +107,8 @@ void SendArrows(int dir, int n, BOOL shift); /* n 个左/右箭头，shift 全�
 void SendArrowsRequestInterrupt(void);       /* 请求打断正在进行的逐格输出（钩子线程调用） */
 BOOL SendArrowsConflicts(int act);           /* act 是否与正在逐格输出的方向冲突 */
 void SendNativeWordJump(int dir, BOOL shift);/* 原生 Ctrl(+Shift)+方向：词跳兜底 */
+void SendWheelAccel(int delta, int mul);     /* 滚轮加速：补发 (mul-1) 个同值刻度 */
+int  SendWheelExtraCount(int mul);           /* 倍数 -> 补发格数（单测用） */
 void SendClearStuckModifiers(void);          /* 清卡键：逻辑按下且物理未按的补抬起（重启/退出用） */
 void SendForceResetKeys(void);               /* 无条件对所有修饰键补抬起（--reset-keys 强制重置） */
 
@@ -120,6 +124,7 @@ BOOL ConfigGetRunAsAdmin(void);             /* [General] RunAsAdmin：启动时�
 int  ConfigGetLogMaxKB(void);               /* [General] LogMaxKB：日志上限(KB)，0=不限 */
 int  ConfigGetMaxArrowSteps(void);          /* [General] MaxArrowSteps：逐格词跳最大步数 */
 BOOL ConfigGetOverStepCtrl(void);           /* [General] OverStepMode：超限 0=仍发方向键 1=Ctrl+方向 */
+int  ConfigGetWheelScrollMul(void);         /* [General] WheelScrollMul：按住 C 时滚轮放大倍数，<2=不放大 */
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中名单 */
 BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口的进程 exe 名 */
 BOOL IsRunElevated(void);                   /* 真实运行权限（查进程令牌） */

@@ -14,6 +14,7 @@ BOOL ConfigGetRunAsAdmin(void);
 int  ConfigGetLogMaxKB(void);
 int  ConfigGetMaxArrowSteps(void);
 BOOL ConfigGetOverStepCtrl(void);
+int  ConfigGetWheelScrollMul(void);
 BOOL IsRunElevated(void);
 
 static int fails = 0;
@@ -146,6 +147,29 @@ int main(void) {
     EXPECT(ConfigGetMaxArrowSteps() == 32 && !ConfigGetOverStepCtrl(),
            "CFG: 非 General 段不生效");
 
+    /* 滚轮加速倍数 WheelScrollMul（按住 C 时滚轮放大） */
+    WriteIni("[General]\r\nWheelScrollMul = 5\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelScrollMul() == 5, "CFG: WheelScrollMul=5 生效");
+    WriteIni("[General]\r\nWheelScrollMul = 0\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelScrollMul() == 0, "CFG: WheelScrollMul=0（关闭，不放大）");
+    WriteIni("[General]\r\nWheelScrollMul = 1\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelScrollMul() == 1, "CFG: WheelScrollMul=1（不放大）");
+    WriteIni("[General]\r\nWheelScrollMul = 9999\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelScrollMul() == 16, "CFG: WheelScrollMul 超过上限钳到 16");
+    WriteIni("[General]\r\nWheelScrollMul = abc\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelScrollMul() == 3, "CFG: WheelScrollMul 非法值回落默认 3");
+    WriteIni("[Other]\r\nWheelScrollMul = 9\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelScrollMul() == 3, "CFG: 非 General 段的 WheelScrollMul 不生效");
+    WriteIni("[General]\r\n\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelScrollMul() == 3, "CFG: WheelScrollMul 缺省为 3");
+
     /* 老配置升级：缺失的新键自动补齐，已有内容保留 */
     {
         FILE* fo = NULL;
@@ -160,17 +184,18 @@ int main(void) {
         EXPECT(ConfigGetLogMaxKB() == 2048 && ConfigGetMaxArrowSteps() == 32,
                "UPG: 缺失键补齐默认值");
         FILE* fc = NULL;
-        int hasLog = 0, hasSteps = 0, hasMode = 0;
+        int hasLog = 0, hasSteps = 0, hasMode = 0, hasWheel = 0;
         if (fopen_s(&fc, "bin/cfgtest.ini", "r") == 0 && fc) {
             char line[512];
             while (fgets(line, sizeof(line), fc)) {
                 if (strstr(line, "LogMaxKB = 2048")) hasLog = 1;
                 if (strstr(line, "MaxArrowSteps = 32")) hasSteps = 1;
                 if (strstr(line, "OverStepMode = 0")) hasMode = 1;
+                if (strstr(line, "WheelScrollMul = 3")) hasWheel = 1;
             }
             fclose(fc);
         }
-        EXPECT(hasLog && hasSteps && hasMode, "UPG: 补齐块带注释写回文件");
+        EXPECT(hasLog && hasSteps && hasMode && hasWheel, "UPG: 补齐块带注释写回文件");
     }
     /* 升级的容量算式必须正交覆盖四组边界：
          BOM 有/无  ×  末尾有/无换行  ×  [General] 段有/无  ×  缺部分/缺全部键
@@ -245,11 +270,12 @@ int main(void) {
             EXPECT(allBom == 1, "UPG(BOM边界): 全文只有一个 BOM（未被复制进正文）");
         }
     }
-    /* 新格式（四键齐全）：升级不改动文件 */
+    /* 新格式（键齐全）：升级不改动文件 */
     {
         FILE* fo = NULL;
         if (fopen_s(&fo, "bin/cfgtest.ini", "wb") == 0 && fo) {
-            fputs("[General]\nRunAsAdmin = 1\nLogMaxKB = 7\nMaxArrowSteps = 5\nOverStepMode = 1\n", fo);
+            fputs("[General]\nRunAsAdmin = 1\nLogMaxKB = 7\nMaxArrowSteps = 5\n"
+                  "OverStepMode = 1\nWheelScrollMul = 2\n", fo);
             fclose(fo);
         }
         char before[512];
@@ -271,6 +297,7 @@ int main(void) {
         ConfigLoadFrom(L"bin/cfgtest.ini");
         EXPECT(ConfigGetLogMaxKB() == 7 && ConfigGetMaxArrowSteps() == 5 && ConfigGetOverStepCtrl(),
                "UPG: 用户自定义值不被覆盖");
+        EXPECT(ConfigGetWheelScrollMul() == 2, "UPG: WheelScrollMul 自定义值不被覆盖");
     }
 
     /* 兼容早期不分节写法 */

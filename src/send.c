@@ -150,6 +150,52 @@ void SendArrows(int dir, int n, BOOL shift) {
     if (shift) SendEvent(VK_LSHIFT, TRUE);   /* 打断时也要抬 Shift，选区停在此处 */
 }
 
+/* 滚轮加速：补发 (mul-1) 个"标准刻度"，逐格发、每格之间隔 2ms。
+   **不要**改成"一个事件塞 delta = 120*N"，实测（跨进程量目标窗口收到的消息）：
+     · 一次 SendInput 批 3 个 120    -> 目标只收到 1 条、delta=360
+     · 3 个事件间隔 2ms 逐个发       -> 目标收到 3 条、每条 delta=120
+   系统会把"目标还没派发的"滚轮事件合并成一个 WM_MOUSEWHEEL 并把 delta 相加；
+   更糟的是 +120 与 -120 同批会被合成 delta=0，等于什么都没滚。
+   为什么在乎这个差别：不少程序只看 delta 的符号、每条消息只滚一格（Blender
+   就为此专门把大 delta 拆成多个单格事件），所以"逐格"才是通用写法。
+
+   每格 2ms 的间隔在倍数上限 16 下最坏阻塞主线程 30ms，可接受。也正因为有
+   Sleep，这段**不能**挪进 act.c 的工作队列 —— 那个队列带 ActInFlight() 门控，
+   滚轮挤进去会拖慢和弦重复的节奏。
+   全程只做输入注入：不调 SystemParametersInfo（不改系统的"每次滚动行数"），
+   也不写注册表。 */
+#define WHEEL_EXTRA_MAX 15
+#define WHEEL_GAP_MS    2
+
+/* 倍数 -> 要补发的格数。单独拎出来是为了能被单测直接断言换算
+   （真注入的条数没法在本进程里稳定观测，见 test_chord 场景 N 的说明）。 */
+int SendWheelExtraCount(int mul) {
+    if (mul <= 1) return 0;
+    int extra = mul - 1;
+    return extra > WHEEL_EXTRA_MAX ? WHEEL_EXTRA_MAX : extra;
+}
+
+void SendWheelAccel(int delta, int mul) {
+    if (delta == 0) return;
+    int extra = SendWheelExtraCount(mul);
+    for (int i = 0; i < extra; i++) {
+        INPUT in;
+        memset(&in, 0, sizeof(in));
+        in.type = INPUT_MOUSE;
+        in.mi.dwFlags = MOUSEEVENTF_WHEEL;
+        in.mi.mouseData = (DWORD)(LONG)delta;   /* 有符号增量：正=上滚，负=下滚 */
+        if (SendInput(1, &in, sizeof(INPUT)) == 0) {
+            /* UIPI 等场景会被整体拒绝。只在记录模式写日志、且不重试：
+               重试只会继续失败并把日志刷爆 */
+            if (g_recording)
+                CapLog("  !! SendInput 滚轮被拒 i=%d delta=%d err=%lu",
+                       i, delta, (unsigned long)GetLastError());
+            break;
+        }
+        if (i + 1 < extra) Sleep(WHEEL_GAP_MS);
+    }
+}
+
 /* 兜底：文字读取失败时，用系统原生 Ctrl(+Shift)+方向键做词跳。
    Ctrl 必须在方向键之前按下、之后抬起，否则目标收到的只是单格方向键。 */
 void SendNativeWordJump(int dir, BOOL shift) {

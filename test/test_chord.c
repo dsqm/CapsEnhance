@@ -69,35 +69,71 @@ static void KeyAlt(int vk, BOOL down) {
     LowLevelKeyboardProc(HC_ACTION,
         down ? WM_SYSKEYDOWN : WM_SYSKEYUP, (LPARAM)&ks);
 }
+
+/* ---- 滚轮加速：取走钩子投递的加速请求 ----
+   这里**不**去数"目标窗口收到了几条 WM_MOUSEWHEEL"：滚轮消息的落点取决于
+   焦点窗口 / 光标下方的窗口（还受系统"悬停滚动非活动窗口"设置影响），让测试
+   依赖系统把消息派发到哪个窗口是不稳的 —— 实测 10 次里有 1 次因为光标被挪开
+   而完全收不到。
+   改成验证**钩子的决策**：它该不该把加速请求投递出来、投递的参数对不对。
+   这部分完全在本进程内可观测，稳定。真正"逐格注入并经系统送达目标"的
+   行为由一次性探针在跨进程场景下验证过（一次批 3 个会被系统合并成 1 条
+   delta=360；间隔 2ms 逐个发则目标收到 3 条 delta=120），结论记在 send.c。 */
+static BOOL TakeWheelAccel(int* delta, int* mul) {
+    MSG m;
+    if (PeekMessageW(&m, g_mainWnd, WM_WHEEL_ACCEL, WM_WHEEL_ACCEL, PM_REMOVE)) {
+        if (delta) *delta = (int)m.wParam;
+        if (mul)   *mul   = (int)m.lParam;
+        return TRUE;
+    }
+    return FALSE;
+}
+/* 模拟硬件滚轮：直接喂给生产用的鼠标钩子过程（flags=0 表示非注入）。
+   注意只模拟"钩子的判断"，不会真的产生那原始一格。 */
+static void Wheel(int delta, DWORD flags) {
+    MSLLHOOKSTRUCT ms; memset(&ms, 0, sizeof(ms));
+    ms.mouseData = (DWORD)(USHORT)(SHORT)delta << 16;   /* 高字是滚轮增量 */
+    ms.flags = flags;
+    LowLevelMouseProc(HC_ACTION, WM_MOUSEWHEEL, (LPARAM)&ms);
+}
 /* 排干所有待处理消息（含残留 TIMER/TRIG） */
 static void Sink(void) {
     MSG m;
     while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE))
         DispatchMessageW(&m);
 }
+
+/* 一边等一边泵：**用 MsgWaitForMultipleObjects，不要用 Sleep**。
+   Sleep 期间本线程不在"等消息"状态，系统对低级钩子的处理是**直接跳过**
+   （不是延后补发）—— 于是"另一个线程注入、本线程钩子捕获"的事件会时有时无
+   地被漏记，断言就飘（实测 12 次里飘 1 次，表现为 LSHIFT 一次都没记到）。
+   MsgWait 是真正的等消息状态，钩子能在第一时间被调用。 */
+static void SinkWait(int ms) {
+    MSG m;
+    MsgWaitForMultipleObjects(0, NULL, FALSE, (DWORD)ms, QS_ALLINPUT);
+    while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE))
+        DispatchMessageW(&m);
+}
 /* 只泵消息，不等待执行线程。
    时序敏感的场景（"稳定期内抬手"）靠它 —— 一旦在这里等执行线程，
    CHORD_SETTLE 的 50ms 稳定期就在场景中途被绕过，测的东西就变了。
-   需要等发送做完时，在断言前单独调 Drain()。 */
+   需要等发送做完时，在断言前单独调 Drain()。
+   用 SinkWait 而不是 Sleep：要一直在"等消息"状态，钩子才不会漏记注入事件。 */
 static void Pump(int ms) {
     ULONGLONG end = GetTickCount64() + ms;
-    while (GetTickCount64() < end) {
-        Sink();
-        Sleep(1);
-    }
+    while (GetTickCount64() < end)
+        SinkWait(1);
     Sink();   /* 收尾：把压着的 TIMER 也处理掉 */
 }
 
-/* 等执行线程把当前场景的动作做完，并把注入事件"看全"。
-   **必须一边泵消息一边等**：低级键盘钩子装在本线程上，只有本线程处于
-   "等消息"状态时系统才会调用它。发送改到执行线程之后这个坑才暴露出来 ——
-   以前发送就在本线程同步完成，事件顺手就被自己的钩子看到了；
-   现在用 WaitForSingleObject/Sleep 干等会漏记注入事件。 */
+/* 等执行线程把当前场景的动作做完，并把注入事件"看全"。 */
 static void Drain(void) {
-    for (int i = 0; i < 3000 && ActInFlight() != 0; i++) { Sink(); Sleep(1); }
-    /* 再泵一段：注入事件到达本线程的钩子有延迟（本机实测可达 ~60ms） */
-    ULONGLONG end = GetTickCount64() + 150;
-    while (GetTickCount64() < end) { Sink(); Sleep(1); }
+    for (int i = 0; i < 3000 && ActInFlight() != 0; i++)
+        SinkWait(1);
+    /* 再等一段：注入事件到达本线程的钩子有延迟（本机实测可达 ~60ms） */
+    ULONGLONG end = GetTickCount64() + 200;
+    while (GetTickCount64() < end)
+        SinkWait(1);
 }
 
 /* 场景收尾：松开 C、泵完消息，再等执行线程把注入做完 */
@@ -316,6 +352,47 @@ int main(void) {
     CHECK(cd < ld && ld < lu && lu < cu,
           "M: 顺序正确 Ctrl↓ -> ←↓ -> ←↑ -> Ctrl↑");
     CHECK(CountVk(VK_LCONTROL) == 1, "M: Ctrl 只按一次");
+
+    /* ---- 场景N：按住 C 时鼠标滚轮的加速决策 ----
+       配置里 WheelScrollMul 的缺省值是 3（本测试没读 ini，用的就是静态缺省），
+       所以钩子应以 mul=3 投递加速请求，delta 原样带过去（方向也在里面）。
+       注：不把生产的 LowLevelMouseProc 真正挂进钩子链 —— 万一哪天
+       LLMHF_INJECTED 守卫被删掉，真挂链上会让注入事件自我放大成风暴。
+       直接调用它喂"硬件事件"/"注入事件"两条路径，都能确定性地覆盖到。 */
+    Reset();
+    int d = 0, mul = 0;
+
+    Key(CLI_CAPS, FALSE); Pump(2);       /* 先确保未按 C 的基线 */
+    Wheel(120, 0);
+    CHECK(!TakeWheelAccel(NULL, NULL), "N: 未按 C 时不投递加速请求");
+
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Wheel(120, 0);                       /* 硬件上滚 */
+    CHECK(TakeWheelAccel(&d, &mul) && d == 120 && mul == 3,
+          "N: 按住 C 上滚 -> 投递 delta=120 mul=3");
+    CHECK(!TakeWheelAccel(NULL, NULL), "N: 一次滚轮只投递一次请求");
+
+    Wheel(-120, 0);                      /* 硬件下滚：方向要带对 */
+    CHECK(TakeWheelAccel(&d, &mul) && d == -120 && mul == 3,
+          "N: 按住 C 下滚 -> 投递 delta=-120");
+
+    Wheel(120, LLMHF_INJECTED);          /* 我们注入出去的滚轮回到钩子 */
+    CHECK(!TakeWheelAccel(NULL, NULL),
+          "N: 注入的滚轮不再投递加速（防无限放大）");
+
+    g_state.paused = TRUE;               /* 暂停映射：也不加速 */
+    Wheel(120, 0);
+    CHECK(!TakeWheelAccel(NULL, NULL), "N: 暂停时不投递加速请求");
+    g_state.paused = FALSE;
+
+    /* 倍数 -> 补发格数的换算（真注入条数无法在本进程稳定观测，单独断言换算） */
+    CHECK(SendWheelExtraCount(3) == 2,  "N: mul=3 -> 补发 2 格");
+    CHECK(SendWheelExtraCount(1) == 0,  "N: mul=1 -> 不补发");
+    CHECK(SendWheelExtraCount(0) == 0,  "N: mul=0 -> 不补发");
+    CHECK(SendWheelExtraCount(16) == 15, "N: mul=16 -> 补发 15 格");
+    CHECK(SendWheelExtraCount(999) == 15, "N: 超过上限也只补发 15 格");
+
+    Key(CLI_CAPS, FALSE); Pump(2);
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
     return fails;

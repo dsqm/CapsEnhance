@@ -179,12 +179,48 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     return CallNextHookEx(g_hook, nCode, wParam, lParam);
 }
 
+/* ================= 鼠标钩子：按住 C 时滚轮加速 =================
+   为什么用低级钩子而不是 Raw Input：**必须能认出"这个滚轮事件是我们自己
+   注入的"**。Raw Input（RIDEV_INPUTSINK）拿不到"注入"标记，放大后的滚轮会
+   再触发一次 WM_INPUT → 再放大 → 无限放大；MSLLHOOKSTRUCT.flags 的
+   LLMHF_INJECTED 正是为这个场景准备的，低级钩子路线才能干净地过滤掉自己。
+
+   代价是：这个回调落在**全局鼠标输入的关键路径**上（每一次鼠标移动都会
+   进来一次），所以回调里只做几次比较然后 PostMessage，绝不在这里注入、
+   也不做任何查询 —— 连 GetAsyncKeyState 都不能调（会明显加剧鼠标卡顿），
+   "C 是否按住"直接读键盘钩子已经维护好的 g_cMod。
+   注入放到主线程的消息处理里做（见 main.c 的 WM_WHEEL_ACCEL）。
+   注：这也意味着主线程若被长时间占住会拖慢鼠标输入 —— 这正是"动作发送
+   移到执行线程"（act.c）要解决的问题，两者是同一根因的两个面。 */
+static HHOOK g_mouseHook = NULL;
+
+static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    /* 最快路径过滤：绝大多数事件（鼠标移动）在第一个条件就返回 */
+    if (nCode == HC_ACTION && wParam == WM_MOUSEWHEEL) {
+        const MSLLHOOKSTRUCT* m = (const MSLLHOOKSTRUCT*)lParam;
+        if (m && !(m->flags & LLMHF_INJECTED) && !g_state.paused && g_cMod) {
+            int mul = ConfigGetWheelScrollMul();
+            int delta = (int)(short)HIWORD(m->mouseData);   /* 高字是滚轮增量 */
+            if (mul > 1 && delta != 0)
+                PostMessageW(g_mainWnd, WM_WHEEL_ACCEL, (WPARAM)delta, (LPARAM)mul);
+        }
+    }
+    return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
+}
+
 BOOL HookInstall(void) {
     g_hook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc,
                                GetModuleHandleW(NULL), 0);
-    return g_hook != NULL;
+    if (!g_hook) return FALSE;
+    /* 滚轮加速的鼠标钩子装不上不影响主映射，降级即可（托盘会显示出来） */
+    g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc,
+                                    GetModuleHandleW(NULL), 0);
+    return TRUE;
 }
 
 void HookUninstall(void) {
+    if (g_mouseHook) { UnhookWindowsHookEx(g_mouseHook); g_mouseHook = NULL; }
     if (g_hook) { UnhookWindowsHookEx(g_hook); g_hook = NULL; }
 }
+
+BOOL HookMouseAvailable(void) { return g_mouseHook != NULL; }

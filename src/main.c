@@ -471,6 +471,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_WHEEL_ACCEL:
+        /* 滚轮加速：主线程直接注入。一条 SendInput 数组调用（微秒级）不会
+           阻塞，所以不走 act.c 的队列 —— 队列是给"会阻塞数百毫秒的发送"
+           准备的，滚轮排在词跳后面反而会毁掉滚动的手感。 */
+        SendWheelAccel((int)wp, (int)lp);
+        return 0;
     /* ---- 托盘 ---- */
     case WM_TOGGLE_TRAY:
         if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP)
@@ -578,7 +584,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
             AppendMenuW(g_menu, MF_SEPARATOR, 0, NULL);
             AppendMenuW(g_menu, MF_STRING, IDM_EXIT, L"退出");
         }
-        TrayHint(L"正在映射");
+        /* 鼠标钩子（滚轮加速）装不上不影响主映射，但要让人看见，别静默降级 */
+        TrayHint(HookMouseAvailable() ? L"正在映射" : L"正在映射（滚轮加速不可用）");
     }
 
     MSG msg;
