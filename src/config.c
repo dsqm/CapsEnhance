@@ -24,16 +24,19 @@ static int   g_logMaxKB   = 2048;   /* 日志大小上限（KB），0 = 不限�
 static int   g_maxArrowSteps = 32;  /* 逐格词跳最大步数，超过按 overStepMode 处理 */
 static BOOL  g_overStepCtrl = FALSE; /* TRUE=超限改发 Ctrl+方向（原生词跳） */
 
-/* 整数：只认前导十进制数字，其余（空/非法）返回默认值 */
+/* 整数：只认前导十进制数字，其余（空/非法）返回默认值。
+   超过 1e8 直接判非法：没有哪个配置项需要这么大，而继续累加会让
+   n = n*10 + d 有符号溢出（UB）。 */
 static int ParseIntW(const WCHAR* v, int def) {
     if (!v || !v[0]) return def;
-    int n = 0; BOOL any = FALSE;
+    long long n = 0; BOOL any = FALSE;
     for (const WCHAR* p = v; *p; p++) {
         if (*p < L'0' || *p > L'9') break;
         n = n * 10 + (*p - L'0');
+        if (n > 100000000LL) return def;
         any = TRUE;
     }
-    return any ? n : def;
+    return any ? (int)n : def;
 }
 
 typedef enum { SEC_NONE, SEC_GENERAL, SEC_NATIVE, SEC_OTHER } CfgSec;
@@ -242,8 +245,28 @@ static const struct {
       "OverStepMode = 0\n" },
 };
 
-void ConfigUpgradeFile(const WCHAR* path) {
-    FILE* f = NULL;
+/* ---- 带边界检查的输出缓冲 ----
+   本项目已两次栽在"手工计算分配容量"上（见 776f468 与 ConfigUpgradeFile
+   的 BOM 漏算）：容量一旦算错，后面每一次 memcpy 都是堆越界写。这里把
+   "按索引写裸缓冲"换成"追加 + 容量校验"，算错时退化为不写而不是越界。 */
+typedef struct { char* p; size_t n, cap; } OutBuf;
+
+static BOOL OutInit(OutBuf* b, size_t cap) {
+    b->n = 0; b->cap = cap;
+    b->p = (char*)malloc(cap ? cap : 1);
+    return b->p != NULL;
+}
+static BOOL OutAdd(OutBuf* b, const void* src, size_t len) {
+    if (!b->p || b->n + len > b->cap) return FALSE;
+    if (len) memcpy(b->p + b->n, src, len);
+    b->n += len;
+    return TRUE;
+}
+static BOOL OutAddStr(OutBuf* b, const char* s) { return OutAdd(b, s, strlen(s)); }
+static BOOL OutAddCh(OutBuf* b, char c)          { return OutAdd(b, &c, 1); }
+static void OutFree(OutBuf* b) { free(b->p); b->p = NULL; b->n = b->cap = 0; }
+
+void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
     if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
@@ -309,30 +332,37 @@ void ConfigUpgradeFile(const WCHAR* path) {
     }
     if (nMiss == 0) { free(raw); return; }   /* 无缺失：不动文件 */
 
-    /* 组装新内容：BOM + 头部 + [General] 行(若新建) + 缺失块 + 尾部 */
+    /* 组装新内容：BOM + 头部 + [General] 行(若新建) + 缺失块 + 尾部。
+       容量逐项算清：BOM 只在 hasBom 时占用，且它**不计入 bodyLen**
+       （body 已经跳过 BOM）—— 漏算它就是越界写（Debug CRT 下 abort）。 */
+    static const char kGenHdr[] = "[General]\n";
     size_t insOff = genStart ? (size_t)(genEnd - body) : 0;
     int needNl = (genStart && insOff > 0 && body[insOff - 1] != '\n');
     size_t blockTotal = 0;
     for (int i = 0; i < KUP_N; i++)
         if (missing[i]) blockTotal += blockLens[i];
 
-    size_t genHdr = genStart ? 0 : strlen("[General]\n");
-    char* out = (char*)malloc(bodyLen + blockTotal + genHdr + 2);
-    if (!out) { free(raw); return; }
-    size_t o = 0;
-    if (hasBom) { out[o++] = (char)0xEF; out[o++] = (char)0xBB; out[o++] = (char)0xBF; }
-    memcpy(out + o, body, insOff); o += insOff;
-    if (!genStart) { memcpy(out + o, "[General]\n", 10); o += 10; }
-    if (needNl) out[o++] = '\n';
-    for (int i = 0; i < KUP_N; i++)
-        if (missing[i]) { memcpy(out + o, kUpgrades[i].block, blockLens[i]); o += blockLens[i]; }
-    memcpy(out + o, body + insOff, bodyLen - insOff); o += bodyLen - insOff;
+    size_t bomLen = hasBom ? 3 : 0;
+    size_t genHdr = genStart ? 0 : sizeof(kGenHdr) - 1;
+    size_t total  = bomLen + insOff + genHdr + (needNl ? 1u : 0u)
+                  + blockTotal + (bodyLen - insOff);
 
-    if (_wfopen_s(&f, path, L"wb") == 0 && f) {
-        fwrite(out, 1, o, f);
+    OutBuf ob;
+    if (!OutInit(&ob, total)) { free(raw); return; }
+    BOOL ok = TRUE;
+    if (hasBom)              ok = OutAdd(&ob, "\xEF\xBB\xBF", 3);
+    if (ok)                  ok = OutAdd(&ob, body, insOff);
+    if (ok && !genStart)     ok = OutAdd(&ob, kGenHdr, genHdr);
+    if (ok && needNl)        ok = OutAddCh(&ob, '\n');
+    for (int i = 0; ok && i < KUP_N; i++)
+        if (missing[i])      ok = OutAdd(&ob, kUpgrades[i].block, blockLens[i]);
+    if (ok)                  ok = OutAdd(&ob, body + insOff, bodyLen - insOff);
+
+    if (ok && _wfopen_s(&f, path, L"wb") == 0 && f) {
+        fwrite(ob.p, 1, ob.n, f);
         fclose(f);
     }
-    free(out);
+    OutFree(&ob);
     free(raw);
     #undef KUP_N
 }

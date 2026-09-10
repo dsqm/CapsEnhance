@@ -16,6 +16,13 @@ jobs:
           call test\build_nav.bat || exit /b 1
           call test\build_test.bat || exit /b 1
 
+      # Release CRT (/MT) does not validate heap blocks, so "wrote past end of
+      # heap buffer" bugs pass the suite silently. This pass runs the config
+      # test on the Debug CRT, where such a write aborts at free().
+      - name: Debug-CRT pass (heap overflow guard)
+        shell: cmd
+        run: call test\build_dbg.bat
+
       - name: Build diagnostic tools
         shell: cmd
         run: call test\build_keytest.bat

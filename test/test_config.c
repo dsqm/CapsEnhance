@@ -172,6 +172,79 @@ int main(void) {
         }
         EXPECT(hasLog && hasSteps && hasMode, "UPG: 补齐块带注释写回文件");
     }
+    /* 升级的容量算式必须正交覆盖四组边界：
+         BOM 有/无  ×  末尾有/无换行  ×  [General] 段有/无  ×  缺部分/缺全部键
+       历史缺陷正是"带 BOM 且缺键"时漏算 BOM 的 3 字节 —— 越界写 1~2 字节。
+       这里靠 Debug CRT（/MTd）在 free() 时校验堆块，配合断言兜住回归。 */
+    {
+        static const struct {
+            const char* name;
+            int  bom;
+            int  trailingNl;
+            const char* body;      /* 不含 BOM 与结尾换行 */
+        } kCases[] = {
+            { "BOM + 无尾换行 + 有 General + 缺键", 1, 0,
+              "[General]\nRunAsAdmin = 1" },
+            { "BOM + 有尾换行 + 有 General + 缺键", 1, 1,
+              "[General]\nRunAsAdmin = 1\n" },
+            { "BOM + 无尾换行 + 无 General 段",     1, 0,
+              "[NativeWordJump]\nOldApp" },
+            { "无 BOM + 无尾换行 + 有 General",     0, 0,
+              "[General]\nRunAsAdmin = 1" },
+            { "无 BOM + 有尾换行 + 无 General 段",  0, 1,
+              "[NativeWordJump]\nOldApp\n" },
+        };
+        for (int c = 0; c < (int)(sizeof(kCases) / sizeof(kCases[0])); c++) {
+            FILE* fo = NULL;
+            if (fopen_s(&fo, "bin/cfgtest.ini", "wb") == 0 && fo) {
+                if (kCases[c].bom) { fputc(0xEF, fo); fputc(0xBB, fo); fputc(0xBF, fo); }
+                fputs(kCases[c].body, fo);
+                if (kCases[c].trailingNl) fputc('\n', fo);
+                fclose(fo);
+            }
+            ConfigUpgradeFile(L"bin/cfgtest.ini");   /* 越界会在这里 abort */
+            ConfigLoadFrom(L"bin/cfgtest.ini");
+            char nm[128];
+            _snprintf_s(nm, sizeof(nm), _TRUNCATE, "UPG(BOM边界): %s", kCases[c].name);
+            EXPECT(ConfigGetRunAsAdmin() || !strstr(kCases[c].body, "RunAsAdmin"),
+                   nm);
+        }
+        /* 缺键补齐后 BOM 必须仍然只在文件最开头出现一次 */
+        {
+            FILE* fo = NULL;
+            if (fopen_s(&fo, "bin/cfgtest.ini", "wb") == 0 && fo) {
+                fputc(0xEF, fo); fputc(0xBB, fo); fputc(0xBF, fo);
+                fputs("[General]\nRunAsAdmin = 1", fo);
+                fclose(fo);
+            }
+            ConfigUpgradeFile(L"bin/cfgtest.ini");
+            unsigned char head[8] = {0};
+            FILE* fr = NULL;
+            size_t rd = 0;
+            if (fopen_s(&fr, "bin/cfgtest.ini", "rb") == 0 && fr) {
+                rd = fread(head, 1, sizeof(head), fr);
+                fclose(fr);
+            }
+            int bomCount = 0;
+            for (size_t i = 0; i + 2 < rd; i++)
+                if (head[i] == 0xEF && head[i+1] == 0xBB && head[i+2] == 0xBF) bomCount++;
+            EXPECT(rd >= 3 && bomCount == 1 && head[0] == 0xEF,
+                   "UPG(BOM边界): BOM 保留且只在文件头出现一次");
+            /* 正文里也不应再出现第二个 BOM */
+            char whole[4096];
+            size_t wn = 0;
+            if (fopen_s(&fr, "bin/cfgtest.ini", "rb") == 0 && fr) {
+                wn = fread(whole, 1, sizeof(whole) - 1, fr);
+                fclose(fr);
+            }
+            whole[wn] = 0;
+            int allBom = 0;
+            for (size_t i = 0; i + 2 < wn; i++)
+                if (whole[i] == (char)0xEF && whole[i+1] == (char)0xBB &&
+                    whole[i+2] == (char)0xBF) allBom++;
+            EXPECT(allBom == 1, "UPG(BOM边界): 全文只有一个 BOM（未被复制进正文）");
+        }
+    }
     /* 新格式（四键齐全）：升级不改动文件 */
     {
         FILE* fo = NULL;
