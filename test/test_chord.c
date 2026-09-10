@@ -570,9 +570,10 @@ int main(void) {
     KeyAlt(VK_LMENU, TRUE); Pump(2);              /* 默认增强键：左 Alt */
     CHECK(ModeDown(MODE_ENHANCE), "R: 按住 Alt -> 增强模式生效");
 
-    /* 初始速度不能太快：第 1 档的"每格时长"就是配置值（缺省 500ms = 2 格/秒） */
+    /* 初始速度按**人的阅读速度**定的（见 config.c 的换算表）：
+       24000ms/格 = 7.5 行/分钟 ≈ 338 字/分钟，落在默读 300..500 的舒适区。 */
     int base = ConfigGetAutoScrollInterval();
-    CHECK(base == 500, "R: 初始节拍缺省 500ms（两轮放慢：120 -> 300 -> 500）");
+    CHECK(base == 24000, "R: 初始节拍缺省 24000ms（≈338 字/分钟，按阅读速度定）");
     CHECK(ConfigGetAutoScrollSmooth(), "R: 平滑注入缺省开启");
 
     ActAutoScrollWheel(120);                      /* 第一滚：启动、最慢档、向上 */
@@ -626,9 +627,15 @@ int main(void) {
     CHECK(ConfigGetAutoScrollSmooth(), "R: 回缺省后平滑重新开启");
 
     ResetWheelRec();
-    Pump(900);                                    /* 覆盖若干拍（缺省 500ms/格） */
+    Pump(900);                                    /* 覆盖若干拍 */
     CHECK(g_wheelInj >= 1 && g_wheelSum > 0, "R: 自动滚动确实在持续注入上滚");
-    CHECK(g_wheelInj >= 5, "R: 平滑模式下注入点明显变密（>=5 次/900ms）");
+    /* 慢速档的平滑注入会落到"最小刻度"：delta=1，节拍 = 每格时长/120。
+       注意此处已爬过档位（上面滚到了顶档），所以断言用相对关系而不是硬值。 */
+    CHECK(ActAutoScrollDelta() == 1,
+          "R: 慢速档拆到最小整数刻度（delta=1，整刻度的物理下限）");
+    CHECK(ActAutoScrollBeat() < ActAutoScrollTick(),
+          "R: 平滑节拍仍短于每格时长（细水长流而非一次一大格）");
+    CHECK(g_wheelInj >= 2, "R: 900ms 内注入了多次（平滑模式下细水长流）");
 
     ActAutoScrollWheel(-120);                     /* 反向：立即终止 + 清零速度 */
     CHECK(!ActAutoScrollActive() && ActAutoScrollDir() == 0 && ActAutoScrollGear() == 0,

@@ -25,13 +25,34 @@
 #define STR2(x) #x
 #define STR(x)  STR2(x)
 
-/* 自动滚动的**初始**节拍（ms）：启动后每 N 毫秒滚一格，即最慢档的速度。
+/* 自动滚动的**初始**节拍（ms）：启动后每 N 毫秒滚"一格"，即最慢档的速度。
    同向继续滚会逐档提速，最快档的节拍 = 本值 / WheelScrollMul
    —— 所以本值同时定了"初始速度"和"最快速度"的基准。
-   默认 500ms = 2 格/秒 ≈ 6 行/秒（按系统默认每次 3 行）：属于"慢慢往下
-   溜"的档，用来读文档刚好。历史值：120ms（8.3 格/秒）明显偏快、
-   300ms（3.3 格/秒）仍偏快。嫌慢就再滚一下提速，或把这里调小。 */
-#define AUTOSCROLL_INTERVAL_DEFAULT 500
+
+   默认值的依据是**人的实际阅读速度**，不是手感试出来的（前几版就是靠试，
+   结果 120 -> 300 -> 500 -> 4000 改了四轮都还偏快）：
+     · 成人中文默读约 300..500 字/分钟（阅读心理学通行的量级；
+       《义务教育语文课程标准》对 7-9 年级的要求是"每分钟不少于 500 字"）
+     · 需要边读边想的**技术文本/精读**约 80..150 字/分钟
+     · 中文朗读 150..250 字/分钟（电视播音 240 左右），比默读慢得多
+   换算假设：Windows 默认"每次滚 3 行"，一行按 45 字（最大化窗口的中间值），
+   于是  字/分钟 ≈ 135000 / 本值(ms) ：
+        每格ms   行/分钟   字/分钟
+         120     1500     67500   <- 最初的值，比人快两个数量级
+         500      360     16200
+        4000       45      2025   <- 上一版，仍是人的 4~7 倍，所以还是偏快
+       18000       10       450   <- 通用默读
+       24000      7.5       338   <- **默认**：落在 300..500 的偏慢半区，
+                                      对应"边读边理解"的舒适区
+       60000        3       135   <- 技术精读（80..150 字/分钟）
+   嫌慢就再滚一下提速（6 档到 本值/WheelScrollMul），或把本值调小。 */
+#define AUTOSCROLL_INTERVAL_DEFAULT 24000
+
+/* AutoScrollInterval 的可调范围（ms）。下限 100 对应" 1350 行/分钟"这种
+   非人速的扫读，留着只是不设人为障碍；上限 60000（3 行/分钟 ≈ 135 字/分钟）
+   覆盖"技术精读"这一档 —— 只要有需求就不该被上限挡住。 */
+#define AUTOSCROLL_INTERVAL_MIN 100
+#define AUTOSCROLL_INTERVAL_MAX 60000
 
 /* 自动滚动是否用"高分频"平滑注入（默认开）。
    标准滚轮刻度 WHEEL_DELTA = 120 是"一格"，但 Windows 明确支持**小于**
@@ -232,8 +253,8 @@ void ConfigLoadFrom(const WCHAR* path) {
                 }
                 else if (_wcsicmp(key, L"autoscrollinterval") == 0) {
                     int v = ParseIntW(val, AUTOSCROLL_INTERVAL_DEFAULT);
-                    if (v < 20)  v = 20;      /* 太快会把目标程序滚爆，也失去可读性 */
-                    if (v > 1000) v = 1000;   /* 太慢等于没开 */
+                    if (v < AUTOSCROLL_INTERVAL_MIN) v = AUTOSCROLL_INTERVAL_MIN;
+                    if (v > AUTOSCROLL_INTERVAL_MAX) v = AUTOSCROLL_INTERVAL_MAX;
                     g_autoScrollInterval = v;
                 }
                 else if (_wcsicmp(key, L"autoscrollsmooth") == 0)
@@ -289,8 +310,11 @@ void ConfigLoad(void) {
             ";   也不写注册表。\n"
             ";   同一个开关也决定\"自动滚动\"能否用：N >= 2 才启用（自动滚动最快档 = N 倍）。\n"
             "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n"
-            "; 自动滚动的初始节拍（毫秒）：启动后每 N 毫秒滚一格（最慢档）。\n"
-            "; 同向继续滚会逐档提速，最快档节拍 = N / WheelScrollMul。可调范围 20..1000。\n"
+            "; 自动滚动的初始节拍（毫秒）：启动后每 N 毫秒滚一格（最慢档，越大越慢）。\n"
+            "; 同向继续滚会逐档提速，最快档节拍 = N / WheelScrollMul。可调范围 "
+            STR(AUTOSCROLL_INTERVAL_MIN) ".." STR(AUTOSCROLL_INTERVAL_MAX) "。\n"
+            "; 缺省 24000 = 7.5 行/分钟（按系统每次滚 3 行）≈ 338 字/分钟，\n"
+            "; 落在成人中文默读 300..500 字/分钟的舒适区；最慢可到 60000（约 135 字/分钟，技术精读）。\n"
             "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n"
             "; 自动滚动是否平滑注入（1=是 / 0=否）。1 时只发\"不足一格\"的小刻度、\n"
             "; 次数更多，手感接近触控板连续滑动；个别程序不累积小刻度（完全不动）时设 0。\n"
@@ -363,8 +387,9 @@ static const struct {
       ";   同一个开关也决定\"自动滚动\"能否用：N >= 2 才启用（最快档 = N 倍）。\n"
       "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n" },
     { "autoscrollinterval",
-      "; 自动滚动的初始节拍（毫秒）：启动后每 N 毫秒滚一格（最慢档）。\n"
-      "; 同向继续滚会逐档提速，最快档节拍 = N / WheelScrollMul。可调范围 20..1000。\n"
+      "; 自动滚动的初始节拍（毫秒）：启动后每 N 毫秒滚一格（最慢档，越大越慢）。\n"
+      "; 同向继续滚会逐档提速，最快档节拍 = N / WheelScrollMul。可调范围 "
+      STR(AUTOSCROLL_INTERVAL_MIN) ".." STR(AUTOSCROLL_INTERVAL_MAX) "。\n"
       "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n" },
     { "autoscrollsmooth",
       "; 自动滚动是否平滑注入（1=是 / 0=否）。1 时只发\"不足一格\"的小刻度、\n"

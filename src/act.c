@@ -261,17 +261,24 @@ static DWORD AutoScrollTickMs(int gear, int cap) {
 
 /* 本拍"实际怎么发"：间隔 beat(ms) + 增量 delta（无符号，方向由调用方加）。
    整格模式：beat = 每格时长，delta = WHEEL_STD_DELTA。
-   平滑模式：beat 压到 AUTOSCROLL_SMOOTH_TICK，delta 按比例缩小到"一格的一个
-   零头"—— 于是 delta/beat 与整格模式完全相同（速度不变），只是拆得更碎。
-   若某档本来就比平滑节拍还快（节拍下限/小 base 的情况），保持整格，免得
-   "delta 反而比 120 还大"。 */
+   平滑模式：先按 AUTOSCROLL_SMOOTH_TICK 定一个**整数** delta，再由 delta 反解
+   节拍 —— 这样 delta 不会因四舍五入掉到 0，慢速档也能正常输出：
+     delta = round(120 * SMOOTH_TICK / 每格时长)     （至少 1）
+     beat  = round(每格时长 * delta / 120)
+   于是 delta/beat 恒等于 120/每格时长（速度不变），只是拆得更碎。
+   注意慢到"每格时长 > 120*SMOOTH_TICK"(=4800ms) 时 delta 已经是最小的 1，
+   此时节拍自然超过 SMOOTH_TICK（注入变疏）—— 这是"整刻度的物理下限"，
+   不是缺陷：一个 120 的刻度拆不出比 1 更小的整数部分。
+   若某档本来就快过 SMOOTH_TICK（快速档/小 base），保持整格，免得 delta > 120。 */
 static void AutoScrollPlan(int gear, int cap, DWORD* beat, int* delta) {
     DWORD gearTick = AutoScrollTickMs(gear, cap);
     if (ConfigGetAutoScrollSmooth() && gearTick > AUTOSCROLL_SMOOTH_TICK) {
         int d = (int)((WHEEL_STD_DELTA * (LONG)AUTOSCROLL_SMOOTH_TICK + (LONG)gearTick / 2)
                       / (LONG)gearTick);          /* 四舍五入 */
         if (d < 1) d = 1;
-        *beat  = AUTOSCROLL_SMOOTH_TICK;
+        DWORD b = (DWORD)(((LONG)gearTick * d + WHEEL_STD_DELTA / 2) / WHEEL_STD_DELTA);
+        if (b < 1) b = 1;
+        *beat  = b;
         *delta = d;
     } else {
         *beat  = gearTick;
