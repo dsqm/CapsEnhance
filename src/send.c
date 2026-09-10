@@ -110,6 +110,25 @@ BOOL SendArrowsConflicts(int act) {
 #define MAX_ARROW_STEPS 256
 void SendArrows(int dir, int n, BOOL shift) {
     int vk = (dir == DIR_LEFT) ? VK_LEFT : VK_RIGHT;
+    /* 发送处统一判定：本次要发的步数达到 MaxArrowSteps 就改为
+         OverStepMode=1 -> 发原生 Ctrl+方向（目标程序自己的词跳，瞬时）
+         OverStepMode=0 -> 只发一个方向键（跳一格即停）
+       放在这里而不是调用方，是为了让所有调用路径（含"箭头补正"）都受
+       同一约束；MaxArrowSteps=0 表示不限制（硬上限仍是 256）。 */
+    int maxSteps = ConfigGetMaxArrowSteps();
+    if (maxSteps > 0 && n >= maxSteps) {
+        if (ConfigGetOverStepCtrl()) {
+            SendNativeWordJump(dir, shift);
+            if (g_recording)
+                CapLog("  -> 逐格步数 %d 达到 MaxArrowSteps(%d)，改发 Ctrl+arrow",
+                       n, maxSteps);
+            return;
+        }
+        n = 1;
+        if (g_recording)
+            CapLog("  -> 逐格步数 %d 达到 MaxArrowSteps(%d)，只发一格",
+                   n == 1 ? maxSteps : n, maxSteps);
+    }
     g_arrDir = dir; g_arrBusy = TRUE; g_arrBreak = FALSE;
     if (shift) { SendEvent(VK_LSHIFT, FALSE); Sleep(COMBO_GAP); }
     for (int i = 0; i < n && i < MAX_ARROW_STEPS; i++) {

@@ -1040,32 +1040,12 @@ int NavJump(int dir, BOOL shift) {
             free(t2);
         }
     }
-    BOOL overLimit = FALSE;    /* 走了超限替代路径（Ctrl+方向 / 单格）：不做补正 */
-    if (!direct && !skipArrows) {
-        /* 逐格距离超过配置阈值：按 OverStepMode 处理。
-           0 = 只发一个方向键（跳一格即停）；
-           1 = 改发原生 Ctrl+方向（目标程序自己的词跳，瞬时）。
-           MaxArrowSteps=0 表示不限制（逐格发完，与旧逻辑一致）。
-           瞬跳路径不受影响。
-           注意：这两条路径都不做"箭头补正"——补正会按我们算出的 tgt 纠偏，
-           而 Ctrl+方向 的落点由目标程序的词跳语义决定、"只发一格"本就不该
-           走到 tgt；补正一叠加就出现"跳过去又跳回来"的来回移动。 */
-        int maxSteps = ConfigGetMaxArrowSteps();
-        if (maxSteps > 0 && steps > maxSteps) {
-            overLimit = TRUE;
-            if (ConfigGetOverStepCtrl()) {
-                SendNativeWordJump(dir, shift);
-                if (g_recording)
-                    CapLog("  -> 逐格步数 %d 超过 MaxArrowSteps，改发 Ctrl+arrow", steps);
-            } else {
-                SendArrows(dir, 1, shift);
-                if (g_recording)
-                    CapLog("  -> 逐格步数 %d 超过 MaxArrowSteps，只发一格", steps);
-            }
-        } else {
-            SendArrows(dir, steps, shift);
-        }
-    }
+    /* 超限与否由 SendArrows 在发送处判定（达到阈值即改道）；这里只记一个
+       标志用于跳过补正：改道后的落点由目标程序决定、"只发一格"本就不该
+       走到 tgt，补正一叠加就会出现"跳过去又跳回来"。 */
+    BOOL overLimit = (ConfigGetMaxArrowSteps() > 0 &&
+                      steps >= ConfigGetMaxArrowSteps());
+    if (!direct && !skipArrows) SendArrows(dir, steps, shift);
     /* 自校验补正：经典 Edit 通道能读回光标。实测 EmEditor 会在直接置位后
        吞掉第一支箭头（虚拟机里也可能丢键），导致逐格跳少走一格——
        读回实际位置，按差值补发（只补一轮、差值不超过原步数，防打转）。
