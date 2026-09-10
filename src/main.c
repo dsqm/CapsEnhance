@@ -163,6 +163,12 @@ static void PostAct(int act, int fillAct, int count) {
 /* 开火一次动作（词跳走文本解析；其余走按键发送，都用开火快照修饰） */
 static void DoFireOnce(int act) { PostAct(act, ACT_NONE, 0); }
 
+/* 开关键（CapsLock）是"翻转"动作：按一次只该切换一次。
+   它绝不能进长按重复节奏（REPEAT_INTERVAL 一发），也不能做松手补齐 ——
+   否则一次按下的切换次数取决于按住时长，偶数次等于没切，现象就是
+   "caps+tab 有些时候要按两下才能取消锁定"。 */
+static BOOL IsSingleShotAct(int act) { return act == ACT_CAPSLOCK; }
+
 /* ============ 托盘 ============ */
 static const WCHAR* APP_NAME = L"CapsEnhance";
 #define IDM_PAUSE   1
@@ -400,10 +406,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             /* 已在重复时又按下另一个键：立刻切到新键（最后按下优先），
                重新走重复节奏。此前这里直接忽略，导致第二个键完全失灵。 */
             g_actD = g_pendD; g_actF = g_pendF;
-            g_activeAct = act;
             g_btnCount = 1;
             DoFireOnce(act);
-            g_activeNext = GetTickCount64() + REPEAT_FIRST_DELAY;
+            if (!IsSingleShotAct(act)) {
+                /* 开关键只切一次、也不接管重复节奏（原来那个动作继续重复） */
+                g_activeAct = act;
+                g_activeNext = GetTickCount64() + REPEAT_FIRST_DELAY;
+            } else {
+                /* 已经切过了：从"仍按着"的栈里摘掉，否则之后松开别的键时
+                   "退回上一个"会把它再切一次（两次切换 = 又切回原状态） */
+                StackRemove(act);
+            }
         } else if (g_pendingAct != act) {
             /* 稳定期内后按下的键优先 */
             g_pendingAct = act;
@@ -422,7 +435,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_pendingAct = ACT_NONE;
             g_actD = g_pendD; g_actF = g_pendF;
             g_btnCount = 1;
-            PostAct(act, act, g_btnCount);
+            /* 开关键不做松手补齐（补齐会把一次点按变成 3 次切换，等于又切回去） */
+            PostAct(act, IsSingleShotAct(act) ? ACT_NONE : act, g_btnCount);
             g_actD = FALSE; g_actF = FALSE;
             /* 还有别的键按着就继续（退回上一个），否则停 */
             int top = StackTop();
@@ -460,17 +474,37 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
            在队列里堆出一串尾流。 */
         if (g_pendingAct != ACT_NONE && now >= g_pendingTick + CHORD_SETTLE
             && ActInFlight() == 0) {
-            /* 稳定期到：用门闩快照修饰，开火，进入重复节奏 */
-            g_activeAct = g_pendingAct; g_pendingAct = ACT_NONE;
+            /* 稳定期到：用门闩快照修饰，开火 */
+            int act = g_pendingAct; g_pendingAct = ACT_NONE;
             g_actD = g_pendD; g_actF = g_pendF;
             g_btnCount = 1;
-            DoFireOnce(g_activeAct);
-            g_activeNext = now + REPEAT_FIRST_DELAY;
+            DoFireOnce(act);
+            if (IsSingleShotAct(act)) {
+                /* 开关键：切一次就结束，不进重复节奏。
+                   同时把它从"仍按着"的栈里摘掉 —— 否则之后松开别的键时会
+                   "退回上一个"又把它补切一次。 */
+                StackRemove(act);
+                g_actD = FALSE; g_actF = FALSE;
+                int top = StackTop();
+                if (top != ACT_NONE) {          /* 还按着别的键：接着它走 */
+                    g_pendingAct = top;
+                    g_pendingTick = now;
+                } else StopEngine();
+            } else {
+                g_activeAct = act;
+                g_activeNext = now + REPEAT_FIRST_DELAY;
+            }
         } else if (g_activeAct != ACT_NONE && now >= g_activeNext
                    && ActInFlight() == 0) {
-            DoFireOnce(g_activeAct);
-            g_btnCount++;
-            g_activeNext = now + REPEAT_INTERVAL;
+            if (IsSingleShotAct(g_activeAct)) {
+                /* 防御：开关键永远不重复（正常路径到不了这里） */
+                g_activeAct = ACT_NONE;
+                StopEngine();
+            } else {
+                DoFireOnce(g_activeAct);
+                g_btnCount++;
+                g_activeNext = now + REPEAT_INTERVAL;
+            }
         } else if (g_pendingAct == ACT_NONE && g_activeAct == ACT_NONE
                    && ActInFlight() == 0) {
             StopEngine();

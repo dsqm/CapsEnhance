@@ -94,11 +94,14 @@ void SendActOnce(int act, BOOL shift) {
 }
 
 /* 松手补齐：仅增益模式（快照 d 为真）+ 非词跳动作；已发送次数 <3 则补到 3。
-   次数由调用方（引擎）给出，本函数不回写任何全局状态。 */
+   次数由调用方（引擎）给出，本函数不回写任何全局状态。
+   开关键（CapsLock）排除在外：它是翻转动作，补齐会把"切一次"变成"切三次"
+   （净效果又回到原状态），这正是 caps+tab 时灵时不灵的成因之一。 */
 void ReleaseFill(int act, BOOL d, BOOL shift, int count) {
     if (!d) return;
     if (count >= 3) return;
     if (act == ACT_WORD_L || act == ACT_WORD_R) return;
+    if (act == ACT_CAPSLOCK) return;
     while (count < 3) { SendActOnce(act, shift); count++; }
 }
 

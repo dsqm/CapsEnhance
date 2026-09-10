@@ -424,6 +424,53 @@ int main(void) {
 
     Key(CLI_CAPS, FALSE); Pump(2);
 
+    /* ---- 场景P：Caps+Tab 是"单发"翻转 —— 按一次只切一次 ----
+       ACT_CAPSLOCK 原来被当作可重复、可补齐的普通动作：长按期间每
+       REPEAT_INTERVAL(35ms) 切一次，切换次数取决于按住时长（偶数次 = 没切，
+       CapsLock 看上去"没反应"），现象就是"caps+tab 有时要按两下才能取消锁定"。
+       现在：只切一次，不进重复节奏、也不做松手补齐。
+       注意 VK_CAPITAL 是真实开关键，注入会切换**本机**大小写状态 —— 测完恢复。 */
+    int capsWasOn = (GetKeyState(VK_CAPITAL) & 1) ? 1 : 0;
+
+    Reset();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Key(VK_TAB, TRUE); Pump(250);        /* 远长于稳定期 50ms + 多个重复周期 */
+    Key(VK_TAB, FALSE); Pump(2);
+    END_SCENE();
+    CHECK(CountVk(VK_CAPITAL) == 1, "P: 长按 C+Tab 只切换一次（不重复）");
+
+    Reset();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Key('D', TRUE); Pump(2);             /* 增益门闩：补齐规则对开关键不适用 */
+    Key(VK_TAB, TRUE); Pump(2);
+    Key(VK_TAB, FALSE); Pump(2);         /* 短点 */
+    Key('D', FALSE); Pump(2);
+    END_SCENE();
+    CHECK(CountVk(VK_CAPITAL) == 1, "P: 带增益短点 C+D+Tab 也只切一次（不补齐）");
+
+    /* 争议路径：另一个键正在重复时按下 Tab（开关键），只切一次；
+       随后松开那个键（引擎的"退回上一个仍按着的键"）不能把它再切一次
+       —— 切两次等于又切回去，用户看到的还是"没反应"。 */
+    Reset();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Key('J', TRUE); Pump(200);           /* J 进入长按重复 */
+    Key(VK_TAB, TRUE); Pump(2);          /* 切换分支：应立即切一次 */
+    Drain();
+    int capsAfterTab = CountVk(VK_CAPITAL);
+    Key('J', FALSE); Pump(2);            /* 松开 J：不应"退回"到 Tab 再切 */
+    Drain();
+    int capsAfterJUp = CountVk(VK_CAPITAL);
+    Key(VK_TAB, FALSE); Pump(2);
+    END_SCENE();
+    CHECK(capsAfterTab == 1 && capsAfterJUp == 1 && CountVk(VK_CAPITAL) == 1,
+          "P: J 重复中按 Tab 只切一次（松手不会退回补切）");
+
+    /* 恢复本机 CapsLock 状态（测试不改用户的键盘状态） */
+    if (((GetKeyState(VK_CAPITAL) & 1) ? 1 : 0) != capsWasOn) {
+        SendKeyOnce(VK_CAPITAL, FALSE);
+        Pump(30); Drain();
+    }
+
     /* ---- 场景Q：滚轮加速搬到专用线程后仍逐格补发 ----
        原来主线程自己在 Sleep(2ms) 循环里补发：主线程不在"等消息"状态期间，
        系统对低级钩子的事件是**直接跳过**（不是延后补发）——松开 Caps 的 keyup
