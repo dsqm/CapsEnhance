@@ -484,6 +484,42 @@ static IUIAutomationElement* FindDocElement(IUIAutomation* ua, IUIAutomationElem
     return result;
 }
 
+/* ================= COM / UIA 资源缓存 =================
+   原来每个 UIA 函数都成对 CoInitialize/CoUninitialize，并且每次
+   CoCreateInstance(CLSID_CUIAutomation)；而一次词跳最多走两遍（读取 +
+   置位后回读校验）。CUIAutomation 的创建要拉起 UIA 服务与缓存层，开销在
+   数十毫秒量级 —— 全落在大键路径上，还叠加了主线程阻塞。
+
+   缓存必须是"每线程一份"，不能做成进程级单例：
+     · CoInitialize 是线程级状态，执行线程（act.c）要有自己的；
+     · CUIAutomation 注册为 Apartment 线程模型，接口指针跨套间裸传是错的
+       （需要封送），所以不能两个线程共享同一个实例。
+   结束时不 CoUninitialize：调用者只有主线程与执行线程，都在进程退出时才
+   结束，交给进程退出回收。 */
+static __declspec(thread) BOOL           t_coReady = FALSE;
+static __declspec(thread) IUIAutomation* t_uia     = NULL;
+
+static BOOL CoUp(void) {
+    if (t_coReady) return TRUE;
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    /* RPC_E_CHANGED_MODE：本线程已按别的模式初始化过 COM，照样能用；
+       S_FALSE：本线程重复初始化。两者都不该再反初始化。 */
+    if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE) t_coReady = TRUE;
+    return t_coReady;
+}
+
+/* 取本线程的 IUIAutomation（首次创建后常驻）。返回的是缓存引用，
+   调用方**不要** Release。 */
+static IUIAutomation* UiaGet(void) {
+    if (t_uia) return t_uia;
+    if (!CoUp()) return NULL;
+    IUIAutomation* ua = NULL;
+    if (SUCCEEDED(CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
+                                   &IID_IUIAutomation, (void**)&ua)) && ua)
+        t_uia = ua;
+    return t_uia;
+}
+
 /* 在子树里找第一个"带 DocumentRange"的元素。
    Chromium 系（QQ / Edge / VSCode）的 UIA 焦点有时落在 Pane 上：Pane 自身没有
    DocumentRange，沿祖先链向上也找不到（顶层 Chrome_WidgetWin_1 同样没有）——
@@ -577,13 +613,9 @@ static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut)
     IUIAutomationTextRange *doc = NULL, *caret = NULL, *tmp = NULL;
     BOOL ok = FALSE;
 
-    hr = CoInitialize(NULL);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return FALSE;
-
-    hr = CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
-                          &IID_IUIAutomation, (void**)&ua);
-    UiaLog("CoCreateInstance", hr);
-    if (FAILED(hr) || !ua) { CoUninitialize(); return FALSE; }
+    ua = UiaGet();                       /* 本线程缓存，不 Release */
+    UiaLog("UiaGet", ua ? S_OK : E_FAIL);
+    if (!ua) return FALSE;
 
     /* 锚定候选：优先 UIA 焦点元素（GetFocusedElement 能命中 Chromium/WinUI 的
        真正文本框），取不到 TextPattern 时再回退 ElementFromHandle(hwnd)。
@@ -697,8 +729,7 @@ done:
     if (doc)  IUIAutomationTextRange_Release(doc);
     if (tp)   IUIAutomationTextPattern_Release(tp);
     if (el)   IUIAutomationElement_Release(el);
-    if (ua)   IUIAutomation_Release(ua);
-    CoUninitialize();
+    /* ua 由 UiaGet 的线程缓存持有，这里不 Release、也不 CoUninitialize */
     return ok;
 }
 
@@ -723,12 +754,8 @@ static BOOL UiaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
     const char* why = "";                              /* 失败点（诊断日志用） */
     if (delta == 0) return TRUE;                       /* 无需移动 */
 
-    hr = CoInitialize(NULL);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return FALSE;
-    hr = CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
-                          &IID_IUIAutomation, (void**)&ua);
-    if (FAILED(hr) || !ua) { CoUninitialize(); return FALSE; }
-
+    ua = UiaGet();                                     /* 本线程缓存，不 Release */
+    if (!ua) return FALSE;
     if (SUCCEEDED(IUIAutomation_GetFocusedElement(ua, &ef)) && ef) {
         owner = FindDocElement(ua, ef);
         IUIAutomationElement_Release(ef);
@@ -766,22 +793,24 @@ static BOOL UiaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
     {
         int A = (target < caret) ? target : caret;
         int B = (target < caret) ? caret : target;
-        long moved = 0;
+        /* count / moved 都按头文件声明用 int（原来写 long，/W4 报 C4057；
+           x64 下 long 也是 32 位所以没出事，但类型对不上就是在掩盖真问题） */
+        int moved = 0;
         hr = IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_End,
                 doc, TextPatternRangeEndpoint_Start);
         if (FAILED(hr)) { why = "pin End to doc head"; goto done; }
         if (A > 0) {
             hr = IUIAutomationTextRange_MoveEndpointByUnit(r, TextPatternRangeEndpoint_End,
-                    TextUnit_Character, (long)A, &moved);
-            if (FAILED(hr) || moved != (long)A) { why = "move End to A"; goto done; }
+                    TextUnit_Character, A, &moved);
+            if (FAILED(hr) || moved != A) { why = "move End to A"; goto done; }
         }
         hr = IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_Start,
                 r, TextPatternRangeEndpoint_End);
         if (FAILED(hr)) { why = "fold Start to End"; goto done; }
         if (B > A) {
             hr = IUIAutomationTextRange_MoveEndpointByUnit(r, TextPatternRangeEndpoint_End,
-                    TextUnit_Character, (long)(B - A), &moved);
-            if (FAILED(hr) || moved != (long)(B - A)) { why = "move End to B"; goto done; }
+                    TextUnit_Character, B - A, &moved);
+            if (FAILED(hr) || moved != (B - A)) { why = "move End to B"; goto done; }
         }
     }
     if (!shift) {
@@ -813,8 +842,7 @@ done:
     if (doc)    IUIAutomationTextRange_Release(doc);
     if (tp)     IUIAutomationTextPattern_Release(tp);
     if (el)     IUIAutomationElement_Release(el);
-    if (ua)     IUIAutomation_Release(ua);
-    CoUninitialize();
+    /* ua 由 UiaGet 的线程缓存持有，这里不 Release、也不 CoUninitialize */
     return ok;
 }
 
@@ -1144,17 +1172,8 @@ void NavBaseInfo(void) {
 
     /* UIA 自动化是否可用 */
     {
-        BOOL uiaOK = FALSE;
-        HRESULT hr = CoInitialize(NULL);
-        if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE) {
-            IUIAutomation* ua = NULL;
-            if (SUCCEEDED(CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
-                                           &IID_IUIAutomation, (void**)&ua)) && ua) {
-                uiaOK = TRUE;
-                IUIAutomation_Release(ua);
-            }
-            CoUninitialize();
-        }
+        /* 顺带让本线程的 UIA 实例在启动时就建好，后续跳词直接用缓存 */
+        BOOL uiaOK = (UiaGet() != NULL);
         RepAppend(b, 1700, &o, L"UIA 自动化可用 = %s\n", uiaOK ? L"是" : L"否");
     }
 
@@ -1223,11 +1242,9 @@ void NavProbe(void) {
     }
 
     /* UIA 是否支持文本模式 */
-    HRESULT hr = CoInitialize(NULL);
-    if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE) {
-        IUIAutomation* ua = NULL;
-        if (SUCCEEDED(CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
-                                       &IID_IUIAutomation, (void**)&ua)) && ua) {
+    {
+        IUIAutomation* ua = UiaGet();       /* 本线程缓存，不 Release */
+        if (ua) {
             IUIAutomationElement* el = NULL;
             if (SUCCEEDED(IUIAutomation_GetFocusedElement(ua, &el)) && el) {
                 IUIAutomationTextPattern* tp = NULL;
@@ -1240,11 +1257,9 @@ void NavProbe(void) {
             } else {
                 RepAppend(rep, 2800, &o, L"UIA 取不到焦点元素\n");
             }
-            IUIAutomation_Release(ua);
         } else {
             RepAppend(rep, 2800, &o, L"UIA 初始化失败\n");
         }
-        CoUninitialize();
     }
 
     /* IA2 (IAccessibleText) 是否可用 —— Scintilla 系编辑器的通道 */
@@ -1268,11 +1283,15 @@ void NavProbe(void) {
         }
     }
 
-    /* 写日志（UTF-8）并存一份供弹窗 */
+    /* 只写日志。原来这里弹一个模态 MessageBox，三个问题：把和弦引擎和键盘
+       响应一起冻住（探测期间再按 Caps+J 会异常）、2800 字符的文本在对话框里
+       既读不完也复制不了、而它的内容本就已经全文写入日志了。
+       UTF-8 缓冲区按最坏情况给（BMP 最多 3 字节/字符）：原来固定 3000 字节
+       且不检查返回值 —— 内容含中文时转换会失败，utf 保持未初始化就被当
+       字符串打印，等于把栈上的残留内容写进日志。 */
     CapLog("%S focus=0x%p class=[%S] textOK=%d", title, (void*)focus, cls, textOK);
-    char utf[3000];
-    WideCharToMultiByte(CP_UTF8, 0, rep, -1, utf, 3000, NULL, NULL);
-    CapLog("%s", utf);
-
-    MessageBoxW(NULL, rep, L"CapsEnhance 焦点探测", MB_OK);
+    char utf[2800 * 3 + 1];
+    int un = WideCharToMultiByte(CP_UTF8, 0, rep, -1, utf, (int)sizeof(utf), NULL, NULL);
+    if (un > 0) CapLog("%s", utf);
+    else        CapLog("(探测结果转 UTF-8 失败, err=%lu)", (unsigned long)GetLastError());
 }

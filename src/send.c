@@ -59,7 +59,13 @@ static void SendEvent(int vk, BOOL up) {
     i.ki.wScan = (WORD)MapVirtualKeyW((UINT)vk, MAPVK_VK_TO_VSC);
     if (IsExtendedVk(vk)) i.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
     if (up)                i.ki.dwFlags |= KEYEVENTF_KEYUP;
-    SendInput(1, &i, sizeof(INPUT));
+    /* 返回值必须看：目标窗口的完整性级别高于本进程时（例如对方以管理员
+       运行而本程序没有），UIPI 会把整批注入拒掉、SendInput 返回 0。此前
+       丢弃返回值，于是现象是"词跳完全没反应"而日志干净无事 —— 无法诊断。
+       只在记录模式写日志：常规模式不打扰用户，也不改变任何行为。 */
+    if (SendInput(1, &i, sizeof(INPUT)) == 0 && g_recording)
+        CapLog("  !! SendInput 被拒 vk=0x%02X up=%d err=%lu",
+               (unsigned)vk, up ? 1 : 0, (unsigned long)GetLastError());
 }
 
 /* 事件之间的间隔：让目标程序的消息队列逐个消化 */
