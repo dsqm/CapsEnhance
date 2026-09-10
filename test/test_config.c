@@ -177,13 +177,13 @@ int main(void) {
     EXPECT(ConfigGetWheelScrollMul() == 16, "CFG: WheelScrollMul 超过上限钳到 16");
     WriteIni("[General]\r\nWheelScrollMul = abc\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMul() == 3, "CFG: WheelScrollMul 非法值回落默认 3");
+    EXPECT(ConfigGetWheelScrollMul() == 2, "CFG: WheelScrollMul 非法值回落默认 2");
     WriteIni("[Other]\r\nWheelScrollMul = 9\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMul() == 3, "CFG: 非 General 段的 WheelScrollMul 不生效");
+    EXPECT(ConfigGetWheelScrollMul() == 2, "CFG: 非 General 段的 WheelScrollMul 不生效");
     WriteIni("[General]\r\n\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMul() == 3, "CFG: WheelScrollMul 缺省为 3");
+    EXPECT(ConfigGetWheelScrollMul() == 2, "CFG: WheelScrollMul 缺省为 2");
 
     /* 老配置升级：缺失的新键自动补齐，已有内容保留 */
     {
@@ -206,7 +206,7 @@ int main(void) {
                 if (strstr(line, "LogMaxKB = 2048")) hasLog = 1;
                 if (strstr(line, "MaxArrowSteps = 32")) hasSteps = 1;
                 if (strstr(line, "OverStepMode = 0")) hasMode = 1;
-                if (strstr(line, "WheelScrollMul = 3")) hasWheel = 1;
+                if (strstr(line, "WheelScrollMul = 2")) hasWheel = 1;
             }
             fclose(fc);
         }
@@ -290,7 +290,7 @@ int main(void) {
         FILE* fo = NULL;
         if (fopen_s(&fo, "bin/cfgtest.ini", "wb") == 0 && fo) {
             fputs("[General]\nRunAsAdmin = 1\nLogMaxKB = 7\nMaxArrowSteps = 5\n"
-                  "OverStepMode = 1\nWheelScrollMul = 2\n", fo);
+                  "OverStepMode = 1\nWheelScrollMul = 5\n", fo);
             fclose(fo);
         }
         char before[512];
@@ -312,7 +312,7 @@ int main(void) {
         ConfigLoadFrom(L"bin/cfgtest.ini");
         EXPECT(ConfigGetLogMaxKB() == 7 && ConfigGetMaxArrowSteps() == 5 && ConfigGetOverStepCtrl(),
                "UPG: 用户自定义值不被覆盖");
-        EXPECT(ConfigGetWheelScrollMul() == 2, "UPG: WheelScrollMul 自定义值不被覆盖");
+        EXPECT(ConfigGetWheelScrollMul() == 5, "UPG: WheelScrollMul 自定义值不被覆盖");
     }
 
     /* 兼容早期不分节写法 */
@@ -335,7 +335,7 @@ int main(void) {
     EXPECT(TemplateHas("LogMaxKB = 2048"),   "CFG: 模板含 LogMaxKB 默认值");
     EXPECT(TemplateHas("MaxArrowSteps = 32"),"CFG: 模板含 MaxArrowSteps 默认值");
     EXPECT(TemplateHas("OverStepMode = 0"),  "CFG: 模板含 OverStepMode 默认值");
-    EXPECT(TemplateHas("WheelScrollMul = 3"),"CFG: 模板含 WheelScrollMul 默认值");
+    EXPECT(TemplateHas("WheelScrollMul = 2"),"CFG: 模板含 WheelScrollMul 默认值");
     EXPECT(TemplateHas("[NativeWordJump]"),  "CFG: 模板含 NativeWordJump 段");
 
     /* 真实权限查询：不崩溃即可（是否管理员取决于运行环境） */

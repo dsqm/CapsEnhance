@@ -364,8 +364,8 @@ int main(void) {
     CHECK(CountVk(VK_LCONTROL) == 1, "M: Ctrl 只按一次");
 
     /* ---- 场景N：按住 C 时鼠标滚轮的加速决策 ----
-       配置里 WheelScrollMul 的缺省值是 3（本测试没读 ini，用的就是静态缺省），
-       所以钩子应以 mul=3 投递加速请求，delta 原样带过去（方向也在里面）。
+       配置里 WheelScrollMul 的缺省值是 2（本测试没读 ini，用的就是静态缺省），
+       所以钩子应以 mul=2 投递加速请求，delta 原样带过去（方向也在里面）。
        注：不把生产的 LowLevelMouseProc 真正挂进钩子链 —— 万一哪天
        LLMHF_INJECTED 守卫被删掉，真挂链上会让注入事件自我放大成风暴。
        直接调用它喂"硬件事件"/"注入事件"两条路径，都能确定性地覆盖到。 */
@@ -378,12 +378,12 @@ int main(void) {
 
     Key(CLI_CAPS, TRUE); Pump(2);
     Wheel(120, 0);                       /* 硬件上滚 */
-    CHECK(TakeWheelAccel(&d, &mul) && d == 120 && mul == 3,
-          "N: 按住 C 上滚 -> 投递 delta=120 mul=3");
+    CHECK(TakeWheelAccel(&d, &mul) && d == 120 && mul == 2,
+          "N: 按住 C 上滚 -> 投递 delta=120 mul=2");
     CHECK(!TakeWheelAccel(NULL, NULL), "N: 一次滚轮只投递一次请求");
 
     Wheel(-120, 0);                      /* 硬件下滚：方向要带对 */
-    CHECK(TakeWheelAccel(&d, &mul) && d == -120 && mul == 3,
+    CHECK(TakeWheelAccel(&d, &mul) && d == -120 && mul == 2,
           "N: 按住 C 下滚 -> 投递 delta=-120");
 
     Wheel(120, LLMHF_INJECTED);          /* 我们注入出去的滚轮回到钩子 */

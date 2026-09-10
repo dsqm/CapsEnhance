@@ -17,13 +17,21 @@
 #define CFG_MAX_ENTRIES 128
 #define CFG_NAME_MAX    64
 
+/* 滚轮放大倍数的缺省值。只在这一处定值：模板与升级块用 STR() 拼进去，
+   不会再出现"代码改了、字符串没改"的写漂（本项目手工同步常量栽过跟头）。
+   为什么是 2 而不是 3：每补发一格主线程就要隔 2ms，mul=3 会补 2 格，
+   滚动时出现可见卡顿；mul=2 只补 1 格、无间隔等待，手感与系统原生一致。 */
+#define WHEEL_MUL_DEFAULT 2
+#define STR2(x) #x
+#define STR(x)  STR2(x)
+
 static WCHAR g_names[CFG_MAX_ENTRIES][CFG_NAME_MAX];
 static int   g_count = 0;
 static BOOL  g_runAsAdmin = FALSE;
 static int   g_logMaxKB   = 2048;   /* 日志大小上限（KB），0 = 不限制 */
 static int   g_maxArrowSteps = 32;  /* 逐格词跳最大步数，超过按 overStepMode 处理 */
 static BOOL  g_overStepCtrl = FALSE; /* TRUE=超限改发 Ctrl+方向（原生词跳） */
-static int   g_wheelMul = 3;         /* 按住 C 时滚轮放大倍数，<2 视为不放大 */
+static int   g_wheelMul = WHEEL_MUL_DEFAULT; /* 按住 C 时滚轮放大倍数，<2 视为不放大 */
 
 /* 整数：只认前导十进制数字，其余（空/非法）返回默认值。
    超过 1e8 直接判非法：没有哪个配置项需要这么大，而继续累加会让
@@ -94,7 +102,7 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_logMaxKB = 2048;
     g_maxArrowSteps = 32;
     g_overStepCtrl = FALSE;
-    g_wheelMul = 3;
+    g_wheelMul = WHEEL_MUL_DEFAULT;
 
     FILE* f = NULL;
     if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
@@ -155,7 +163,7 @@ void ConfigLoadFrom(const WCHAR* path) {
                 else if (_wcsicmp(key, L"maxarrowsteps") == 0) g_maxArrowSteps = ParseIntW(val, 32);
                 else if (_wcsicmp(key, L"overstepmode") == 0) g_overStepCtrl = ParseBoolW(val);
                 else if (_wcsicmp(key, L"wheelscrollmul") == 0) {
-                    int v = ParseIntW(val, 3);
+                    int v = ParseIntW(val, WHEEL_MUL_DEFAULT);
                     if (v < 0) v = 0;
                     if (v > 16) v = 16;   /* 上限 16：单次最多补发 15 格（每格间隔 2ms） */
                     g_wheelMul = v;
@@ -201,12 +209,12 @@ void ConfigLoad(void) {
             ";   0 = 只发送一个方向键（跳一格即停）\n"
             ";   1 = 改发 Ctrl+方向键（由目标程序自己的词跳完成，瞬时）\n"
             "OverStepMode = 0\n"
-            "; 按住 C 时用鼠标滚轮加速滚动：每个滚轮刻度放大成 N 倍。\n"
+            "; 按住 C 时用鼠标滚轮加速滚动：每个滚轮刻度放大成 N 倍（默认 2）。\n"
             ";   N >= 2 = 放大 N 倍；N = 0 或 1 = 不放大（等同关闭，滚轮完全按系统原本行为）\n"
             ";   实现方式：原始刻度照常送达，再补发 (N-1) 个同值刻度。\n"
             ";   只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），\n"
             ";   也不写注册表。\n"
-            "WheelScrollMul = 3\n"
+            "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n"
             "\n"
             "[NativeWordJump]\n"
             "; 命中名单的程序：Caps+N / Caps+M 不做文本探测，\n"
@@ -258,12 +266,12 @@ static const struct {
       ";   1 = 改发 Ctrl+方向键（由目标程序自己的词跳完成，瞬时）\n"
       "OverStepMode = 0\n" },
     { "wheelscrollmul",
-      "; 按住 C 时用鼠标滚轮加速滚动：每个滚轮刻度放大成 N 倍。\n"
+      "; 按住 C 时用鼠标滚轮加速滚动：每个滚轮刻度放大成 N 倍（默认 2）。\n"
       ";   N >= 2 = 放大 N 倍；N = 0 或 1 = 不放大（等同关闭，滚轮完全按系统原本行为）\n"
       ";   实现方式：原始刻度照常送达，再补发 (N-1) 个同值刻度。\n"
       ";   只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），\n"
       ";   也不写注册表。\n"
-      "WheelScrollMul = 3\n" },
+      "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n" },
 };
 
 /* ---- 带边界检查的输出缓冲 ----
