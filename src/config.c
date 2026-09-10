@@ -21,7 +21,6 @@
    不会再出现"代码改了、字符串没改"的写漂（本项目手工同步常量栽过跟头）。
    为什么是 2 而不是 3：每补发一格主线程就要隔 2ms，mul=3 会补 2 格，
    滚动时出现可见卡顿；mul=2 只补 1 格、无间隔等待，手感与系统原生一致。 */
-#define WHEEL_MUL_DEFAULT 2
 
 /* 横向滚动的默认倍数：**1**（不放大）。
    横向是"每次滚轮挪一列"的语义，倍数 1 = 一个物理格换一次横向滚动，
@@ -32,9 +31,23 @@
 #define STR2(x) #x
 #define STR(x)  STR2(x)
 
+/* 滚轮滚动的**最快速度**：每 N 毫秒滚一格 —— 与 AutoScrollInterval **同一个单位**（毫秒/格）。
+   这一个值同时管三件事（它们本来就是"同一个速度"的三种用法）：
+     · 「Caps + 滚轮」：以这个速度连续滚动（最快档）；
+     · 「Caps + Alt/D + 滚轮」：从这里往上的**上限** —— 自动滚动只会更慢，不会更快；
+     · 0 = 整个滚轮增强关闭（这两个纵向用法都停；横向滚动另有 WheelHScrollMul）。
+   为什么从"倍数"改成"毫秒/格"：倍数和"毫秒/格"是两种量，放在一起没法比较也没法互相
+   约束（用户要的正是"单位一样 + 上限不超过它"）。改成一个单位之后，"最快 = 手动速度"
+   就是同一个数，一眼能看懂。
+   默认 1000 = 1 格/秒 = 3 行/秒（按系统每次滚 3 行）≈ 180 行/分钟：一个"快速下翻"的
+   速度；嫌慢调小（最小 1），嫌快调大。想让它和自动滚动一样是阅读速度，就设成 24000。 */
+#define WHEEL_MS_DEFAULT 1000
+#define WHEEL_MS_MIN     0      /* 0 = 关闭（见上）；下限只管住"负数"这种非法写法 */
+#define WHEEL_MS_MAX     60000
+
 /* 自动滚动的**初始**节拍（ms）：启动后每 N 毫秒滚"一格"，即最慢档的速度。
-   同向继续滚会逐档提速，最快档的节拍 = 本值 / WheelScrollMul
-   —— 所以本值同时定了"初始速度"和"最快速度"的基准。
+   同向继续滚会逐档提速，**最快只到 WheelScrollMs**（手动滚轮的速度）
+   —— 所以本值是"初始速度"，WheelScrollMs 是"最快速度"。
 
    默认值的依据是**人的实际阅读速度**，不是手感试出来的（前几版就是靠试，
    结果 120 -> 300 -> 500 -> 4000 改了四轮都还偏快）：
@@ -52,7 +65,7 @@
        24000      7.5       338   <- **默认**：落在 300..500 的偏慢半区，
                                       对应"边读边理解"的舒适区
        60000        3       135   <- 技术精读（80..150 字/分钟）
-   嫌慢就再滚一下提速（6 档到 本值/WheelScrollMul），或把本值调小。 */
+   嫌慢就再滚一下提速，或把本值调小（6 档从本值一路缩到 WheelScrollMs）。 */
 #define AUTOSCROLL_INTERVAL_DEFAULT 24000
 
 /* AutoScrollInterval 的可调范围（ms）。下限 100 对应" 1350 行/分钟"这种
@@ -113,7 +126,7 @@ static BOOL  g_runAsAdmin = FALSE;
 static int   g_logMaxKB   = 2048;   /* 日志大小上限（KB），0 = 不限制 */
 static int   g_maxArrowSteps = 32;  /* 逐格词跳最大步数，超过按 overStepMode 处理 */
 static BOOL  g_overStepCtrl = FALSE; /* TRUE=超限改发 Ctrl+方向（原生词跳） */
-static int   g_wheelMul = WHEEL_MUL_DEFAULT; /* 按住 C 时滚轮放大倍数，<2 视为不放大 */
+static int   g_wheelMs = WHEEL_MS_DEFAULT;    /* 滚轮最快速度：毫秒/格，0=关闭纵向滚轮增强 */
 static int   g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT; /* 自动滚动初始节拍(ms) */
 static BOOL  g_autoScrollSmooth = AUTOSCROLL_SMOOTH_DEFAULT;     /* 自动滚动平滑注入 */
 static int   g_wheelHMul = WHEEL_HMUL_DEFAULT; /* Caps+Shift+滚轮 的横向滚动倍数，0=关闭 */
@@ -187,7 +200,7 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_logMaxKB = 2048;
     g_maxArrowSteps = 32;
     g_overStepCtrl = FALSE;
-    g_wheelMul = WHEEL_MUL_DEFAULT;
+    g_wheelMs = WHEEL_MS_DEFAULT;
     g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT;
     g_autoScrollSmooth = AUTOSCROLL_SMOOTH_DEFAULT;
     g_wheelHMul = WHEEL_HMUL_DEFAULT;
@@ -254,12 +267,17 @@ void ConfigLoadFrom(const WCHAR* path) {
                 else if (_wcsicmp(key, L"logmaxkb") == 0) g_logMaxKB = ParseIntW(val, 2048);
                 else if (_wcsicmp(key, L"maxarrowsteps") == 0) g_maxArrowSteps = ParseIntW(val, 32);
                 else if (_wcsicmp(key, L"overstepmode") == 0) g_overStepCtrl = ParseBoolW(val);
-                else if (_wcsicmp(key, L"wheelscrollmul") == 0) {
-                    int v = ParseIntW(val, WHEEL_MUL_DEFAULT);
-                    if (v < 0) v = 0;
-                    if (v > 16) v = 16;   /* 上限 16：单次最多补发 15 格（每格间隔 2ms） */
-                    g_wheelMul = v;
+                else if (_wcsicmp(key, L"wheelscrollms") == 0) {
+                    int v = ParseIntW(val, WHEEL_MS_DEFAULT);
+                    if (v < WHEEL_MS_MIN) v = WHEEL_MS_MIN;   /* 负数按非法处理 */
+                    if (v > WHEEL_MS_MAX) v = WHEEL_MS_MAX;
+                    g_wheelMs = v;
                 }
+                /* 兼容旧键名 WheelScrollMul（倍数语义）：**不**换算成毫秒 ——
+                   "放大 2 倍"和"每格 2 毫秒"是两种量，硬换算只会得到荒谬的值。
+                   旧键留在这里被忽略；升级机制会补上新的 WheelScrollMs。
+                   旧键若落在 StoreStr 里也只是躺着，不影响任何行为。 */
+                else if (_wcsicmp(key, L"wheelscrollmul") == 0) { /* 忽略（旧语义） */ }
                 else if (_wcsicmp(key, L"autoscrollinterval") == 0) {
                     int v = ParseIntW(val, AUTOSCROLL_INTERVAL_DEFAULT);
                     if (v < AUTOSCROLL_INTERVAL_MIN) v = AUTOSCROLL_INTERVAL_MIN;
@@ -308,35 +326,48 @@ void ConfigLoad(void) {
             "; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）\n"
             "; 只认 0/1：1=启用，0=禁用（其它写法一律视为 0）\n"
             "RunAsAdmin = 0\n"
+            "\n"
             "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
             "LogMaxKB = 2048\n"
+            "\n"
             "; 逐格词跳的最大步数（字符数）：单次要发的方向键达到这个数就不再逐格，\n"
             "; 改按 OverStepMode 处理，避免方向键发太久。0 = 不限制（逐格发完）。\n"
             "; 无论填多少，单次逐格发送另有 256 步的硬上限\n"
             "MaxArrowSteps = 32\n"
+            "\n"
             "; 超过 MaxArrowSteps 时的替代方式，只认 0/1：\n"
             ";   0 = 只发送一个方向键（跳一格即停）\n"
             ";   1 = 改发 Ctrl+方向键（由目标程序自己的词跳完成，瞬时）\n"
             "OverStepMode = 0\n"
-            "; 按住 C 时用鼠标滚轮加速滚动：每个滚轮刻度放大成 N 倍（默认 2）。\n"
-            ";   N >= 2 = 放大 N 倍；N = 0 或 1 = 不放大（等同关闭，滚轮完全按系统原本行为）\n"
-            ";   实现方式：原始刻度照常送达，再补发 (N-1) 个同值刻度。\n"
-            ";   只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），\n"
-            ";   也不写注册表。\n"
-            ";   同一个开关也决定\"自动滚动\"能否用：N >= 2 才启用（自动滚动最快档 = N 倍）。\n"
-            "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n"
-            "; 自动滚动的初始节拍（毫秒）：启动后每 N 毫秒滚一格（最慢档，越大越慢）。\n"
-            "; 同向继续滚会逐档提速，最快档节拍 = N / WheelScrollMul。可调范围 "
-            STR(AUTOSCROLL_INTERVAL_MIN) ".." STR(AUTOSCROLL_INTERVAL_MAX) "。\n"
-            "; 缺省 24000 = 7.5 行/分钟（按系统每次滚 3 行）≈ 338 字/分钟，\n"
-            "; 落在成人中文默读 300..500 字/分钟的舒适区；最慢可到 60000（约 135 字/分钟，技术精读）。\n"
+            "\n"
+            "; ============ 滚轮（单位统一为「毫秒/格」，越小越快）============\n"
+            "; 滚轮滚动的**最快速度**：每 N 毫秒滚一格。这一个值同时管两件事：\n"
+            ";   · 按住 C 滚滚轮 = 以这个速度连续滚动（滚一下即开始，反向或松开 C 停）；\n"
+            ";   · 按住 C + Alt/D 滚滚轮 = 自动滚动，从这里往上的**上限**（只会更慢）。\n"
+            "; 0 = 关闭上面两个纵向滚轮功能（滚轮完全按系统原本行为）。\n"
+            "; 缺省 1000 = 1 格/秒 = 3 行/秒 ≈ 180 行/分钟（快速下翻）；嫌快就调大，\n"
+            "; 想和自动滚动的阅读速度一致就设成 24000。可调范围 0.."
+            STR(WHEEL_MS_MAX) "。\n"
+            "; 只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），也不写注册表。\n"
+            "WheelScrollMs = " STR(WHEEL_MS_DEFAULT) "\n"
+            "\n"
+            "; 自动滚动的初始速度（毫秒/格）：越大越慢。同向继续滚会逐档提速，\n"
+            "; 最快只到 WheelScrollMs（手动滚轮的速度），不会更快。\n"
+            "; 缺省 24000 = 7.5 行/分钟 ≈ 338 字/分钟，落在成人中文默读\n"
+            "; 300..500 字/分钟的舒适区；最慢可到 " STR(AUTOSCROLL_INTERVAL_MAX)
+            "（约 135 字/分钟，技术精读）。\n"
+            "; 可调范围 " STR(AUTOSCROLL_INTERVAL_MIN) ".." STR(AUTOSCROLL_INTERVAL_MAX) "。\n"
             "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n"
+            "\n"
             "; 自动滚动是否平滑注入（1=是 / 0=否）。1 时只发\"不足一格\"的小刻度、\n"
             "; 次数更多，手感接近触控板连续滑动；个别程序不累积小刻度（完全不动）时设 0。\n"
             "AutoScrollSmooth = " STR(AUTOSCROLL_SMOOTH_DEFAULT) "\n"
+            "\n"
             "; 横向滚动：按住 C + Shift 滚滚轮，横向挪动。倍数 1 = 一滚一格（默认），\n"
             "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n"
+            "; 方向同浏览器：滚轮向上 = 向左，滚轮向下 = 向右。\n"
             "WheelHScrollMul = " STR(WHEEL_HMUL_DEFAULT) "\n"
+            "\n"
             "; ---- 和弦修饰的激活键 ----\n"
             "; 按住 C（CapsLock）期间，这些键作为\"模式修饰\"生效。\n"
             "; 键名可用：单字母 A-Z、数字 0-9、Alt / RAlt / Ctrl / Shift / Win / Space 等；\n"
@@ -344,6 +375,7 @@ void ConfigLoad(void) {
             "; EnhanceKeys 增强模式：点按触发键补齐到 3 次；配合滚轮启动自动滚动。\n"
             ";   适应了以后想只用 Alt、把 D 去掉，就把下面改成 \"Alt\" 即可。\n"
             "EnhanceKeys = " MODE_ENHANCE_KEYS_DEFAULT "\n"
+            "\n"
             "; ShiftKeys 位移模式：触发键带 Shift（选中/位移）。\n"
             "ShiftKeys = " MODE_SHIFT_KEYS_DEFAULT "\n"
             "\n"
@@ -380,44 +412,56 @@ static const struct {
     const char* block;
 } kUpgrades[] = {
     { "runasadmin",
+      "\n"
       "; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）\n"
       "; 只认 0/1：1=启用，0=禁用（其它写法一律视为 0）\n"
       "RunAsAdmin = 0\n" },
     { "logmaxkb",
+      "\n"
       "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
       "LogMaxKB = 2048\n" },
     { "maxarrowsteps",
+      "\n"
       "; 逐格词跳的最大步数（字符数）：超过该距离的逐格跳转不再逐格发送，\n"
       "; 改按 OverStepMode 处理，避免方向键发太久。0 = 不限制（逐格发完）。\n"
       "; 无论填多少，单次逐格发送另有 256 步的硬上限\n"
       "MaxArrowSteps = 32\n" },
     { "overstepmode",
+      "\n"
       "; 超过 MaxArrowSteps 时的替代方式，只认 0/1：\n"
       ";   0 = 只发送一个方向键（跳一格即停）\n"
       ";   1 = 改发 Ctrl+方向键（由目标程序自己的词跳完成，瞬时）\n"
       "OverStepMode = 0\n" },
-    { "wheelscrollmul",
-      "; 按住 C 时用鼠标滚轮加速滚动：每个滚轮刻度放大成 N 倍（默认 2）。\n"
-      ";   N >= 2 = 放大 N 倍；N = 0 或 1 = 不放大（等同关闭，滚轮完全按系统原本行为）\n"
-      ";   实现方式：原始刻度照常送达，再补发 (N-1) 个同值刻度。\n"
-      ";   只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），\n"
-      ";   也不写注册表。\n"
-      ";   同一个开关也决定\"自动滚动\"能否用：N >= 2 才启用（最快档 = N 倍）。\n"
-      "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n" },
+    { "wheelscrollms",
+      "\n"
+      "; 滚轮滚动的**最快速度**：每 N 毫秒滚一格（与 AutoScrollInterval 同单位）。\n"
+      ";   · 按住 C 滚滚轮 = 以这个速度连续滚动（反向或松开 C 停）；\n"
+      ";   · 按住 C + Alt/D 滚滚轮 = 自动滚动，从这里往上的上限（只会更慢）。\n"
+      "; 0 = 关闭上面两个纵向滚轮功能（滚轮按系统原本行为）。\n"
+      "; 缺省 1000 ≈ 180 行/分钟（快速下翻）；嫌快就调大，\n"
+      "; 想和自动滚动的阅读速度一致就设成 24000。范围 0.."
+      STR(WHEEL_MS_MAX) "。\n"
+      "; 注：旧版这里是倍数项 WheelScrollMul，语义不同，无法自动换算，已废弃。\n"
+      "WheelScrollMs = " STR(WHEEL_MS_DEFAULT) "\n" },
     { "autoscrollinterval",
-      "; 自动滚动的初始节拍（毫秒）：启动后每 N 毫秒滚一格（最慢档，越大越慢）。\n"
-      "; 同向继续滚会逐档提速，最快档节拍 = N / WheelScrollMul。可调范围 "
-      STR(AUTOSCROLL_INTERVAL_MIN) ".." STR(AUTOSCROLL_INTERVAL_MAX) "。\n"
+      "\n"
+      "; 自动滚动的初始速度（毫秒/格，越大越慢）：同向继续滚会逐档提速，\n"
+      "; 最快只到 WheelScrollMs（手动滚轮的速度），不会更快。\n"
+      "; 可调范围 " STR(AUTOSCROLL_INTERVAL_MIN) ".." STR(AUTOSCROLL_INTERVAL_MAX) "。\n"
       "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n" },
     { "autoscrollsmooth",
+      "\n"
       "; 自动滚动是否平滑注入（1=是 / 0=否）。1 时只发\"不足一格\"的小刻度、\n"
       "; 次数更多，手感接近触控板连续滑动；个别程序不累积小刻度（完全不动）时设 0。\n"
       "AutoScrollSmooth = " STR(AUTOSCROLL_SMOOTH_DEFAULT) "\n" },
     { "wheelhscrollmul",
+      "\n"
       "; 横向滚动：按住 C + Shift 滚滚轮，横向挪动。倍数 1 = 一滚一格（默认），\n"
       "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n"
+      "; 方向同浏览器：滚轮向上 = 向左，滚轮向下 = 向右。\n"
       "WheelHScrollMul = " STR(WHEEL_HMUL_DEFAULT) "\n" },
     { "enhancekeys",
+      "\n"
       "; ---- 和弦修饰的激活键 ----\n"
       "; 按住 C（CapsLock）期间，这些键作为\"模式修饰\"生效。\n"
       "; 键名可用：单字母 A-Z、数字 0-9、Alt / RAlt / Ctrl / Shift / Win / Space 等；\n"
@@ -426,6 +470,7 @@ static const struct {
       ";   适应了以后想只用 Alt、把 D 去掉，就把下面改成 \"Alt\" 即可。\n"
       "EnhanceKeys = " MODE_ENHANCE_KEYS_DEFAULT "\n" },
     { "shiftkeys",
+      "\n"
       "; ShiftKeys 位移模式：触发键带 Shift（选中/位移）。\n"
       "ShiftKeys = " MODE_SHIFT_KEYS_DEFAULT "\n" },
 };
@@ -568,8 +613,8 @@ BOOL ConfigGetOverStepCtrl(void) {
     return g_overStepCtrl;
 }
 
-int ConfigGetWheelScrollMul(void) {
-    return g_wheelMul;
+int ConfigGetWheelScrollMs(void) {
+    return g_wheelMs;
 }
 
 int ConfigGetAutoScrollInterval(void) {

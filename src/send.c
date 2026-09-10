@@ -170,7 +170,7 @@ int SendArrows(int dir, int n, BOOL shift) {
 }
 
 /* 逐格注入 n 个"同值刻度"，纵轴与横轴共用这一段 —— 只有 dwFlags 不同
-   （MOUSEEVENTF_WHEEL / MOUSEEVENTF_HWHEEL），"补几格"的算法各自决定，
+   （MOUSEEVENTF_WHEEL / MOUSEEVENTF_HWHEEL），"发几格"由调用方决定，
    注入语义完全一样，所以只留一处实现，免得"改了间隔忘了改另一条路"。
 
    **不要**改成"一个事件塞 delta = 120*N"，实测（跨进程量目标窗口收到的消息）：
@@ -214,22 +214,15 @@ void SendWheelNotches(int delta, int n)  { SendWheelAxis(delta, n, FALSE); }
 
 /* 横向滚动：n 个**固定** ±120 的刻度。这里不沿用物理格的原值而统一成
    WHEEL_STD_DELTA —— 横向是"每次滚轮换一列"的语义，放大倍数才有确定含义
-   （倍数 1 = 正好一格），物理格的原始大小（高精度滚轮可能小于 120）不参与。 */
+   （倍数 1 = 正好一格），物理格的原始大小（高精度滚轮可能小于 120）不参与。
+
+   **方向（与滚轮上下相反）**：滚轮**向上** -> 向左，向下 -> 向右。
+   这不是我们随便定的，而是"Shift + 滚轮"在浏览器 / 资源管理器 / 表格里的
+   通用约定（Firefox 官方快捷键表就写着 Shift+上滚 = 向左滚动）。照抄系统
+   约定用户才不用重新适应肌肉记忆。 */
 void SendWheelHNotches(int delta, int n) {
     if (delta == 0) return;
     SendWheelAxis((delta > 0) ? -WHEEL_STD_DELTA : WHEEL_STD_DELTA, n, TRUE);
-}
-
-/* 倍数 -> 要补发的格数。单独拎出来是为了能被单测直接断言换算
-   （真注入的条数没法在本进程里稳定观测，见 test_chord 场景 N 的说明）。 */
-int SendWheelExtraCount(int mul) {
-    if (mul <= 1) return 0;
-    int extra = mul - 1;
-    return extra > WHEEL_EXTRA_MAX ? WHEEL_EXTRA_MAX : extra;
-}
-
-void SendWheelAccel(int delta, int mul) {
-    SendWheelNotches(delta, SendWheelExtraCount(mul));
 }
 
 /* 兜底：文字读取失败时，用系统原生 Ctrl(+Shift)+方向键做词跳。

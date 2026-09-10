@@ -191,12 +191,15 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 /* ================= 鼠标钩子：按住 C 时的滚轮 =================
-   三种语义（按 Shift 优先级从高到低判定）：
-     · Caps+Shift（真实 Shift）：**横向滚动** —— WM_WHEEL_HACCEL，并吞掉物理格；
-     · 增强模式（默认 C+Alt/D）：驱动 act.c 的自动滚动 —— WM_WHEEL_ENH；
-     · 普通（只按住 C）：逐格放大 N 倍 —— 见 main.c 的 WM_WHEEL_ACCEL。
-   为什么 Shift 排最前：它显式指定了"轴向"，比"是否自动滚动"更具体；
-   两个都按住时按 Shift 理解（用户想横着走）。
+   三种语义（按 Shift 优先级从高到低判定），**都由本钩子吞掉物理格**（返回 1），
+   完全由我们注入 —— 物理滚轮给的只是"纵向一格"，放行就会和我们的注入打架：
+     · Caps+Shift（真实 Shift）：**横向滚动** —— WM_WHEEL_HACCEL（换轴向，
+       物理的纵向格更不能放行，否则横纵混滚）；
+     · Caps + 增强修饰（默认 Alt/D）：**连续滚动·增强档** —— 起点在
+       AutoScrollInterval，同向滚逐档提速，上限 WheelScrollMs；
+     · Caps（无修饰）：**连续滚动·手动档** —— 直接以 WheelScrollMs 连续滚。
+   为什么 Shift 排最前：它显式指定了"轴向"，比"滚多快"更具体。
+   WheelScrollMs = 0 时纵向那两档关闭，物理格照常放行（退回系统原生滚动）。
 
    为什么用低级钩子而不是 Raw Input：**必须能认出"这个滚轮事件是我们自己
    注入的"**。Raw Input（RIDEV_INPUTSINK）拿不到"注入"标记，放大后的滚轮会
@@ -232,14 +235,19 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
                         return 1;
                     }
                 }
-                if (ModeDown(MODE_ENHANCE)) {
-                    /* 增强模式（默认 Caps+Alt/D）：滚轮语义是"启动/提速持续
-                       滚动"，由 act.c 的自动滚动通道接管，不再逐格放大。 */
-                    PostMessageW(g_mainWnd, WM_WHEEL_ENH, (WPARAM)delta, 0);
-                } else {
-                    int mul = ConfigGetWheelScrollMul();
-                    if (mul > 1)
-                        PostMessageW(g_mainWnd, WM_WHEEL_ACCEL, (WPARAM)delta, (LPARAM)mul);
+                /* 纵向：Caps + 滚轮（也可再加增强修饰键）= 连续滚动。
+                   分两档：
+                     · 按住增强修饰键（默认 Alt/D）-> 从最慢档起步、同向滚提速；
+                     · 只按住 Caps               -> 直接以最快档（手动速度）滚。
+                   两者的"最快"是同一个值（WheelScrollMs），所以手动速度就是上限。
+                   这一格也**吞掉**（返回 1）：语义已完全由我们接管，再放行一格
+                   原生纵向滚动就会"我们滚一段 + 系统滚一格"地打架。
+                   WheelScrollMs = 0（关闭）时放行，完全退回系统原生行为。 */
+                if (ConfigGetWheelScrollMs() > 0) {
+                    BOOL manual = !ModeDown(MODE_ENHANCE);
+                    PostMessageW(g_mainWnd, WM_WHEEL_ENH,
+                                 (WPARAM)delta, (LPARAM)(manual ? 1 : 0));
+                    return 1;
                 }
             }
         }

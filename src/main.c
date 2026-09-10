@@ -535,18 +535,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
-    case WM_WHEEL_ACCEL:
-        /* 滚轮加速：只投递给专用线程，**主线程绝不在这里做注入**。
-           原来在这里直接 SendWheelAccel（内含 Sleep 逐格补发），主线程一进
-           Sleep 就不在"等消息"状态，系统会把这段时间到达的低级钩子事件**直接
-           跳过**：松开 Caps 的 keyup 被漏掉 -> g_cMod 卡在 TRUE -> 松开 C 后
-           滚轮还在加速、随后按 Tab 又冒出大写锁定。同一根因也造成 mul>=3 卡顿。 */
-        ActWheelPost((int)wp, (int)lp);
-        return 0;
     case WM_WHEEL_ENH:
-        /* 增强模式（默认 C+Alt/D）下的滚轮：驱动持续滚动（act.c 的自动滚动
-           通道）。这里同样只投递，主线程绝不做注入。 */
-        ActAutoScrollWheel((int)wp);
+        /* Caps(+增强修饰) 下的滚轮：驱动连续滚动（act.c 的连续滚动通道）。
+           lParam = 1 表示"手动档"（只按 Caps，直接最快速度）。这里同样只投递，
+           主线程绝不做注入。 */
+        ActAutoScrollWheel((int)wp, (BOOL)(lp != 0));
         return 0;
     case WM_WHEEL_HACCEL:
         /* Caps+Shift+滚轮：横向滚动。钩子已经吞掉物理那一格（否则会横纵混滚），
@@ -557,7 +550,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         /* 某个修饰模式的激活键全部抬起了（钩子投递）：增强模式一失效，
            进行中的自动滚动立刻停 —— 这就是"松开 Alt 立即终止"的快速路径
            （工作线程每拍也会自查一遍，两条路互为兜底）。 */
-        if ((int)wp == MODE_ENHANCE) ActAutoScrollStop();
+        if ((int)wp == MODE_ENHANCE) ActAutoScrollStopEnh();
         return 0;
     /* ---- 托盘 ---- */
     case WM_TOGGLE_TRAY:

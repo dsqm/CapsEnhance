@@ -13,10 +13,10 @@
 #define WM_TOGGLE_TRAY (WM_APP + 5) /* 托盘自定义回调消息 */
 #define WM_ALREADY_RUNNING (WM_APP + 7) /* 已有实例在跑：新实例通知它提示后退出 */
 #define WM_PROBE       (WM_APP + 6) /* 探测焦点控件（钩子线程投递） */
-#define WM_WHEEL_ACCEL (WM_APP + 8) /* 滚轮加速：wParam=原始 delta，lParam=倍数 */
-#define WM_WHEEL_ENH   (WM_APP + 9) /* 增强模式下的滚轮：wParam=delta（驱动自动滚动） */
+#define WM_WHEEL_ENH   (WM_APP + 9) /* Caps(+修饰)+滚轮：wParam=delta，lParam=1 表示"手动档" */
 #define WM_MODE_UP     (WM_APP + 10)/* 某修饰模式的激活键全部抬起：wParam=mode */
-#define WM_WHEEL_HACCEL (WM_APP + 11)/* 横向滚动（Caps+Shift+滚轮）：wParam=delta，lParam=倍数 */
+#define WM_WHEEL_HACCEL (WM_APP + 11)/* 横向滚动（Caps+Shift+滚轮）：wParam=delta，lParam=倍数。
+                                       方向同浏览器：滚轮向上 = 向左。 */
 
 #define PROBE_KEY      VK_OEM_3    /* 按住 C 时按 ` 触发焦点探测 */
 
@@ -136,28 +136,37 @@ void ActDrain(void);              /* 等队列清空且当前动作结束       
    逐格补发，主线程不在"等消息"状态期间系统会**跳过**低级钩子，
    于是松开 Caps 的 keyup 可能被漏掉（g_cMod 卡住 → 滚轮停不下来 +
    之后按 Tab 冒出大写锁定），同一根因也是 mul>=3 卡顿的来源。 */
-void ActWheelPost(int delta, int mul);   /* 投递一次纵向滚轮加速（非阻塞）  */
-void ActWheelPostH(int delta, int mul);  /* 投递一次横向滚动（Caps+Shift）  */
+void ActWheelPostH(int delta, int n);    /* 投递一次横向滚动（Caps+Shift）：注入 n 格 */
 void ActWheelClear(void);                /* 丢弃未补发的滚轮请求（松开 C）  */
 
-/* 自动滚动专用通道（同样在 act.c：独立状态 + 独立线程）。
-   增强模式（默认 Alt / D）+ 滚轮 = 持续滚动：
-     · 第一次滚 -> 启动，第 1 档 = 最慢档（AutoScrollInterval 每格）
-     · 同向再滚 -> 逐档平滑提速，最快档 = WheelScrollMul 倍
-     · 反向滚   -> 立即终止，并把速度**清零**（下次从最慢档重来）
-     · 增强模式失效 / 松开 C -> 立即终止
-   速度靠"每格之间的间隔"表达（不是"每拍补一撮"），所以提速不会抖。默认还开启
-   **平滑注入**：把一格拆成若干"小数刻度"、提高发数（见 act.c），手感接近触控板。
+/* ================= 连续滚动通道（act.c：独立状态 + 独立线程） =================
+   **Caps + 滚轮** 与 **Caps + 增强修饰键 + 滚轮** 共用这一条通道，都是"滚一下
+   就持续滚，直到反向或松手"，只有起始速度不同：
+
+     · manual = TRUE （只有 Caps）：
+         直接以**最快档**（WheelScrollMs）连续滚动 —— 也就是"手动速度"。
+     · manual = FALSE（Caps + 增强修饰，默认 Alt/D）：
+         从**最慢档**（AutoScrollInterval）起步，同向继续滚逐档提速，
+         **上限 = WheelScrollMs**（不会比手动滚轮更快）。
+
+   共同点：反向滚 -> 立即终止并把速度清零；松开 C -> 立即终止；
+   增强档还会在修饰键全抬起时终止。
+
+   速度一律用"每格多少毫秒"表达（与两个配置项同单位），渐进的提速靠缩短间隔、
+   不是"每拍补一撮"，所以不会抖。默认还开启 **平滑注入**：把一格拆成若干
+   "小数刻度"、提高发数（见 act.c），手感接近触控板。
    主线程只投递"发生了一次滚轮"，状态机与注入都在本通道内，主线程不阻塞。
-   启用条件：`WheelScrollMul >= 2`（与滚轮加速同一个开关：0/1 = 整个滚轮增强关闭）。 */
-void ActAutoScrollWheel(int delta);   /* 主线程：增强模式下的一次滚轮 */
+   启用条件：`WheelScrollMs > 0`（= 0 表示关闭纵向滚轮增强）。 */
+void ActAutoScrollWheel(int delta, BOOL manual);  /* 主线程：Caps(+修饰) 下的一次滚轮 */
 void ActAutoScrollStop(void);         /* 立即终止（松手 / 复位 / 退出） */
+void ActAutoScrollStopEnh(void);      /* 只在"增强档"时终止（WM_MODE_UP 用，别打扰手动档） */
 BOOL ActAutoScrollActive(void);       /* 单测用 */
+BOOL ActAutoScrollManual(void);       /* 单测用：当前是手动档（等于最快速度）吗 */
 int  ActAutoScrollGear(void);         /* 单测用：当前速度档（1..总档数，未启动为 0） */
 int  ActAutoScrollDir(void);          /* 单测用：+1 上滚 / -1 下滚 / 0 未启动 */
-int  ActAutoScrollCap(void);          /* 单测用：速度上限倍数 = WheelScrollMul；<2 表示未启用 */
-int  ActAutoScrollTick(void);         /* 单测用：速度档（平均每格的毫秒数）；最快 = AutoScrollInterval/WheelScrollMul */
-int  ActAutoScrollBeat(void);         /* 单测用：本拍实际间隔(ms)；平滑模式固定，否则同 Tick */
+int  ActAutoScrollFastMs(void);       /* 单测用：最快档的毫秒/格（= WheelScrollMs，0=未启用） */
+int  ActAutoScrollTick(void);         /* 单测用：当前速度（每格多少毫秒） */
+int  ActAutoScrollBeat(void);         /* 单测用：本拍实际间隔(ms) */
 int  ActAutoScrollDelta(void);        /* 单测用：本拍增量（带符号）；平滑模式 < 120（小数刻度） */
 
 /* ---------- 钩子模块 ---------- */
@@ -195,10 +204,8 @@ void SendArrowsStrict(int dir, int n, BOOL shift); /* 同上但绝不改道（�
 void SendArrowsRequestInterrupt(void);       /* 请求打断正在进行的逐格输出（钩子线程调用） */
 BOOL SendArrowsConflicts(int act);           /* act 是否与正在逐格输出的方向冲突 */
 void SendNativeWordJump(int dir, BOOL shift);/* 原生 Ctrl(+Shift)+方向：词跳兜底 */
-void SendWheelAccel(int delta, int mul);     /* 滚轮加速：补发 (mul-1) 个同值刻度 */
-void SendWheelNotches(int delta, int n);     /* 直接补发 n 个同值刻度（自动滚动用） */
+void SendWheelNotches(int delta, int n);     /* 补发 n 个同值刻度（连续滚动用） */
 void SendWheelHNotches(int delta, int n);    /* 横向：n 个 ±120 刻度（Caps+Shift+滚轮） */
-int  SendWheelExtraCount(int mul);           /* 倍数 -> 补发格数（单测用） */
 #define WHEEL_STD_DELTA 120                  /* 标准滚轮刻度（WHEEL_DELTA） */
 void SendClearStuckModifiers(void);          /* 清卡键：逻辑按下且物理未按的补抬起（重启/退出用） */
 void SendForceResetKeys(void);               /* 无条件对所有修饰键补抬起（--reset-keys 强制重置） */
@@ -215,7 +222,7 @@ BOOL ConfigGetRunAsAdmin(void);             /* [General] RunAsAdmin：启动时�
 int  ConfigGetLogMaxKB(void);               /* [General] LogMaxKB：日志上限(KB)，0=不限 */
 int  ConfigGetMaxArrowSteps(void);          /* [General] MaxArrowSteps：逐格词跳最大步数 */
 BOOL ConfigGetOverStepCtrl(void);           /* [General] OverStepMode：超限 0=仍发方向键 1=Ctrl+方向 */
-int  ConfigGetWheelScrollMul(void);         /* [General] WheelScrollMul：按住 C 时滚轮放大倍数，<2=不放大 */
+int  ConfigGetWheelScrollMs(void);          /* [General] WheelScrollMs：滚轮最快速度（毫秒/格），0=关闭 */
 int  ConfigGetWheelHScrollMul(void);        /* [General] WheelHScrollMul：Caps+Shift+滚轮 横向倍数，0=关闭 */
 BOOL ConfigGetStr(const WCHAR* key, WCHAR* out, size_t cap); /* [General] 通用字符串项（未具名解析的） */
 int  ConfigGetAutoScrollInterval(void);     /* [General] AutoScrollInterval：自动滚动初始节拍(ms) */
