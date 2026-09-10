@@ -12,6 +12,8 @@ void ConfigLoad(void);
 BOOL ConfigMatchName(const WCHAR* exeName);
 BOOL ConfigGetRunAsAdmin(void);
 int  ConfigGetLogMaxKB(void);
+int  ConfigGetMaxArrowSteps(void);
+BOOL ConfigGetOverStepCtrl(void);
 BOOL IsRunElevated(void);
 
 static int fails = 0;
@@ -125,6 +127,24 @@ int main(void) {
         EXPECT(ConfigGetRunAsAdmin() && ConfigMatchName(L"bomapp"),
                "CFG: UTF-8 BOM + LF 行尾");
     }
+
+    /* 逐格阈值与超限模式 */
+    WriteIni("[General]\r\nMaxArrowSteps = 16\r\nOverStepMode = 1\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetMaxArrowSteps() == 16 && ConfigGetOverStepCtrl(),
+           "CFG: MaxArrowSteps=16 + OverStepMode=1 生效");
+    WriteIni("[General]\r\nMaxArrowSteps = 0\r\nOverStepMode = 0\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetMaxArrowSteps() == 0 && !ConfigGetOverStepCtrl(),
+           "CFG: MaxArrowSteps=0(不限制) + OverStepMode=0 生效");
+    WriteIni("[General]\r\nMaxArrowSteps = abc\r\nOverStepMode = xyz\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetMaxArrowSteps() == 32 && !ConfigGetOverStepCtrl(),
+           "CFG: 非法值回落默认 (32 / arrows)");
+    WriteIni("[Other]\r\nMaxArrowSteps = 1\r\nOverStepMode = 1\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetMaxArrowSteps() == 32 && !ConfigGetOverStepCtrl(),
+           "CFG: 非 General 段不生效");
 
     /* 兼容早期不分节写法 */
     WriteIni("Legacy.exe\r\n");

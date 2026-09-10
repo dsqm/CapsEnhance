@@ -93,6 +93,8 @@ void ConfigLoadFrom(const WCHAR* path);      /* 从指定路径加载（单测�
 BOOL ConfigMatchName(const WCHAR* exeName);  /* 进程名是否命中原生词跳名单 */
 BOOL ConfigGetRunAsAdmin(void);             /* [General] RunAsAdmin：启动时提权 */
 int  ConfigGetLogMaxKB(void);               /* [General] LogMaxKB：日志上限(KB)，0=不限 */
+int  ConfigGetMaxArrowSteps(void);          /* [General] MaxArrowSteps：逐格词跳最大步数 */
+BOOL ConfigGetOverStepCtrl(void);           /* [General] OverStepMode：超限 0=仍发方向键 1=Ctrl+方向 */
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中名单 */
 BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口的进程 exe 名 */
 BOOL IsRunElevated(void);                   /* 真实运行权限（查进程令牌） */

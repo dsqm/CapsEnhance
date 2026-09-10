@@ -21,6 +21,8 @@ static WCHAR g_names[CFG_MAX_ENTRIES][CFG_NAME_MAX];
 static int   g_count = 0;
 static BOOL  g_runAsAdmin = FALSE;
 static int   g_logMaxKB   = 2048;   /* 日志大小上限（KB），0 = 不限制 */
+static int   g_maxArrowSteps = 32;  /* 逐格词跳最大步数，超过按 overStepMode 处理 */
+static BOOL  g_overStepCtrl = FALSE; /* TRUE=超限改发 Ctrl+方向（原生词跳） */
 
 /* 整数：只认前导十进制数字，其余（空/非法）返回默认值 */
 static int ParseIntW(const WCHAR* v, int def) {
@@ -86,6 +88,8 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_count = 0;
     g_runAsAdmin = FALSE;
     g_logMaxKB = 2048;
+    g_maxArrowSteps = 32;
+    g_overStepCtrl = FALSE;
 
     FILE* f = NULL;
     if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
@@ -143,6 +147,8 @@ void ConfigLoadFrom(const WCHAR* path) {
                 TrimW(key); TrimW(val); LowerW(key);
                 if (_wcsicmp(key, L"runasadmin") == 0) g_runAsAdmin = ParseBoolW(val);
                 else if (_wcsicmp(key, L"logmaxkb") == 0) g_logMaxKB = ParseIntW(val, 2048);
+                else if (_wcsicmp(key, L"maxarrowsteps") == 0) g_maxArrowSteps = ParseIntW(val, 32);
+                else if (_wcsicmp(key, L"overstepmode") == 0) g_overStepCtrl = ParseBoolW(val);
             }
         } else if (sec == SEC_NATIVE) {
             AddEntry(line);
@@ -176,6 +182,13 @@ void ConfigLoad(void) {
             "RunAsAdmin = 0\n"
             "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
             "LogMaxKB = 2048\n"
+            "; 逐格词跳的最大步数（字符数）：超过该距离的逐格跳转不再逐格发送，\n"
+            "; 改按 OverStepMode 处理，避免方向键发太久。0 = 不限制（逐格发完）\n"
+            "MaxArrowSteps = 32\n"
+            "; 超过 MaxArrowSteps 时的替代方式，只认 0/1：\n"
+            ";   0 = 只发送一个方向键（跳一格即停）\n"
+            ";   1 = 改发 Ctrl+方向键（由目标程序自己的词跳完成，瞬时）\n"
+            "OverStepMode = 0\n"
             "\n"
             "[NativeWordJump]\n"
             "; 命中名单的程序：Caps+N / Caps+M 不做文本探测，\n"
@@ -205,6 +218,14 @@ BOOL ConfigGetRunAsAdmin(void) {
 
 int ConfigGetLogMaxKB(void) {
     return g_logMaxKB;
+}
+
+int ConfigGetMaxArrowSteps(void) {
+    return g_maxArrowSteps;
+}
+
+BOOL ConfigGetOverStepCtrl(void) {
+    return g_overStepCtrl;
 }
 
 /* 进程可执行文件名是否命中原生词跳名单（完全匹配，.exe 可选） */
