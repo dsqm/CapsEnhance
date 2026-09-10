@@ -888,6 +888,15 @@ static int  g_selAnchorLen = -1;
 static BOOL g_selAnchorIsStart = FALSE;
 void NavSelTrackReset(void) { g_selAnchor = -1; g_selAnchorLen = -1; }
 
+/* 置位"无效"程序的会话内记忆：
+   部分实现（Quicker 等 WPF 控件）的 TextRange.Select 会短暂改变显示光标
+   （屏幕上看到"闪一下"到目标位置）却并不真正生效——回读校验已能拦住，
+   但每次都试一次就会每次都闪。连续两次判为无效后，本次会话内不再对该
+   程序尝试置位，消除闪烁；重启程序即恢复（不做任何隐式行为切换，
+   只是省掉已知无效的一步）。 */
+static WCHAR g_noSetProc[64] = {0};
+static int   g_noSetCount = 0;
+
 int NavJump(int dir, BOOL shift) {
     WCHAR* text = NULL;
     int len = 0, caret = 0;
@@ -955,6 +964,10 @@ int NavJump(int dir, BOOL shift) {
        拖慢；小距离仍走箭头以保持完全一致的键行为。 */
     BOOL direct = FALSE;
     BOOL skipArrows = FALSE;   /* 置位已发生但回读不符：不能再发箭头叠加错误 */
+    WCHAR procName[64] = {0};
+    if (focus) ConfigGetProcessName(focus, procName, 64);
+    BOOL skipSetTry = (g_noSetProc[0] && procName[0] &&
+                       !_wcsicmp(g_noSetProc, procName));
     if (path[0] == 'E' && focus && steps >= DIRECT_JUMP_MIN) {
         /* 期望选区（有序）：锚已建立时活动端=tgt、锚端固定；
            无 Shift 收缩为一点。 */
@@ -987,7 +1000,7 @@ int NavJump(int dir, BOOL shift) {
                 CapLog("  -> 直接 SCI_SETSEL caret=%lld anchor=%lld", tb, anchorB);
         }
     } else if ((path[0] == 'U' || path[0] == 'I') && focus && !shift
-               && steps >= DIRECT_JUMP_MIN) {
+               && !skipSetTry && steps >= DIRECT_JUMP_MIN) {
         /* UIA/IA2 直接置位（TextRange.Select / setCaretOffset）仅限无 Shift：
            带选区时读回的 caret 是选区起点而非活动端，目标计算本身就不成立，
            置位会产生错误选区 —— Shift 位移走箭头（anchor 语义天然正确）。
@@ -1002,6 +1015,7 @@ int NavJump(int dir, BOOL shift) {
                      : MsaaGetTextCaret(focus, &t2, &l2, &c2);
             if (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0 && c2 == tgt) {
                 direct = TRUE;
+                g_noSetProc[0] = 0; g_noSetCount = 0;
                 if (g_recording) CapLog("  -> UIA/IA2 直接置位已校验 (caret=%d)", tgt);
             } else if (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0 && c2 == caret) {
                 /* Select 返回成功但光标未动（provider 静默忽略）：
@@ -1009,6 +1023,14 @@ int NavJump(int dir, BOOL shift) {
                 if (g_recording)
                     CapLog("  -> UIA Select 未生效(光标未动 c2=%d)，退回箭头。"
                            "嫌慢可把该程序加入 [NativeWordJump]", c2);
+                /* 连续两次无效 -> 本次会话内不再尝试（WPF 上它会让显示光标
+                   闪一下却不生效，每次试一次就每次都闪） */
+                if (++g_noSetCount >= 2 && procName[0]) {
+                    wcscpy_s(g_noSetProc, 64, procName);
+                    if (g_recording)
+                        CapLog("  -> 该程序连续 2 次置位无效，本次会话内不再尝试"
+                               "（消除多余闪烁，重启程序恢复）");
+                }
             } else {
                 skipArrows = TRUE;
                 if (g_recording)

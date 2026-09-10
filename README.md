@@ -103,7 +103,7 @@
 | **IA2** | `setCaretOffset` / `setSelection` | IAccessible2 规范：*"Sets the position of the caret"*，不支持时返回 `E_FAIL` 退回箭头 |
 
 - UIA/IA2 的直接置位**仅限无 Shift**：带选区时读回的位置是选区起点而非活动端，目标计算不成立，置位会产生错误选区——Shift 位移走箭头（anchor 语义天然正确）。
-- **置位并非对所有 UIA 实现有效**：Chromium 系（QQ/Edge/Electron）支持（但只支持移动 End 端点，向左需全正向构造）；**WPF 系（如 Quicker 的文本框）的 `Select()` 会返回成功但选区不动**——回读校验发现"光标未动"后自动退回箭头，功能正确只是逐格偏慢；嫌慢可把该程序加入 `[NativeWordJump]`。
+- **置位并非对所有 UIA 实现有效**：Chromium 系（QQ/Edge/Electron）支持（但只支持移动 End 端点，向左需全正向构造）；**WPF 系（如 Quicker 的文本框）的 `Select()` 会返回成功但选区不动** —— 它还会让显示光标短暂闪到目标位置却不真正生效，所以连续两次判定无效后，本次会话内不再对该程序尝试置位（消除闪烁，重启程序恢复；日志会写明）——回读校验发现"光标未动"后自动退回箭头，功能正确只是逐格偏慢；嫌慢可把该程序加入 `[NativeWordJump]`。
 - UIA/IA2 置位的回读校验比经典 Edit 更严：置位后重新读文本+光标，**仍是同一页文本且光标恰在目标**才算成功；HRESULT 成功但回读不符时，不叠加箭头（避免双重错误），本次到此为止（诊断日志会记录）。
 - 三个通道置位后都会让视口跟随：Edit 发 `EM_SCROLLCARET`、Scintilla 发 `SCI_SCROLLCARET`、UIA 调 `ScrollIntoView`——否则光标会被移到窗口外看不到。
 
