@@ -10,6 +10,16 @@ GlobalState g_state;
    钩子从不判断"按的是 D 还是 Alt"，只问"这个键属于哪个模式"。 */
 volatile BOOL g_cMod = FALSE;
 
+/* 真实 Shift 的按住状态：钩子线程写，鼠标钩子读。
+   用途只有一个 —— **Caps + Shift + 滚轮 = 横向滚动**。
+   注意与 keymap.c 的"位移模式"（默认 F，作用是给动作加 Shift）不是一回事：
+   那是"模拟 Shift 的效果"，这里读的是**用户真的按着 Shift**。
+   为什么不在鼠标钩子里直接调 GetAsyncKeyState：那个回调在全局鼠标输入的关键
+   路径上（每次鼠标移动都进来），任何系统查询都会明显加剧鼠标卡顿 —— 所以状态
+   由键盘钩子维护、鼠标钩子只读几个 volatile 变量（与 g_cMod 同一套做法）。 */
+volatile BOOL g_shiftMod = FALSE;
+static volatile DWORD s_shiftMask = 0;   /* bit0=左 Shift, bit1=右 Shift */
+
 /* 注：g_actEnh / g_actShf / g_btnCount 是和弦引擎状态，定义在 main.c。
    实际发送跑在 act.c 的工作线程上，快照随 ActJob 传递，这里不再持有。 */
 
@@ -33,6 +43,11 @@ void PhysSeedFromLogical(void) {
     };
     for (int i = 0; i < (int)(sizeof(vks) / sizeof(vks[0])); i++)
         if (GetAsyncKeyState(vks[i]) & 0x8000) g_phys[vks[i]] = 1;
+    /* Shift 位图同步种子化：否则"启动前就按着 Shift"时 Caps+滚轮不会横向滚动 */
+    s_shiftMask = 0;
+    if (g_phys[VK_LSHIFT]) s_shiftMask |= 1u;
+    if (g_phys[VK_RSHIFT]) s_shiftMask |= 2u;
+    g_shiftMod = (s_shiftMask != 0);
 }
 
 /* 同时按住的触发键集合（每个动作一个 bit）。
@@ -40,6 +55,17 @@ void PhysSeedFromLogical(void) {
    再也发不出去（g_downAct 已不是 J），引擎收不到 UP 就永远重复 J —— 
    "按住 Caps 同时按 J 和 K 会一直输出左键"就是这么来的。 */
 static volatile DWORD g_downMask = 0;
+
+/* 清"按住状态"。暂停/重启时会漏掉抬起事件（钩子被跳过），留着就会粘住 ——
+   比如暂停期间松开 Shift，恢复后 g_shiftMod 还是 TRUE，Caps+滚轮会莫名变成
+   横向滚动。所以复位时主动清掉。 */
+void ModHoldReset(void) {
+    g_cMod = FALSE;
+    s_shiftMask = 0;
+    g_shiftMod = FALSE;
+    g_downMask = 0;
+    ModeResetAll();
+}
 
 /* 发一次动作。目标键与属性都来自键位表（src/keymap.c）：
    · 目标虚拟键用 ActOutVk —— 表里 outVk=0 的动作（词跳/诊断）不走这里；
@@ -82,6 +108,16 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
         /* 物理状态：注入的键在上面已放行，这里记录的都是真实按键 */
         if (vk >= 0 && vk < 256) g_phys[vk] = (BYTE)(down ? 1 : 0);
+
+        /* ---- 真实 Shift 跟踪（无条件，未按 C 时也要跟） ----
+           只在按下/抬起时更新一个位图；左右各一位，免得"两个 Shift 只松一个"
+           被误判成全部抬起。放在最前面是因为鼠标钩子要用它判断横向滚动，
+           而那时可能已经过了 `if (!g_cMod)` 的放行分支。 */
+        if (vk == VK_LSHIFT || vk == VK_RSHIFT) {
+            DWORD bit = (vk == VK_LSHIFT) ? 1u : 2u;
+            if (down) s_shiftMask |= bit; else s_shiftMask &= ~bit;
+            g_shiftMod = (s_shiftMask != 0);
+        }
 
         /* ---- C 键（CapsLock）自身 ---- */
         if (vk == CLI_CAPS) {
@@ -155,9 +191,12 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 /* ================= 鼠标钩子：按住 C 时的滚轮 =================
-   两种语义（互斥，由"是否处于增强模式"决定）：
-     · 普通（只按住 C）：逐格放大 N 倍 —— 见 main.c 的 WM_WHEEL_ACCEL；
-     · 增强模式（默认 C+Alt/D）：驱动 act.c 的自动滚动 —— WM_WHEEL_ENH。
+   三种语义（按 Shift 优先级从高到低判定）：
+     · Caps+Shift（真实 Shift）：**横向滚动** —— WM_WHEEL_HACCEL，并吞掉物理格；
+     · 增强模式（默认 C+Alt/D）：驱动 act.c 的自动滚动 —— WM_WHEEL_ENH；
+     · 普通（只按住 C）：逐格放大 N 倍 —— 见 main.c 的 WM_WHEEL_ACCEL。
+   为什么 Shift 排最前：它显式指定了"轴向"，比"是否自动滚动"更具体；
+   两个都按住时按 Shift 理解（用户想横着走）。
 
    为什么用低级钩子而不是 Raw Input：**必须能认出"这个滚轮事件是我们自己
    注入的"**。Raw Input（RIDEV_INPUTSINK）拿不到"注入"标记，放大后的滚轮会
@@ -181,6 +220,18 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
         if (m && !(m->flags & LLMHF_INJECTED) && !g_state.paused && g_cMod) {
             int delta = (int)(short)HIWORD(m->mouseData);   /* 高字是滚轮增量 */
             if (delta != 0) {
+                /* Caps + Shift + 滚轮 = **横向滚动**（Shift 决定轴向）。
+                   这一格必须**吞掉**（返回 1）：物理滚轮送出的是纵向事件，
+                   放行就会变成"横一下、纵一下"的混滚。吞掉之后横向完全由我们
+                   注入，倍数 1 也就恰好等于一次标准横向滚动。
+                   mul = 0（关闭）时不吞，退回下面的纵向语义。 */
+                if (g_shiftMod) {
+                    int hmul = ConfigGetWheelHScrollMul();
+                    if (hmul > 0) {
+                        PostMessageW(g_mainWnd, WM_WHEEL_HACCEL, (WPARAM)delta, (LPARAM)hmul);
+                        return 1;
+                    }
+                }
                 if (ModeDown(MODE_ENHANCE)) {
                     /* 增强模式（默认 Caps+Alt/D）：滚轮语义是"启动/提速持续
                        滚动"，由 act.c 的自动滚动通道接管，不再逐格放大。 */

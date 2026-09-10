@@ -115,6 +115,7 @@ static volatile LONG s_wStop = 0;
 static BOOL    s_wInit = FALSE;
 static int     s_wDelta[ACT_WHEEL_QMAX];
 static int     s_wMul[ACT_WHEEL_QMAX];
+static BOOL    s_wHorz[ACT_WHEEL_QMAX];   /* 本条是横向滚动吗（Caps+Shift+滚轮） */
 static int     s_wHead = 0, s_wTail = 0, s_wN = 0;
 
 static DWORD WINAPI WheelThread(LPVOID p) {
@@ -123,25 +124,38 @@ static DWORD WINAPI WheelThread(LPVOID p) {
         if (InterlockedCompareExchange(&s_wStop, 0, 0)) break;
         WaitForSingleObject(s_wEvWork, 1000);   /* 1s 超时兜底，防事件被吞 */
         for (;;) {
-            int delta, mul;
+            int delta, mul; BOOL horz;
             EnterCriticalSection(&s_wcs);
             if (s_wStop) { LeaveCriticalSection(&s_wcs); return 0; }
             if (s_wN == 0) { LeaveCriticalSection(&s_wcs); break; }
             delta = s_wDelta[s_wHead];
             mul   = s_wMul[s_wHead];
+            horz  = s_wHorz[s_wHead];
             s_wHead = (s_wHead + 1) % ACT_WHEEL_QMAX;
             s_wN--;
             LeaveCriticalSection(&s_wcs);
-            SendWheelAccel(delta, mul);   /* 里面的 Sleep 只阻塞本线程 */
+            /* 里面的 Sleep 只阻塞本线程 */
+            if (horz) SendWheelHNotches(delta, mul);   /* 横向：注入 mul 格 */
+            else      SendWheelAccel(delta, mul);      /* 纵向：原始格已送达，补 mul-1 */
         }
     }
     return 0;
 }
 
-/* 投递一次滚轮加速。**主线程调用，绝不阻塞**（原来的 Sleep 就是缺陷根源）。 */
-void ActWheelPost(int delta, int mul) {
-    if (delta == 0 || SendWheelExtraCount(mul) <= 0) return;
-    if (!s_wInit) { SendWheelAccel(delta, mul); return; }  /* 线程起不来：同步兜底 */
+/* 投递一次滚轮请求。**主线程调用，绝不阻塞**（原来的 Sleep 就是缺陷根源）。
+   horz=TRUE 时是横向（Caps+Shift+滚轮）。注意两者的 n 语义不同：
+     · 纵向：物理那一格会照原样送达，所以只补 (mul-1) 格；
+     · 横向：物理那一格是**纵向**、已被钩子吞掉（不吞就会横纵混滚），
+       所以我们负责全部 mul 格 —— 于是"倍数 1"恰好等于一次标准横向滚动。 */
+static void WheelPost(int delta, int mul, BOOL horz) {
+    if (delta == 0) return;
+    if (!horz && SendWheelExtraCount(mul) <= 0) return;
+    if (horz && mul <= 0) return;
+    if (!s_wInit) {                        /* 线程起不来：同步兜底 */
+        if (horz) SendWheelHNotches(delta, mul);
+        else      SendWheelAccel(delta, mul);
+        return;
+    }
     EnterCriticalSection(&s_wcs);
     if (s_wStop) { LeaveCriticalSection(&s_wcs); return; }
     if (s_wN == ACT_WHEEL_QMAX) {          /* 满：丢最旧的一条 */
@@ -150,11 +164,15 @@ void ActWheelPost(int delta, int mul) {
     }
     s_wDelta[s_wTail] = delta;
     s_wMul[s_wTail]   = mul;
+    s_wHorz[s_wTail]  = horz;
     s_wTail = (s_wTail + 1) % ACT_WHEEL_QMAX;
     s_wN++;
     LeaveCriticalSection(&s_wcs);
     SetEvent(s_wEvWork);
 }
+
+void ActWheelPost(int delta, int mul)  { WheelPost(delta, mul, FALSE); }
+void ActWheelPostH(int delta, int mul) { WheelPost(delta, mul, TRUE);  }
 
 /* 丢弃还没补发的滚轮请求（松开 C / 引擎复位时）。
    用户的预期是"松开 C 就是普通滚轮"，所以松手后不该再有加速尾流。 */
@@ -164,11 +182,14 @@ void ActWheelClear(void) {
     s_wHead = s_wTail = s_wN = 0;
     LeaveCriticalSection(&s_wcs);
 }
+/* 说明：纵向与横向共用这一条队列，所以"松开 C 丢掉尾流"（ActWheelClear）
+   对两者一视同仁 —— 松手后既不该有加速尾流，也不该有横向尾流。 */
 
 /* 起/停滚轮通道。起不来不算致命：s_wInit 保持 FALSE，ActWheelPost 退回同步注入
    （损失一点响应性，但功能不失效）。 */
 static void WheelLaneStart(void) {
     s_wStop = 0; s_wHead = s_wTail = s_wN = 0;
+    memset(s_wHorz, 0, sizeof(s_wHorz));
     InitializeCriticalSection(&s_wcs);
     s_wEvWork = CreateEventW(NULL, FALSE, FALSE, NULL);
     s_wThread = s_wEvWork ? CreateThread(NULL, 0, WheelThread, NULL, 0, NULL) : NULL;

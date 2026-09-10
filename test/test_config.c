@@ -231,6 +231,32 @@ int main(void) {
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(ConfigGetAutoScrollSmooth(), "CFG: 非 General 段的 AutoScrollSmooth 不生效");
 
+    /* 横向滚动倍数 WheelHScrollMul（Caps+Shift+滚轮）。默认必须是 **1**
+       —— 一个物理格换一次横向滚动，与系统原生横向滚动一致。
+       样本一律用与默认值不同的值（1 当样本会让"自定义生效"恒真）。 */
+    EXPECT(ConfigGetWheelHScrollMul() == 1, "CFG: WheelHScrollMul 缺省为 1");
+    WriteIni("[General]\r\nWheelHScrollMul = 3\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelHScrollMul() == 3, "CFG: WheelHScrollMul=3 生效");
+    WriteIni("[General]\r\nWheelHScrollMul = 0\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelHScrollMul() == 0, "CFG: WheelHScrollMul=0 表示关闭横向滚动");
+    /* ParseIntW 只认前导十进制数字，负号不是数字 -> 当作非法值回落默认。
+       （解析器里仍有 v<0 -> 0 的防御，但配置文本走不到那条路。） */
+    WriteIni("[General]\r\nWheelHScrollMul = -5\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelHScrollMul() == 1,
+           "CFG: WheelHScrollMul 负号被当非法值 -> 回落默认 1");
+    WriteIni("[General]\r\nWheelHScrollMul = 999\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelHScrollMul() == 16, "CFG: WheelHScrollMul 上限钳到 16");
+    WriteIni("[General]\r\nWheelHScrollMul = abc\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelHScrollMul() == 1, "CFG: WheelHScrollMul 非法值回落默认 1");
+    WriteIni("[Other]\r\nWheelHScrollMul = 7\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelHScrollMul() == 1, "CFG: 非 General 段的 WheelHScrollMul 不生效");
+
     /* 激活键列表 EnhanceKeys / ShiftKeys：配置层只作"通用字符串项"留存，
        由键位映射模块（keymap.c）解析。这里断言**解析结果** ——
        也就是"以后把 D 删掉、只留 Alt"确实只改一行配置即可生效。 */
@@ -300,7 +326,7 @@ int main(void) {
                "UPG: 补齐的 EnhanceKeys/ShiftKeys 可被解析（Alt+D / F）");
         FILE* fc = NULL;
         int hasLog = 0, hasSteps = 0, hasMode = 0, hasWheel = 0;
-        int hasInterval = 0, hasEnh = 0, hasShift = 0, hasSmooth = 0;
+        int hasInterval = 0, hasEnh = 0, hasShift = 0, hasSmooth = 0, hasHMul = 0;
         if (fopen_s(&fc, "bin/cfgtest.ini", "r") == 0 && fc) {
             char line[512];
             while (fgets(line, sizeof(line), fc)) {
@@ -312,11 +338,12 @@ int main(void) {
                 if (strstr(line, "EnhanceKeys = Alt, D")) hasEnh = 1;
                 if (strstr(line, "ShiftKeys = F")) hasShift = 1;
                 if (strstr(line, "AutoScrollSmooth = 1")) hasSmooth = 1;
+                if (strstr(line, "WheelHScrollMul = 1")) hasHMul = 1;
             }
             fclose(fc);
         }
         EXPECT(hasLog && hasSteps && hasMode && hasWheel && hasInterval && hasEnh && hasShift
-               && hasSmooth,
+               && hasSmooth && hasHMul,
                "UPG: 补齐块带注释写回文件（含新增项）");
     }
     /* 升级的容量算式必须正交覆盖四组边界：
@@ -402,6 +429,7 @@ int main(void) {
             fputs("[General]\nRunAsAdmin = 1\nLogMaxKB = 7\nMaxArrowSteps = 5\n"
                   "OverStepMode = 1\nWheelScrollMul = 5\n"
                   "AutoScrollInterval = 250\nAutoScrollSmooth = 0\n"
+                  "WheelHScrollMul = 4\n"
                   "EnhanceKeys = Alt\nShiftKeys = Ctrl\n", fo);
             fclose(fo);
         }
@@ -429,6 +457,8 @@ int main(void) {
                "UPG: AutoScrollInterval 自定义值不被覆盖");
         EXPECT(!ConfigGetAutoScrollSmooth(),
                "UPG: AutoScrollSmooth 自定义值不被覆盖（默认开、样本为关）");
+        EXPECT(ConfigGetWheelHScrollMul() == 4,
+               "UPG: WheelHScrollMul 自定义值不被覆盖（默认 1、样本为 4）");
         {
             WCHAR v[MODE_KEYS_MAXLEN] = L"";
             EXPECT(ConfigGetStr(L"EnhanceKeys", v, MODE_KEYS_MAXLEN) &&
@@ -460,6 +490,7 @@ int main(void) {
     EXPECT(TemplateHas("WheelScrollMul = 2"),"CFG: 模板含 WheelScrollMul 默认值");
     EXPECT(TemplateHas("AutoScrollInterval = 24000"), "CFG: 模板含 AutoScrollInterval 默认值");
     EXPECT(TemplateHas("AutoScrollSmooth = 1"),    "CFG: 模板含 AutoScrollSmooth 默认值");
+    EXPECT(TemplateHas("WheelHScrollMul = 1"),     "CFG: 模板含 WheelHScrollMul 默认值");
     EXPECT(TemplateHas("EnhanceKeys = Alt, D"), "CFG: 模板含 EnhanceKeys 默认值");
     EXPECT(TemplateHas("ShiftKeys = F"),     "CFG: 模板含 ShiftKeys 默认值");
     EXPECT(TemplateHas("[NativeWordJump]"),  "CFG: 模板含 NativeWordJump 段");

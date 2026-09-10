@@ -169,9 +169,9 @@ int SendArrows(int dir, int n, BOOL shift) {
     return ARROW_SEND_STEPS;
 }
 
-/* 逐格注入 n 个"同值刻度"。滚轮加速（补 (mul-1) 格）与自动滚动（每拍补
-   `档位` 格）共用这一段 —— 两者只是"补几格"由谁算不同，注入语义完全一样，
-   所以只留一处实现，免得"改了间隔忘了改另一条路"。
+/* 逐格注入 n 个"同值刻度"，纵轴与横轴共用这一段 —— 只有 dwFlags 不同
+   （MOUSEEVENTF_WHEEL / MOUSEEVENTF_HWHEEL），"补几格"的算法各自决定，
+   注入语义完全一样，所以只留一处实现，免得"改了间隔忘了改另一条路"。
 
    **不要**改成"一个事件塞 delta = 120*N"，实测（跨进程量目标窗口收到的消息）：
      · 一次 SendInput 批 3 个 120    -> 目标只收到 1 条、delta=360
@@ -182,31 +182,42 @@ int SendArrows(int dir, int n, BOOL shift) {
    就为此专门把大 delta 拆成多个单格事件），所以"逐格"才是通用写法。
 
    每格 2ms 的间隔在倍数上限 16 下最坏阻塞 30ms。也正因为有 Sleep，这段**不能**
-   跑在主线程上：调用它的两条通道都在 act.c 的专用线程里（见 act.c 顶部说明）。
+   跑在主线程上：调用它的通道都在 act.c 的专用线程里（见 act.c 顶部说明）。
    全程只做输入注入：不调 SystemParametersInfo（不改系统的"每次滚动行数"），
    也不写注册表。 */
 #define WHEEL_EXTRA_MAX 15
 #define WHEEL_GAP_MS    2
 
-void SendWheelNotches(int delta, int n) {
+static void SendWheelAxis(int delta, int n, BOOL horizontal) {
     if (delta == 0 || n <= 0) return;
     if (n > WHEEL_EXTRA_MAX) n = WHEEL_EXTRA_MAX;
     for (int i = 0; i < n; i++) {
         INPUT in;
         memset(&in, 0, sizeof(in));
         in.type = INPUT_MOUSE;
-        in.mi.dwFlags = MOUSEEVENTF_WHEEL;
-        in.mi.mouseData = (DWORD)(LONG)delta;   /* 有符号增量：正=上滚，负=下滚 */
+        in.mi.dwFlags = horizontal ? MOUSEEVENTF_HWHEEL : MOUSEEVENTF_WHEEL;
+        in.mi.mouseData = (DWORD)(LONG)delta;   /* 有符号增量：正=上/右，负=下/左 */
         if (SendInput(1, &in, sizeof(INPUT)) == 0) {
             /* UIPI 等场景会被整体拒绝。只在记录模式写日志、且不重试：
                重试只会继续失败并把日志刷爆 */
             if (g_recording)
-                CapLog("  !! SendInput 滚轮被拒 i=%d delta=%d err=%lu",
-                       i, delta, (unsigned long)GetLastError());
+                CapLog("  !! SendInput 滚轮被拒 %s i=%d delta=%d err=%lu",
+                       horizontal ? "横" : "纵", i, delta,
+                       (unsigned long)GetLastError());
             break;
         }
         if (i + 1 < n) Sleep(WHEEL_GAP_MS);
     }
+}
+
+void SendWheelNotches(int delta, int n)  { SendWheelAxis(delta, n, FALSE); }
+
+/* 横向滚动：n 个**固定** ±120 的刻度。这里不沿用物理格的原值而统一成
+   WHEEL_STD_DELTA —— 横向是"每次滚轮换一列"的语义，放大倍数才有确定含义
+   （倍数 1 = 正好一格），物理格的原始大小（高精度滚轮可能小于 120）不参与。 */
+void SendWheelHNotches(int delta, int n) {
+    if (delta == 0) return;
+    SendWheelAxis((delta > 0) ? WHEEL_STD_DELTA : -WHEEL_STD_DELTA, n, TRUE);
 }
 
 /* 倍数 -> 要补发的格数。单独拎出来是为了能被单测直接断言换算

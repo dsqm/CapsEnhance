@@ -22,6 +22,13 @@
    为什么是 2 而不是 3：每补发一格主线程就要隔 2ms，mul=3 会补 2 格，
    滚动时出现可见卡顿；mul=2 只补 1 格、无间隔等待，手感与系统原生一致。 */
 #define WHEEL_MUL_DEFAULT 2
+
+/* 横向滚动的默认倍数：**1**（不放大）。
+   横向是"每次滚轮挪一列"的语义，倍数 1 = 一个物理格换一次横向滚动，
+   手感与系统原生横向滚动一致；想更快再调大，0 = 完全关闭该功能。
+   为什么不跟纵向一样默认 2：纵向默认 2 是"补一格让滚动更跟手"，而横向
+   默认放大反而会让横向移动过头（列宽通常远小于行高，横向更容易"越过目标"）。 */
+#define WHEEL_HMUL_DEFAULT 1
 #define STR2(x) #x
 #define STR(x)  STR2(x)
 
@@ -109,6 +116,7 @@ static BOOL  g_overStepCtrl = FALSE; /* TRUE=超限改发 Ctrl+方向（原生�
 static int   g_wheelMul = WHEEL_MUL_DEFAULT; /* 按住 C 时滚轮放大倍数，<2 视为不放大 */
 static int   g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT; /* 自动滚动初始节拍(ms) */
 static BOOL  g_autoScrollSmooth = AUTOSCROLL_SMOOTH_DEFAULT;     /* 自动滚动平滑注入 */
+static int   g_wheelHMul = WHEEL_HMUL_DEFAULT; /* Caps+Shift+滚轮 的横向滚动倍数，0=关闭 */
 
 /* 整数：只认前导十进制数字，其余（空/非法）返回默认值。
    超过 1e8 直接判非法：没有哪个配置项需要这么大，而继续累加会让
@@ -182,6 +190,7 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_wheelMul = WHEEL_MUL_DEFAULT;
     g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT;
     g_autoScrollSmooth = AUTOSCROLL_SMOOTH_DEFAULT;
+    g_wheelHMul = WHEEL_HMUL_DEFAULT;
     g_strN = 0;
 
     FILE* f = NULL;
@@ -257,6 +266,12 @@ void ConfigLoadFrom(const WCHAR* path) {
                     if (v > AUTOSCROLL_INTERVAL_MAX) v = AUTOSCROLL_INTERVAL_MAX;
                     g_autoScrollInterval = v;
                 }
+                else if (_wcsicmp(key, L"wheelhscrollmul") == 0) {
+                    int v = ParseIntW(val, WHEEL_HMUL_DEFAULT);
+                    if (v < 0) v = 0;      /* 0 = 关闭横向滚动 */
+                    if (v > 16) v = 16;    /* 与纵向 WheelScrollMul 同一个上限口径 */
+                    g_wheelHMul = v;
+                }
                 else if (_wcsicmp(key, L"autoscrollsmooth") == 0)
                     g_autoScrollSmooth = ParseBoolW(val);
                 /* 其余 [General] 项原样留存，由需要的模块按名字取
@@ -319,6 +334,9 @@ void ConfigLoad(void) {
             "; 自动滚动是否平滑注入（1=是 / 0=否）。1 时只发\"不足一格\"的小刻度、\n"
             "; 次数更多，手感接近触控板连续滑动；个别程序不累积小刻度（完全不动）时设 0。\n"
             "AutoScrollSmooth = " STR(AUTOSCROLL_SMOOTH_DEFAULT) "\n"
+            "; 横向滚动：按住 C + Shift 滚滚轮，横向挪动。倍数 1 = 一滚一格（默认），\n"
+            "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n"
+            "WheelHScrollMul = " STR(WHEEL_HMUL_DEFAULT) "\n"
             "; ---- 和弦修饰的激活键 ----\n"
             "; 按住 C（CapsLock）期间，这些键作为\"模式修饰\"生效。\n"
             "; 键名可用：单字母 A-Z、数字 0-9、Alt / RAlt / Ctrl / Shift / Win / Space 等；\n"
@@ -395,6 +413,10 @@ static const struct {
       "; 自动滚动是否平滑注入（1=是 / 0=否）。1 时只发\"不足一格\"的小刻度、\n"
       "; 次数更多，手感接近触控板连续滑动；个别程序不累积小刻度（完全不动）时设 0。\n"
       "AutoScrollSmooth = " STR(AUTOSCROLL_SMOOTH_DEFAULT) "\n" },
+    { "wheelhscrollmul",
+      "; 横向滚动：按住 C + Shift 滚滚轮，横向挪动。倍数 1 = 一滚一格（默认），\n"
+      "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n"
+      "WheelHScrollMul = " STR(WHEEL_HMUL_DEFAULT) "\n" },
     { "enhancekeys",
       "; ---- 和弦修饰的激活键 ----\n"
       "; 按住 C（CapsLock）期间，这些键作为\"模式修饰\"生效。\n"
@@ -556,6 +578,10 @@ int ConfigGetAutoScrollInterval(void) {
 
 BOOL ConfigGetAutoScrollSmooth(void) {
     return g_autoScrollSmooth;
+}
+
+int ConfigGetWheelHScrollMul(void) {
+    return g_wheelHMul;
 }
 
 /* 进程可执行文件名是否命中原生词跳名单（完全匹配，.exe 可选） */

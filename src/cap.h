@@ -16,6 +16,7 @@
 #define WM_WHEEL_ACCEL (WM_APP + 8) /* 滚轮加速：wParam=原始 delta，lParam=倍数 */
 #define WM_WHEEL_ENH   (WM_APP + 9) /* 增强模式下的滚轮：wParam=delta（驱动自动滚动） */
 #define WM_MODE_UP     (WM_APP + 10)/* 某修饰模式的激活键全部抬起：wParam=mode */
+#define WM_WHEEL_HACCEL (WM_APP + 11)/* 横向滚动（Caps+Shift+滚轮）：wParam=delta，lParam=倍数 */
 
 #define PROBE_KEY      VK_OEM_3    /* 按住 C 时按 ` 触发焦点探测 */
 
@@ -82,7 +83,8 @@ extern GlobalState g_state;
 extern volatile BOOL g_recording;
 
 /* C 键实时状态（volatile，跨线程读：鼠标钩子要据此决定要不要处理滚轮） */
-extern volatile BOOL g_cMod;    /* C 按住 */
+extern volatile BOOL g_cMod;       /* C 按住 */
+extern volatile BOOL g_shiftMod;   /* 真实 Shift 按住（Caps+Shift+滚轮 = 横向滚动） */
 
 /* 和弦引擎状态（仅主线程）：开火快照与已发送次数。
    实际发送由 act.c 的工作线程执行，快照随请求一起投递过去。
@@ -134,7 +136,8 @@ void ActDrain(void);              /* 等队列清空且当前动作结束       
    逐格补发，主线程不在"等消息"状态期间系统会**跳过**低级钩子，
    于是松开 Caps 的 keyup 可能被漏掉（g_cMod 卡住 → 滚轮停不下来 +
    之后按 Tab 冒出大写锁定），同一根因也是 mul>=3 卡顿的来源。 */
-void ActWheelPost(int delta, int mul);   /* 投递一次滚轮加速（非阻塞）      */
+void ActWheelPost(int delta, int mul);   /* 投递一次纵向滚轮加速（非阻塞）  */
+void ActWheelPostH(int delta, int mul);  /* 投递一次横向滚动（Caps+Shift）  */
 void ActWheelClear(void);                /* 丢弃未补发的滚轮请求（松开 C）  */
 
 /* 自动滚动专用通道（同样在 act.c：独立状态 + 独立线程）。
@@ -164,6 +167,7 @@ void HookUninstall(void);
 BOOL HookMouseAvailable(void); /* 滚轮加速用的鼠标钩子是否装上了（装不上不影响主映射） */
 BOOL PhysKeyDown(int vk);   /* 真实（非注入）按键是否物理按住 —— 判断卡键用 */
 void PhysSeedFromLogical(void); /* 装钩子后：把当前已按下的键视为物理按住，防误清 */
+void ModHoldReset(void);    /* 清"按住状态"（C / 真实 Shift / 模式门闩）—— 暂停、重启用 */
 
 /* ---------- 发送/补齐 ---------- */
 /* 开火快照（增强/位移模式、已发送次数）由调用方显式传入：实际执行发生在
@@ -193,6 +197,7 @@ BOOL SendArrowsConflicts(int act);           /* act 是否与正在逐格输出�
 void SendNativeWordJump(int dir, BOOL shift);/* 原生 Ctrl(+Shift)+方向：词跳兜底 */
 void SendWheelAccel(int delta, int mul);     /* 滚轮加速：补发 (mul-1) 个同值刻度 */
 void SendWheelNotches(int delta, int n);     /* 直接补发 n 个同值刻度（自动滚动用） */
+void SendWheelHNotches(int delta, int n);    /* 横向：n 个 ±120 刻度（Caps+Shift+滚轮） */
 int  SendWheelExtraCount(int mul);           /* 倍数 -> 补发格数（单测用） */
 #define WHEEL_STD_DELTA 120                  /* 标准滚轮刻度（WHEEL_DELTA） */
 void SendClearStuckModifiers(void);          /* 清卡键：逻辑按下且物理未按的补抬起（重启/退出用） */
@@ -211,6 +216,7 @@ int  ConfigGetLogMaxKB(void);               /* [General] LogMaxKB：日志上限
 int  ConfigGetMaxArrowSteps(void);          /* [General] MaxArrowSteps：逐格词跳最大步数 */
 BOOL ConfigGetOverStepCtrl(void);           /* [General] OverStepMode：超限 0=仍发方向键 1=Ctrl+方向 */
 int  ConfigGetWheelScrollMul(void);         /* [General] WheelScrollMul：按住 C 时滚轮放大倍数，<2=不放大 */
+int  ConfigGetWheelHScrollMul(void);        /* [General] WheelHScrollMul：Caps+Shift+滚轮 横向倍数，0=关闭 */
 BOOL ConfigGetStr(const WCHAR* key, WCHAR* out, size_t cap); /* [General] 通用字符串项（未具名解析的） */
 int  ConfigGetAutoScrollInterval(void);     /* [General] AutoScrollInterval：自动滚动初始节拍(ms) */
 BOOL ConfigGetAutoScrollSmooth(void);       /* [General] AutoScrollSmooth：小数刻度平滑注入 */

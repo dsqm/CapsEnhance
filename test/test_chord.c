@@ -3,7 +3,8 @@
    用另一个捕获钩子统计软件真实注入的方向键/Shift。
    覆盖：模式修饰（增强=Alt/D、位移=F）在"按键乱序到达"下仍正确、
    长按重复/松手补齐、原生词跳按键序列、滚轮加速，
-   以及"增强模式 + 滚轮 = 自动滚动"（注入计数钩子观测）。
+   以及"增强模式 + 滚轮 = 自动滚动"（注入计数钩子观测）、
+   "Caps+Shift+滚轮 = 横向滚动"（真实 Shift 决定轴向，且钩子吞掉物理格）。
    注意：引擎只问"某个模式是否生效"，从不判断按的是哪个键 ——
    键位表在 keymap.c，可由配置改（场景S验证"把 D 去掉只留 Alt"）。
    ============================================================ */
@@ -110,13 +111,24 @@ static BOOL TakeWheelAccel(int* delta, int* mul) {
     }
     return FALSE;
 }
-/* 模拟硬件滚轮：直接喂给生产用的鼠标钩子过程（flags=0 表示非注入）。
+/* 取走钩子投递的**横向**滚动请求（Caps+Shift+滚轮）。 */
+static BOOL TakeWheelHAccel(int* delta, int* mul) {
+    MSG m;
+    if (PeekMessageW(&m, g_mainWnd, WM_WHEEL_HACCEL, WM_WHEEL_HACCEL, PM_REMOVE)) {
+        if (delta) *delta = (int)m.wParam;
+        if (mul)   *mul   = (int)m.lParam;
+        return TRUE;
+    }
+    return FALSE;
+}
+/* 模拟硬件滚轮：直接喂给生产用的鼠标钩子过程（flags=0 表示非注入），
+   返回钩子的判定（1 = 这一格被吞掉，事件不再往下传）。
    注意只模拟"钩子的判断"，不会真的产生那原始一格。 */
-static void Wheel(int delta, DWORD flags) {
+static LRESULT Wheel(int delta, DWORD flags) {
     MSLLHOOKSTRUCT ms; memset(&ms, 0, sizeof(ms));
     ms.mouseData = (DWORD)(USHORT)(SHORT)delta << 16;   /* 高字是滚轮增量 */
     ms.flags = flags;
-    LowLevelMouseProc(HC_ACTION, WM_MOUSEWHEEL, (LPARAM)&ms);
+    return LowLevelMouseProc(HC_ACTION, WM_MOUSEWHEEL, (LPARAM)&ms);
 }
 /* 排干所有待处理消息（含残留 TIMER/TRIG） */
 static void Sink(void) {
@@ -696,6 +708,72 @@ int main(void) {
           "R: 只按 C 时仍走逐格加速（delta=-120 mul=2）");
     END_SCENE();
     ConfigLoadFrom(L"bin/__absent__.ini");
+
+    /* ---- 场景T：Caps+Shift+滚轮 = 横向滚动 ----
+       "该功能无须实现 Alt 和 D，只要能正常横向滚动即可；速度可在配置文件调整，
+        默认保持 1"。注意这里用的是**真实 Shift**，与 keymap 的"位移模式 F"无关。 */
+    Reset();
+    CHECK(ConfigGetWheelHScrollMul() == 1, "T: WheelHScrollMul 缺省为 1（一滚一格）");
+
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Key(VK_LSHIFT, TRUE); Pump(2);                /* 真实左 Shift */
+    Sink();
+
+    ResetWheelRec();
+    int hd = 0, hm = 0;
+    LRESULT consumed = Wheel(120, 0);
+    CHECK(consumed == 1, "T: Caps+Shift+滚轮 -> 钩子吞掉物理这一格（防横纵混滚）");
+    CHECK(TakeWheelHAccel(&hd, &hm), "T: 投递横向滚动请求");
+    CHECK(hd == 120 && hm == 1, "T: 请求带原始方向与倍数 1");
+    CHECK(!TakeWheelAccel(NULL, NULL), "T: 不走纵向加速通道（轴向互斥）");
+    CHECK(!ActAutoScrollActive(), "T: 也不启动自动滚动（只按 Shift、没按增强键）");
+
+    /* 注入侧：mul=1 -> 正好一次标准横向刻度（±120），不带平滑小数点 */
+    Wheel(-120, 0);
+    int hd2 = 0, hm2 = 0;
+    CHECK(TakeWheelHAccel(&hd2, &hm2) && hd2 == -120 && hm2 == 1,
+          "T: 反向滚 -> 请求为 -120（方向原样带过去）");
+
+    /* 倍数可配：3 -> 钩子仍然只投递一条请求（由工作线程注入 3 格） */
+    WriteChordIni("[General]\r\nWheelHScrollMul = 3\r\n");
+    ConfigLoadFrom(L"bin/chordtest.ini");
+    Sink();
+    int hd3 = 0, hm3 = 0;
+    CHECK(Wheel(120, 0) == 1 && TakeWheelHAccel(&hd3, &hm3) && hm3 == 3,
+          "T: WheelHScrollMul=3 -> 请求倍数 3");
+    ConfigLoadFrom(L"bin/__absent__.ini");        /* 回缺省（1） */
+
+    /* 关闭（0）：不吞这一格，退回纵向语义 */
+    WriteChordIni("[General]\r\nWheelHScrollMul = 0\r\n");
+    ConfigLoadFrom(L"bin/chordtest.ini");
+    Key(VK_LSHIFT, FALSE); Pump(2); Sink();
+    Key(VK_LSHIFT, TRUE);  Pump(2); Sink();
+    ResetWheelRec();
+    CHECK(Wheel(120, 0) != 1, "T: WheelHScrollMul=0 -> 不吞这一格（横向关闭）");
+    CHECK(!TakeWheelHAccel(NULL, NULL), "T: 关闭时不再投递横向请求");
+    ConfigLoadFrom(L"bin/__absent__.ini");
+
+    /* 松开 Shift 就回到纵向语义；Caps+Shift 之外不受影响 */
+    Key(VK_LSHIFT, FALSE); Pump(2); Sink();
+    ResetWheelRec();
+    int dS = 0, mS = 0;
+    CHECK(Wheel(120, 0) != 1 && TakeWheelAccel(&dS, &mS) && mS == 2,
+          "T: 松开 Shift -> 恢复纵向加速（缺省 mul=2）");
+    CHECK(!TakeWheelHAccel(NULL, NULL), "T: 松开 Shift 后不再横向");
+
+    /* 真 Shift 的按住状态必须被正确清掉（否则会粘住） */
+    CHECK(!g_shiftMod, "T: 松开 Shift 后 g_shiftMod 归 FALSE");
+    ModHoldReset();                               /* 暂停/重启路径 */
+    CHECK(!g_shiftMod && !g_cMod, "T: ModHoldReset 清掉按住状态");
+
+    Key(CLI_CAPS, TRUE); Pump(2);                 /* 用 Ctrl 也一样不该横向 */
+    Key(VK_LCONTROL, TRUE); Pump(2); Sink();
+    ResetWheelRec();
+    int dC = 0, mC = 0;
+    CHECK(Wheel(120, 0) != 1 && TakeWheelAccel(&dC, &mC),
+          "T: Caps+Ctrl+滚轮 仍是纵向（只有 Shift 决定轴向）");
+    Key(VK_LCONTROL, FALSE); Pump(2);
+    END_SCENE();
 
     /* ---- 场景S：EnhanceKeys 可配 —— 把 D 去掉只留 Alt（用户的真实诉求） ----
        "以后等我适应了，还可能把 D 删除掉" —— 按设计这只需改一行配置，

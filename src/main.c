@@ -228,9 +228,10 @@ static void TrayShowMenu(void) {
                              pt.x, pt.y, 0, g_mainWnd, NULL);
     if (cmd == IDM_PAUSE) {
         g_state.paused = !g_state.paused;
-        /* 切换暂停时清掉残留的修饰/引擎状态，避免恢复后粘滞 */
-        g_cMod = FALSE;
-        ModeResetAll();
+        /* 切换暂停时清掉残留的修饰/引擎状态，避免恢复后粘滞。
+           用 ModHoldReset 而不是只清 g_cMod：暂停期间钩子被跳过，
+           抬起事件收不到（含真实 Shift），不主动清就会一直粘着。 */
+        ModHoldReset();
         g_btnCount = 0;
         ResetEngine();
         if (!g_state.paused) TrayHint(L"正在映射");
@@ -294,7 +295,7 @@ static void ResetEngine(void) {
    钩子 / 和弦引擎 / 修饰门闩随进程重启全部回到干净初态。 */
 static void DoRestart(void) {
     ResetEngine();
-    g_cMod = FALSE; ModeResetAll();
+    ModHoldReset();
     g_btnCount = 0;
     /* 必须先停执行线程并等它收尾：否则它可能正在注入，而 SendClearStuckModifiers
        要读 send.c 里由它维护的 g_injectedDown（清卡键会读错）。 */
@@ -546,6 +547,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         /* 增强模式（默认 C+Alt/D）下的滚轮：驱动持续滚动（act.c 的自动滚动
            通道）。这里同样只投递，主线程绝不做注入。 */
         ActAutoScrollWheel((int)wp);
+        return 0;
+    case WM_WHEEL_HACCEL:
+        /* Caps+Shift+滚轮：横向滚动。钩子已经吞掉物理那一格（否则会横纵混滚），
+           所以这里要注入**全部** hmul 格。同样只投递、不在主线程注入。 */
+        ActWheelPostH((int)wp, (int)lp);
         return 0;
     case WM_MODE_UP:
         /* 某个修饰模式的激活键全部抬起了（钩子投递）：增强模式一失效，
