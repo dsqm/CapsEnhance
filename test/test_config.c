@@ -44,6 +44,21 @@ static BOOL TemplateHasForbidden(void) {
     return bad;
 }
 
+/* 生成的模板里是否含某个键（连默认值一起匹配）—— 新增配置项忘了写进模板
+   的话，用户根本不知道有这个开关 */
+static BOOL TemplateHas(const char* needle) {
+    FILE* f = NULL;
+    if (_wfopen_s(&f, L"bin/CapsEnhance.ini", L"rb") != 0 || !f) return FALSE;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    char* buf = (char*)malloc((size_t)sz + 1);
+    size_t n = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[n] = 0;
+    BOOL has = strstr(buf, needle) != NULL;
+    free(buf);
+    return has;
+}
+
 int main(void) {
     /* 完整格式：General 键值 + NativeWordJump 名单 */
     WriteIni(
@@ -315,6 +330,13 @@ int main(void) {
     DeleteFileW(L"bin/CapsEnhance.ini");
     ConfigLoad();
     EXPECT(!TemplateHasForbidden(), "CFG: 模板不含禁用字样（VSCode/vsc）");
+    /* 模板必须把每个 [General] 开关连默认值写出来，否则用户不知道有这些项 */
+    EXPECT(TemplateHas("RunAsAdmin = 0"),    "CFG: 模板含 RunAsAdmin 默认值");
+    EXPECT(TemplateHas("LogMaxKB = 2048"),   "CFG: 模板含 LogMaxKB 默认值");
+    EXPECT(TemplateHas("MaxArrowSteps = 32"),"CFG: 模板含 MaxArrowSteps 默认值");
+    EXPECT(TemplateHas("OverStepMode = 0"),  "CFG: 模板含 OverStepMode 默认值");
+    EXPECT(TemplateHas("WheelScrollMul = 3"),"CFG: 模板含 WheelScrollMul 默认值");
+    EXPECT(TemplateHas("[NativeWordJump]"),  "CFG: 模板含 NativeWordJump 段");
 
     /* 真实权限查询：不崩溃即可（是否管理员取决于运行环境） */
     (void)IsRunElevated();
