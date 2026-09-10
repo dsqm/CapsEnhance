@@ -90,12 +90,14 @@
 
 | 通道 | API | 依据 |
 | ---- | ---- | ---- |
-| 经典 Edit / EmEditorView | `EM_SETSEL` | 经典编辑协议 |
-| Scintilla | `SCI_SETSEL` | Scintilla 消息 |
-| **UIA** | `TextRange.Select()` | 官方语义：退化（空）range 上调用 Select 时 *"the text insertion point moves to the starting endpoint"*——即直接移动光标。锚定后克隆 DocumentRange 折叠到 caret，`MoveEndpointByUnit(Character, delta)` 展开到目标，折叠到目标端 Select；带 Shift 保留展开区间产生选区。`moved` 数与期望不符（provider 不支持/越界）即放弃 |
+| 经典 Edit / EmEditorView | `EM_SETSEL` | 经典编辑协议（无 anchor 概念，Shift 位移按"向左锚右端 / 向右锚左端"给出有序选区） |
+| Scintilla | `SCI_SETSEL(anchor, caret)` | wParam=锚、lParam=活动光标，天然支持选区位移 |
+| **UIA** | `TextRange.Select()` | 官方语义：退化（空）range 上调用 Select 时 *"the text insertion point moves to the starting endpoint"*——即直接移动光标。**Chromium 系对折叠 range 的负向端点移动一律拒绝**（实测 moved=0，"N 不行 M 可以"），因此向左目标用"Start 从文档头正向数 + End 绝对定位回 caret"构造，全程只用正向增量与绝对定位；带 Shift 保留展开区间产生选区 |
 | **IA2** | `setCaretOffset` / `setSelection` | IAccessible2 规范：*"Sets the position of the caret"*，不支持时返回 `E_FAIL` 退回箭头 |
 
-UIA/IA2 置位的回读校验比经典 Edit 更严：置位后重新读文本+光标，**仍是同一页文本且光标恰在目标**才算成功；HRESULT 成功但回读不符时，不叠加箭头（避免双重错误），本次到此为止（诊断日志会记录）。
+- UIA/IA2 的直接置位**仅限无 Shift**：带选区时读回的位置是选区起点而非活动端，目标计算不成立，置位会产生错误选区——Shift 位移走箭头（anchor 语义天然正确）。
+- UIA/IA2 置位的回读校验比经典 Edit 更严：置位后重新读文本+光标，**仍是同一页文本且光标恰在目标**才算成功；HRESULT 成功但回读不符时，不叠加箭头（避免双重错误），本次到此为止（诊断日志会记录）。
+- 三个通道置位后都会让视口跟随：Edit 发 `EM_SCROLLCARET`、Scintilla 发 `SCI_SCROLLCARET`、UIA 调 `ScrollIntoView`——否则光标会被移到窗口外看不到。
 
 两个实测坑：
 - EmEditor 的 `WM_GETTEXT` 返回计数把结尾 NUL 也算进去（比 `WM_GETTEXTLENGTH` 多 1），多出的 `'\0'` 会被当成一个分隔符字符参与跳词、算出越界目标——已剥掉。

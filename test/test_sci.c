@@ -7,7 +7,7 @@
      SCI_GETTEXTLENGTH -> 文档字节数
      SCI_GETTEXT       -> 拷 min(wParam, 字节数) 个字节 + 结尾 0
      SCI_GETCURRENTPOS / SCI_GETANCHOR -> 字节偏移
-     SCI_SETSEL(caret, anchor)         -> SetSelection(lParam, wParam)
+     SCI_SETSEL(anchor, caret)         -> 选区[anchor,caret]，光标(caret)落在 lParam
      SCI_GETCODEPAGE   -> 65001 (UTF-8)
    文档内容用 UTF-8 存，因此这条链路同时验证"字节 <-> UTF-16"换算 ——
    中文 3 字节/字，换算出错时断言必然不通过。
@@ -76,7 +76,7 @@ static LRESULT CALLBACK SciProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case SCI_GETCURRENTPOS: return g_caret;
     case SCI_GETANCHOR:     return g_anchor;
     case SCI_GETCODEPAGE:   return 65001;
-    case SCI_SETSEL:        g_caret = (int)w; g_anchor = (int)l; return 0;
+    case SCI_SETSEL:        g_anchor = (int)w; g_caret = (int)l; return 0;
     case SCI_SCROLLCARET:   return 0;
     case WM_KEYDOWN:
         g_kd++;

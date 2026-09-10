@@ -77,10 +77,11 @@ static BOOL SendMsg(HWND hwnd, UINT msg, WPARAM w, LPARAM l, LONGLONG* out) {
 
 /* 经典 Edit 控件直接置光标（或选区）位置。若可成功则无需发送箭头，瞬跳。
    无 Shift：光标瞬移到 target；有 Shift：从当前光标(anchor)选到 target。 */
-static BOOL ClassicSetSel(HWND hwnd, int caret, int target, BOOL shift) {
-    if (shift)
-        return SendMsg(hwnd, EM_SETSEL, (WPARAM)caret, (LPARAM)target, NULL);
-    return SendMsg(hwnd, EM_SETSEL, (WPARAM)target, (LPARAM)target, NULL);
+/* 经典 Edit 直接置选区：EM_SETSEL(wantStart, wantEnd)，参数有序。
+   注意 EM_SETSEL 没有 anchor 概念（anchor 落在 start），Shift 位移时
+   由调用方按"向左锚右端 / 向右锚左端"给出有序期望（见 NavJump）。 */
+static BOOL ClassicSetSel(HWND hwnd, int wantStart, int wantEnd) {
+    return SendMsg(hwnd, EM_SETSEL, (WPARAM)wantStart, (LPARAM)wantEnd, NULL);
 }
 
 /* ================= Scintilla 通道（Notepad3 / Notepad++ / SciTE ...） =================
@@ -140,12 +141,12 @@ static LONGLONG Utf16ToDocBytes(const WCHAR* s, int u16len, UINT cp) {
    （能回 EM_GETSEL 不一定能收 EM_SETSEL），置位失败就退回逐格箭头，
    宁可慢也不能光标原地不动。EM_GETSEL 返回值按 LOWORD/HIWORD 拆
    （跨进程不能传指针参数，文本超过 64K 时该返回值会截断，此为已知限制）。 */
-static BOOL EditVerifySel(HWND hwnd, int caret, int target, BOOL shift) {
+/* EM_SETSEL 置位校验：读回的选区是有序 (start<=end)，与期望端点逐一比对 */
+static BOOL EditVerifySel(HWND hwnd, int wantStart, int wantEnd) {
     LONGLONG sel = 0;
     if (!SendMsg(hwnd, EM_GETSEL, 0, 0, &sel)) return FALSE;
     DWORD v = (DWORD)sel;
-    int start = (int)LOWORD(v), end = (int)HIWORD(v);
-    return (end == target) && (shift ? (start == caret) : (start == target));
+    return (int)LOWORD(v) == wantStart && (int)HIWORD(v) == wantEnd;
 }
 
 /* 读回光标位置（EM_GETSEL 的 LOWORD）；读不到返回 -1 */
@@ -155,11 +156,14 @@ static LONGLONG EditGetCaret(HWND hwnd) {
     return (LONGLONG)LOWORD((DWORD)sel);
 }
 
-/* 直接置光标：SCI_SETSEL(caret, anchor)。置完立即回读校验，
-   位置不符就返回 FALSE，让上层退回逐格箭头。 */
+/* 直接置光标：SCI_SETSEL(anchor, caret)。Scintilla 语义：wParam=选区起点
+   (anchor)，lParam=终点，活动光标落在 lParam —— 带选区位移(F)时 anchor
+   固定在原光标、caret 移到目标，正好匹配。置完立即回读校验，位置不符就
+   返回 FALSE，让上层退回逐格箭头。此前 wParam/lParam 写反：无选区时两点
+   重合看不出来，Shift 位移时光标根本不动（选区还被反向设置）。 */
 static BOOL SciSetSel(HWND hwnd, LONGLONG caretB, LONGLONG anchorB) {
     LONGLONG now = 0;
-    SendMsg(hwnd, SCI_SETSEL, (WPARAM)caretB, (LPARAM)anchorB, NULL);
+    SendMsg(hwnd, SCI_SETSEL, (WPARAM)anchorB, (LPARAM)caretB, NULL);
     SendMsg(hwnd, SCI_GETCURRENTPOS, 0, 0, &now);
     SendMsg(hwnd, SCI_SCROLLCARET, 0, 0, NULL);
     return now == caretB;
@@ -398,7 +402,8 @@ static BOOL IsClassicEdit(HWND hwnd) {
 
 /* ================= 快速通道：经典 Edit / RichEdit / EmEditorView ================= */
 /* 通过 WM_GETTEXT + EM_GETSEL 读取文本与光标。仅对白名单内的控件生效。 */
-static BOOL FastGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
+static BOOL FastGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut,
+                             int* selEndOut) {
     if (!hwnd) return FALSE;
     if (!IsClassicEdit(hwnd)) return FALSE;   /* 非经典编辑：交给 Scintilla/UIA/原生 */
 
@@ -424,15 +429,20 @@ static BOOL FastGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut
     while (got > 0 && buf[got - 1] == L'\0') got--;
     if (got <= 0) { free(buf); return FALSE; }
 
-    /* 光标位置：EM_GETSEL */
+    /* 光标位置：EM_GETSEL。返回值打包 (选区start, 选区end)——选区有序
+       (start<=end)，Shift 位移时"活动端"按方向取其一（见 NavJump） */
     LONGLONG sel = 0;
     if (!SendMsg(hwnd, EM_GETSEL, 0, 0, &sel)) { free(buf); return FALSE; }
     int caret = ((DWORD)sel != 0xFFFFFFFF) ? (int)LOWORD((DWORD)sel) : 0;
     if (caret < 0 || caret > (int)got) caret = (int)got;
+    int selEnd = ((DWORD)sel != 0xFFFFFFFF) ? (int)HIWORD((DWORD)sel) : caret;
+    if (selEnd < caret) selEnd = caret;          /* 有序化 */
+    if (selEnd > (int)got) selEnd = (int)got;
 
     *text = buf;
     *lenOut = (int)got;
     *caretOut = caret;
+    if (selEndOut) *selEndOut = selEnd;
     return TRUE;
 }
 
@@ -737,32 +747,37 @@ static BOOL UiaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
                 TextPatternRangeEndpoint_Start, caretR, TextPatternRangeEndpoint_Start)))
         { why = "collapse to caret"; goto done; }
 
-    if (!shift) {
-        /* 无 Shift：整体平移折叠 range 到目标。Move 移动两端、折叠 range
-           移动后仍折叠 —— 这是读屏器(NVDA)移动光标的标准做法。
-           不用 MoveEndpointByUnit(Start, -delta)：实测 Chromium 系(QQ/Edge)
-           对折叠 range 向左展开 Start 会被拒绝/clamp（moved=0，表现为
-           "N 不行 M 可以"），而 Move 双端平移两个方向都正常。 */
+    /* 展开到目标端点。实测 Chromium 系（QQ/Edge）对折叠 range 的**负向**
+       增量移动一律拒绝（Move / MoveEndpointByUnit(Start,-n) 的 moved=0，
+       表现为"N 不行 M 可以"），因此这里只用两种已验证可行的操作：
+       a) 端点**正向**移动（MoveEndpointByUnit(+n)）
+       b) 端点**绝对定位**（MoveEndpointByRange 到另一 range 的端点，
+          无方向语义，折叠本身就在用它）
+       向左目标 = "Start 从文档头正向数 tgt 个字符" + "End 绝对定位回 caret"。 */
+    if (delta < 0) {
         long moved = 0;
-        hr = IUIAutomationTextRange_Move(r, TextUnit_Character, (long)delta, &moved);
-        if (FAILED(hr) || moved != (long)(delta < 0 ? -delta : delta))
-            { why = "Move(character) moved mismatch"; goto done; }
-    } else if (delta > 0) {
-        /* 选区向右：End 从 caret 向右展开 delta（实测可行） */
+        hr = IUIAutomationTextRange_MoveEndpointByUnit(r, TextPatternRangeEndpoint_Start,
+                TextUnit_Character, (long)target, &moved);
+        if (FAILED(hr) || moved != (long)target) { why = "move Start to tgt"; goto done; }
+        hr = IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_End,
+                caretR, TextPatternRangeEndpoint_Start);
+        if (FAILED(hr)) { why = "pin End to caret"; goto done; }
+    } else {
         long moved = 0;
         hr = IUIAutomationTextRange_MoveEndpointByUnit(r, TextPatternRangeEndpoint_End,
                 TextUnit_Character, (long)delta, &moved);
-        if (FAILED(hr) || moved != delta) { why = "expand End right"; goto done; }
-    } else {
-        /* 选区向左：先把折叠 range 平移到 target（Move），再把 End 向右
-           展开回 caret —— 同样只依赖"向右展开 End"这个已验证方向 */
-        long moved = 0;
-        hr = IUIAutomationTextRange_Move(r, TextUnit_Character, (long)delta, &moved);
-        if (FAILED(hr) || moved != (long)-delta) { why = "Move left for sel"; goto done; }
-        hr = IUIAutomationTextRange_MoveEndpointByUnit(r, TextPatternRangeEndpoint_End,
-                TextUnit_Character, (long)-delta, &moved);
-        if (FAILED(hr) || moved != (long)-delta) { why = "expand End back"; goto done; }
+        if (FAILED(hr) || moved != (long)delta) { why = "expand End right"; goto done; }
     }
+    if (!shift) {
+        /* 无 Shift：折叠到目标端点（绝对定位），Select 后光标落在目标 */
+        hr = (delta < 0)
+           ? IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_End,
+                                                        r, TextPatternRangeEndpoint_Start)
+           : IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_Start,
+                                                        r, TextPatternRangeEndpoint_End);
+        if (FAILED(hr)) { why = "collapse to target"; goto done; }
+    }
+    /* 带 Shift：保留 [tgt,caret] / [caret,tgt] 展开区间，Select 产生选区 */
     hr = IUIAutomationTextRange_Select(r);
     ok = SUCCEEDED(hr);
     if (ok) {
@@ -864,7 +879,8 @@ int NavJump(int dir, BOOL shift) {
             CapLog("  -> 进程命中原生词跳名单，直接 Ctrl+arrow");
         return -1;
     }
-    if (focus) got = FastGetTextCaret(focus, &text, &len, &caret);  /* 仅经典 Edit/RichEdit */
+    int selEnd = caret;          /* 经典 Edit 选区另一端（HIWORD），无选区=caret */
+    if (focus) got = FastGetTextCaret(focus, &text, &len, &caret, &selEnd);  /* 仅经典 Edit/RichEdit */
     if (got) path = "Edit";
     if (!got) {                                                     /* Scintilla 系 */
         got = SciGetTextCaret(focus, &text, &len, &caret, &sp);
@@ -880,10 +896,17 @@ int NavJump(int dir, BOOL shift) {
     }
     if (!got) { SendNativeWordJump(dir, shift); if (g_recording) CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
 
+    /* Shift 位移的活动端：向左扩时选区 start 是活动端，向右扩时 end 是
+       活动端（经典 Edit 的 EM_GETSEL 是有序选区，不含 anchor 信息）。
+       Sci 通道例外：SCI_GETCURRENTPOS 本身就是活动端，caret 直接可用。 */
+    int activeCaret = caret;
+    if (got && shift && path[0] == 'E')
+        activeCaret = (dir == DIR_LEFT) ? caret : selEnd;
+
     int steps = 0;
-    int tgt = WordJumpTarget(text, len, caret, dir, &steps);
+    int tgt = WordJumpTarget(text, len, activeCaret, dir, &steps);
     if (g_recording) CapLog("  path=%s len=%d caret=%d -> steps=%d tgt=%d",
-                            path, len, caret, steps, tgt);
+                            path, len, activeCaret, steps, tgt);
 
     if (steps <= 0) {
         /* 已到边界，无可跳转；此时读文本已成功，只是边界无可跳。
@@ -896,8 +919,12 @@ int NavJump(int dir, BOOL shift) {
     BOOL direct = FALSE;
     BOOL skipArrows = FALSE;   /* 置位已发生但回读不符：不能再发箭头叠加错误 */
     if (path[0] == 'E' && focus && steps >= DIRECT_JUMP_MIN) {
-        direct = ClassicSetSel(focus, caret, tgt, shift);
-        if (direct) direct = EditVerifySel(focus, caret, tgt, shift);
+        /* 期望选区（有序）：无 Shift 收缩为一点；Shift 向左 = [tgt, selEnd]
+           （锚在选区右端）、向右 = [caret, tgt]（锚在选区左端） */
+        int ws = shift ? ((dir == DIR_LEFT) ? tgt : caret) : tgt;
+        int we = shift ? ((dir == DIR_LEFT) ? selEnd : tgt) : tgt;
+        direct = ClassicSetSel(focus, ws, we);
+        if (direct) direct = EditVerifySel(focus, ws, we);
         if (direct) {
             /* EM_SETSEL 不会滚动视图：光标可能被移到窗口外看不到
                （EmEditor 实测）。EM_SCROLLCARET 把光标滚到可见，
@@ -905,7 +932,7 @@ int NavJump(int dir, BOOL shift) {
             LONGLONG dummy;
             SendMsg(focus, 0x00B7 /* EM_SCROLLCARET */, 0, 0, &dummy);
         }
-        if (direct && g_recording) CapLog("  -> 直接 EM_SETSEL [%d,%d] 已校验", caret, tgt);
+        if (direct && g_recording) CapLog("  -> 直接 EM_SETSEL [%d,%d] 已校验", ws, we);
     } else if (path[0] == 'S' && focus && steps >= DIRECT_JUMP_MIN) {
         LONGLONG tb = Utf16ToDocBytes(text, tgt, sp.cp);
         if (tb >= 0) {
@@ -914,12 +941,15 @@ int NavJump(int dir, BOOL shift) {
             if (direct && g_recording)
                 CapLog("  -> 直接 SCI_SETSEL caret=%lld anchor=%lld", tb, anchorB);
         }
-    } else if ((path[0] == 'U' || path[0] == 'I') && focus && steps >= DIRECT_JUMP_MIN) {
-        /* UIA/IA2 同样有"直接置位"能力（TextRange.Select / setCaretOffset）。
-           试一次并回读校验：HRESULT 失败 -> 退回箭头；置位发生但回读不符 ->
-           不能再叠加箭头（会双重错误），本次到此为止。 */
-        BOOL set = (path[0] == 'U') ? UiaSetSel(focus, caret, tgt, shift)
-                                    : MsaaSetSel(focus, caret, tgt, shift);
+    } else if ((path[0] == 'U' || path[0] == 'I') && focus && !shift
+               && steps >= DIRECT_JUMP_MIN) {
+        /* UIA/IA2 直接置位（TextRange.Select / setCaretOffset）仅限无 Shift：
+           带选区时读回的 caret 是选区起点而非活动端，目标计算本身就不成立，
+           置位会产生错误选区 —— Shift 位移走箭头（anchor 语义天然正确）。
+           无 Shift 时试一次并回读校验：HRESULT 失败 -> 退回箭头；置位发生
+           但回读不符 -> 不能再叠加箭头（会双重错误），本次到此为止。 */
+        BOOL set = (path[0] == 'U') ? UiaSetSel(focus, caret, tgt, FALSE)
+                                    : MsaaSetSel(focus, caret, tgt, FALSE);
         if (set) {
             WCHAR* t2 = NULL; int l2 = 0, c2 = 0;
             BOOL ok2 = (path[0] == 'U')
