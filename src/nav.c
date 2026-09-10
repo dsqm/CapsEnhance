@@ -1018,14 +1018,19 @@ int NavJump(int dir, BOOL shift) {
             free(t2);
         }
     }
+    BOOL overLimit = FALSE;    /* 走了超限替代路径（Ctrl+方向 / 单格）：不做补正 */
     if (!direct && !skipArrows) {
         /* 逐格距离超过配置阈值：按 OverStepMode 处理。
            0 = 只发一个方向键（跳一格即停）；
            1 = 改发原生 Ctrl+方向（目标程序自己的词跳，瞬时）。
            MaxArrowSteps=0 表示不限制（逐格发完，与旧逻辑一致）。
-           瞬跳路径不受影响。 */
+           瞬跳路径不受影响。
+           注意：这两条路径都不做"箭头补正"——补正会按我们算出的 tgt 纠偏，
+           而 Ctrl+方向 的落点由目标程序的词跳语义决定、"只发一格"本就不该
+           走到 tgt；补正一叠加就出现"跳过去又跳回来"的来回移动。 */
         int maxSteps = ConfigGetMaxArrowSteps();
         if (maxSteps > 0 && steps > maxSteps) {
+            overLimit = TRUE;
             if (ConfigGetOverStepCtrl()) {
                 SendNativeWordJump(dir, shift);
                 if (g_recording)
@@ -1043,7 +1048,7 @@ int NavJump(int dir, BOOL shift) {
        吞掉第一支箭头（虚拟机里也可能丢键），导致逐格跳少走一格——
        读回实际位置，按差值补发（只补一轮、差值不超过原步数，防打转）。
        带 Shift 的选区移动不做补正（anchor 校验复杂，收益低）。 */
-    if (!direct && !shift && path[0] == 'E' && focus) {
+    if (!direct && !overLimit && !shift && path[0] == 'E' && focus) {
         LONGLONG now = EditGetCaret(focus);
         if (now >= 0 && now != (LONGLONG)tgt) {
             LONGLONG diff = (LONGLONG)tgt - now;
@@ -1062,7 +1067,8 @@ int NavJump(int dir, BOOL shift) {
        仅当读回的仍是同一页文本（长度与内容都一致，坐标可比）才按差值补一轮；
        差值超过原步数说明坐标系统性不可靠，放弃补正（不做任何自动切换，
        只提示）—— 这类程序请把进程名写进配置文件的 [NativeWordJump] 名单。 */
-    if (!direct && !skipArrows && !shift && (path[0] == 'U' || path[0] == 'I') && focus) {
+    if (!direct && !skipArrows && !overLimit && !shift
+        && (path[0] == 'U' || path[0] == 'I') && focus) {
         WCHAR* t2 = NULL; int l2 = 0, c2 = 0;
         BOOL ok2 = (path[0] == 'U') ? UiaGetTextCaret(focus, &t2, &l2, &c2)
                                     : MsaaGetTextCaret(focus, &t2, &l2, &c2);
