@@ -214,6 +214,7 @@ static void SetMenuPauseText(void) {
 /* ============ 窗口过程 ============ */
 static void ResetEngine(void) {
     StopEngine();
+    NavSelTrackReset();
     g_pendingAct = ACT_NONE;
     g_activeAct  = ACT_NONE;
     g_actD = FALSE; g_actF = FALSE;

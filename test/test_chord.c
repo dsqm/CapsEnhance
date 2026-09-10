@@ -15,6 +15,7 @@
 int NavJump(int dir, BOOL shift) { (void)dir; (void)shift; return 0; }
 void NavProbe(void) { /* 诊断探测：本测试桩掉 */ }
 void NavBaseInfo(void) { /* 启动基线采集：本测试桩掉 */ }
+void NavSelTrackReset(void) { /* 选区锚跟踪：本测试桩掉 */ }
 
 /* ---- 捕获钩子：记录注入的完整事件序列（按下/抬起），并可统计次数 ---- */
 typedef struct { int vk; int n; } Rec;

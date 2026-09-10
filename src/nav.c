@@ -686,7 +686,7 @@ static BOOL UiaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
     IUIAutomation *ua = NULL;
     IUIAutomationElement *el = NULL, *ef = NULL, *eh = NULL, *owner = NULL;
     IUIAutomationTextPattern *tp = NULL;
-    IUIAutomationTextRange *doc = NULL, *caretR = NULL, *r = NULL;
+    IUIAutomationTextRange *doc = NULL, *r = NULL;
     BOOL ok = FALSE;
     int delta = target - caret;
     const char* why = "";                              /* 失败点（诊断日志用） */
@@ -718,66 +718,48 @@ static BOOL UiaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
     hr = IUIAutomationTextPattern_get_DocumentRange(tp, &doc);
     if (FAILED(hr) || !doc) goto done;
 
-    {
-        IUIAutomationTextPattern2* tp2 = NULL;
-        if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPattern2Id,
-                            &IID_IUIAutomationTextPattern2, (void**)&tp2)) && tp2) {
-            BOOL active = FALSE;
-            if (FAILED(IUIAutomationTextPattern2_GetCaretRange(tp2, &active, &caretR)) || !caretR)
-                caretR = NULL;
-            IUIAutomationTextPattern2_Release(tp2);
-        }
-    }
-    if (!caretR) {
-        IUIAutomationTextRangeArray* sel = NULL;
-        if (SUCCEEDED(IUIAutomationTextPattern_GetSelection(tp, &sel)) && sel) {
-            int n = 0;
-            sel->lpVtbl->get_Length(sel, &n);
-            if (n > 0) sel->lpVtbl->GetElement(sel, 0, &caretR);
-            sel->lpVtbl->Release(sel);
-        }
-    }
-    if (!caretR) goto done;
-
     if (FAILED(IUIAutomationTextRange_Clone(doc, &r)) || !r) goto done;
-    /* 折叠 r 到 caret（两端都对齐 caretR 的 Start，与读取通道同源） */
-    if (FAILED(IUIAutomationTextRange_MoveEndpointByRange(r,
-                TextPatternRangeEndpoint_End, caretR, TextPatternRangeEndpoint_Start)) ||
-        FAILED(IUIAutomationTextRange_MoveEndpointByRange(r,
-                TextPatternRangeEndpoint_Start, caretR, TextPatternRangeEndpoint_Start)))
-        { why = "collapse to caret"; goto done; }
-
-    /* 展开到目标端点。实测 Chromium 系（QQ/Edge）对折叠 range 的**负向**
-       增量移动一律拒绝（Move / MoveEndpointByUnit(Start,-n) 的 moved=0，
-       表现为"N 不行 M 可以"），因此这里只用两种已验证可行的操作：
-       a) 端点**正向**移动（MoveEndpointByUnit(+n)）
-       b) 端点**绝对定位**（MoveEndpointByRange 到另一 range 的端点，
-          无方向语义，折叠本身就在用它）
-       向左目标 = "Start 从文档头正向数 tgt 个字符" + "End 绝对定位回 caret"。 */
-    if (delta < 0) {
+    /* 构造 [A,B]（A=min(target,caret)，B=max）。实测 Chromium 系（QQ/Edge）
+       的 UIA TextRange 对这些操作的态度：
+         可用：End 端点的**正向** MoveEndpointByUnit(+n)、端点**绝对定位**
+              （MoveEndpointByRange，无方向语义）、Select、ScrollIntoView
+         不可用：Start 端点的 MoveEndpointByUnit（任何方向 moved=0）、
+              负向 Move —— 即"只支持移动 End"
+       因此构造顺序全部依赖"End 正向移动 + 绝对定位到已知参照"：
+         1) End 绝对定位到文档头          r=[0,0]
+         2) End 正向 +A                   r=[0,A]
+         3) Start 绝对定位到 r.End        r=[A,A]
+         4) End 正向 +(B-A)               r=[A,B]
+       Select 作用在折叠 range 上即移动光标（官方语义），带 Shift 时保留
+       展开区间产生选区。 */
+    {
+        int A = (target < caret) ? target : caret;
+        int B = (target < caret) ? caret : target;
         long moved = 0;
-        hr = IUIAutomationTextRange_MoveEndpointByUnit(r, TextPatternRangeEndpoint_Start,
-                TextUnit_Character, (long)target, &moved);
-        if (FAILED(hr) || moved != (long)target) { why = "move Start to tgt"; goto done; }
         hr = IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_End,
-                caretR, TextPatternRangeEndpoint_Start);
-        if (FAILED(hr)) { why = "pin End to caret"; goto done; }
-    } else {
-        long moved = 0;
-        hr = IUIAutomationTextRange_MoveEndpointByUnit(r, TextPatternRangeEndpoint_End,
-                TextUnit_Character, (long)delta, &moved);
-        if (FAILED(hr) || moved != (long)delta) { why = "expand End right"; goto done; }
+                doc, TextPatternRangeEndpoint_Start);
+        if (FAILED(hr)) { why = "pin End to doc head"; goto done; }
+        if (A > 0) {
+            hr = IUIAutomationTextRange_MoveEndpointByUnit(r, TextPatternRangeEndpoint_End,
+                    TextUnit_Character, (long)A, &moved);
+            if (FAILED(hr) || moved != (long)A) { why = "move End to A"; goto done; }
+        }
+        hr = IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_Start,
+                r, TextPatternRangeEndpoint_End);
+        if (FAILED(hr)) { why = "fold Start to End"; goto done; }
+        if (B > A) {
+            hr = IUIAutomationTextRange_MoveEndpointByUnit(r, TextPatternRangeEndpoint_End,
+                    TextUnit_Character, (long)(B - A), &moved);
+            if (FAILED(hr) || moved != (long)(B - A)) { why = "move End to B"; goto done; }
+        }
     }
     if (!shift) {
-        /* 无 Shift：折叠到目标端点（绝对定位），Select 后光标落在目标 */
-        hr = (delta < 0)
-           ? IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_End,
-                                                        r, TextPatternRangeEndpoint_Start)
-           : IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_Start,
-                                                        r, TextPatternRangeEndpoint_End);
+        /* 无 Shift：折叠到目标端（绝对定位），Select 后光标落在目标 */
+        hr = IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_Start,
+                r, TextPatternRangeEndpoint_End);
         if (FAILED(hr)) { why = "collapse to target"; goto done; }
     }
-    /* 带 Shift：保留 [tgt,caret] / [caret,tgt] 展开区间，Select 产生选区 */
+    /* 带 Shift：保留 [A,B] 展开区间，Select 产生选区 */
     hr = IUIAutomationTextRange_Select(r);
     ok = SUCCEEDED(hr);
     if (ok) {
@@ -793,7 +775,6 @@ done:
     if (!ok && g_recording && why[0])
         CapLog("  UIA SetSel 失败于 %s (delta=%d)", why, delta);
     if (r)      IUIAutomationTextRange_Release(r);
-    if (caretR) IUIAutomationTextRange_Release(caretR);
     if (doc)    IUIAutomationTextRange_Release(doc);
     if (tp)     IUIAutomationTextPattern_Release(tp);
     if (el)     IUIAutomationElement_Release(el);
@@ -862,10 +843,22 @@ static BOOL MsaaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut
     return TRUE;
 }
 
+/* Shift 位移序列的锚点跟踪（经典 Edit 通道）：
+   EM_GETSEL 只给有序两端、没有 anchor 概念。序列第一次位移时把"当时
+   的活动端"定为锚并固定，其后活动端 = 另一端 —— 这样 F+N 后再 F+M，
+   活动端会沿原路缩回锚点（符合系统 Shift 位移的直觉）。
+   序列结束（无 Shift 的跳转、文本长度变化、引擎复位）即清除。 */
+static int  g_selAnchor = -1;         /* -1 = 未在位移序列中 */
+static int  g_selAnchorLen = -1;
+static BOOL g_selAnchorIsStart = FALSE;
+void NavSelTrackReset(void) { g_selAnchor = -1; g_selAnchorLen = -1; }
+
 int NavJump(int dir, BOOL shift) {
     WCHAR* text = NULL;
     int len = 0, caret = 0;
     if (g_recording) CapLog("NavJump dir=%d shift=%d", dir, shift);
+
+    if (!shift) { g_selAnchor = -1; g_selAnchorLen = -1; }
 
     BOOL got = FALSE;
     const char* path = "native";
@@ -896,12 +889,21 @@ int NavJump(int dir, BOOL shift) {
     }
     if (!got) { SendNativeWordJump(dir, shift); if (g_recording) CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
 
-    /* Shift 位移的活动端：向左扩时选区 start 是活动端，向右扩时 end 是
-       活动端（经典 Edit 的 EM_GETSEL 是有序选区，不含 anchor 信息）。
+    /* Shift 位移的活动端：序列锚未建立时，向左扩活动端=选区 start、向右扩
+       活动端=选区 end；锚已建立则活动端固定在锚的另一侧。
        Sci 通道例外：SCI_GETCURRENTPOS 本身就是活动端，caret 直接可用。 */
     int activeCaret = caret;
-    if (got && shift && path[0] == 'E')
-        activeCaret = (dir == DIR_LEFT) ? caret : selEnd;
+    if (got && shift && path[0] == 'E') {
+        if (g_selAnchor < 0 || g_selAnchorLen != len) {
+            g_selAnchorIsStart = (dir == DIR_RIGHT);
+            g_selAnchor = g_selAnchorIsStart ? caret : selEnd;
+            g_selAnchorLen = len;
+        }
+        activeCaret = g_selAnchorIsStart ? selEnd : caret;
+    } else if (!shift) {
+        g_selAnchor = -1;
+        g_selAnchorLen = -1;
+    }
 
     int steps = 0;
     int tgt = WordJumpTarget(text, len, activeCaret, dir, &steps);
@@ -919,10 +921,18 @@ int NavJump(int dir, BOOL shift) {
     BOOL direct = FALSE;
     BOOL skipArrows = FALSE;   /* 置位已发生但回读不符：不能再发箭头叠加错误 */
     if (path[0] == 'E' && focus && steps >= DIRECT_JUMP_MIN) {
-        /* 期望选区（有序）：无 Shift 收缩为一点；Shift 向左 = [tgt, selEnd]
-           （锚在选区右端）、向右 = [caret, tgt]（锚在选区左端） */
-        int ws = shift ? ((dir == DIR_LEFT) ? tgt : caret) : tgt;
-        int we = shift ? ((dir == DIR_LEFT) ? selEnd : tgt) : tgt;
+        /* 期望选区（有序）：锚已建立时活动端=tgt、锚端固定；
+           无 Shift 收缩为一点。 */
+        int ws, we;
+        if (!shift) {
+            ws = we = tgt;
+        } else if (g_selAnchor >= 0) {
+            ws = (tgt < g_selAnchor) ? tgt : g_selAnchor;
+            we = (tgt < g_selAnchor) ? g_selAnchor : tgt;
+        } else {
+            ws = (dir == DIR_LEFT) ? tgt : caret;
+            we = (dir == DIR_LEFT) ? selEnd : tgt;
+        }
         direct = ClassicSetSel(focus, ws, we);
         if (direct) direct = EditVerifySel(focus, ws, we);
         if (direct) {

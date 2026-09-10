@@ -102,5 +102,6 @@ void NavBaseInfo(void);              /* 启动时采集系统/环境基线（不
 
 /* ---------- 词跳模块 ---------- */
 int NavJump(int dir, BOOL shift);      /* 前台控件 + dir + shift(位移=F) -> 移动；返回移动格数(<0失败) */
+void NavSelTrackReset(void);           /* 清除 Shift 位移序列的锚点跟踪（引擎复位时） */
 
 #endif
