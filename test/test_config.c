@@ -262,55 +262,11 @@ int main(void) {
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(ConfigGetWheelHScrollMul() == 1, "CFG: 非 General 段的 WheelHScrollMul 不生效");
 
-    /* 激活键列表 EnhanceKeys / ShiftKeys：配置层只作"通用字符串项"留存，
-       由键位映射模块（keymap.c）解析。这里断言**解析结果** ——
-       也就是"以后把 D 删掉、只留 Alt"确实只改一行配置即可生效。 */
-    {
-        WCHAR t[MODE_KEYS_MAXLEN];
-        WriteIni("[General]\r\nEnhanceKeys = Alt, D\r\nShiftKeys = F\r\n");
-        ConfigLoadFrom(L"bin/cfgtest.ini");
-        KeyMapInit();
-        ModeKeysText(MODE_ENHANCE, t, MODE_KEYS_MAXLEN);
-        EXPECT(ModeKeyCount(MODE_ENHANCE) == 2 && _wcsicmp(t, L"Alt, D") == 0,
-               "KEY: 增强键 Alt, D -> 解析为 2 个键（文本回显一致）");
-        EXPECT(ModeKeyCount(MODE_SHIFT) == 1 && ModeFindByVk('F') == MODE_SHIFT,
-               "KEY: 位移键 F -> 解析为 1 个键");
-        EXPECT(ModeFindByVk(VK_LMENU) == MODE_ENHANCE && ModeFindByVk('D') == MODE_ENHANCE,
-               "KEY: Alt 与 D 都属于增强模式");
-        EXPECT(ModeFindByVk('X') == -1, "KEY: 未配置的键不属于任何模式");
-
-        /* 用户的真实诉求：适应以后只用 Alt、把 D 去掉 */
-        WriteIni("[General]\r\nEnhanceKeys = Alt\r\n");
-        ConfigLoadFrom(L"bin/cfgtest.ini");
-        KeyMapInit();
-        EXPECT(ModeKeyCount(MODE_ENHANCE) == 1 && ModeFindByVk(VK_LMENU) == MODE_ENHANCE,
-               "KEY: EnhanceKeys=Alt -> 只剩 Alt");
-        EXPECT(ModeFindByVk('D') == -1, "KEY: 去掉 D 之后 D 不再是修饰键");
-
-        /* 分隔符与大小写容错（+ / 空格 / 逗号，大小写任意） */
-        WriteIni("[General]\r\nEnhanceKeys = alt+d\r\n");
-        ConfigLoadFrom(L"bin/cfgtest.ini");
-        KeyMapInit();
-        EXPECT(ModeKeyCount(MODE_ENHANCE) == 2 && ModeFindByVk('D') == MODE_ENHANCE,
-               "KEY: 小写与 + 分隔同样解析");
-        WriteIni("[General]\r\nEnhanceKeys = ALT\r\n");
-        ConfigLoadFrom(L"bin/cfgtest.ini");
-        KeyMapInit();
-        EXPECT(ModeKeyCount(MODE_ENHANCE) == 1, "KEY: 全大写键名同样解析");
-
-        /* 一个名字都认不出 -> 回退默认（配置写错不该让功能整体失效） */
-        WriteIni("[General]\r\nEnhanceKeys = FooBar\r\n");
-        ConfigLoadFrom(L"bin/cfgtest.ini");
-        KeyMapInit();
-        EXPECT(ModeKeyCount(MODE_ENHANCE) == 2, "KEY: 名字全认不出时回退默认 Alt+D");
-
-        /* 未配置（老配置没有这一项）-> 默认 */
-        WriteIni("[General]\r\nRunAsAdmin = 1\r\n");
-        ConfigLoadFrom(L"bin/cfgtest.ini");
-        KeyMapInit();
-        EXPECT(ModeKeyCount(MODE_ENHANCE) == 2 && ModeKeyCount(MODE_SHIFT) == 1,
-               "KEY: 未配置时用默认键位（Enhance=Alt+D, Shift=F）");
-    }
+    /* 激活键列表 EnhanceKeys / ShiftKeys 已**从配置里去掉**（它们是"和弦语法"
+       的一部分，不是给用户调的旋钮）：解析器不再认这两个键名、KeyMapInit 也
+       不读配置 —— 激活键固定为 cap.h 的 MODE_*_KEYS_DEFAULT（Alt+D / F）。
+       相关行为由 test_chord 的场景 S 验证（随手写一个 ini 也不会改变键位）；
+       "模板里不该再有这两项"由本文件末尾的模板用例断言。 */
 
     /* 老配置升级：缺失的新键自动补齐，已有内容保留 */
     {
@@ -328,10 +284,10 @@ int main(void) {
         EXPECT(ConfigGetAutoScrollInterval() == 24000, "UPG: 补齐 AutoScrollInterval 默认值");
         KeyMapInit();
         EXPECT(ModeKeyCount(MODE_ENHANCE) == 2 && ModeKeyCount(MODE_SHIFT) == 1,
-               "UPG: 补齐的 EnhanceKeys/ShiftKeys 可被解析（Alt+D / F）");
+               "UPG: 激活键是编译期常量（Alt+D / F），与配置文件无关");
         FILE* fc = NULL;
         int hasLog = 0, hasSteps = 0, hasMode = 0, hasWheel = 0;
-        int hasInterval = 0, hasEnh = 0, hasShift = 0, hasSmooth = 0, hasHMul = 0;
+        int hasInterval = 0, hasSmooth = 0, hasHMul = 0;
         if (fopen_s(&fc, "bin/cfgtest.ini", "r") == 0 && fc) {
             char line[512];
             while (fgets(line, sizeof(line), fc)) {
@@ -340,15 +296,13 @@ int main(void) {
                 if (strstr(line, "OverStepMode = 0")) hasMode = 1;
                 if (strstr(line, "WheelScrollMs = 1000")) hasWheel = 1;
                 if (strstr(line, "AutoScrollInterval = 24000")) hasInterval = 1;
-                if (strstr(line, "EnhanceKeys = Alt, D")) hasEnh = 1;
-                if (strstr(line, "ShiftKeys = F")) hasShift = 1;
                 if (strstr(line, "AutoScrollSmooth = 1")) hasSmooth = 1;
                 if (strstr(line, "WheelHScrollMul = 1")) hasHMul = 1;
                 if (strstr(line, "WheelScrollMs = 1000")) hasWheel = 1;
             }
             fclose(fc);
         }
-        EXPECT(hasLog && hasSteps && hasMode && hasWheel && hasInterval && hasEnh && hasShift
+        EXPECT(hasLog && hasSteps && hasMode && hasWheel && hasInterval
                && hasSmooth && hasHMul,
                "UPG: 补齐块带注释写回文件（含新增项）");
     }
@@ -435,8 +389,7 @@ int main(void) {
             fputs("[General]\nRunAsAdmin = 1\nLogMaxKB = 7\nMaxArrowSteps = 5\n"
                   "OverStepMode = 1\nWheelScrollMs = 250\n"
                   "AutoScrollInterval = 250\nAutoScrollSmooth = 0\n"
-                  "WheelHScrollMul = 4\n"
-                  "EnhanceKeys = Alt\nShiftKeys = Ctrl\n", fo);
+                  "WheelHScrollMul = 4\n", fo);
             fclose(fo);
         }
         char before[512];
@@ -465,12 +418,10 @@ int main(void) {
                "UPG: AutoScrollSmooth 自定义值不被覆盖（默认开、样本为关）");
         EXPECT(ConfigGetWheelHScrollMul() == 4,
                "UPG: WheelHScrollMul 自定义值不被覆盖（默认 1、样本为 4）");
-        {
-            WCHAR v[MODE_KEYS_MAXLEN] = L"";
-            EXPECT(ConfigGetStr(L"EnhanceKeys", v, MODE_KEYS_MAXLEN) &&
-                   _wcsicmp(v, L"Alt") == 0,
-                   "UPG: EnhanceKeys 自定义值不被覆盖（通用字符串项）");
-        }
+        /* 未识别的键（含已废弃的 EnhanceKeys）不再被留存，也不影响任何取值：
+           "通用字符串项"设施已随这两个键一起去掉，配置层只认上面具名解析的那些。 */
+        EXPECT(ConfigGetWheelHScrollMul() == 4,
+               "UPG: 废弃键不再被留存（横向倍数仍取自定义值 4）");
     }
 
     /* 兼容早期不分节写法 */
@@ -498,8 +449,9 @@ int main(void) {
     EXPECT(TemplateHas("AutoScrollInterval = 24000"), "CFG: 模板含 AutoScrollInterval 默认值");
     EXPECT(TemplateHas("AutoScrollSmooth = 1"),    "CFG: 模板含 AutoScrollSmooth 默认值");
     EXPECT(TemplateHas("WheelHScrollMul = 1"),     "CFG: 模板含 WheelHScrollMul 默认值");
-    EXPECT(TemplateHas("EnhanceKeys = Alt, D"), "CFG: 模板含 EnhanceKeys 默认值");
-    EXPECT(TemplateHas("ShiftKeys = F"),     "CFG: 模板含 ShiftKeys 默认值");
+    /* 激活键不再进配置：模板里**不该**再出现这两项（否则用户会以为能改） */
+    EXPECT(!TemplateHas("EnhanceKeys"), "CFG: 模板不再含 EnhanceKeys（已改为编译期常量）");
+    EXPECT(!TemplateHas("ShiftKeys"),   "CFG: 模板不再含 ShiftKeys（已改为编译期常量）");
     EXPECT(TemplateHas("[NativeWordJump]"),  "CFG: 模板含 NativeWordJump 段");
 
     /* 真实权限查询：不崩溃即可（是否管理员取决于运行环境） */

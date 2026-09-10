@@ -16,10 +16,12 @@
 
    现在全部收敛成两张声明式表，上面那些地方只剩查询：
      · 动作表   —— 触发键 / 目标键 / 属性标志（能否重复、由谁执行）
-     · 修饰表   —— 每个模式的激活键集合（可由配置覆盖）
+     · 修饰表   —— 每个模式的激活键集合（编译期常量，见 cap.h）
 
    特别注意：**引擎从不判断具体按的是哪个键，只问"这个模式生效了吗"。**
-   所以把 D 删掉、只留 Alt，或者换成 Caps+右Ctrl，都只是配置问题。 */
+   所以想把增强键从 Alt+D 改成"只留 Alt"、或换成 Caps+右Ctrl，只改
+   cap.h 里 MODE_*_KEYS_DEFAULT 一行即可，不必碰任何逻辑（更不读配置：
+   这两个键属于"和弦语法"，不是给用户调的旋钮）。 */
 
 /* ================= 动作表 ================= */
 
@@ -86,9 +88,7 @@ BOOL ActHasFlag(int act, unsigned flag) {
 
 typedef struct {
     int          id;
-    const char*  name;      /* 日志用（ASCII）                    */
-    const char*  iniKey;    /* [General] 里对应的配置项名（ASCII） */
-    const char*  defKeys;   /* 默认激活键文本（cap.h 里单点定义）  */
+    const char*  defKeys;   /* 激活键文本（cap.h 里单点定义）      */
     int          keys[MODE_KEY_MAX];   /* 当前生效的激活键          */
     int          nKeys;
     volatile DWORD downMask;           /* bit i = keys[i] 物理按住（钩子线程写） */
@@ -96,20 +96,13 @@ typedef struct {
 } ModeDef;
 
 static ModeDef kModes[MODE_COUNT] = {
-    { MODE_ENHANCE, "enhance", "EnhanceKeys", MODE_ENHANCE_KEYS_DEFAULT, { 0 }, 0, 0, 0 },
-    { MODE_SHIFT,   "shift",   "ShiftKeys",   MODE_SHIFT_KEYS_DEFAULT,   { 0 }, 0, 0, 0 },
+    { MODE_ENHANCE, MODE_ENHANCE_KEYS_DEFAULT, { 0 }, 0, 0, 0 },
+    { MODE_SHIFT,   MODE_SHIFT_KEYS_DEFAULT,   { 0 }, 0, 0, 0 },
 };
 
 static ModeDef* ModeOf(int mode) {
     if (mode < 0 || mode >= MODE_COUNT) return NULL;
     return &kModes[mode];
-}
-
-/* 窄串 -> 宽串（配置项的键名本身是 ASCII，转换不会丢字符） */
-static void Widen(const char* s, WCHAR* out, size_t cap) {
-    size_t i = 0;
-    for (; s[i] && i + 1 < cap; i++) out[i] = (WCHAR)(unsigned char)s[i];
-    out[i] = 0;
 }
 
 /* ---- 键名 -> 虚拟键 ----
@@ -178,18 +171,6 @@ static int ParseKeys(const char* text, int* out, int cap) {
     return n;
 }
 
-/* 宽字符版：配置文件里的值读出来是 WCHAR（可含中文注释外的任意字符，
-   但键名本身是 ASCII）。为了与 ASCII 默认值共用同一个解析器，
-   这里先窄化 —— 非 ASCII 字符一律丢弃，它们本来也不可能是合法键名。 */
-static int ParseKeysW(const WCHAR* text, int* out, int cap) {
-    char buf[MODE_KEYS_MAXLEN];
-    int i = 0;
-    for (; text && text[i] && i < MODE_KEYS_MAXLEN - 1; i++)
-        buf[i] = (text[i] < 128) ? (char)text[i] : ' ';
-    buf[i] = 0;
-    return ParseKeys(buf, out, cap);
-}
-
 /* 给一个模式换一套激活键。n <= 0 时不动（调用方保证回退语义）。 */
 static void ModeSetKeys(int mode, const int* keys, int n) {
     ModeDef* m = ModeOf(mode);
@@ -202,26 +183,21 @@ static void ModeSetKeys(int mode, const int* keys, int n) {
     m->pendMask = 0;
 }
 
-/* 启动时装配：配置里的键列表优先，没配/全认不出则用表里的默认值。
-   注意默认值也走**同一个解析器**（MODE_*_KEYS_DEFAULT 是文本）——
-   这样"默认配置"和"用户配置"走同一条路径，默认值天然被测试覆盖。 */
+/* 启动时装配：把 MODE_*_KEYS_DEFAULT 的文本解析成虚拟键表。
+   **不读配置** —— 激活键是编译期常量（理由见 cap.h）；配置文件里若写了
+   EnhanceKeys / ShiftKeys 一律忽略（配置解析器也不认这两个键名）。
+   走"文本 -> 解析器"这条路的好处是：默认值本身被测试覆盖（VkOfName /
+   ParseKeys 的大小写、分隔符容错都会在默认值上跑到）。 */
 void KeyMapInit(void) {
     for (int i = 0; i < MODE_COUNT; i++) {
         ModeDef* m = &kModes[i];
         int keys[MODE_KEY_MAX];
-        int n = 0;
-
-        WCHAR iniKey[64], cfg[MODE_KEYS_MAXLEN];
-        Widen(m->iniKey, iniKey, 64);
-        if (ConfigGetStr(iniKey, cfg, MODE_KEYS_MAXLEN))
-            n = ParseKeysW(cfg, keys, MODE_KEY_MAX);
-        if (n == 0)   /* 未配置 / 空 / 一个名字都不认得 -> 回退默认 */
-            n = ParseKeys(m->defKeys, keys, MODE_KEY_MAX);
+        int n = ParseKeys(m->defKeys, keys, MODE_KEY_MAX);
         ModeSetKeys(i, keys, n);
     }
     /* 刻意不在这里写日志：本项目约定"启动不写日志文件"（见 main.c 的
        CapLog 注释与 WinMain 收尾）。按键位写进 C+` 记录开始时的那条
-       "配置: ..." 日志，排查"改了配置没生效"时一样看得到。 */
+       "配置: ..." 日志，排查按键映射时一样看得到。 */
 }
 
 int ModeFindByVk(int vk) {

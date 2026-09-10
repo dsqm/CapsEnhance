@@ -21,6 +21,7 @@
    不会再出现"代码改了、字符串没改"的写漂（本项目手工同步常量栽过跟头）。
    为什么是 2 而不是 3：每补发一格主线程就要隔 2ms，mul=3 会补 2 格，
    滚动时出现可见卡顿；mul=2 只补 1 格、无间隔等待，手感与系统原生一致。 */
+#define CFG_VAL_LEN     256   /* 配置值缓冲：键名短，值留宽一点，宁可截断不可越界 */
 
 /* 横向滚动的默认倍数：**1**（不放大）。
    横向是"每次滚轮挪一列"的语义，倍数 1 = 一个物理格换一次横向滚动，
@@ -81,44 +82,6 @@
    注入点、每次只挪一点点，手感从"一格一格跳"变成连续滑动。
    个别程序对小数刻度不做累积（表现为完全不动），把这里设 0 退回整格模式。 */
 #define AUTOSCROLL_SMOOTH_DEFAULT 1
-
-/* 通用字符串项：明确解析的键之外，[General] 里其它键值原样留存，
-   供上层模块按名字取（见 ConfigGetStr）。
-
-   为什么要有它：配置项每加一个就要在这里加一条解析分支 + 一个 getter，
-   而"激活键列表"这类项天生属于别的模块（键位映射），在配置模块里拆解
-   它们会把两边的职责搅在一起。留着原文、由需要的模块自己解释，
-   新增配置项就只是"写进模板 + 读一次"，解析器不用动。 */
-#define CFG_STR_MAX    8
-#define CFG_STR_LEN    MODE_KEYS_MAXLEN
-static struct { WCHAR key[CFG_NAME_MAX]; WCHAR val[CFG_STR_LEN]; } g_strs[CFG_STR_MAX];
-static int g_strN = 0;
-
-/* 未具名解析的 [General] 项：留原文。同名的后写的覆盖先写的。 */
-static void StoreStr(const WCHAR* key, const WCHAR* val) {
-    for (int i = 0; i < g_strN; i++) {
-        if (_wcsicmp(g_strs[i].key, key) == 0) {
-            _snwprintf_s(g_strs[i].val, CFG_STR_LEN, _TRUNCATE, L"%s", val);
-            return;
-        }
-    }
-    if (g_strN >= CFG_STR_MAX) return;      /* 满了就丢：都是可选扩展项 */
-    _snwprintf_s(g_strs[g_strN].key, CFG_NAME_MAX, _TRUNCATE, L"%s", key);
-    _snwprintf_s(g_strs[g_strN].val, CFG_STR_LEN, _TRUNCATE, L"%s", val);
-    g_strN++;
-}
-
-BOOL ConfigGetStr(const WCHAR* key, WCHAR* out, size_t cap) {
-    if (!key || !out || cap == 0) return FALSE;
-    out[0] = 0;
-    for (int i = 0; i < g_strN; i++) {
-        if (_wcsicmp(g_strs[i].key, key) != 0) continue;
-        if (!g_strs[i].val[0]) return FALSE;          /* 空值 = 视为未配置 */
-        _snwprintf_s(out, cap, _TRUNCATE, L"%s", g_strs[i].val);
-        return TRUE;
-    }
-    return FALSE;
-}
 
 static WCHAR g_names[CFG_MAX_ENTRIES][CFG_NAME_MAX];
 static int   g_count = 0;
@@ -204,7 +167,6 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT;
     g_autoScrollSmooth = AUTOSCROLL_SMOOTH_DEFAULT;
     g_wheelHMul = WHEEL_HMUL_DEFAULT;
-    g_strN = 0;
 
     FILE* f = NULL;
     if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
@@ -256,12 +218,9 @@ void ConfigLoadFrom(const WCHAR* path) {
             WCHAR* eq = wcschr(line, L'=');
             if (eq) {
                 *eq = 0;
-                /* key 受 CFG_NAME_MAX 限制（键名短），val 用 CFG_STR_LEN：
-                   通用字符串项要留给上层模块自己解释（例如激活键列表），
-                   按键名长度截断会把长列表悄悄砍掉。 */
-                WCHAR key[CFG_NAME_MAX], val[CFG_STR_LEN];
+                WCHAR key[CFG_NAME_MAX], val[CFG_VAL_LEN];
                 _snwprintf_s(key, CFG_NAME_MAX, _TRUNCATE, L"%s", line);
-                _snwprintf_s(val, CFG_STR_LEN, _TRUNCATE, L"%s", eq + 1);
+                _snwprintf_s(val, CFG_VAL_LEN, _TRUNCATE, L"%s", eq + 1);
                 TrimW(key); TrimW(val); LowerW(key);
                 if (_wcsicmp(key, L"runasadmin") == 0) g_runAsAdmin = ParseBoolW(val);
                 else if (_wcsicmp(key, L"logmaxkb") == 0) g_logMaxKB = ParseIntW(val, 2048);
@@ -275,8 +234,7 @@ void ConfigLoadFrom(const WCHAR* path) {
                 }
                 /* 兼容旧键名 WheelScrollMul（倍数语义）：**不**换算成毫秒 ——
                    "放大 2 倍"和"每格 2 毫秒"是两种量，硬换算只会得到荒谬的值。
-                   旧键留在这里被忽略；升级机制会补上新的 WheelScrollMs。
-                   旧键若落在 StoreStr 里也只是躺着，不影响任何行为。 */
+                   旧键留在这里被忽略；升级机制会补上新的 WheelScrollMs。 */
                 else if (_wcsicmp(key, L"wheelscrollmul") == 0) { /* 忽略（旧语义） */ }
                 else if (_wcsicmp(key, L"autoscrollinterval") == 0) {
                     int v = ParseIntW(val, AUTOSCROLL_INTERVAL_DEFAULT);
@@ -292,9 +250,9 @@ void ConfigLoadFrom(const WCHAR* path) {
                 }
                 else if (_wcsicmp(key, L"autoscrollsmooth") == 0)
                     g_autoScrollSmooth = ParseBoolW(val);
-                /* 其余 [General] 项原样留存，由需要的模块按名字取
-                   （例如键位映射模块读 EnhanceKeys / ShiftKeys） */
-                else StoreStr(key, val);
+                /* 其余 [General] 项一律忽略：本项目所有配置项都在上面具名解析。
+                   不认识的键（含已废弃的旧键名）留着也只是噪音，不解析、不保存。 */
+                else { /* 忽略未知/废弃键 */ }
             }
         } else if (sec == SEC_NATIVE) {
             AddEntry(line);
@@ -367,17 +325,6 @@ void ConfigLoad(void) {
             "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n"
             "; 方向同浏览器：滚轮向上 = 向左，滚轮向下 = 向右。\n"
             "WheelHScrollMul = " STR(WHEEL_HMUL_DEFAULT) "\n"
-            "\n"
-            "; ---- 和弦修饰的激活键 ----\n"
-            "; 按住 C（CapsLock）期间，这些键作为\"模式修饰\"生效。\n"
-            "; 键名可用：单字母 A-Z、数字 0-9、Alt / RAlt / Ctrl / Shift / Win / Space 等；\n"
-            "; 多个键用逗号或空格分隔 —— 任一个按住即视为该模式生效。\n"
-            "; EnhanceKeys 增强模式：点按触发键补齐到 3 次；配合滚轮启动自动滚动。\n"
-            ";   适应了以后想只用 Alt、把 D 去掉，就把下面改成 \"Alt\" 即可。\n"
-            "EnhanceKeys = " MODE_ENHANCE_KEYS_DEFAULT "\n"
-            "\n"
-            "; ShiftKeys 位移模式：触发键带 Shift（选中/位移）。\n"
-            "ShiftKeys = " MODE_SHIFT_KEYS_DEFAULT "\n"
             "\n"
             "[NativeWordJump]\n"
             "; 命中名单的程序：Caps+N / Caps+M 不做文本探测，\n"
@@ -460,19 +407,6 @@ static const struct {
       "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n"
       "; 方向同浏览器：滚轮向上 = 向左，滚轮向下 = 向右。\n"
       "WheelHScrollMul = " STR(WHEEL_HMUL_DEFAULT) "\n" },
-    { "enhancekeys",
-      "\n"
-      "; ---- 和弦修饰的激活键 ----\n"
-      "; 按住 C（CapsLock）期间，这些键作为\"模式修饰\"生效。\n"
-      "; 键名可用：单字母 A-Z、数字 0-9、Alt / RAlt / Ctrl / Shift / Win / Space 等；\n"
-      "; 多个键用逗号或空格分隔 —— 任一个按住即视为该模式生效。\n"
-      "; EnhanceKeys 增强模式：点按触发键补齐到 3 次；配合滚轮启动自动滚动。\n"
-      ";   适应了以后想只用 Alt、把 D 去掉，就把下面改成 \"Alt\" 即可。\n"
-      "EnhanceKeys = " MODE_ENHANCE_KEYS_DEFAULT "\n" },
-    { "shiftkeys",
-      "\n"
-      "; ShiftKeys 位移模式：触发键带 Shift（选中/位移）。\n"
-      "ShiftKeys = " MODE_SHIFT_KEYS_DEFAULT "\n" },
 };
 
 /* ---- 带边界检查的输出缓冲 ----

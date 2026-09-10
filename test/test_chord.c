@@ -851,32 +851,39 @@ int main(void) {
     END_SCENE();                                  /* 松开 C -> 终止 */
     CHECK(!ActAutoScrollActive(), "U: 手动档松开 C -> 立即终止");
 
-    /* ---- 场景S：EnhanceKeys 可配 —— 把 D 去掉只留 Alt（用户的真实诉求） ----
-       "以后等我适应了，还可能把 D 删除掉" —— 按设计这只需改一行配置，
-       不需要动引擎/钩子里任何一行（它们只问"增强模式生效吗"）。 */
-    WriteChordIni("[General]\r\nEnhanceKeys = Alt\r\n");
+
+    /* ---- 场景S：EnhanceKeys / ShiftKeys 已**不再读配置** ----
+       "配置项中，去掉 EnhanceKeys = Alt, D 与 ShiftKeys = F，没必要读取配置"
+       —— 激活键改成编译期常量（cap.h 的 MODE_*_KEYS_DEFAULT）：配置文件里
+       即使写了这两项也一律忽略（解析器不认这两个键名，KeyMapInit 也不读）。
+       这么做之所以安全，是因为"模式"这层抽象还在 —— 引擎只问"增强模式生效
+       吗"，从不判断按的是哪个键；以后真要改/删激活键，只改常量一处即可。 */
+    WriteChordIni("[General]\r\nEnhanceKeys = X\r\nShiftKeys = Y\r\n");
     ConfigLoadFrom(L"bin/chordtest.ini");
     KeyMapInit();
-    CHECK(ModeFindByVk(VK_LMENU) == MODE_ENHANCE && ModeFindByVk('D') == -1,
-          "S: EnhanceKeys=Alt 后 D 不再是修饰键");
+    CHECK(ModeFindByVk(VK_LMENU) == MODE_ENHANCE && ModeFindByVk('D') == MODE_ENHANCE,
+          "S: 配置里的 EnhanceKeys 被忽略 —— 增强键仍是固定的 Alt + D");
+    CHECK(ModeFindByVk('F') == MODE_SHIFT, "S: 位移键仍是固定的 F");
+    CHECK(ModeFindByVk('X') == -1 && ModeFindByVk('Y') == -1,
+          "S: 配置里写的 X / Y 不会变成激活键");
 
     Reset();
     Key(CLI_CAPS, TRUE); Pump(2);
-    Key('D', TRUE); Pump(2);                      /* D 已不是修饰键，只是个被屏蔽的普通键 */
+    KeyAlt(VK_LMENU, TRUE); Pump(2);              /* 固定的增强键：Alt */
     Key('J', TRUE);  Pump(2);
-    Key('J', FALSE); Pump(2);                     /* 短点：无增强 -> 不补齐 */
-    Key('D', FALSE); Pump(2);
-    END_SCENE();
-    CHECK(CountVk(VK_LEFT) == 1, "S: 去掉 D 后 C+D+J 只发 1 次左键（不补齐到 3）");
-
-    Reset();
-    Key(CLI_CAPS, TRUE); Pump(2);
-    KeyAlt(VK_LMENU, TRUE); Pump(2);              /* Alt 仍是增强修饰 */
-    Key('J', TRUE);  Pump(2);
-    Key('J', FALSE); Pump(2);
+    Key('J', FALSE); Pump(2);                     /* 短点：增强模式 -> 补齐到 3 次 */
     KeyAlt(VK_LMENU, FALSE); Pump(2);
     END_SCENE();
-    CHECK(CountVk(VK_LEFT) == 3, "S: 改用 Alt 后 C+Alt+J 补齐到 3 次左键");
+    CHECK(CountVk(VK_LEFT) == 3, "S: 增强键仍是 Alt+D：C+Alt+J 补齐到 3 次左键");
+
+    Reset();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Key('D', TRUE); Pump(2);                      /* D 同样是固定的增强键 */
+    Key('J', TRUE);  Pump(2);
+    Key('J', FALSE); Pump(2);
+    Key('D', FALSE); Pump(2);
+    END_SCENE();
+    CHECK(CountVk(VK_LEFT) == 3, "S: C+D+J 同样补齐到 3 次左键（D 仍是增强键）");
 
     /* 复位默认键位（别给以后新增的场景留坑） */
     ConfigLoadFrom(L"bin/__absent__.ini");

@@ -398,15 +398,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             CapLog("配置: MaxArrowSteps=%d OverStepCtrl=%d LogMaxKB=%d RunAsAdmin=%d",
                    ConfigGetMaxArrowSteps(), ConfigGetOverStepCtrl() ? 1 : 0,
                    ConfigGetLogMaxKB(), ConfigGetRunAsAdmin() ? 1 : 0);
-            {   /* 实际生效的修饰激活键：排查"改了 EnhanceKeys 没生效"一眼可见 */
+            {   /* 实际生效的修饰激活键（编译期常量，见 cap.h）：排查按键映射时一眼可见 */
                 WCHAR ek[MODE_KEYS_MAXLEN], sk[MODE_KEYS_MAXLEN];
                 char  eb[MODE_KEYS_MAXLEN * 3], sb[MODE_KEYS_MAXLEN * 3];
                 ModeKeysText(MODE_ENHANCE, ek, MODE_KEYS_MAXLEN);
                 ModeKeysText(MODE_SHIFT,   sk, MODE_KEYS_MAXLEN);
                 WideCharToMultiByte(CP_UTF8, 0, ek, -1, eb, (int)sizeof(eb), NULL, NULL);
                 WideCharToMultiByte(CP_UTF8, 0, sk, -1, sb, (int)sizeof(sb), NULL, NULL);
-                CapLog("按键: EnhanceKeys=%s ShiftKeys=%s AutoScrollInterval=%d",
-                       eb, sb, ConfigGetAutoScrollInterval());
+                CapLog("按键: 增强=%s 位移=%s（固定值，不读配置） WheelScrollMs=%d AutoScrollInterval=%d",
+                       eb, sb, ConfigGetWheelScrollMs(), ConfigGetAutoScrollInterval());
             }
             MessageBeep(MB_ICONASTERISK);   /* 系统"星号"音：开始记录（与结束不同） */
             TrayHint(L"正在记录日志（C+\x60 结束）");
@@ -630,7 +630,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
         /* 启动不写日志文件；采集系统/环境基线供 C+` 诊断时输出。启动不发声。 */
         NavBaseInfo();
         ConfigLoad();   /* 读 CapsEnhance.ini（缺失则写注释模板） */
-        KeyMapInit();   /* 装配修饰激活键（EnhanceKeys/ShiftKeys，缺省见 cap.h） */
+        KeyMapInit();   /* 装配修饰激活键（编译期常量 Alt+D / F，见 cap.h） */
 
         /* 配置要求以管理员运行且当前不是管理员：申请提权重启一次。
            提权实例带 --wait-exit —— 必须等本实例释放单实例互斥量之后再装

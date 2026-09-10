@@ -50,20 +50,22 @@
 #define ACTF_NO_SHIFT    0x08   /* 不吃位移修饰：即使位移模式生效也裸发（开关键用） */
 
 /* ---------- 修饰（和弦）模式 ----------
-   按住 C 期间生效的"组合修饰"。每个模式可以由**多个键**激活，具体是哪几个
-   键由配置决定（默认值见 MODE_*_KEYS_DEFAULT）。引擎与钩子只问
-   "这个模式现在生效吗"，从不判断具体按的是哪个键 ——
-   所以"适应了以后把 D 删掉、只留 Alt"只是改一行配置，不用动任何逻辑。 */
-#define MODE_ENHANCE 0   /* 增强模式：默认 Alt + D（原"增益"：点按补齐到 3 次、滚轮自动滚动） */
-#define MODE_SHIFT   1   /* 位移模式：默认 F（带 Shift 的选区位移） */
+   按住 C 期间生效的"组合修饰"。**激活键是编译期常量，不读配置**（见下面
+   MODE_*_KEYS_DEFAULT）：这两个键属于"和弦语法"本身，改它等于改功能，
+   不该是暴露给配置文件的旋钮 —— 配置文件里即使写了也一律忽略。
+
+   但"模式"这层抽象保留：引擎与钩子只问"这个模式现在生效吗"，从不判断
+   具体按的是哪个键，所以以后想换/删某个激活键，只改这一处常量即可，
+   不用碰任何逻辑（keymap.c 的查询接口一律不变）。 */
+#define MODE_ENHANCE 0   /* 增强模式：激活键 Alt + D（点按触发键补齐到 3 次；配合滚轮自动滚动） */
+#define MODE_SHIFT   1   /* 位移模式：激活键 F（带 Shift 的选区位移） */
 #define MODE_COUNT   2
 
 #define MODE_KEY_MAX     8    /* 单个模式最多几个激活键     */
 #define MODE_KEYS_MAXLEN 96   /* 激活键列表文本的最大长度    */
 
-/* 默认激活键（ASCII 文本、逗号或空格分隔）。**只在这一处定值**：
-   config.c 用它拼配置模板与升级块，keymap.c 用同一套解析器读成虚拟键表 ——
-   三处共用一份定义，避免"代码改了、模板/注释没跟着改"的漂移。 */
+/* 激活键（ASCII 文本、逗号或空格分隔）。**只在这一处定值**：
+   keymap.c 用解析器把它读成虚拟键表，main.c 的日志回显同一份，避免漂移。 */
 #define MODE_ENHANCE_KEYS_DEFAULT "Alt, D"
 #define MODE_SHIFT_KEYS_DEFAULT   "F"
 
@@ -224,7 +226,6 @@ int  ConfigGetMaxArrowSteps(void);          /* [General] MaxArrowSteps：逐格�
 BOOL ConfigGetOverStepCtrl(void);           /* [General] OverStepMode：超限 0=仍发方向键 1=Ctrl+方向 */
 int  ConfigGetWheelScrollMs(void);          /* [General] WheelScrollMs：滚轮最快速度（毫秒/格），0=关闭 */
 int  ConfigGetWheelHScrollMul(void);        /* [General] WheelHScrollMul：Caps+Shift+滚轮 横向倍数，0=关闭 */
-BOOL ConfigGetStr(const WCHAR* key, WCHAR* out, size_t cap); /* [General] 通用字符串项（未具名解析的） */
 int  ConfigGetAutoScrollInterval(void);     /* [General] AutoScrollInterval：自动滚动初始节拍(ms) */
 BOOL ConfigGetAutoScrollSmooth(void);       /* [General] AutoScrollSmooth：小数刻度平滑注入 */
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中名单 */
