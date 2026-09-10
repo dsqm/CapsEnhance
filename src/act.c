@@ -36,16 +36,26 @@ static BOOL    s_init = FALSE;
 static ActJob  s_q[ACT_QUEUE_MAX];
 static int     s_head = 0, s_tail = 0, s_n = 0;
 
-/* 执行一条请求。顺序必须与"开火 -> 补齐"的原始语义一致。 */
+/* 执行一条请求。顺序必须与"开火 -> 补齐"的原始语义一致。
+   走哪条分支由动作标志决定（见 keymap.c），这里不再列举动作 id ——
+   加一个词跳/诊断类动作不必再回来改这个函数。 */
 static void RunJob(const ActJob* j) {
-    if (j->act == ACT_WORD_L)      NavJump(DIR_LEFT,  j->f);
-    else if (j->act == ACT_WORD_R) NavJump(DIR_RIGHT, j->f);
-    /* 焦点探测（C+`）也在这里跑：NavProbe 会做跨进程 SendMsg + UIA COM 往返，
-       是几百毫秒级的阻塞。留在主线程就是同一个根因（见文件头）——那时松开
-       Caps 的 keyup 会被系统跳过，g_cMod 卡住，之后按 Tab 就冒出大写锁定。 */
-    else if (j->act == ACT_PROBE)  NavProbe();
-    else if (j->act != ACT_NONE)   SendActOnce(j->act, j->f);
-    if (j->fillAct != ACT_NONE)    ReleaseFill(j->fillAct, j->d, j->f, j->count);
+    int act = j->act;
+    if (act != ACT_NONE) {
+        if (ActHasFlag(act, ACTF_WORDJUMP)) {
+            int dir = ActWordDir(act);
+            if (dir >= 0) NavJump(dir, j->shf);
+        } else if (ActHasFlag(act, ACTF_PROBE)) {
+            /* 焦点探测（C+`）：NavProbe 会做跨进程 SendMsg + UIA COM 往返，
+               是几百毫秒级的阻塞。留在主线程就是同一个根因（见文件头）——那时
+               松开 Caps 的 keyup 会被系统跳过，g_cMod 卡住，之后按 Tab 就冒出
+               大写锁定。 */
+            NavProbe();
+        } else {
+            SendActOnce(act, j->shf);
+        }
+    }
+    if (j->fillAct != ACT_NONE) ReleaseFill(j->fillAct, j->enh, j->shf, j->count);
 }
 
 /* 队列已空且当前不在执行 -> 置空闲事件。

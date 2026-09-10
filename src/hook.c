@@ -4,16 +4,13 @@
 HHOOK g_hook = NULL;
 GlobalState g_state;
 
-/* 修饰键实时状态（钩子线程写，主线程读） */
+/* C（CapsLock）实时状态：钩子线程写，主线程与鼠标钩子读。
+   修饰模式（增强/位移）的按住位图不在这里 —— 它在 keymap.c 的模式表里，
+   由 ModeKeyEvent 维护、ModeDown/ModePending 查询。
+   钩子从不判断"按的是 D 还是 Alt"，只问"这个键属于哪个模式"。 */
 volatile BOOL g_cMod = FALSE;
-volatile BOOL g_dMod = FALSE;
-volatile BOOL g_fMod = FALSE;
 
-/* 本次和弦 D/F 门闩（钩子线程维护，随物理按键立即更新） */
-volatile BOOL g_pendD = FALSE;
-volatile BOOL g_pendF = FALSE;
-
-/* 注：g_actD / g_actF / g_btnCount 是和弦引擎状态，定义在 main.c。
+/* 注：g_actEnh / g_actShf / g_btnCount 是和弦引擎状态，定义在 main.c。
    实际发送跑在 act.c 的工作线程上，快照随 ActJob 传递，这里不再持有。 */
 
 /* 物理按键状态表：只记录真实（非注入）按键的按下/抬起。
@@ -44,64 +41,27 @@ void PhysSeedFromLogical(void) {
    "按住 Caps 同时按 J 和 K 会一直输出左键"就是这么来的。 */
 static volatile DWORD g_downMask = 0;
 
-/* 映射表：虚拟键码 -> 动作 */
-typedef struct { int vk; int act; } KeyMap;
-static const KeyMap kMap[] = {
-    { 'J',    ACT_LEFT       },
-    { 'K',    ACT_DOWN       },
-    { 'L',    ACT_RIGHT      },
-    { 'I',    ACT_UP         },
-    { 'P',    ACT_HOME       },
-    { VK_OEM_1, ACT_END      },        /* ; */
-    { 'R',    ACT_BACKSPACE  },
-    { 'W',    ACT_DELETE     },
-    { VK_SPACE,   ACT_ENTER  },
-    { VK_TAB,     ACT_CAPSLOCK },
-    { 'N',    ACT_WORD_L     },
-    { 'M',    ACT_WORD_R     },
-};
-#define KMAP_N (sizeof(kMap)/sizeof(kMap[0]))
-
-static int ActOfVk(int vk) {
-    for (int i = 0; i < (int)KMAP_N; i++)
-        if (kMap[i].vk == vk) return kMap[i].act;
-    return ACT_NONE;
-}
-
-/* act -> 目标虚拟键 */
-static int ActToVk(int act) {
-    switch (act) {
-        case ACT_LEFT:   return VK_LEFT;
-        case ACT_UP:     return VK_UP;
-        case ACT_RIGHT:  return VK_RIGHT;
-        case ACT_DOWN:   return VK_DOWN;
-        case ACT_HOME:   return VK_HOME;
-        case ACT_END:    return VK_END;
-        case ACT_BACKSPACE: return VK_BACK;
-        case ACT_DELETE: return VK_DELETE;
-        case ACT_ENTER:  return VK_RETURN;
-        case ACT_CAPSLOCK: return VK_CAPITAL;
-        default: return 0;
-    }
-}
-
-/* 发一次动作。shift = 开火快照里的 F（位移）；词跳 N/M 由 NavJump 处理，
-   不走这里。真实 CapsLock 切换不需要带 Shift。 */
+/* 发一次动作。目标键与属性都来自键位表（src/keymap.c）：
+   · 目标虚拟键用 ActOutVk —— 表里 outVk=0 的动作（词跳/诊断）不走这里；
+   · 带 ACTF_NO_SHIFT 的动作（开关键）即便位移模式生效也裸发。
+   shift 是**开火快照**里的位移模式，不是"此刻按着 F 吗"。 */
 void SendActOnce(int act, BOOL shift) {
-    int vk = ActToVk(act);
+    int vk = ActOutVk(act);
     if (!vk) return;
-    SendKeyOnce(vk, (act == ACT_CAPSLOCK) ? FALSE : shift);
+    SendKeyOnce(vk, ActHasFlag(act, ACTF_NO_SHIFT) ? FALSE : shift);
 }
 
-/* 松手补齐：仅增益模式（快照 d 为真）+ 非词跳动作；已发送次数 <3 则补到 3。
-   次数由调用方（引擎）给出，本函数不回写任何全局状态。
-   开关键（CapsLock）排除在外：它是翻转动作，补齐会把"切一次"变成"切三次"
-   （净效果又回到原状态），这正是 caps+tab 时灵时不灵的成因之一。 */
-void ReleaseFill(int act, BOOL d, BOOL shift, int count) {
-    if (!d) return;
+/* 松手补齐：仅增强模式（快照 enh 为真）时补到 3 次；已发送次数由调用方
+   （引擎）给出，本函数不回写任何全局状态。
+   排除规则也来自键位表的标志，不再一个一个列举动作 id：
+     · ACTF_WORDJUMP    —— 词跳不走按键发送，补齐无意义；
+     · ACTF_SINGLE_SHOT —— 翻转动作补齐会把"切一次"变成"切三次"（净效果又回到
+       原状态），这正是 caps+tab 时灵时不灵的成因之一。 */
+void ReleaseFill(int act, BOOL enh, BOOL shift, int count) {
+    if (!enh) return;
     if (count >= 3) return;
-    if (act == ACT_WORD_L || act == ACT_WORD_R) return;
-    if (act == ACT_CAPSLOCK) return;
+    if (ActHasFlag(act, ACTF_WORDJUMP))    return;
+    if (ActHasFlag(act, ACTF_SINGLE_SHOT)) return;
     while (count < 3) { SendActOnce(act, shift); count++; }
 }
 
@@ -138,15 +98,27 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             return 1;   /* 全程屏蔽，无效果 */
         }
 
+        /* ---- 修饰模式的激活键（默认 增强=Alt/D、位移=F） ----
+           哪些键属于哪个模式由 keymap.c 的模式表决定（可由配置改），这里只问
+           "这个 vk 属于哪个模式" —— 所以"以后把 D 删掉、只留 Alt"不用动这里一行。
+
+           **始终跟踪**按下/抬起（没按 C 时也跟踪）：否则"没按 C 的时候松开
+           修饰键"会让按住位图残留，之后按 C 再随便一滚就被当成增强模式。
+           仅在 C 按住期间屏蔽这些键；不按 C 时完全放行 —— D / F 照常打字。
+           Alt 单独按下时系统发 WM_SYSKEYDOWN（上面的 down 判断已覆盖），
+           屏蔽掉它就不会出现"Alt 被系统看到后激活菜单栏"的情况。 */
+        int mode = ModeFindByVk(vk);
+        if (mode >= 0) {
+            BOOL was = ModeDown(mode);
+            ModeKeyEvent(mode, vk, down);
+            if (was && !ModeDown(mode))          /* 最后一个激活键也抬起了 */
+                PostMessageW(g_mainWnd, WM_MODE_UP, (WPARAM)mode, 0);
+            if (!g_cMod) return CallNextHookEx(g_hook, nCode, wParam, lParam);
+            return 1;   /* C 按住期间：修饰键本身不外泄 */
+        }
+
         /* ---- 未进入映射模式：放行 ---- */
         if (!g_cMod) return CallNextHookEx(g_hook, nCode, wParam, lParam);
-
-        /* ---- C 按住期间：D/F 修饰 ----
-           左 Alt 等同 D（增益）：Caps+Alt+… 与 Caps+D+… 完全一样。
-           Alt 单独按下时系统发 WM_SYSKEYDOWN（上面的 down 判断已覆盖），
-           且这里全程屏蔽，不会出现"Alt 被系统看到后激活菜单栏"的情况。 */
-        if (vk == 'D' || vk == VK_LMENU) { g_dMod = down; g_pendD = down; return 1; }
-        if (vk == 'F') { g_fMod = down; g_pendF = down; return 1; }
 
         /* ---- C 按住期间：` 键触发焦点探测（仅按下沿） ---- */
         if (vk == PROBE_KEY) {

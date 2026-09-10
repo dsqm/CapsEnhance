@@ -21,9 +21,10 @@ static NOTIFYICONDATAW g_nid;
 static BOOL  g_quit = FALSE;
 
 /* 和弦引擎状态（仅主线程）：开火快照与"本动作已发送次数"。
-   实际发送由 act.c 的工作线程执行，快照随 ActJob 一起投递过去。 */
-volatile BOOL g_actD = FALSE;
-volatile BOOL g_actF = FALSE;
+   实际发送由 act.c 的工作线程执行，快照随 ActJob 一起投递过去。
+   快照字段不叫 D/F 而叫 enh/shf：按哪个键由配置决定（见 keymap.c 的模式表）。 */
+volatile BOOL g_actEnh = FALSE;
+volatile BOOL g_actShf = FALSE;
 volatile int  g_btnCount = 0;
 
 /* 诊断记录开关：C+` 切换（主线程读写，hook 线程投递 WM_PROBE） */
@@ -149,25 +150,33 @@ static void EnsEngine(void) {
    主线程不再自己发送：逐格方向键 / 跨进程同步 IPC / COM 往返会阻塞数百
    毫秒，而 WH_KEYBOARD_LL 回调正跑在主线程上 —— 期间系统键盘输入得不到
    处理（卡顿），超时还会被系统静默摘钩。
-   开火快照（g_actD/g_actF/g_btnCount）在此刻采集并随请求带走。 */
+   开火快照（g_actEnh/g_actShf/g_btnCount）在此刻采集并随请求带走。 */
 static void PostAct(int act, int fillAct, int count) {
     ActJob j;
     j.act     = act;
     j.fillAct = fillAct;
-    j.d       = g_actD;
-    j.f       = g_actF;
+    j.enh     = g_actEnh;
+    j.shf     = g_actShf;
     j.count   = count;
     ActPost(&j);
+}
+
+/* 采集本次开火的模式门闩快照：增强（点按补齐到 3 次）与位移（带 Shift）。
+   门闩由钩子线程维护（ModePending = "本次和弦内按下过"），开火那一刻拷贝成
+   g_actEnh/g_actShf —— 于是"动作先按、修饰后到"的乱序也不会丢修饰，而开火
+   之后的修饰变化不影响本次动作（快照随 ActJob 带走，工作线程不读主线程状态）。 */
+static void SnapMods(void) {
+    g_actEnh = ModePending(MODE_ENHANCE);
+    g_actShf = ModePending(MODE_SHIFT);
 }
 
 /* 开火一次动作（词跳走文本解析；其余走按键发送，都用开火快照修饰） */
 static void DoFireOnce(int act) { PostAct(act, ACT_NONE, 0); }
 
-/* 开关键（CapsLock）是"翻转"动作：按一次只该切换一次。
-   它绝不能进长按重复节奏（REPEAT_INTERVAL 一发），也不能做松手补齐 ——
-   否则一次按下的切换次数取决于按住时长，偶数次等于没切，现象就是
-   "caps+tab 有些时候要按两下才能取消锁定"。 */
-static BOOL IsSingleShotAct(int act) { return act == ACT_CAPSLOCK; }
+/* 翻转类动作（开关键：按一次只该切换一次）。属性现在写在键位表里
+   （ACTF_SINGLE_SHOT），这里只是给引擎内部一个好读的名字 —— 以前是
+   `return act == ACT_CAPSLOCK;`，加一个翻转动作就得回来改这里。 */
+static BOOL IsSingleShotAct(int act) { return ActHasFlag(act, ACTF_SINGLE_SHOT); }
 
 /* ============ 托盘 ============ */
 static const WCHAR* APP_NAME = L"CapsEnhance";
@@ -220,7 +229,8 @@ static void TrayShowMenu(void) {
     if (cmd == IDM_PAUSE) {
         g_state.paused = !g_state.paused;
         /* 切换暂停时清掉残留的修饰/引擎状态，避免恢复后粘滞 */
-        g_cMod = FALSE; g_dMod = FALSE; g_fMod = FALSE;
+        g_cMod = FALSE;
+        ModeResetAll();
         g_btnCount = 0;
         ResetEngine();
         if (!g_state.paused) TrayHint(L"正在映射");
@@ -270,8 +280,9 @@ static void ResetEngine(void) {
     ActWheelClear();
     g_pendingAct = ACT_NONE;
     g_activeAct  = ACT_NONE;
-    g_actD = FALSE; g_actF = FALSE;
-    g_pendD = FALSE; g_pendF = FALSE;
+    g_actEnh = FALSE; g_actShf = FALSE;
+    /* 清门闩但保留"按住状态"：Alt 还按着时，鼠标侧的增强模式判定仍成立 */
+    ModeResetPending();
     StackClear();
 }
 
@@ -281,8 +292,8 @@ static void ResetEngine(void) {
    钩子 / 和弦引擎 / 修饰门闩随进程重启全部回到干净初态。 */
 static void DoRestart(void) {
     ResetEngine();
-    g_cMod = FALSE; g_dMod = FALSE; g_fMod = FALSE;
-    g_pendD = FALSE; g_pendF = FALSE; g_btnCount = 0;
+    g_cMod = FALSE; ModeResetAll();
+    g_btnCount = 0;
     /* 必须先停执行线程并等它收尾：否则它可能正在注入，而 SendClearStuckModifiers
        要读 send.c 里由它维护的 g_injectedDown（清卡键会读错）。 */
     ActStop();
@@ -405,7 +416,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_activeAct != ACT_NONE && g_activeAct != act) {
             /* 已在重复时又按下另一个键：立刻切到新键（最后按下优先），
                重新走重复节奏。此前这里直接忽略，导致第二个键完全失灵。 */
-            g_actD = g_pendD; g_actF = g_pendF;
+            SnapMods();
             g_btnCount = 1;
             DoFireOnce(act);
             if (!IsSingleShotAct(act)) {
@@ -433,11 +444,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                开火 + 补齐合成一条请求：中间不会被别的动作插队，也用同一份
                快照（旧代码靠连续两次同步调用达成同样效果）。 */
             g_pendingAct = ACT_NONE;
-            g_actD = g_pendD; g_actF = g_pendF;
+            SnapMods();
             g_btnCount = 1;
             /* 开关键不做松手补齐（补齐会把一次点按变成 3 次切换，等于又切回去） */
             PostAct(act, IsSingleShotAct(act) ? ACT_NONE : act, g_btnCount);
-            g_actD = FALSE; g_actF = FALSE;
+            g_actEnh = FALSE; g_actShf = FALSE;
             /* 还有别的键按着就继续（退回上一个），否则停 */
             int top = StackTop();
             if (top != ACT_NONE) {
@@ -447,14 +458,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             } else StopEngine();
         } else if (g_activeAct == act) {
             /* 长按之后抬起：停止重复，若有增益短板则补齐（快照要在清空
-               g_actD 之前采集，故先投递） */
+               g_actEnh/g_actShf 之前采集，故先投递） */
             g_activeAct = ACT_NONE;
             PostAct(ACT_NONE, act, g_btnCount);
-            g_actD = FALSE; g_actF = FALSE;
+            g_actEnh = FALSE; g_actShf = FALSE;
             int top = StackTop();
             if (top != ACT_NONE) {
                 /* 别的键还按着：切回它并继续重复 */
-                g_actD = g_pendD; g_actF = g_pendF;
+                SnapMods();
                 g_activeAct = top;
                 g_btnCount = 1;
                 DoFireOnce(top);
@@ -476,7 +487,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             && ActInFlight() == 0) {
             /* 稳定期到：用门闩快照修饰，开火 */
             int act = g_pendingAct; g_pendingAct = ACT_NONE;
-            g_actD = g_pendD; g_actF = g_pendF;
+            SnapMods();
             g_btnCount = 1;
             DoFireOnce(act);
             if (IsSingleShotAct(act)) {
@@ -484,7 +495,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                    同时把它从"仍按着"的栈里摘掉 —— 否则之后松开别的键时会
                    "退回上一个"又把它补切一次。 */
                 StackRemove(act);
-                g_actD = FALSE; g_actF = FALSE;
+                g_actEnh = FALSE; g_actShf = FALSE;
                 int top = StackTop();
                 if (top != ACT_NONE) {          /* 还按着别的键：接着它走 */
                     g_pendingAct = top;
@@ -597,6 +608,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
         /* 启动不写日志文件；采集系统/环境基线供 C+` 诊断时输出。启动不发声。 */
         NavBaseInfo();
         ConfigLoad();   /* 读 CapsEnhance.ini（缺失则写注释模板） */
+        KeyMapInit();   /* 装配修饰激活键（EnhanceKeys/ShiftKeys，缺省见 cap.h） */
 
         /* 配置要求以管理员运行且当前不是管理员：申请提权重启一次。
            提权实例带 --wait-exit —— 必须等本实例释放单实例互斥量之后再装

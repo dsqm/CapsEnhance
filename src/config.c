@@ -25,6 +25,44 @@
 #define STR2(x) #x
 #define STR(x)  STR2(x)
 
+/* 通用字符串项：明确解析的键之外，[General] 里其它键值原样留存，
+   供上层模块按名字取（见 ConfigGetStr）。
+
+   为什么要有它：配置项每加一个就要在这里加一条解析分支 + 一个 getter，
+   而"激活键列表"这类项天生属于别的模块（键位映射），在配置模块里拆解
+   它们会把两边的职责搅在一起。留着原文、由需要的模块自己解释，
+   新增配置项就只是"写进模板 + 读一次"，解析器不用动。 */
+#define CFG_STR_MAX    8
+#define CFG_STR_LEN    MODE_KEYS_MAXLEN
+static struct { WCHAR key[CFG_NAME_MAX]; WCHAR val[CFG_STR_LEN]; } g_strs[CFG_STR_MAX];
+static int g_strN = 0;
+
+/* 未具名解析的 [General] 项：留原文。同名的后写的覆盖先写的。 */
+static void StoreStr(const WCHAR* key, const WCHAR* val) {
+    for (int i = 0; i < g_strN; i++) {
+        if (_wcsicmp(g_strs[i].key, key) == 0) {
+            _snwprintf_s(g_strs[i].val, CFG_STR_LEN, _TRUNCATE, L"%s", val);
+            return;
+        }
+    }
+    if (g_strN >= CFG_STR_MAX) return;      /* 满了就丢：都是可选扩展项 */
+    _snwprintf_s(g_strs[g_strN].key, CFG_NAME_MAX, _TRUNCATE, L"%s", key);
+    _snwprintf_s(g_strs[g_strN].val, CFG_STR_LEN, _TRUNCATE, L"%s", val);
+    g_strN++;
+}
+
+BOOL ConfigGetStr(const WCHAR* key, WCHAR* out, size_t cap) {
+    if (!key || !out || cap == 0) return FALSE;
+    out[0] = 0;
+    for (int i = 0; i < g_strN; i++) {
+        if (_wcsicmp(g_strs[i].key, key) != 0) continue;
+        if (!g_strs[i].val[0]) return FALSE;          /* 空值 = 视为未配置 */
+        _snwprintf_s(out, cap, _TRUNCATE, L"%s", g_strs[i].val);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static WCHAR g_names[CFG_MAX_ENTRIES][CFG_NAME_MAX];
 static int   g_count = 0;
 static BOOL  g_runAsAdmin = FALSE;
@@ -103,6 +141,7 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_maxArrowSteps = 32;
     g_overStepCtrl = FALSE;
     g_wheelMul = WHEEL_MUL_DEFAULT;
+    g_strN = 0;
 
     FILE* f = NULL;
     if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
@@ -154,9 +193,12 @@ void ConfigLoadFrom(const WCHAR* path) {
             WCHAR* eq = wcschr(line, L'=');
             if (eq) {
                 *eq = 0;
-                WCHAR key[CFG_NAME_MAX], val[CFG_NAME_MAX];
+                /* key 受 CFG_NAME_MAX 限制（键名短），val 用 CFG_STR_LEN：
+                   通用字符串项要留给上层模块自己解释（例如激活键列表），
+                   按键名长度截断会把长列表悄悄砍掉。 */
+                WCHAR key[CFG_NAME_MAX], val[CFG_STR_LEN];
                 _snwprintf_s(key, CFG_NAME_MAX, _TRUNCATE, L"%s", line);
-                _snwprintf_s(val, CFG_NAME_MAX, _TRUNCATE, L"%s", eq + 1);
+                _snwprintf_s(val, CFG_STR_LEN, _TRUNCATE, L"%s", eq + 1);
                 TrimW(key); TrimW(val); LowerW(key);
                 if (_wcsicmp(key, L"runasadmin") == 0) g_runAsAdmin = ParseBoolW(val);
                 else if (_wcsicmp(key, L"logmaxkb") == 0) g_logMaxKB = ParseIntW(val, 2048);
@@ -168,6 +210,9 @@ void ConfigLoadFrom(const WCHAR* path) {
                     if (v > 16) v = 16;   /* 上限 16：单次最多补发 15 格（每格间隔 2ms） */
                     g_wheelMul = v;
                 }
+                /* 其余 [General] 项原样留存，由需要的模块按名字取
+                   （例如键位映射模块读 EnhanceKeys / ShiftKeys） */
+                else StoreStr(key, val);
             }
         } else if (sec == SEC_NATIVE) {
             AddEntry(line);
@@ -215,6 +260,15 @@ void ConfigLoad(void) {
             ";   只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），\n"
             ";   也不写注册表。\n"
             "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n"
+            "; ---- 和弦修饰的激活键 ----\n"
+            "; 按住 C（CapsLock）期间，这些键作为\"模式修饰\"生效。\n"
+            "; 键名可用：单字母 A-Z、数字 0-9、Alt / RAlt / Ctrl / Shift / Win / Space 等；\n"
+            "; 多个键用逗号或空格分隔 —— 任一个按住即视为该模式生效。\n"
+            "; EnhanceKeys 增强模式：点按触发键补齐到 3 次；配合滚轮启动自动滚动。\n"
+            ";   适应了以后想只用 Alt、把 D 去掉，就把下面改成 \"Alt\" 即可。\n"
+            "EnhanceKeys = " MODE_ENHANCE_KEYS_DEFAULT "\n"
+            "; ShiftKeys 位移模式：触发键带 Shift（选中/位移）。\n"
+            "ShiftKeys = " MODE_SHIFT_KEYS_DEFAULT "\n"
             "\n"
             "[NativeWordJump]\n"
             "; 命中名单的程序：Caps+N / Caps+M 不做文本探测，\n"
@@ -272,6 +326,17 @@ static const struct {
       ";   只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），\n"
       ";   也不写注册表。\n"
       "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n" },
+    { "enhancekeys",
+      "; ---- 和弦修饰的激活键 ----\n"
+      "; 按住 C（CapsLock）期间，这些键作为\"模式修饰\"生效。\n"
+      "; 键名可用：单字母 A-Z、数字 0-9、Alt / RAlt / Ctrl / Shift / Win / Space 等；\n"
+      "; 多个键用逗号或空格分隔 —— 任一个按住即视为该模式生效。\n"
+      "; EnhanceKeys 增强模式：点按触发键补齐到 3 次；配合滚轮启动自动滚动。\n"
+      ";   适应了以后想只用 Alt、把 D 去掉，就把下面改成 \"Alt\" 即可。\n"
+      "EnhanceKeys = " MODE_ENHANCE_KEYS_DEFAULT "\n" },
+    { "shiftkeys",
+      "; ShiftKeys 位移模式：触发键带 Shift（选中/位移）。\n"
+      "ShiftKeys = " MODE_SHIFT_KEYS_DEFAULT "\n" },
 };
 
 /* ---- 带边界检查的输出缓冲 ----

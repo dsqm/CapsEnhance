@@ -159,9 +159,9 @@ static void Drain(void) {
 
 /* 场景间复位：清引擎状态与残留消息，保证场景相互独立 */
 static void Reset(void) {
-    g_cMod = FALSE; g_dMod = FALSE; g_fMod = FALSE;
-    g_pendD = FALSE; g_pendF = FALSE;
-    g_actD = FALSE; g_actF = FALSE; g_btnCount = 0;
+    g_cMod = FALSE;
+    ModeResetAll();          /* 模式表整体复位：门闩 + 按住位图（替代旧的 g_dMod/g_pendD） */
+    g_actEnh = FALSE; g_actShf = FALSE; g_btnCount = 0;
     memset((void*)g_phys, 0, sizeof(g_phys));   /* 物理按键表也归零 */
     PostMessageW(g_mainWnd, WM_CAPS_DOWN, 0, 0);  /* → ResetEngine：清 pending/active + 停表 */
     Sink();
@@ -195,6 +195,11 @@ int main(void) {
     /* 生产路径里动作由 act.c 的执行线程发送，测试必须起同一个线程，
        否则测的是"同步兜底"分支，覆盖不到真实时序。 */
     ActStart();
+
+    /* 键位表必须在引擎工作前装配好。生产路径在 WinMain 里调 KeyMapInit；
+       本测试不走 WinMain（main.c 的 WinMain 被改名弃用），所以要显式调 ——
+       漏掉它模式表就是空的，Alt/D/F 一个都不生效（所有修饰场景会全红）。 */
+    KeyMapInit();
 
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = WndProc;
@@ -544,6 +549,37 @@ int main(void) {
     /* 复位成缺省：本场景是最后一个，但别给以后新加的场景留坑
        （SendArrows 的行为受 MaxArrowSteps/OverStepMode 影响） */
     ConfigLoadFrom(L"bin/__absent__.ini");         /* 文件不存在 -> 全部回缺省 */
+
+    /* ---- 场景S：EnhanceKeys 可配 —— 把 D 去掉只留 Alt（用户的真实诉求） ----
+       "以后等我适应了，还可能把 D 删除掉" —— 按设计这只需改一行配置，
+       不需要动引擎/钩子里任何一行（它们只问"增强模式生效吗"）。 */
+    WriteChordIni("[General]\r\nEnhanceKeys = Alt\r\n");
+    ConfigLoadFrom(L"bin/chordtest.ini");
+    KeyMapInit();
+    CHECK(ModeFindByVk(VK_LMENU) == MODE_ENHANCE && ModeFindByVk('D') == -1,
+          "S: EnhanceKeys=Alt 后 D 不再是修饰键");
+
+    Reset();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Key('D', TRUE); Pump(2);                      /* D 已不是修饰键，只是个被屏蔽的普通键 */
+    Key('J', TRUE);  Pump(2);
+    Key('J', FALSE); Pump(2);                     /* 短点：无增强 -> 不补齐 */
+    Key('D', FALSE); Pump(2);
+    END_SCENE();
+    CHECK(CountVk(VK_LEFT) == 1, "S: 去掉 D 后 C+D+J 只发 1 次左键（不补齐到 3）");
+
+    Reset();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    KeyAlt(VK_LMENU, TRUE); Pump(2);              /* Alt 仍是增强修饰 */
+    Key('J', TRUE);  Pump(2);
+    Key('J', FALSE); Pump(2);
+    KeyAlt(VK_LMENU, FALSE); Pump(2);
+    END_SCENE();
+    CHECK(CountVk(VK_LEFT) == 3, "S: 改用 Alt 后 C+Alt+J 补齐到 3 次左键");
+
+    /* 复位默认键位（别给以后新增的场景留坑） */
+    ConfigLoadFrom(L"bin/__absent__.ini");
+    KeyMapInit();
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
     return fails;

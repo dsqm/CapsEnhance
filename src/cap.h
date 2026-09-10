@@ -14,6 +14,7 @@
 #define WM_ALREADY_RUNNING (WM_APP + 7) /* 已有实例在跑：新实例通知它提示后退出 */
 #define WM_PROBE       (WM_APP + 6) /* 探测焦点控件（钩子线程投递） */
 #define WM_WHEEL_ACCEL (WM_APP + 8) /* 滚轮加速：wParam=原始 delta，lParam=倍数 */
+#define WM_MODE_UP     (WM_APP + 10)/* 某修饰模式的激活键全部抬起：wParam=mode */
 
 #define PROBE_KEY      VK_OEM_3    /* 按住 C 时按 ` 触发焦点探测 */
 
@@ -37,10 +38,37 @@
 #define DIR_LEFT 0
 #define DIR_RIGHT 1
 
+/* ---------- 动作属性标志（键位表用，见 src/keymap.c） ----------
+   一个动作"能不能重复""要不要补齐""由谁执行""吃不吃 Shift 修饰"都是**数据**，
+   不是散落在各处的 if/switch。加一个动作只改键位表一处，不会再出现"改了重复
+   逻辑忘了改补齐逻辑"这种漏改。 */
+#define ACTF_SINGLE_SHOT 0x01   /* 翻转类：按一次只生效一次，不进重复节奏、不做松手补齐 */
+#define ACTF_WORDJUMP    0x02   /* 词跳：交给 nav.c 的 NavJump，不走按键发送 */
+#define ACTF_PROBE       0x04   /* 诊断：交给 nav.c 的 NavProbe，不走按键发送 */
+#define ACTF_NO_SHIFT    0x08   /* 不吃位移修饰：即使位移模式生效也裸发（开关键用） */
+
+/* ---------- 修饰（和弦）模式 ----------
+   按住 C 期间生效的"组合修饰"。每个模式可以由**多个键**激活，具体是哪几个
+   键由配置决定（默认值见 MODE_*_KEYS_DEFAULT）。引擎与钩子只问
+   "这个模式现在生效吗"，从不判断具体按的是哪个键 ——
+   所以"适应了以后把 D 删掉、只留 Alt"只是改一行配置，不用动任何逻辑。 */
+#define MODE_ENHANCE 0   /* 增强模式：默认 Alt + D（原"增益"：点按补齐到 3 次、滚轮自动滚动） */
+#define MODE_SHIFT   1   /* 位移模式：默认 F（带 Shift 的选区位移） */
+#define MODE_COUNT   2
+
+#define MODE_KEY_MAX     8    /* 单个模式最多几个激活键     */
+#define MODE_KEYS_MAXLEN 96   /* 激活键列表文本的最大长度    */
+
+/* 默认激活键（ASCII 文本、逗号或空格分隔）。**只在这一处定值**：
+   config.c 用它拼配置模板与升级块，keymap.c 用同一套解析器读成虚拟键表 ——
+   三处共用一份定义，避免"代码改了、模板/注释没跟着改"的漂移。 */
+#define MODE_ENHANCE_KEYS_DEFAULT "Alt, D"
+#define MODE_SHIFT_KEYS_DEFAULT   "F"
+
 /* 长按重复节奏 */
 #define REPEAT_FIRST_DELAY   150     /* ms：开火到第一次重复                 */
 #define REPEAT_INTERVAL      35      /* ms：后续重复间隔                      */
-#define CHORD_SETTLE         50      /* ms：和弦稳定期，等 D/F 修饰到位      */
+#define CHORD_SETTLE         50      /* ms：和弦稳定期，等增强/位移修饰到位  */
 
 /* ---------- 全局共享状态（钩子线程写，主线程读） ---------- */
 typedef struct {
@@ -52,18 +80,34 @@ extern GlobalState g_state;
 /* 诊断记录开关：C+` 触发开始/结束（主线程读写） */
 extern volatile BOOL g_recording;
 
-/* 修饰键实时状态与"开火快照"（volatile，跨线程） */
+/* C 键实时状态（volatile，跨线程读：鼠标钩子要据此决定要不要处理滚轮） */
 extern volatile BOOL g_cMod;    /* C 按住 */
-extern volatile BOOL g_dMod;    /* 增益 D 按住（实时） */
-extern volatile BOOL g_fMod;    /* 位移 F 按住（实时） */
-extern volatile BOOL g_pendD;   /* 本次和弦 D 门闩（钩子线程维护，物理顺序，免疫派发竞态） */
-extern volatile BOOL g_pendF;   /* 本次和弦 F 门闩 */
 
 /* 和弦引擎状态（仅主线程）：开火快照与已发送次数。
-   实际发送由 act.c 的工作线程执行，快照随请求一起投递过去。 */
-extern volatile BOOL g_actD;    /* 本次动作开火时的 D 快照 */
-extern volatile BOOL g_actF;    /* 本次动作开火时的 F 快照 */
+   实际发送由 act.c 的工作线程执行，快照随请求一起投递过去。
+   enh/shf 是"开火那一刻"的模式快照 —— 命名不叫 D/F，因为按哪个键由配置决定。 */
+extern volatile BOOL g_actEnh;  /* 本次动作开火时的 增强模式 快照 */
+extern volatile BOOL g_actShf;  /* 本次动作开火时的 位移模式 快照 */
 extern volatile int  g_btnCount;/* 本次动作已发送次数 */
+
+/* ---------- 键位映射（src/keymap.c） ----------
+   两张声明式表：动作表（触发键 -> 动作 -> 目标键 + 属性标志）与
+   修饰模式表（模式 <-> 激活键）。hook.c 与 main.c 只做查询，不再自带表。 */
+void KeyMapInit(void);                  /* 启动时装配修饰激活键（配置优先） */
+int  ActOfVk(int vk);                   /* 触发键 -> 动作；ACT_NONE = 不是触发键 */
+int  ActOutVk(int act);                 /* 动作 -> 目标虚拟键；0 = 不发键（看标志） */
+int  ActWordDir(int act);               /* 词跳动作 -> DIR_*；其余返回 -1 */
+BOOL ActHasFlag(int act, unsigned flag);/* 动作是否带某属性标志 */
+
+int  ModeFindByVk(int vk);              /* vk 是哪个模式激活键；-1 = 不是 */
+void ModeKeyEvent(int mode, int vk, BOOL down); /* 钩子线程：更新按住位图 */
+BOOL ModeDown(int mode);                /* 该模式此刻是否生效（任一激活键按住） */
+BOOL ModePending(int mode);             /* 本次和弦的门闩（开火快照取它） */
+void ModeResetPending(void);            /* 引擎复位：清门闩（按住状态保留） */
+void ModeResetAll(void);                /* 暂停/重启：门闩与按住状态一起清 */
+int  ModeKeyCount(int mode);            /* 配置/测试用 */
+int  ModeKeyAt(int mode, int i);
+int  ModeKeysText(int mode, WCHAR* out, size_t cap); /* 拼 "Alt, D"（日志/测试） */
 
 /* ---------- 动作执行线程（src/act.c） ----------
    把"会阻塞数百毫秒"的发送动作从主线程挪到专职线程，避免 WH_KEYBOARD_LL
@@ -71,8 +115,8 @@ extern volatile int  g_btnCount;/* 本次动作已发送次数 */
 typedef struct {
     int  act;       /* 要开火的动作（ACT_*）；ACT_NONE = 不开火  */
     int  fillAct;   /* 松手补齐的动作（ACT_*）；ACT_NONE = 不补齐 */
-    BOOL d;         /* 开火快照：D 增益                          */
-    BOOL f;         /* 开火快照：F 位移                          */
+    BOOL enh;       /* 开火快照：增强模式（点按补齐到 3 次）      */
+    BOOL shf;       /* 开火快照：位移模式（带 Shift）             */
     int  count;     /* fillAct 的已发送次数（补齐时用）           */
 } ActJob;
 
@@ -101,10 +145,10 @@ BOOL PhysKeyDown(int vk);   /* 真实（非注入）按键是否物理按住 —
 void PhysSeedFromLogical(void); /* 装钩子后：把当前已按下的键视为物理按住，防误清 */
 
 /* ---------- 发送/补齐 ---------- */
-/* 开火快照（D/F 修饰、已发送次数）由调用方显式传入：实际执行发生在
+/* 开火快照（增强/位移模式、已发送次数）由调用方显式传入：实际执行发生在
    act.c 的工作线程上，不能再回头读主线程的 volatile 状态。 */
 void SendActOnce(int act, BOOL shift);                          /* 发一次动作 */
-void ReleaseFill(int act, BOOL d, BOOL shift, int count);       /* 松手补齐：增益模式点按 -> 补到3 */
+void ReleaseFill(int act, BOOL enh, BOOL shift, int count);     /* 松手补齐：增强模式点按 -> 补到3 */
 
 /* ---------- 按键发送模块（src/send.c） ----------
    所有模拟按键集中在这里：扩展键标志、逐条发送节奏、Shift/Ctrl 组合。
@@ -144,6 +188,7 @@ int  ConfigGetLogMaxKB(void);               /* [General] LogMaxKB：日志上限
 int  ConfigGetMaxArrowSteps(void);          /* [General] MaxArrowSteps：逐格词跳最大步数 */
 BOOL ConfigGetOverStepCtrl(void);           /* [General] OverStepMode：超限 0=仍发方向键 1=Ctrl+方向 */
 int  ConfigGetWheelScrollMul(void);         /* [General] WheelScrollMul：按住 C 时滚轮放大倍数，<2=不放大 */
+BOOL ConfigGetStr(const WCHAR* key, WCHAR* out, size_t cap); /* [General] 通用字符串项（未具名解析的） */
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中名单 */
 BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口的进程 exe 名 */
 BOOL IsRunElevated(void);                   /* 真实运行权限（查进程令牌） */

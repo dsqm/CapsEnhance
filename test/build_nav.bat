@@ -13,6 +13,8 @@ cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
 cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
    /Isrc /c /Fobin\config_test.obj src\config.c || exit /b 1
 cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
+   /Isrc /c /Fobin\keymap_test.obj src\keymap.c || exit /b 1
+cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
    /Isrc /c /Fobin\test_nav.obj test\test_nav.c || exit /b 1
 cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
    /Isrc /c /Fobin\test_sci.obj test\test_sci.c || exit /b 1
@@ -30,7 +32,7 @@ cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib ^
    /SUBSYSTEM:CONSOLE || exit /b 1
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
-   bin\test_config.obj bin\config_test.obj ^
+   bin\test_config.obj bin\config_test.obj bin\keymap_test.obj ^
    /link /OUT:bin\test_config.exe user32.lib advapi32.lib /SUBSYSTEM:CONSOLE || exit /b 1
 echo [OK] compiled. running test_nav (word-jump algorithm)...
 ".\bin\test_nav.exe"

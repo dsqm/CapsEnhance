@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 void ConfigLoadFrom(const WCHAR* path);
 void ConfigLoad(void);
@@ -185,6 +186,56 @@ int main(void) {
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(ConfigGetWheelScrollMul() == 2, "CFG: WheelScrollMul 缺省为 2");
 
+    /* 激活键列表 EnhanceKeys / ShiftKeys：配置层只作"通用字符串项"留存，
+       由键位映射模块（keymap.c）解析。这里断言**解析结果** ——
+       也就是"以后把 D 删掉、只留 Alt"确实只改一行配置即可生效。 */
+    {
+        WCHAR t[MODE_KEYS_MAXLEN];
+        WriteIni("[General]\r\nEnhanceKeys = Alt, D\r\nShiftKeys = F\r\n");
+        ConfigLoadFrom(L"bin/cfgtest.ini");
+        KeyMapInit();
+        ModeKeysText(MODE_ENHANCE, t, MODE_KEYS_MAXLEN);
+        EXPECT(ModeKeyCount(MODE_ENHANCE) == 2 && _wcsicmp(t, L"Alt, D") == 0,
+               "KEY: 增强键 Alt, D -> 解析为 2 个键（文本回显一致）");
+        EXPECT(ModeKeyCount(MODE_SHIFT) == 1 && ModeFindByVk('F') == MODE_SHIFT,
+               "KEY: 位移键 F -> 解析为 1 个键");
+        EXPECT(ModeFindByVk(VK_LMENU) == MODE_ENHANCE && ModeFindByVk('D') == MODE_ENHANCE,
+               "KEY: Alt 与 D 都属于增强模式");
+        EXPECT(ModeFindByVk('X') == -1, "KEY: 未配置的键不属于任何模式");
+
+        /* 用户的真实诉求：适应以后只用 Alt、把 D 去掉 */
+        WriteIni("[General]\r\nEnhanceKeys = Alt\r\n");
+        ConfigLoadFrom(L"bin/cfgtest.ini");
+        KeyMapInit();
+        EXPECT(ModeKeyCount(MODE_ENHANCE) == 1 && ModeFindByVk(VK_LMENU) == MODE_ENHANCE,
+               "KEY: EnhanceKeys=Alt -> 只剩 Alt");
+        EXPECT(ModeFindByVk('D') == -1, "KEY: 去掉 D 之后 D 不再是修饰键");
+
+        /* 分隔符与大小写容错（+ / 空格 / 逗号，大小写任意） */
+        WriteIni("[General]\r\nEnhanceKeys = alt+d\r\n");
+        ConfigLoadFrom(L"bin/cfgtest.ini");
+        KeyMapInit();
+        EXPECT(ModeKeyCount(MODE_ENHANCE) == 2 && ModeFindByVk('D') == MODE_ENHANCE,
+               "KEY: 小写与 + 分隔同样解析");
+        WriteIni("[General]\r\nEnhanceKeys = ALT\r\n");
+        ConfigLoadFrom(L"bin/cfgtest.ini");
+        KeyMapInit();
+        EXPECT(ModeKeyCount(MODE_ENHANCE) == 1, "KEY: 全大写键名同样解析");
+
+        /* 一个名字都认不出 -> 回退默认（配置写错不该让功能整体失效） */
+        WriteIni("[General]\r\nEnhanceKeys = FooBar\r\n");
+        ConfigLoadFrom(L"bin/cfgtest.ini");
+        KeyMapInit();
+        EXPECT(ModeKeyCount(MODE_ENHANCE) == 2, "KEY: 名字全认不出时回退默认 Alt+D");
+
+        /* 未配置（老配置没有这一项）-> 默认 */
+        WriteIni("[General]\r\nRunAsAdmin = 1\r\n");
+        ConfigLoadFrom(L"bin/cfgtest.ini");
+        KeyMapInit();
+        EXPECT(ModeKeyCount(MODE_ENHANCE) == 2 && ModeKeyCount(MODE_SHIFT) == 1,
+               "KEY: 未配置时用默认键位（Enhance=Alt+D, Shift=F）");
+    }
+
     /* 老配置升级：缺失的新键自动补齐，已有内容保留 */
     {
         FILE* fo = NULL;
@@ -198,8 +249,12 @@ int main(void) {
                "UPG: 用户已有内容保留 (RunAsAdmin=1 / 名单)");
         EXPECT(ConfigGetLogMaxKB() == 2048 && ConfigGetMaxArrowSteps() == 32,
                "UPG: 缺失键补齐默认值");
+        KeyMapInit();
+        EXPECT(ModeKeyCount(MODE_ENHANCE) == 2 && ModeKeyCount(MODE_SHIFT) == 1,
+               "UPG: 补齐的 EnhanceKeys/ShiftKeys 可被解析（Alt+D / F）");
         FILE* fc = NULL;
         int hasLog = 0, hasSteps = 0, hasMode = 0, hasWheel = 0;
+        int hasInterval = 0, hasEnh = 0, hasShift = 0;
         if (fopen_s(&fc, "bin/cfgtest.ini", "r") == 0 && fc) {
             char line[512];
             while (fgets(line, sizeof(line), fc)) {
@@ -207,6 +262,8 @@ int main(void) {
                 if (strstr(line, "MaxArrowSteps = 32")) hasSteps = 1;
                 if (strstr(line, "OverStepMode = 0")) hasMode = 1;
                 if (strstr(line, "WheelScrollMul = 2")) hasWheel = 1;
+                if (strstr(line, "EnhanceKeys = Alt, D")) hasEnh = 1;
+                if (strstr(line, "ShiftKeys = F")) hasShift = 1;
             }
             fclose(fc);
         }
@@ -289,8 +346,12 @@ int main(void) {
     {
         FILE* fo = NULL;
         if (fopen_s(&fo, "bin/cfgtest.ini", "wb") == 0 && fo) {
+            /* 必须把**当前所有**新增键都写上：少写一个，升级逻辑就会（正确地）
+               认为它是老配置而改写文件。曾经就是这样漏掉的 —— 加配置项时
+               记得同步这里，和 kUpgrades 保持一致。 */
             fputs("[General]\nRunAsAdmin = 1\nLogMaxKB = 7\nMaxArrowSteps = 5\n"
-                  "OverStepMode = 1\nWheelScrollMul = 5\n", fo);
+                  "OverStepMode = 1\nWheelScrollMul = 5\n"
+                  "AutoScrollInterval = 250\nEnhanceKeys = Alt\nShiftKeys = Ctrl\n", fo);
             fclose(fo);
         }
         char before[512];
@@ -313,6 +374,12 @@ int main(void) {
         EXPECT(ConfigGetLogMaxKB() == 7 && ConfigGetMaxArrowSteps() == 5 && ConfigGetOverStepCtrl(),
                "UPG: 用户自定义值不被覆盖");
         EXPECT(ConfigGetWheelScrollMul() == 5, "UPG: WheelScrollMul 自定义值不被覆盖");
+        {
+            WCHAR v[MODE_KEYS_MAXLEN] = L"";
+            EXPECT(ConfigGetStr(L"EnhanceKeys", v, MODE_KEYS_MAXLEN) &&
+                   _wcsicmp(v, L"Alt") == 0,
+                   "UPG: EnhanceKeys 自定义值不被覆盖（通用字符串项）");
+        }
     }
 
     /* 兼容早期不分节写法 */
@@ -336,6 +403,8 @@ int main(void) {
     EXPECT(TemplateHas("MaxArrowSteps = 32"),"CFG: 模板含 MaxArrowSteps 默认值");
     EXPECT(TemplateHas("OverStepMode = 0"),  "CFG: 模板含 OverStepMode 默认值");
     EXPECT(TemplateHas("WheelScrollMul = 2"),"CFG: 模板含 WheelScrollMul 默认值");
+    EXPECT(TemplateHas("EnhanceKeys = Alt, D"), "CFG: 模板含 EnhanceKeys 默认值");
+    EXPECT(TemplateHas("ShiftKeys = F"),     "CFG: 模板含 ShiftKeys 默认值");
     EXPECT(TemplateHas("[NativeWordJump]"),  "CFG: 模板含 NativeWordJump 段");
 
     /* 真实权限查询：不崩溃即可（是否管理员取决于运行环境） */
