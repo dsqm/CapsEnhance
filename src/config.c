@@ -210,7 +210,131 @@ void ConfigLoad(void) {
         return;
     }
     fclose(probe);
+    ConfigUpgradeFile(path);   /* 老配置补齐新增键（无缺失则不改动） */
     ConfigLoadFrom(path);
+}
+
+/* ---- 配置文件升级：把新增键（连同注释）补进老用户的配置文件 ----
+   模板只在文件不存在时生成，老用户的 ini 会缺少后来新增的键。
+   这里检测 [General] 段内缺失的键，把"注释 + 默认值"插入该段末尾；
+   没有 [General] 段的老格式则在文件头新建一段。用户已有内容原样保留，
+   无缺失时不做任何写入。每次新增配置项后，在 kUpgrades 表里补一条即可。 */
+static const struct {
+    const char* key;
+    const char* block;
+} kUpgrades[] = {
+    { "runasadmin",
+      "; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）\n"
+      "; 只认 0/1：1=启用，0=禁用（其它写法一律视为 0）\n"
+      "RunAsAdmin = 0\n" },
+    { "logmaxkb",
+      "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
+      "LogMaxKB = 2048\n" },
+    { "maxarrowsteps",
+      "; 逐格词跳的最大步数（字符数）：超过该距离的逐格跳转不再逐格发送，\n"
+      "; 改按 OverStepMode 处理，避免方向键发太久。0 = 不限制（逐格发完）。\n"
+      "; 无论填多少，单次逐格发送另有 256 步的硬上限\n"
+      "MaxArrowSteps = 32\n" },
+    { "overstepmode",
+      "; 超过 MaxArrowSteps 时的替代方式，只认 0/1：\n"
+      ";   0 = 只发送一个方向键（跳一格即停）\n"
+      ";   1 = 改发 Ctrl+方向键（由目标程序自己的词跳完成，瞬时）\n"
+      "OverStepMode = 0\n" },
+};
+
+void ConfigUpgradeFile(const WCHAR* path) {
+    FILE* f = NULL;
+    if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 64 * 1024) { fclose(f); return; }
+    char* raw = (char*)malloc((size_t)sz + 1);
+    if (!raw) { fclose(f); return; }
+    size_t rd = fread(raw, 1, (size_t)sz, f);
+    fclose(f);
+    raw[rd] = 0;
+
+    const char* body = raw;
+    size_t bodyLen = rd;
+    int hasBom = (rd >= 3 && (unsigned char)raw[0] == 0xEF &&
+                  (unsigned char)raw[1] == 0xBB && (unsigned char)raw[2] == 0xBF);
+    if (hasBom) { body = raw + 3; bodyLen = rd - 3; }
+
+    /* 定位 [General] 段：genStart=段行，genEnd=段结束（下一个段行或 EOF） */
+    const char* genStart = NULL;
+    const char* genEnd = body + bodyLen;
+    const char* line = body;
+    while (line < body + bodyLen) {
+        const char* nl = memchr(line, '\n', (size_t)(body + bodyLen - line));
+        size_t ll = nl ? (size_t)(nl - line) : (size_t)(body + bodyLen - line);
+        char tmp[160];
+        size_t n = ll < 159 ? ll : 159;
+        memcpy(tmp, line, n); tmp[n] = 0;
+        char* s = tmp;
+        while (*s == ' ' || *s == '\t' || *s == '\r') s++;
+        if (*s == '[') {
+            if (_strnicmp(s, "[general]", 9) == 0 && !genStart)
+                genStart = line;
+            else if (genStart) { genEnd = line; break; }
+        }
+        line = nl ? nl + 1 : body + bodyLen;
+    }
+
+    /* 检查哪些键缺失（只在 [General] 段范围内找） */
+    #define KUP_N ((int)(sizeof(kUpgrades)/sizeof(kUpgrades[0])))
+    BOOL missing[KUP_N];
+    size_t blockLens[KUP_N];
+    int nMiss = 0;
+    for (int i = 0; i < KUP_N; i++) {
+        blockLens[i] = strlen(kUpgrades[i].block);
+        missing[i] = TRUE;
+        for (const char* l = genStart ? genStart : body;
+             l < (genStart ? genEnd : body + bodyLen) && missing[i]; ) {
+            const char* nl = memchr(l, '\n', (size_t)(body + bodyLen - l));
+            size_t ll = nl ? (size_t)(nl - l) : (size_t)(body + bodyLen - l);
+            char tmp[160];
+            size_t n = ll < 159 ? ll : 159;
+            memcpy(tmp, l, n); tmp[n] = 0;
+            char* s = tmp;
+            while (*s == ' ' || *s == '\t' || *s == '\r') s++;
+            size_t klen = strlen(kUpgrades[i].key);
+            if (_strnicmp(s, kUpgrades[i].key, klen) == 0) {
+                char c = s[klen];
+                if (c == '=' || c == ' ' || c == '\t' || c == 0) missing[i] = FALSE;
+            }
+            l = nl ? nl + 1 : body + bodyLen;
+        }
+        if (missing[i]) nMiss++;
+    }
+    if (nMiss == 0) { free(raw); return; }   /* 无缺失：不动文件 */
+
+    /* 组装新内容：BOM + 头部 + [General] 行(若新建) + 缺失块 + 尾部 */
+    size_t insOff = genStart ? (size_t)(genEnd - body) : 0;
+    int needNl = (genStart && insOff > 0 && body[insOff - 1] != '\n');
+    size_t blockTotal = 0;
+    for (int i = 0; i < KUP_N; i++)
+        if (missing[i]) blockTotal += blockLens[i];
+
+    size_t genHdr = genStart ? 0 : strlen("[General]\n");
+    char* out = (char*)malloc(bodyLen + blockTotal + genHdr + 2);
+    if (!out) { free(raw); return; }
+    size_t o = 0;
+    if (hasBom) { out[o++] = (char)0xEF; out[o++] = (char)0xBB; out[o++] = (char)0xBF; }
+    memcpy(out + o, body, insOff); o += insOff;
+    if (!genStart) { memcpy(out + o, "[General]\n", 10); o += 10; }
+    if (needNl) out[o++] = '\n';
+    for (int i = 0; i < KUP_N; i++)
+        if (missing[i]) { memcpy(out + o, kUpgrades[i].block, blockLens[i]); o += blockLens[i]; }
+    memcpy(out + o, body + insOff, bodyLen - insOff); o += bodyLen - insOff;
+
+    if (_wfopen_s(&f, path, L"wb") == 0 && f) {
+        fwrite(out, 1, o, f);
+        fclose(f);
+    }
+    free(out);
+    free(raw);
+    #undef KUP_N
 }
 
 BOOL ConfigGetRunAsAdmin(void) {

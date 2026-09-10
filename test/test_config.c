@@ -146,6 +146,60 @@ int main(void) {
     EXPECT(ConfigGetMaxArrowSteps() == 32 && !ConfigGetOverStepCtrl(),
            "CFG: 非 General 段不生效");
 
+    /* 老配置升级：缺失的新键自动补齐，已有内容保留 */
+    {
+        FILE* fo = NULL;
+        if (fopen_s(&fo, "bin/cfgtest.ini", "wb") == 0 && fo) {
+            fputs("[General]\nRunAsAdmin = 1\n\n[NativeWordJump]\nOldApp\n", fo);
+            fclose(fo);
+        }
+        ConfigUpgradeFile(L"bin/cfgtest.ini");
+        ConfigLoadFrom(L"bin/cfgtest.ini");
+        EXPECT(ConfigGetRunAsAdmin() && ConfigMatchName(L"oldapp"),
+               "UPG: 用户已有内容保留 (RunAsAdmin=1 / 名单)");
+        EXPECT(ConfigGetLogMaxKB() == 2048 && ConfigGetMaxArrowSteps() == 32,
+               "UPG: 缺失键补齐默认值");
+        FILE* fc = NULL;
+        int hasLog = 0, hasSteps = 0, hasMode = 0;
+        if (fopen_s(&fc, "bin/cfgtest.ini", "r") == 0 && fc) {
+            char line[512];
+            while (fgets(line, sizeof(line), fc)) {
+                if (strstr(line, "LogMaxKB = 2048")) hasLog = 1;
+                if (strstr(line, "MaxArrowSteps = 32")) hasSteps = 1;
+                if (strstr(line, "OverStepMode = 0")) hasMode = 1;
+            }
+            fclose(fc);
+        }
+        EXPECT(hasLog && hasSteps && hasMode, "UPG: 补齐块带注释写回文件");
+    }
+    /* 新格式（四键齐全）：升级不改动文件 */
+    {
+        FILE* fo = NULL;
+        if (fopen_s(&fo, "bin/cfgtest.ini", "wb") == 0 && fo) {
+            fputs("[General]\nRunAsAdmin = 1\nLogMaxKB = 7\nMaxArrowSteps = 5\nOverStepMode = 1\n", fo);
+            fclose(fo);
+        }
+        char before[512];
+        {
+            FILE* fr = NULL;
+            if (fopen_s(&fr, "bin/cfgtest.ini", "r") == 0 && fr) {
+                size_t n = fread(before, 1, 511, fr); before[n] = 0; fclose(fr);
+            } else before[0] = 0;
+        }
+        ConfigUpgradeFile(L"bin/cfgtest.ini");
+        char after[512];
+        {
+            FILE* fr = NULL;
+            if (fopen_s(&fr, "bin/cfgtest.ini", "r") == 0 && fr) {
+                size_t n = fread(after, 1, 511, fr); after[n] = 0; fclose(fr);
+            } else after[0] = 0;
+        }
+        EXPECT(strcmp(before, after) == 0, "UPG: 键齐全时不改动文件");
+        ConfigLoadFrom(L"bin/cfgtest.ini");
+        EXPECT(ConfigGetLogMaxKB() == 7 && ConfigGetMaxArrowSteps() == 5 && ConfigGetOverStepCtrl(),
+               "UPG: 用户自定义值不被覆盖");
+    }
+
     /* 兼容早期不分节写法 */
     WriteIni("Legacy.exe\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");

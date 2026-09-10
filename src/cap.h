@@ -90,6 +90,7 @@ extern HWND g_mainWnd;
 /* ---------- 配置模块（CapsEnhance.ini，与 exe 同目录） ---------- */
 void ConfigLoad(void);                       /* 启动时读配置；缺失则写注释模板 */
 void ConfigLoadFrom(const WCHAR* path);      /* 从指定路径加载（单测用） */
+void ConfigUpgradeFile(const WCHAR* path);   /* 老配置补齐新增键（单测用） */
 BOOL ConfigMatchName(const WCHAR* exeName);  /* 进程名是否命中原生词跳名单 */
 BOOL ConfigGetRunAsAdmin(void);             /* [General] RunAsAdmin：启动时提权 */
 int  ConfigGetLogMaxKB(void);               /* [General] LogMaxKB：日志上限(KB)，0=不限 */
