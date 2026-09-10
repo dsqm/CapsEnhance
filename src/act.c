@@ -196,6 +196,124 @@ static void WheelLaneStop(void) {
     s_wInit = FALSE;
 }
 
+/* ================= 自动滚动专用通道 =================
+   增强模式（默认 Alt / D）+ 滚轮 = 持续滚动（接口说明见 cap.h）。
+   为什么再开一条独立通道，而不是塞进动作队列或滚轮加速队列：
+     · 它是一个**长时间运行**的循环（一直滚到用户松手），而动作队列的语义是
+       "一条一条执行完就走"；
+     · 它不该受 ActInFlight() 门控（那门控是给和弦重复限速的）；
+     · 每个节拍都要等待，和滚轮加速一样**绝不能跑在主线程上**（主线程不在
+       "等消息"状态会让系统跳过它的低级钩子事件，见文件头）。
+
+   状态机（active/dir/gear）由主线程在锁内更新，工作线程只按拍输出。
+   终止路径：反向滚（主线程置停）、松开修饰键（钩子投 WM_MODE_UP）、
+   松开 C / 引擎复位（ResetEngine -> ActAutoScrollStop）。工作线程另外每拍
+   自查 ModeDown 与 g_cMod 作兜底 —— 不依赖任何消息也能自愈。 */
+static CRITICAL_SECTION s_asCs;
+static HANDLE          s_asEvPoke = NULL;  /* auto-reset：状态变了（启动/提速/停止） */
+static HANDLE          s_asThread = NULL;
+static volatile LONG   s_asStop   = 0;
+static BOOL            s_asInit   = FALSE;
+static volatile LONG   s_asActive = 0;
+static volatile LONG   s_asGear   = 0;
+static volatile LONG   s_asDir    = 0;     /* +1 上滚 / -1 下滚 */
+static volatile LONG   s_asCap    = 0;
+
+int ActAutoScrollCap(void) {
+    int mul = ConfigGetWheelScrollMul();
+    return (mul >= 2) ? mul : 0;   /* 与滚轮加速同一个开关：0/1 = 整个滚轮增强关闭 */
+}
+BOOL ActAutoScrollActive(void) { return s_asActive != 0; }
+int  ActAutoScrollGear(void)   { return s_asActive ? (int)s_asGear : 0; }
+int  ActAutoScrollDir(void)    { return s_asActive ? (int)s_asDir  : 0; }
+
+/* 立即终止。非阻塞：只置状态 + 唤醒工作线程，绝不在调用线程里等它收尾
+   （调用方可能是键盘钩子所在的主线程）。 */
+void ActAutoScrollStop(void) {
+    if (s_asInit) EnterCriticalSection(&s_asCs);
+    s_asActive = 0; s_asGear = 0; s_asDir = 0;
+    if (s_asInit) { LeaveCriticalSection(&s_asCs); SetEvent(s_asEvPoke); }
+}
+
+/* 主线程调用：增强模式下的一次滚轮。非阻塞（只更新状态）。 */
+void ActAutoScrollWheel(int delta) {
+    if (delta == 0 || !s_asInit) return;
+    int cap = ActAutoScrollCap();
+    if (cap < 2) return;                       /* 未启用 */
+    int dir = (delta > 0) ? 1 : -1;
+    EnterCriticalSection(&s_asCs);
+    s_asCap = cap;
+    if (!s_asActive) {
+        s_asActive = 1; s_asDir = dir; s_asGear = 1;    /* 第一滚：基础档 */
+    } else if ((int)s_asDir == dir) {
+        if ((int)s_asGear < cap) s_asGear++;            /* 同向：提速一档 */
+    } else {
+        s_asActive = 0; s_asDir = 0; s_asGear = 0;      /* 反向：立即终止 */
+    }
+    LeaveCriticalSection(&s_asCs);
+    SetEvent(s_asEvPoke);
+}
+
+static DWORD WINAPI AutoScrollThread(LPVOID p) {
+    (void)p;
+    for (;;) {
+        if (InterlockedCompareExchange(&s_asStop, 0, 0)) break;
+        /* 空闲：等一次状态变化（1s 超时兜底，防事件被吞） */
+        WaitForSingleObject(s_asEvPoke, 1000);
+        if (InterlockedCompareExchange(&s_asStop, 0, 0)) break;
+        for (;;) {
+            if (!InterlockedCompareExchange(&s_asActive, 0, 0)) break;
+            /* 兜底：增强模式或映射模式已失效（松开 Alt/D 或 C）就停 */
+            if (!g_cMod || !ModeDown(MODE_ENHANCE)) { ActAutoScrollStop(); break; }
+            int g   = (int)s_asGear;
+            int cap = (int)s_asCap;
+            int dir = (int)s_asDir;
+            if (g < 1) g = 1;
+            if (cap > 0 && g > cap) g = cap;
+            SendWheelNotches(dir > 0 ? WHEEL_STD_DELTA : -WHEEL_STD_DELTA, g);
+            /* 等下一个节拍。停止/提速/反向都会 SetEvent，所以能立即响应；
+               没有事件就是正常节拍（间隔由配置给，20..1000ms）。 */
+            if (WaitForSingleObject(s_asEvPoke,
+                                    (DWORD)ConfigGetAutoScrollInterval()) == WAIT_OBJECT_0) {
+                if (InterlockedCompareExchange(&s_asStop, 0, 0)) break;
+                if (!InterlockedCompareExchange(&s_asActive, 0, 0)) break;
+            }
+        }
+    }
+    return 0;
+}
+
+/* 起/停自动滚动通道。起不来不算致命：s_asInit 保持 FALSE，ActAutoScrollWheel
+   直接忽略 —— "持续滚动"没法像补一格那样在同一调用里同步兜底。 */
+static void AutoScrollLaneStart(void) {
+    s_asStop = 0;
+    s_asActive = 0; s_asGear = 0; s_asDir = 0; s_asCap = 0;
+    InitializeCriticalSection(&s_asCs);
+    s_asEvPoke = CreateEventW(NULL, FALSE, FALSE, NULL);
+    s_asThread = s_asEvPoke ? CreateThread(NULL, 0, AutoScrollThread, NULL, 0, NULL) : NULL;
+    if (!s_asEvPoke || !s_asThread) {
+        if (s_asThread) { CloseHandle(s_asThread); s_asThread = NULL; }
+        if (s_asEvPoke) { CloseHandle(s_asEvPoke); s_asEvPoke = NULL; }
+        DeleteCriticalSection(&s_asCs);
+        s_asInit = FALSE;
+        return;
+    }
+    s_asInit = TRUE;
+}
+static void AutoScrollLaneStop(void) {
+    if (!s_asInit) return;
+    InterlockedExchange(&s_asStop, 1);
+    ActAutoScrollStop();          /* 置停 + 唤醒（否则它还在节拍等待里） */
+    if (s_asThread) {
+        /* 每个节拍都是有界的（最多 15 格 × 2ms），给足 1s 等待即可 */
+        WaitForSingleObject(s_asThread, 1000);
+        CloseHandle(s_asThread); s_asThread = NULL;
+    }
+    if (s_asEvPoke) { CloseHandle(s_asEvPoke); s_asEvPoke = NULL; }
+    DeleteCriticalSection(&s_asCs);
+    s_asInit = FALSE;
+}
+
 BOOL ActStart(void) {
     if (s_init) return TRUE;
     memset(s_q, 0, sizeof(s_q));
@@ -219,14 +337,16 @@ BOOL ActStart(void) {
         return FALSE;
     }
     s_init = TRUE;
-    WheelLaneStart();     /* 滚轮加速的独立线程（起不来则退回主线程同步兜底） */
+    WheelLaneStart();      /* 滚轮加速的独立线程（起不来则退回主线程同步兜底） */
+    AutoScrollLaneStart(); /* 自动滚动的独立线程（起不来则该功能静默不可用） */
     return TRUE;
 }
 
 /* 停止线程。调用后本进程不再执行任何动作（退出/重启专用）。 */
 void ActStop(void) {
     if (!s_init) return;
-    WheelLaneStop();                     /* 先停滚轮通道：它只注入鼠标滚轮 */
+    AutoScrollLaneStop();                /* 先停自动滚动：它可能还在持续注入 */
+    WheelLaneStop();                     /* 再停滚轮通道：它只注入鼠标滚轮 */
     InterlockedExchange(&s_stop, 1);
     SendArrowsRequestInterrupt();        /* 正在逐格输出时立刻止住 */
     ActClear();

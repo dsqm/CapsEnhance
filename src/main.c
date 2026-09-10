@@ -278,6 +278,8 @@ static void ResetEngine(void) {
     /* 滚轮加速的待补队列也一起丢：松开 C 之后不该再有加速尾流
        （用户预期"松开 C 就是普通滚轮"）。 */
     ActWheelClear();
+    /* 自动滚动一律立即终止（松开 C / 重新按下 C 都该停） */
+    ActAutoScrollStop();
     g_pendingAct = ACT_NONE;
     g_activeAct  = ACT_NONE;
     g_actEnh = FALSE; g_actShf = FALSE;
@@ -395,6 +397,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             CapLog("配置: MaxArrowSteps=%d OverStepCtrl=%d LogMaxKB=%d RunAsAdmin=%d",
                    ConfigGetMaxArrowSteps(), ConfigGetOverStepCtrl() ? 1 : 0,
                    ConfigGetLogMaxKB(), ConfigGetRunAsAdmin() ? 1 : 0);
+            {   /* 实际生效的修饰激活键：排查"改了 EnhanceKeys 没生效"一眼可见 */
+                WCHAR ek[MODE_KEYS_MAXLEN], sk[MODE_KEYS_MAXLEN];
+                char  eb[MODE_KEYS_MAXLEN * 3], sb[MODE_KEYS_MAXLEN * 3];
+                ModeKeysText(MODE_ENHANCE, ek, MODE_KEYS_MAXLEN);
+                ModeKeysText(MODE_SHIFT,   sk, MODE_KEYS_MAXLEN);
+                WideCharToMultiByte(CP_UTF8, 0, ek, -1, eb, (int)sizeof(eb), NULL, NULL);
+                WideCharToMultiByte(CP_UTF8, 0, sk, -1, sb, (int)sizeof(sb), NULL, NULL);
+                CapLog("按键: EnhanceKeys=%s ShiftKeys=%s AutoScrollInterval=%d",
+                       eb, sb, ConfigGetAutoScrollInterval());
+            }
             MessageBeep(MB_ICONASTERISK);   /* 系统"星号"音：开始记录（与结束不同） */
             TrayHint(L"正在记录日志（C+\x60 结束）");
             /* 探测交给执行线程：NavProbe 会做跨进程 SendMsg + UIA COM 往返，
@@ -529,6 +541,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
            跳过**：松开 Caps 的 keyup 被漏掉 -> g_cMod 卡在 TRUE -> 松开 C 后
            滚轮还在加速、随后按 Tab 又冒出大写锁定。同一根因也造成 mul>=3 卡顿。 */
         ActWheelPost((int)wp, (int)lp);
+        return 0;
+    case WM_WHEEL_ENH:
+        /* 增强模式（默认 C+Alt/D）下的滚轮：驱动持续滚动（act.c 的自动滚动
+           通道）。这里同样只投递，主线程绝不做注入。 */
+        ActAutoScrollWheel((int)wp);
+        return 0;
+    case WM_MODE_UP:
+        /* 某个修饰模式的激活键全部抬起了（钩子投递）：增强模式一失效，
+           进行中的自动滚动立刻停 —— 这就是"松开 Alt 立即终止"的快速路径
+           （工作线程每拍也会自查一遍，两条路互为兜底）。 */
+        if ((int)wp == MODE_ENHANCE) ActAutoScrollStop();
         return 0;
     /* ---- 托盘 ---- */
     case WM_TOGGLE_TRAY:

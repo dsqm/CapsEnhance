@@ -25,6 +25,12 @@
 #define STR2(x) #x
 #define STR(x)  STR2(x)
 
+/* 自动滚动的基础节奏（ms）：自动滚动每 N 毫秒滚一格。
+   档位（每格补发几格）在 1..WheelScrollMul 之间由滚轮次数调整，
+   所以这个值决定的是**最慢档**的速度。120ms 约 8 格/秒，是"读文档时
+   不至于看丢行"的量级；嫌慢就再滚一下提速，或把这里调小。 */
+#define AUTOSCROLL_INTERVAL_DEFAULT 120
+
 /* 通用字符串项：明确解析的键之外，[General] 里其它键值原样留存，
    供上层模块按名字取（见 ConfigGetStr）。
 
@@ -70,6 +76,7 @@ static int   g_logMaxKB   = 2048;   /* 日志大小上限（KB），0 = 不限�
 static int   g_maxArrowSteps = 32;  /* 逐格词跳最大步数，超过按 overStepMode 处理 */
 static BOOL  g_overStepCtrl = FALSE; /* TRUE=超限改发 Ctrl+方向（原生词跳） */
 static int   g_wheelMul = WHEEL_MUL_DEFAULT; /* 按住 C 时滚轮放大倍数，<2 视为不放大 */
+static int   g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT; /* 自动滚动基础节奏(ms) */
 
 /* 整数：只认前导十进制数字，其余（空/非法）返回默认值。
    超过 1e8 直接判非法：没有哪个配置项需要这么大，而继续累加会让
@@ -141,6 +148,7 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_maxArrowSteps = 32;
     g_overStepCtrl = FALSE;
     g_wheelMul = WHEEL_MUL_DEFAULT;
+    g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT;
     g_strN = 0;
 
     FILE* f = NULL;
@@ -210,6 +218,12 @@ void ConfigLoadFrom(const WCHAR* path) {
                     if (v > 16) v = 16;   /* 上限 16：单次最多补发 15 格（每格间隔 2ms） */
                     g_wheelMul = v;
                 }
+                else if (_wcsicmp(key, L"autoscrollinterval") == 0) {
+                    int v = ParseIntW(val, AUTOSCROLL_INTERVAL_DEFAULT);
+                    if (v < 20)  v = 20;      /* 太快会把目标程序滚爆，也失去可读性 */
+                    if (v > 1000) v = 1000;   /* 太慢等于没开 */
+                    g_autoScrollInterval = v;
+                }
                 /* 其余 [General] 项原样留存，由需要的模块按名字取
                    （例如键位映射模块读 EnhanceKeys / ShiftKeys） */
                 else StoreStr(key, val);
@@ -259,7 +273,11 @@ void ConfigLoad(void) {
             ";   实现方式：原始刻度照常送达，再补发 (N-1) 个同值刻度。\n"
             ";   只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），\n"
             ";   也不写注册表。\n"
+            ";   同一个开关也决定\"自动滚动\"能否用：N >= 2 才启用（自动滚动的档位上限就是 N）。\n"
             "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n"
+            "; 自动滚动的基础节奏（毫秒）：增强模式 + 滚轮启动自动滚动后，\n"
+            "; 每 N 毫秒滚一格。越小越快，可调范围 20..1000。\n"
+            "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n"
             "; ---- 和弦修饰的激活键 ----\n"
             "; 按住 C（CapsLock）期间，这些键作为\"模式修饰\"生效。\n"
             "; 键名可用：单字母 A-Z、数字 0-9、Alt / RAlt / Ctrl / Shift / Win / Space 等；\n"
@@ -325,7 +343,12 @@ static const struct {
       ";   实现方式：原始刻度照常送达，再补发 (N-1) 个同值刻度。\n"
       ";   只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），\n"
       ";   也不写注册表。\n"
+      ";   同一个开关也决定\"自动滚动\"能否用：N >= 2 才启用。\n"
       "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n" },
+    { "autoscrollinterval",
+      "; 自动滚动的基础节奏（毫秒）：增强模式 + 滚轮启动自动滚动后，\n"
+      "; 每 N 毫秒滚一格。越小越快，可调范围 20..1000。\n"
+      "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n" },
     { "enhancekeys",
       "; ---- 和弦修饰的激活键 ----\n"
       "; 按住 C（CapsLock）期间，这些键作为\"模式修饰\"生效。\n"
@@ -479,6 +502,10 @@ BOOL ConfigGetOverStepCtrl(void) {
 
 int ConfigGetWheelScrollMul(void) {
     return g_wheelMul;
+}
+
+int ConfigGetAutoScrollInterval(void) {
+    return g_autoScrollInterval;
 }
 
 /* 进程可执行文件名是否命中原生词跳名单（完全匹配，.exe 可选） */

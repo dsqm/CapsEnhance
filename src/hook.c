@@ -154,7 +154,11 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     return CallNextHookEx(g_hook, nCode, wParam, lParam);
 }
 
-/* ================= 鼠标钩子：按住 C 时滚轮加速 =================
+/* ================= 鼠标钩子：按住 C 时的滚轮 =================
+   两种语义（互斥，由"是否处于增强模式"决定）：
+     · 普通（只按住 C）：逐格放大 N 倍 —— 见 main.c 的 WM_WHEEL_ACCEL；
+     · 增强模式（默认 C+Alt/D）：驱动 act.c 的自动滚动 —— WM_WHEEL_ENH。
+
    为什么用低级钩子而不是 Raw Input：**必须能认出"这个滚轮事件是我们自己
    注入的"**。Raw Input（RIDEV_INPUTSINK）拿不到"注入"标记，放大后的滚轮会
    再触发一次 WM_INPUT → 再放大 → 无限放大；MSLLHOOKSTRUCT.flags 的
@@ -162,9 +166,10 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
    代价是：这个回调落在**全局鼠标输入的关键路径**上（每一次鼠标移动都会
    进来一次），所以回调里只做几次比较然后 PostMessage，绝不在这里注入、
-   也不做任何查询 —— 连 GetAsyncKeyState 都不能调（会明显加剧鼠标卡顿），
-   "C 是否按住"直接读键盘钩子已经维护好的 g_cMod。
-   注入放到主线程的消息处理里做（见 main.c 的 WM_WHEEL_ACCEL）。
+   也不做任何系统查询 —— 连 GetAsyncKeyState 都不能调（会明显加剧鼠标卡顿）。
+   "C 是否按住"直接读键盘钩子已经维护好的 g_cMod；"是否增强模式"读
+   ModeDown（就是把位图与零比一下，几次内存访问，不是系统调用）。
+   注入一律在别的线程做（main.c 只投递，act.c 的专用通道执行）。
    注：这也意味着主线程若被长时间占住会拖慢鼠标输入 —— 这正是"动作发送
    移到执行线程"（act.c）要解决的问题，两者是同一根因的两个面。 */
 static HHOOK g_mouseHook = NULL;
@@ -174,10 +179,18 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
     if (nCode == HC_ACTION && wParam == WM_MOUSEWHEEL) {
         const MSLLHOOKSTRUCT* m = (const MSLLHOOKSTRUCT*)lParam;
         if (m && !(m->flags & LLMHF_INJECTED) && !g_state.paused && g_cMod) {
-            int mul = ConfigGetWheelScrollMul();
             int delta = (int)(short)HIWORD(m->mouseData);   /* 高字是滚轮增量 */
-            if (mul > 1 && delta != 0)
-                PostMessageW(g_mainWnd, WM_WHEEL_ACCEL, (WPARAM)delta, (LPARAM)mul);
+            if (delta != 0) {
+                if (ModeDown(MODE_ENHANCE)) {
+                    /* 增强模式（默认 Caps+Alt/D）：滚轮语义是"启动/提速持续
+                       滚动"，由 act.c 的自动滚动通道接管，不再逐格放大。 */
+                    PostMessageW(g_mainWnd, WM_WHEEL_ENH, (WPARAM)delta, 0);
+                } else {
+                    int mul = ConfigGetWheelScrollMul();
+                    if (mul > 1)
+                        PostMessageW(g_mainWnd, WM_WHEEL_ACCEL, (WPARAM)delta, (LPARAM)mul);
+                }
+            }
         }
     }
     return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);

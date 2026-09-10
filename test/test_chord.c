@@ -1,7 +1,11 @@
 /* ============================================================
    和弦引擎回归测试：直接调用底层钩子进程，注入按键序列，
-   用另一个捕获钩子统计软件真实注入的方向键/Shift，
-   验证 D/F 修饰在"按键乱序到达"下仍能正确工作。
+   用另一个捕获钩子统计软件真实注入的方向键/Shift。
+   覆盖：模式修饰（增强=Alt/D、位移=F）在"按键乱序到达"下仍正确、
+   长按重复/松手补齐、原生词跳按键序列、滚轮加速，
+   以及"增强模式 + 滚轮 = 自动滚动"（注入计数钩子观测）。
+   注意：引擎只问"某个模式是否生效"，从不判断按的是哪个键 ——
+   键位表在 keymap.c，可由配置改（场景S验证"把 D 去掉只留 Alt"）。
    ============================================================ */
 #define WinMain __CapsEnhanceRealWinMain_Unused
 #include "cap.h"
@@ -12,7 +16,7 @@
 #include "act.c"       /* 动作实际由执行线程完成：本测试要能起/停/等它 */
 #include <stdio.h>
 
-/* 词跳桩：本测试只验证 D/F 与补齐，不测文本解析 */
+/* 词跳桩：本测试只验证模式修饰/补齐/自动滚动，不测文本解析 */
 int NavJump(int dir, BOOL shift) { (void)dir; (void)shift; return 0; }
 void NavProbe(void) { /* 诊断探测：本测试桩掉 */ }
 void NavBaseInfo(void) { /* 启动基线采集：本测试桩掉 */ }
@@ -162,6 +166,7 @@ static void Reset(void) {
     g_cMod = FALSE;
     ModeResetAll();          /* 模式表整体复位：门闩 + 按住位图（替代旧的 g_dMod/g_pendD） */
     g_actEnh = FALSE; g_actShf = FALSE; g_btnCount = 0;
+    ActAutoScrollStop();     /* 上一场景可能还在自动滚动：先停，避免尾流串到下一场景 */
     memset((void*)g_phys, 0, sizeof(g_phys));   /* 物理按键表也归零 */
     PostMessageW(g_mainWnd, WM_CAPS_DOWN, 0, 0);  /* → ResetEngine：清 pending/active + 停表 */
     Sink();
@@ -549,6 +554,86 @@ int main(void) {
     /* 复位成缺省：本场景是最后一个，但别给以后新加的场景留坑
        （SendArrows 的行为受 MaxArrowSteps/OverStepMode 影响） */
     ConfigLoadFrom(L"bin/__absent__.ini");         /* 文件不存在 -> 全部回缺省 */
+
+    /* ---- 场景R：增强模式 + 滚轮 = 自动滚动 ----
+       "滚一下就一直滚、继续同向滚提速、反向滚/松开修饰/松开 C 立即停"。
+       状态机（active/dir/gear）由主线程在锁内维护，可确定性断言；
+       "真的在注入"由滚轮计数钩子观测（方向要与 dir 一致）。
+       计数钩子只数**我们注入的**滚轮（LLMHF_INJECTED），与场景Q共用，
+       所以每段观测前先 ResetWheelRec。 */
+    Reset();
+    CHECK(ActAutoScrollCap() == 2, "R: 档位上限 = WheelScrollMul 缺省值 2");
+    CHECK(!ActAutoScrollActive(), "R: 初始未在自动滚动");
+
+    Key(CLI_CAPS, TRUE); Pump(2);
+    KeyAlt(VK_LMENU, TRUE); Pump(2);              /* 默认增强键：左 Alt */
+    CHECK(ModeDown(MODE_ENHANCE), "R: 按住 Alt -> 增强模式生效");
+
+    ActAutoScrollWheel(120);                      /* 第一滚：基础档、方向向上 */
+    CHECK(ActAutoScrollActive() && ActAutoScrollDir() == 1 && ActAutoScrollGear() == 1,
+          "R: 增强模式滚轮 -> 启动自动滚动（档 1 / 向上）");
+
+    ActAutoScrollWheel(120);                      /* 同向再滚：提速一档 */
+    CHECK(ActAutoScrollGear() == 2, "R: 同向再滚 -> 提速到档 2");
+    ActAutoScrollWheel(120);                      /* 已达上限 */
+    CHECK(ActAutoScrollGear() == 2, "R: 档位被钳在 WheelScrollMul 以内");
+
+    ResetWheelRec();
+    Pump(300);                                    /* 至少几个节拍（缺省 120ms） */
+    CHECK(g_wheelInj >= 1 && g_wheelSum > 0, "R: 自动滚动确实在持续注入上滚");
+
+    ActAutoScrollWheel(-120);                     /* 反向：立即终止 */
+    CHECK(!ActAutoScrollActive() && ActAutoScrollDir() == 0,
+          "R: 反向滚动 -> 立即终止");
+
+    ResetWheelRec();
+    ActAutoScrollWheel(-120);                     /* 下滚启动（方向 -1） */
+    CHECK(ActAutoScrollActive() && ActAutoScrollDir() == -1, "R: 下滚启动（方向 -1）");
+    Pump(300);
+    CHECK(g_wheelSum < 0, "R: 下滚方向正确（与上方上滚大致抵消）");
+
+    /* 松开修饰键：钩子投递 WM_MODE_UP -> 终止 */
+    KeyAlt(VK_LMENU, FALSE); Pump(2);
+    Sink();
+    CHECK(!ActAutoScrollActive(), "R: 松开 Alt -> 立即终止自动滚动");
+
+    /* 松开 C：WM_CAPS_UP -> ResetEngine -> 终止 */
+    KeyAlt(VK_LMENU, TRUE); Pump(2);              /* 重新按住 Alt 才能再启动 */
+    ActAutoScrollWheel(120);
+    CHECK(ActAutoScrollActive(), "R: 重新启动成功");
+    END_SCENE();                                  /* 松开 C */
+    CHECK(!ActAutoScrollActive(), "R: 松开 Caps -> 立即终止自动滚动");
+
+    /* 与滚轮加速共用同一个开关：WheelScrollMul < 2 时自动滚动整个关闭 */
+    WriteChordIni("[General]\r\nWheelScrollMul = 1\r\n");
+    ConfigLoadFrom(L"bin/chordtest.ini");
+    CHECK(ActAutoScrollCap() == 0, "R: WheelScrollMul=1 -> 自动滚动未启用");
+    ActAutoScrollWheel(120);
+    CHECK(!ActAutoScrollActive(), "R: 未启用时滚轮不启动自动滚动");
+
+    /* 端到端：钩子把增强模式下的滚轮路由到自动滚动（而不是逐格加速） */
+    ConfigLoadFrom(L"bin/__absent__.ini");        /* 回缺省（mul=2） */
+    Reset();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    KeyAlt(VK_LMENU, TRUE); Pump(2);
+    Sink();                                       /* 冲掉可能残留的消息 */
+    ResetWheelRec();
+    Wheel(120, 0);                                /* 模拟硬件滚轮 -> 钩子投 WM_WHEEL_ENH */
+    Pump(250);                                    /* 泵消息：驱动状态机并注入 */
+    CHECK(ActAutoScrollActive() && ActAutoScrollDir() == 1 && g_wheelInj >= 1,
+          "R: 增强模式下滚轮经钩子路由 -> 启动自动滚动");
+    CHECK(!TakeWheelAccel(NULL, NULL),
+          "R: 增强模式下不再走逐格加速（互斥）");
+
+    /* 非增强（只按 C）：仍走逐格加速，不启动自动滚动 */
+    KeyAlt(VK_LMENU, FALSE); Pump(2); Sink();
+    CHECK(!ActAutoScrollActive(), "R: 松开 Alt 终止（钩子路由路径）");
+    int dR = 0, mR = 0;
+    Wheel(-120, 0);
+    CHECK(TakeWheelAccel(&dR, &mR) && dR == -120 && mR == 2,
+          "R: 只按 C 时仍走逐格加速（delta=-120 mul=2）");
+    END_SCENE();
+    ConfigLoadFrom(L"bin/__absent__.ini");
 
     /* ---- 场景S：EnhanceKeys 可配 —— 把 D 去掉只留 Alt（用户的真实诉求） ----
        "以后等我适应了，还可能把 D 删除掉" —— 按设计这只需改一行配置，
