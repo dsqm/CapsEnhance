@@ -36,9 +36,13 @@ static CRITICAL_SECTION g_logcs;
    进去了。当时只有主线程写日志所以没暴露，但 act.c 的工作线程也会写 ——
    必须换成原子的 InitOnce。 */
 static INIT_ONCE g_logOnce = INIT_ONCE_STATIC_INIT;
+/* 轮转专用锁：与写日志的 g_logcs 分开，见 CapLog 里的说明。 */
+static CRITICAL_SECTION g_rotcs;
+static volatile LONG    g_rotatePending = 0;
 static BOOL CALLBACK LogCsInit(PINIT_ONCE o, PVOID p, PVOID* c) {
     (void)o; (void)p; (void)c;
     InitializeCriticalSection(&g_logcs);
+    InitializeCriticalSection(&g_rotcs);
     return TRUE;
 }
 
@@ -52,25 +56,38 @@ static void log_path(WCHAR* out, size_t cap) {
     /* 全程用宽字符拼路径：经 ANSI 转换会在安装路径含非 ACP 字符时写错文件 */
     _snwprintf_s(out, cap, _TRUNCATE, L"%s\\CapsEnhance.log", wexe);
 }
-/* 日志超过上限时保留最近的一半（老内容丢弃），避免长期开着记录涨到几十 MB。
-   上限由配置 [General] LogMaxKB 控制，0 = 不限制。
-   只在"确实超限"的那一次做，平时不碰这个函数 —— 它要读回半个文件再整写
-   一遍，代价远高于普通写日志。 */
-static void log_rotate_if_needed(const WCHAR* path) {
+/* 是否已达上限（只做一次 stat，非常便宜，可以放在写日志的路径上）。
+   上限由配置 [General] LogMaxKB 控制，0 = 不限制。 */
+static BOOL log_over_limit(const WCHAR* path) {
+    int maxKB = ConfigGetLogMaxKB();
+    if (maxKB <= 0) return FALSE;
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &d)) return FALSE;
+    LONGLONG sz = ((LONGLONG)d.nFileSizeHigh << 32) | (LONGLONG)d.nFileSizeLow;
+    return sz > (LONGLONG)maxKB * 1024;
+}
+
+/* 保留最近的一半（老内容丢弃），避免长期开着记录涨到几十 MB。
+   只在"确实超限"的那一次做，平时不碰 —— 它要读回半个文件再整写一遍，
+   代价远高于普通写日志，所以**绝不能放在写日志的锁里**（详情见 CapLog）。 */
+static void log_rotate(const WCHAR* path) {
     int maxKB = ConfigGetLogMaxKB();
     if (maxKB <= 0) return;
-    WIN32_FILE_ATTRIBUTE_DATA d;
-    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &d)) return;
-    LONGLONG sz = ((LONGLONG)d.nFileSizeHigh << 32) | (LONGLONG)d.nFileSizeLow;
-    if (sz <= (LONGLONG)maxKB * 1024) return;
-
     LONGLONG keep = (LONGLONG)maxKB * 1024 / 2;
+    /* 硬上限，双保险：LogMaxKB 已在配置层钳到 65536（keep 最大约 32MB），
+       但这里再兜一道，避免以后有人改了配置上限却忘了 32 位构建下
+       (size_t)keep 会回绕 —— 回绕后 malloc 拿到小缓冲、fread 按大长度写，
+       就是堆越界。 */
+    if (keep > 64 * 1024 * 1024) keep = 64 * 1024 * 1024;
+    if (keep <= 0) return;
+
     FILE* f = NULL;
     if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
     if (_fseeki64(f, -keep, SEEK_END) != 0) { fclose(f); return; }
-    char* buf = (char*)malloc((size_t)keep + 1);
+    size_t want = (size_t)keep;                /* 读的长度 == 分配的长度 */
+    char* buf = (char*)malloc(want + 1);
     if (!buf) { fclose(f); return; }
-    size_t got = fread(buf, 1, (size_t)keep, f);
+    size_t got = fread(buf, 1, want, f);
     fclose(f);
     /* 丢掉被切断的半行 */
     size_t off = 0;
@@ -94,9 +111,24 @@ static void log_rotate_if_needed(const WCHAR* path) {
    （见 act.c），不再压在主线程上 —— 不值得为它换掉可读性。 */
 void CapLog(const char* fmt, ...) {
     InitOnceExecuteOnce(&g_logOnce, LogCsInit, NULL, NULL);
-    EnterCriticalSection(&g_logcs);
     WCHAR wpath[MAX_PATH]; log_path(wpath, MAX_PATH);
-    log_rotate_if_needed(wpath);
+
+    /* 日志轮转**放在写锁之外**：它要读回半个文件再整写一遍，是几十毫秒级的
+       I/O。放在锁里会把其它写日志的线程（含 act.c 的工作线程）一起拖住 ——
+       而那正是"主线程被阻塞"的同一种味道。
+       做法：超限检测（一次 stat）留在常规路径上；真正的轮转由**碰巧拿到
+       g_rotcs 的那个线程**做，拿不到就跳过、下次再说 —— 于是没有任何线程
+       会为了轮转而等待。轮转与写入可能短暂交错，最坏丢掉一行日志，这对
+       诊断日志是可接受的代价。 */
+    if (log_over_limit(wpath)) InterlockedExchange(&g_rotatePending, 1);
+    if (InterlockedCompareExchange(&g_rotatePending, 0, 0) &&
+        TryEnterCriticalSection(&g_rotcs)) {
+        if (log_over_limit(wpath)) log_rotate(wpath);   /* 双重检查：可能已被别人转过 */
+        InterlockedExchange(&g_rotatePending, 0);
+        LeaveCriticalSection(&g_rotcs);
+    }
+
+    EnterCriticalSection(&g_logcs);
     FILE* f = NULL;
     if (_wfopen_s(&f, wpath, L"a") == 0 && f) {
         SYSTEMTIME st; GetLocalTime(&st);
@@ -412,6 +444,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                        "AutoScrollInterval=%d AutoScrollFastMs=%d",
                        eb, sb, ConfigGetWheelScrollMul(), ConfigGetAutoScrollInterval(),
                        ConfigGetAutoScrollFastMs());
+            }
+            {   /* 持续滚动的两端方向：AutoScrollFastMs 是"最快"，毫秒数必须
+                   **小于** AutoScrollInterval（起步）才有提速空间。写反了不会
+                   崩（act.c 里 `if (fast > slow) fast = slow`），但提速阶梯会
+                   **静默退化成恒定速度** —— 现象只是"再滚一下没变快"，极难
+                   自查，所以在诊断日志里明说。 */
+                int slow = ConfigGetAutoScrollInterval();
+                int fast = ConfigGetAutoScrollFastMs();
+                CapLog("自动滚动: 起步=%dms/格 最快=%dms/格 %s", slow, fast,
+                       (fast >= slow) ? "（!! 最快 >= 起步：提速已退化为恒速）" : "");
             }
             MessageBeep(MB_ICONASTERISK);   /* 系统"星号"音：开始记录（与结束不同） */
             TrayHint(L"正在记录日志（C+\x60 结束）");
