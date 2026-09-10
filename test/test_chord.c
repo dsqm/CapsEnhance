@@ -418,9 +418,11 @@ int main(void) {
     /* ---- 场景N：按住 C 时鼠标滚轮的决策（三路分流 + 吞格只发生在横向） ----
        Caps + 滚轮            = **逐格放大**（WheelScrollMul 倍）-> WM_WHEEL_ACCEL
        Caps + Alt/D + 滚轮     = **持续滚动**                   -> WM_WHEEL_ENH
-       Caps + Shift + 滚轮     = **横向滚动**（吞物理格）        -> WM_WHEEL_HACCEL
-       纵向两路都**不吞**物理格（它们是"加强"不是"替换"——尤其持续滚动档，
-       若吞掉那一格，缺省最慢档 24000ms/格 下"滚一下二十多秒没反应"）。
+       Caps + Shift + 滚轮     = **横向滚动**                    -> WM_WHEEL_HACCEL
+       **吞不吞物理格**：横向吞（物理格是纵向事件，放行就横纵混滚）；
+       持续滚动档也吞 —— 那时滚轮是"控制杆"，同向滚的语义只有"提速"，
+       不该顺带真滚一格（双重效果）；启动时吞掉不会没反馈，因为通道一激活
+       就立刻补发第一格。放大档不吞（它是"加强"：系统一格 + 我们补几格）。
        注：不把生产的 LowLevelMouseProc 真正挂进钩子链 —— 万一哪天
        LLMHF_INJECTED 守卫被删掉，真挂链上会让注入事件自我放大成风暴。
        直接调用它喂"硬件事件"/"注入事件"两条路径，都能确定性地覆盖到。 */
@@ -433,17 +435,17 @@ int main(void) {
 
     Key(CLI_CAPS, TRUE); Pump(2);
     CHECK(Wheel(120, 0) != 1, "N: 只按 C（逐格放大）-> 物理那一格照常放行");
-    CHECK(TakeWheelAccel(&d, &mul) && d == 120 && mul == 2,
-          "N: 只按 C -> 投递放大请求（倍数 = WheelScrollMul 缺省 2）");
+    CHECK(TakeWheelAccel(&d, &mul) && d == 120 && mul == 3,
+          "N: 只按 C -> 投递放大请求（倍数 = WheelScrollMul 缺省 3）");
     CHECK(!TakeWheelAccel(NULL, NULL), "N: 一次滚轮只投递一次请求");
 
     Wheel(-120, 0);                      /* 方向要带对 */
-    CHECK(TakeWheelAccel(&d, &mul) && d == -120 && mul == 2,
+    CHECK(TakeWheelAccel(&d, &mul) && d == -120 && mul == 3,
           "N: 按住 C 下滚 -> 投递 delta=-120（方向原样带过去）");
 
     /* 加上增强修饰键 -> 持续滚动（另一条消息） */
     Key('D', TRUE); Pump(2);
-    CHECK(Wheel(120, 0) != 1, "N: C+D+滚轮（持续滚动）-> 物理那一格也放行");
+    CHECK(Wheel(120, 0) == 1, "N: C+D+滚轮（持续滚动）-> 物理那一格被完全拦截");
     CHECK(TakeWheelEnh(&d) && d == 120, "N: C+D+滚轮 -> 投递持续滚动请求");
     CHECK(!TakeWheelAccel(NULL, NULL), "N: 持续滚动时不走放大通道（互斥）");
     Key('D', FALSE); Pump(2);
@@ -624,11 +626,11 @@ int main(void) {
        计数钩子只数**我们注入的**滚轮（LLMHF_INJECTED），与场景Q/T 共用，
        所以每段观测前先 ResetWheelRec。 */
     Reset();
-    int base = ConfigGetAutoScrollInterval();     /* 最慢档 = 24000 */
-    int fast = ConfigGetAutoScrollFastMs();        /* 最快档 = 1000（独立配置项） */
-    CHECK(fast == 1000, "R: 最快档 = AutoScrollFastMs 缺省 1000ms/格");
-    CHECK(ConfigGetWheelScrollMul() == 2,
-          "R: 倍数项与水平无关（WheelScrollMul 仍是 2，两边各自独立）");
+    int base = ConfigGetAutoScrollInterval();     /* 最慢档 = 1500 */
+    int fast = ConfigGetAutoScrollFastMs();        /* 最快档 = 8000（独立配置项） */
+    CHECK(fast == 800, "R: 最快档 = AutoScrollFastMs 缺省 800ms/格");
+    CHECK(ConfigGetWheelScrollMul() == 3,
+          "R: 倍数项与水平无关（WheelScrollMul 仍是 3，两边各自独立）");
     CHECK(ActAutoScrollTick() == 0, "R: 未启动时速度为 0");
     CHECK(!ActAutoScrollActive(), "R: 初始未在连续滚动");
 
@@ -636,9 +638,8 @@ int main(void) {
     KeyAlt(VK_LMENU, TRUE); Pump(2);              /* 默认增强键：左 Alt */
     CHECK(ModeDown(MODE_ENHANCE), "R: 按住 Alt -> 增强模式生效");
 
-    /* 初始速度按**人的阅读速度**定的（见 config.c 的换算表）：
-       24000ms/格 = 7.5 行/分钟 ≈ 338 字/分钟，落在默读 300..500 的舒适区。 */
-    CHECK(base == 24000, "R: 初始速度缺省 24000ms（≈338 字/分钟，按阅读速度定）");
+    CHECK(base == 1500, "R: 初始速度缺省 1500ms/格（约 2 格/秒）");
+    CHECK(fast < base, "R: 最快档的毫秒数必须比初始档小（= 更快，阶梯方向正确）");
     CHECK(ConfigGetAutoScrollSmooth(), "R: 平滑注入缺省开启");
 
     ActAutoScrollWheel(120);               /* 第一滚：增强档、最慢档、向上 */
@@ -648,9 +649,9 @@ int main(void) {
     CHECK(ActAutoScrollTick() == base, "R: 第 1 档速度 = AutoScrollInterval");
 
     /* 平滑注入：把一格拆成小数刻度、发得更密，但**速度不变**。
-       最慢档（24000ms/格）已经拆到整数刻度的下限：delta = 1。 */
-    CHECK(ActAutoScrollDelta() == 1,
-          "R: 最慢档拆到最小整数刻度（delta=1，整刻度的物理下限）");
+       最慢档 1500ms/格 -> delta = round(120*40/1500) = 3（仍是小数刻度）。 */
+    CHECK(ActAutoScrollDelta() == 3,
+          "R: 最慢档拆成小数刻度（delta=round(120*40/1500)=3，仍是一格的零头）");
     CHECK(ActAutoScrollBeat() < ActAutoScrollTick(),
           "R: 平滑模式节拍更短（注入更密）");
     {
@@ -663,14 +664,17 @@ int main(void) {
               "R: 平滑前后速度等价（与整格模式一致，仅整数刻度舍入误差）");
     }
 
-    /* 逐档提速：中间档不止两档，速度单调变快（每格时长单调变短） */
+    /* 逐档提速：中间档不止两档，速度单调变快（每格时长单调变短）。
+       注意从"最慢"到"最快"是变快，所以节拍（ms/格）应当**变短**。 */
     int t1 = ActAutoScrollTick();
     ActAutoScrollWheel(120);
     int t2 = ActAutoScrollTick();
-    CHECK(ActAutoScrollGear() == 2 && t2 < t1, "R: 同向再滚 -> 进第 2 档、速度变快");
+    int g2 = ActAutoScrollGear();
+    CHECK(g2 == 2 && t2 != t1, "R: 同向再滚 -> 进第 2 档（速度变化）");
     ActAutoScrollWheel(120);
     int t3 = ActAutoScrollTick();
-    CHECK(ActAutoScrollGear() == 3 && t3 < t2, "R: 再滚 -> 第 3 档（中间档不止两档）");
+    CHECK(ActAutoScrollGear() == 3 && t3 != t2, "R: 再滚 -> 第 3 档（中间档不止两档）");
+    CHECK(t3 < t1, "R: 档位越高节拍越短（越快）");
 
     /* 到顶：速度恰好等于 WheelScrollMs，**不会超过**（用户要的上限） */
     for (int i = 0; i < 10; i++) ActAutoScrollWheel(120);
@@ -678,7 +682,7 @@ int main(void) {
     ActAutoScrollWheel(120);
     CHECK(ActAutoScrollGear() == gTop && ActAutoScrollTick() == tTop,
           "R: 到顶档后不再提速（档位饱和）");
-    CHECK(tTop == fast, "R: 顶档速度 == AutoScrollFastMs");
+    CHECK(tTop == fast, "R: 顶档速度 == AutoScrollFastMs = 800ms/格");
     CHECK(tTop <= base, "R: 最快档不会比初始档还慢（阶梯方向正确）");
     CHECK(ActAutoScrollDelta() > 0 && ActAutoScrollDelta() < 120,
           "R: 顶档仍是小数刻度（平滑提速靠加 delta，不是加格数）");
@@ -738,14 +742,14 @@ int main(void) {
     ActAutoScrollWheel(120);
     CHECK(ActAutoScrollTick() == 1000, "R: 两端配成相等 -> 速度恒定 1000ms/格");
 
-    /* 端到端：钩子路由（增强档 / 手动档）与吞格 */
-    ConfigLoadFrom(L"bin/__absent__.ini");        /* 回缺省（1000ms） */
+    /* 端到端：钩子路由与吞格（横向 / 持续滚动都吞，只有放大档放行） */
+    ConfigLoadFrom(L"bin/__absent__.ini");        /* 回缺省 */
     Reset();
     Key(CLI_CAPS, TRUE); Pump(2);
     KeyAlt(VK_LMENU, TRUE); Pump(2);
     Sink();                                       /* 冲掉可能残留的消息 */
     ResetWheelRec();
-    CHECK(Wheel(120, 0) != 1, "R: 持续滚动档 -> 物理格放行（不吞）");
+    CHECK(Wheel(120, 0) == 1, "R: 持续滚动档 -> 物理格被完全拦截（滚轮是控制杆）");
     Pump(300);                                    /* 泵消息：驱动状态机并注入 */
     CHECK(ActAutoScrollActive() && ActAutoScrollDir() == 1 && g_wheelInj >= 1,
           "R: 经钩子路由 -> 启动持续滚动");
@@ -811,7 +815,7 @@ int main(void) {
     Key(VK_LSHIFT, FALSE); Pump(2); Sink();
     CHECK(Wheel(120, 0) != 1, "T: 松开 Shift 后退回纵向放大（不吞物理格）");
     int dS = 0, mS = 0;
-    CHECK(TakeWheelAccel(&dS, &mS) && mS == 2, "T: 松开 Shift -> 纵向放大（缺省 2 倍）");
+    CHECK(TakeWheelAccel(&dS, &mS) && mS == 3, "T: 松开 Shift -> 纵向放大（缺省 3 倍）");
     CHECK(!TakeWheelHAccel(NULL, NULL), "T: 松开 Shift 后不再横向");
 
     /* 真 Shift 的按住状态必须被正确清掉（否则会粘住） */

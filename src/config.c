@@ -35,7 +35,7 @@
    **本项只管「Caps+滚轮」**：自动滚动完全不看它，有自己的两个速度项
    （AutoScrollInterval / AutoScrollFastMs）—— 这是刻意的。倍数量与"毫秒/格"
    是两种量，既不能比较也不能互相约束，硬凑成一个值只会两边都不好用。 */
-#define WHEEL_MUL_DEFAULT 2
+#define WHEEL_MUL_DEFAULT 3
 #define WHEEL_MUL_MAX     16   /* 单次最多补发 15 格（每格间隔 2ms） */
 
 /* 自动滚动的**初始**节拍（ms）：启动后每 N 毫秒滚"一格"，即最慢档的速度。
@@ -60,7 +60,7 @@
                                       对应"边读边理解"的舒适区
        60000        3       135   <- 技术精读（80..150 字/分钟）
    嫌慢就再滚一下提速，或把本值调小。 */
-#define AUTOSCROLL_INTERVAL_DEFAULT 24000
+#define AUTOSCROLL_INTERVAL_DEFAULT 1500
 
 /* AutoScrollInterval 的可调范围（ms）。下限 100 对应" 1350 行/分钟"这种
    非人速的扫读，留着只是不设人为障碍；上限 60000（3 行/分钟 ≈ 135 字/分钟）
@@ -76,7 +76,7 @@
    想让它也慢下来就调大。
    注：本项与 AutoScrollInterval **有意分开、不共用** —— 虽然同单位，但一个管
    "起始速度"、一个管"上限"，拆开各自调才不会互相牵制。 */
-#define AUTOSCROLL_FAST_DEFAULT 1000
+#define AUTOSCROLL_FAST_DEFAULT 800
 #define AUTOSCROLL_FAST_MIN      20
 #define AUTOSCROLL_FAST_MAX   60000
 
@@ -90,10 +90,10 @@
 
 static WCHAR g_names[CFG_MAX_ENTRIES][CFG_NAME_MAX];
 static int   g_count = 0;
-static BOOL  g_runAsAdmin = FALSE;
+static BOOL  g_runAsAdmin = TRUE;    /* 缺省启用（缺省配置就是 RunAsAdmin = 1） */
 static int   g_logMaxKB   = 2048;   /* 日志大小上限（KB），0 = 不限制 */
-static int   g_maxArrowSteps = 32;  /* 逐格词跳最大步数，超过按 overStepMode 处理 */
-static BOOL  g_overStepCtrl = FALSE; /* TRUE=超限改发 Ctrl+方向（原生词跳） */
+static int   g_maxArrowSteps = 8;   /* 逐格词跳最大步数，超过按 overStepMode 处理 */
+static BOOL  g_overStepCtrl = TRUE;  /* TRUE=超限改发 Ctrl+方向（原生词跳） */
 static int   g_wheelMul = WHEEL_MUL_DEFAULT;  /* Caps+滚轮 放大倍数，<2 = 不放大 */
 static int   g_autoScrollFastMs = AUTOSCROLL_FAST_DEFAULT;       /* 自动滚动最快速度(ms/格) */
 static int   g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT; /* 自动滚动初始节拍(ms) */
@@ -165,10 +165,10 @@ static void AddEntry(const WCHAR* name) {
 /* 非 static：供单元测试直接喂指定路径 */
 void ConfigLoadFrom(const WCHAR* path) {
     g_count = 0;
-    g_runAsAdmin = FALSE;
+    g_runAsAdmin = TRUE;
     g_logMaxKB = 2048;
-    g_maxArrowSteps = 32;
-    g_overStepCtrl = FALSE;
+    g_maxArrowSteps = 8;
+    g_overStepCtrl = TRUE;
     g_wheelMul = WHEEL_MUL_DEFAULT;
     g_autoScrollFastMs = AUTOSCROLL_FAST_DEFAULT;
     g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT;
@@ -208,7 +208,7 @@ void ConfigLoadFrom(const WCHAR* path) {
         if (nl) *nl = 0;
         TrimW(line);
 
-        if (line[0] == L';' || line[0] == L'#' || !line[0]) {
+        if (line[0] == L';' || !line[0]) {
             /* 注释 / 空行：忽略 */
         } else if (line[0] == L'[') {
             WCHAR name[CFG_NAME_MAX];
@@ -231,7 +231,7 @@ void ConfigLoadFrom(const WCHAR* path) {
                 TrimW(key); TrimW(val); LowerW(key);
                 if (_wcsicmp(key, L"runasadmin") == 0) g_runAsAdmin = ParseBoolW(val);
                 else if (_wcsicmp(key, L"logmaxkb") == 0) g_logMaxKB = ParseIntW(val, 2048);
-                else if (_wcsicmp(key, L"maxarrowsteps") == 0) g_maxArrowSteps = ParseIntW(val, 32);
+                else if (_wcsicmp(key, L"maxarrowsteps") == 0) g_maxArrowSteps = ParseIntW(val, 8);
                 else if (_wcsicmp(key, L"overstepmode") == 0) g_overStepCtrl = ParseBoolW(val);
                 else if (_wcsicmp(key, L"wheelscrollmul") == 0) {
                     int v = ParseIntW(val, WHEEL_MUL_DEFAULT);
@@ -287,80 +287,54 @@ void ConfigLoad(void) {
     if (_wfopen_s(&probe, path, L"rb") != 0 || !probe) {
         /* 文件不存在：写一个带注释的模板，方便发现与编辑 */
         static const char kTemplate[] =
-            "; ============================================================\n"
-            "; CapsEnhance 配置文件\n"
-            "; ============================================================\n"
-            "; ; 或 # 开头的行是注释；空行忽略；[段名] 行用于切段\n"
-            "; 改动后需重启程序生效（或用托盘菜单的\"重启程序\"）\n"
+            "; 以 ; 开头的行是注释（空行忽略）；[段名] 行用于切段\n"
+            "; 改动后需重启程序生效\n"
             ";\n"
-            "\n"
             "[General]\n"
             "; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）\n"
-            "; 只认 0/1：1=启用，0=禁用（其它写法一律视为 0）\n"
-            "RunAsAdmin = 0\n"
-            "\n"
+            "; 1=启用，0=禁用\n"
+            "RunAsAdmin = 1\n"
+            ";\n"
             "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
             "LogMaxKB = 2048\n"
-            "\n"
-            "; 逐格词跳的最大步数（字符数）：单次要发的方向键达到这个数就不再逐格，\n"
-            "; 改按 OverStepMode 处理，避免方向键发太久。0 = 不限制（逐格发完）。\n"
-            "; 无论填多少，单次逐格发送另有 256 步的硬上限\n"
-            "MaxArrowSteps = 32\n"
-            "\n"
-            "; 超过 MaxArrowSteps 时的替代方式，只认 0/1：\n"
-            ";   0 = 只发送一个方向键（跳一格即停）\n"
-            ";   1 = 改发 Ctrl+方向键（由目标程序自己的词跳完成，瞬时）\n"
-            "OverStepMode = 0\n"
-            "\n"
-            "; ============ 滚轮 ============" "\n"
-            "; 按住 C 滚滚轮 = 每格放大成 N 倍（倍数项，见下面 WheelScrollMul）。" "\n"
-            "; 按住 C + Alt/D 滚滚轮 = 持续滚动（速度项，见下面两项）。" "\n"
-            "; 按住 C + Shift 滚滚轮 = 横向滚动（见 WheelHScrollMul）。" "\n"
-            "; 三者的配置项**各自独立**：倍数量与毫秒/格是两种量，不混用。" "\n"
-            "; 只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），也不写注册表。" "\n"
-            ";" "\n"
-            "; 按住 C 时滚轮的放大倍数：滚一格 = 原本一格 + 补 (N-1) 格。" "\n"
-            "; 0 或 1 = 不放大（滚轮按系统原本行为）。可调范围 0.." STR(WHEEL_MUL_MAX) "。" "\n"
-            "; 缺省 2：只补 1 格、没有间隔等待，手感与系统原生一致；3 以上要隔 2ms 补格，" "\n"
-            "; 滚动时能感觉到卡顿。" "\n"
-            "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n"
-            "\n"
-            "; 持续滚动（按住 C + Alt/D 滚滚轮）的**初始**速度：每 N 毫秒滚一格，越大越慢。" "\n"
-            "; 同向继续滚会逐档提速，最快到下面 AutoScrollFastMs 为止。" "\n"
-            "; 缺省 24000 = 7.5 行/分钟 ≈ 338 字/分钟，落在成人中文默读" "\n"
-            "; 300..500 字/分钟的舒适区；最慢可到 " STR(AUTOSCROLL_INTERVAL_MAX)
-            "（约 135 字/分钟，技术精读）。" "\n"
-            "; 可调范围 " STR(AUTOSCROLL_INTERVAL_MIN) ".." STR(AUTOSCROLL_INTERVAL_MAX) "。" "\n"
-            "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n"
-            "\n"
-            "; 持续滚动的**最快**速度：每 N 毫秒滚一格，越小越快。这是提速的上限，" "\n"
-            "; 与上面那个初始速度各自独立（一个管起步、一个管顶档）。" "\n"
-            "; 缺省 1000 = 1 格/秒 = 3 行/秒 ≈ 180 行/分钟（按每次滚 3 行）——" "\n"
-            "; 比任何阅读速度都快，属于看完了、快速往下翻的档位。" "\n"
-            "; 想更快就调小（下限 " STR(AUTOSCROLL_FAST_MIN) "），想让它也慢下来就调大。" "\n"
-            "; 可调范围 " STR(AUTOSCROLL_FAST_MIN) ".." STR(AUTOSCROLL_FAST_MAX) "。" "\n"
-            "AutoScrollFastMs = " STR(AUTOSCROLL_FAST_DEFAULT) "\n"
-            "\n"
+            ";\n"
+            "; 逐格词跳的最大步数：超过该距离的逐格跳转不再逐格发送，\n"
+            "; 改按 OverStepMode 处理，避免方向键发太久。0 = 不限制，最大 256\n"
+            "MaxArrowSteps = 8\n"
+            ";\n"
+            "; 超过 MaxArrowSteps 时的替代方式\n"
+            ";   0 = 只发送一个方向键\n"
+            ";   1 = 改发 Ctrl+方向键\n"
+            "OverStepMode = 1\n"
+            ";\n"
+            "; 按住 C 时滚轮的放大倍数：滚一格 = 原本一格 + 补 (N-1) 格。\n"
+            "; 0 或 1 = 不放大（滚轮按系统原本行为）。范围 0..16。\n"
+            "WheelScrollMul = 3\n"
+            ";\n"
+            "; 自动滚动的初始速度（毫秒/格，越大越慢）\n"
+            "; 最快到 AutoScrollFastMs\n"
+            "; 可调范围 100..60000。\n"
+            "AutoScrollInterval = 1500\n"
+            ";\n"
+            "; 持续滚动速度上限\n"
+            "; 与上面 AutoScrollInterval（初始速度）各自独立：一个管起步、一个管顶档。\n"
+            "; 范围 20..60000；想更快就调小，想让它也慢下来就调大。\n"
+            "AutoScrollFastMs = 800\n"
+            ";\n"
             "; 自动滚动是否平滑注入（1=是 / 0=否）。1 时只发\"不足一格\"的小刻度、\n"
             "; 次数更多，手感接近触控板连续滑动；个别程序不累积小刻度（完全不动）时设 0。\n"
-            "AutoScrollSmooth = " STR(AUTOSCROLL_SMOOTH_DEFAULT) "\n"
-            "\n"
+            "AutoScrollSmooth = 1\n"
+            ";\n"
             "; 横向滚动：按住 C + Shift 滚滚轮，横向挪动。倍数 1 = 一滚一格（默认），\n"
             "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n"
-            "; 方向同浏览器：滚轮向上 = 向左，滚轮向下 = 向右。\n"
-            "WheelHScrollMul = " STR(WHEEL_HMUL_DEFAULT) "\n"
-            "\n"
+            "WheelHScrollMul = 1\n"
+            ";\n"
             "[NativeWordJump]\n"
             "; 命中名单的程序：Caps+N / Caps+M 不做文本探测，\n"
-            "; 直接发送 Ctrl+\xe2\x86\x90 / Ctrl+\xe2\x86\x92，\n"
-            "; 由该程序自身的词导航完成按词跳转（Shift 位移同样支持）。\n"
-            "; 适用于文本读取不到、或读到的文本坐标与实际光标不符\n"
-            "; （跳词超调、光标乱飘）的程序。\n"
+            "; 直接发送 Ctrl+← / Ctrl+→，由该程序自身的词导航完成按词跳转（Shift 位移同样支持）。\n"
+            "; 适用于文本读取不到、或读到的文本坐标与实际光标不符（跳词超调、光标乱飘）的程序。\n"
             "; 每行一个进程名：完全匹配、大小写不敏感、.exe 后缀可写可不写\n"
-            ";\n"
-            "; 示例（去掉行首 ; 即可生效）：\n"
-            "; Editor.exe\n"
-            "; SomeApp\n";
+            "Obsidian.exe";
         FILE* w = NULL;
         if (_wfopen_s(&w, path, L"wb") == 0 && w) {
             fwrite(kTemplate, 1, sizeof(kTemplate) - 1, w);
@@ -385,44 +359,41 @@ static const struct {
     { "runasadmin",
       "\n"
       "; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）\n"
-      "; 只认 0/1：1=启用，0=禁用（其它写法一律视为 0）\n"
-      "RunAsAdmin = 0\n" },
+      "; 1=启用，0=禁用\n"
+      "RunAsAdmin = 1\n" },
     { "logmaxkb",
       "\n"
       "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
       "LogMaxKB = 2048\n" },
     { "maxarrowsteps",
       "\n"
-      "; 逐格词跳的最大步数（字符数）：超过该距离的逐格跳转不再逐格发送，\n"
-      "; 改按 OverStepMode 处理，避免方向键发太久。0 = 不限制（逐格发完）。\n"
-      "; 无论填多少，单次逐格发送另有 256 步的硬上限\n"
-      "MaxArrowSteps = 32\n" },
+      "; 逐格词跳的最大步数：超过该距离的逐格跳转不再逐格发送，\n"
+      "; 改按 OverStepMode 处理，避免方向键发太久。0 = 不限制，最大 256\n"
+      "MaxArrowSteps = 8\n" },
     { "overstepmode",
       "\n"
-      "; 超过 MaxArrowSteps 时的替代方式，只认 0/1：\n"
-      ";   0 = 只发送一个方向键（跳一格即停）\n"
-      ";   1 = 改发 Ctrl+方向键（由目标程序自己的词跳完成，瞬时）\n"
-      "OverStepMode = 0\n" },
+      "; 超过 MaxArrowSteps 时的替代方式\n"
+      ";   0 = 只发送一个方向键\n"
+      ";   1 = 改发 Ctrl+方向键\n"
+      "OverStepMode = 1\n" },
     { "wheelscrollmul",
       "\n"
-      "; 按住 C 时滚轮的放大倍数：滚一格 = 原本一格 + 补 (N-1) 格。" "\n"
-      "; 0 或 1 = 不放大（滚轮按系统原本行为）。范围 0.." STR(WHEEL_MUL_MAX) "。" "\n"
-      "; 注：过渡期这里曾是 WheelScrollMs（毫秒/格），两种量不可换算，已改回倍数；" "\n"
-      "; 老的 WheelScrollMs 行不再解析，可以删掉。" "\n"
+      "; 按住 C 时滚轮的放大倍数：滚一格 = 原本一格 + 补 (N-1) 格。\n"
+      "; 0 或 1 = 不放大（滚轮按系统原本行为）。范围 0.." STR(WHEEL_MUL_MAX) "。\n"
       "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n" },
-    { "autoscrollfastms",
-      "\n"
-      "; 持续滚动（按住 C + Alt/D）的**最快**速度：每 N 毫秒滚一格，越小越快。" "\n"
-      "; 与下面 AutoScrollInterval（初始速度）各自独立：一个管起步、一个管顶档。" "\n"
-      "; 缺省 1000 ≈ 180 行/分钟；想更快就调小，想让它也慢下来就调大。" "\n"
-      "; 范围 " STR(AUTOSCROLL_FAST_MIN) ".." STR(AUTOSCROLL_FAST_MAX) "。" "\n"
-      "AutoScrollFastMs = " STR(AUTOSCROLL_FAST_DEFAULT) "\n" },
     { "autoscrollinterval",
       "\n"
-      "; 自动滚动的初始速度（毫秒/格，越大越慢）：同向继续滚会逐档提速，\n"
-      "; 最快到 AutoScrollFastMs 为止（另一项，独立配置）。\n"
+      "; 自动滚动的初始速度（毫秒/格，越大越慢）\n"
+      "; 最快到 AutoScrollFastMs\n"
       "; 可调范围 " STR(AUTOSCROLL_INTERVAL_MIN) ".." STR(AUTOSCROLL_INTERVAL_MAX) "。\n"
       "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n" },
+    { "autoscrollfastms",
+      "\n"
+      "; 持续滚动速度上限\n"
+      "; 与上面 AutoScrollInterval（初始速度）各自独立：一个管起步、一个管顶档。\n"
+      "; 范围 " STR(AUTOSCROLL_FAST_MIN) ".." STR(AUTOSCROLL_FAST_MAX)
+      "；想更快就调小，想让它也慢下来就调大。\n"
+      "AutoScrollFastMs = " STR(AUTOSCROLL_FAST_DEFAULT) "\n" },
     { "autoscrollsmooth",
       "\n"
       "; 自动滚动是否平滑注入（1=是 / 0=否）。1 时只发\"不足一格\"的小刻度、\n"
@@ -432,7 +403,6 @@ static const struct {
       "\n"
       "; 横向滚动：按住 C + Shift 滚滚轮，横向挪动。倍数 1 = 一滚一格（默认），\n"
       "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n"
-      "; 方向同浏览器：滚轮向上 = 向左，滚轮向下 = 向右。\n"
       "WheelHScrollMul = " STR(WHEEL_HMUL_DEFAULT) "\n" },
 };
 
