@@ -21,9 +21,16 @@ HHOOK g_hook = NULL;
 void CapLog(const char* fmt, ...) { (void)fmt; }
 /* 未链接 hook.c：物理按键状态桩 */
 BOOL PhysKeyDown(int vk) { (void)vk; return FALSE; }
-/* 未链接 config.c：配置/权限查询桩（压测不关心） */
+/* 未链接 config.c：配置/权限查询桩（压测不关心，签名须与 cap.h 一致） */
 BOOL ConfigIsNativeWordJump(HWND focus) { (void)focus; return FALSE; }
 BOOL IsRunElevated(void) { return FALSE; }
+BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap) {
+    (void)focus;
+    if (out && cap) out[0] = 0;
+    return FALSE;
+}
+int  ConfigGetMaxArrowSteps(void) { return 0; }   /* 0=不限制：压测照常逐格 */
+BOOL ConfigGetOverStepCtrl(void) { return FALSE; }
 
 #include "nav.c"
 #include "send.c"
