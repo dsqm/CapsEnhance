@@ -152,6 +152,16 @@ static void Reset(void) {
 }
 
 static int fails = 0;
+
+/* 写一份临时 ini 供 ConfigLoadFrom 用（场景O：超限改道的契约验证）。
+   ConfigLoadFrom 会先把所有项复位成缺省再应用文件内容，所以每写必"干净"。 */
+static void WriteChordIni(const char* body) {
+    FILE* f = NULL;
+    if (fopen_s(&f, "bin/chordtest.ini", "wb") == 0 && f) {
+        fputs(body, f);
+        fclose(f);
+    }
+}
 #define CHECK(cond, name) do { \
     if (cond) printf("  [OK]   %s\n", name); \
     else      { printf("  [FAIL] %s   (captured: ", name); \
@@ -393,6 +403,52 @@ int main(void) {
     CHECK(SendWheelExtraCount(999) == 15, "N: 超过上限也只补发 15 格");
 
     Key(CLI_CAPS, FALSE); Pump(2);
+
+    /* ---- 场景O：超限"改道"的落点校验契约 ----
+       背景（QQ 实测）：MaxArrowSteps 超限后 SendArrows 改发原生 Ctrl+方向，
+       但改道的落点由**目标程序自己的词切分**决定 —— QQ/Chromium 按 ICU
+       词典切、1~2 字一步，我们按"连续汉字段"整段算（一次 10 字），两者不一致
+       时改道会把光标丢在整段中间（日志实例：期望 82，改道后停在 92，再按一次
+       停在 90）。修法：SendArrows 把"本次是改道"返回给调用方，nav.c 对改道这
+       一次也回读落点并按差额补足；补正自己走 SendArrowsStrict，绝不再改道。
+       真实落点要有真编辑器才能验；这里验的是发送层契约（可确定性断言）：
+       哪种情形返回哪个模式、注入的键序列对不对。 */
+    WriteChordIni("[General]\r\nMaxArrowSteps = 3\r\nOverStepMode = 1\r\n");
+    ConfigLoadFrom(L"bin/chordtest.ini");
+
+    ResetRec();
+    int mode = SendArrows(DIR_LEFT, 5, FALSE);     /* 5 >= 3：超限 */
+    Pump(30);
+    CHECK(mode == ARROW_SEND_HANDOFF, "O: 超限+OverStepMode=1 -> 返回\"已改道\"");
+    CHECK(CountVk(VK_LCONTROL) == 1 && CountVk(VK_LEFT) == 1 && CountVk(VK_RIGHT) == 0,
+          "O: 改道发的是 Ctrl+方向（一支，不逐格）");
+    CHECK(SeqIdx(VK_LCONTROL, 0) < SeqIdx(VK_LEFT, 0)
+          && SeqIdx(VK_LEFT, 1) < SeqIdx(VK_LCONTROL, 1),
+          "O: Ctrl 先按后抬（夹住方向键）");
+
+    ResetRec();
+    mode = SendArrows(DIR_LEFT, 2, FALSE);         /* 2 < 3：不超限 */
+    Pump(30);
+    CHECK(mode == ARROW_SEND_STEPS && CountVk(VK_LEFT) == 2 && CountVk(VK_LCONTROL) == 0,
+          "O: 未超限 -> 逐格 2 步、不带 Ctrl");
+
+    ResetRec();
+    SendArrowsStrict(DIR_LEFT, 5, FALSE);          /* 补正：即使超限也必须逐格 */
+    Pump(30);
+    CHECK(CountVk(VK_LEFT) == 5 && CountVk(VK_LCONTROL) == 0,
+          "O: 补正路径不因超限再改道（逐格 5 步、无 Ctrl）");
+
+    WriteChordIni("[General]\r\nMaxArrowSteps = 3\r\nOverStepMode = 0\r\n");
+    ConfigLoadFrom(L"bin/chordtest.ini");
+    ResetRec();
+    mode = SendArrows(DIR_LEFT, 5, FALSE);
+    Pump(30);
+    CHECK(mode == ARROW_SEND_ONE && CountVk(VK_LEFT) == 1 && CountVk(VK_LCONTROL) == 0,
+          "O: OverStepMode=0 -> 只发一格，返回\"不补正\"");
+
+    /* 复位成缺省：本场景是最后一个，但别给以后新加的场景留坑
+       （SendArrows 的行为受 MaxArrowSteps/OverStepMode 影响） */
+    ConfigLoadFrom(L"bin/__absent__.ini");         /* 文件不存在 -> 全部回缺省 */
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
     return fails;

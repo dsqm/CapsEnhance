@@ -114,27 +114,9 @@ BOOL SendArrowsConflicts(int act) {
    每个箭头单独发送并微小间隔，避免大批量 SendInput 在部分程序中只认第一个键；
    Shift 在整个跳词期间持续按住以维持选区。 */
 #define MAX_ARROW_STEPS 256
-void SendArrows(int dir, int n, BOOL shift) {
+/* 真正的逐格发送：不做任何超限判定，n 步就是 n 步。 */
+static void ArrowsEmit(int dir, int n, BOOL shift) {
     int vk = (dir == DIR_LEFT) ? VK_LEFT : VK_RIGHT;
-    /* 发送处统一判定：本次要发的步数达到 MaxArrowSteps 就改为
-         OverStepMode=1 -> 发原生 Ctrl+方向（目标程序自己的词跳，瞬时）
-         OverStepMode=0 -> 只发一个方向键（跳一格即停）
-       放在这里而不是调用方，是为了让所有调用路径（含"箭头补正"）都受
-       同一约束；MaxArrowSteps=0 表示不限制（硬上限仍是 256）。 */
-    int maxSteps = ConfigGetMaxArrowSteps();
-    if (maxSteps > 0 && n >= maxSteps) {
-        if (ConfigGetOverStepCtrl()) {
-            SendNativeWordJump(dir, shift);
-            if (g_recording)
-                CapLog("  -> 逐格步数 %d 达到 MaxArrowSteps(%d)，改发 Ctrl+arrow",
-                       n, maxSteps);
-            return;
-        }
-        n = 1;
-        if (g_recording)
-            CapLog("  -> 逐格步数 %d 达到 MaxArrowSteps(%d)，只发一格",
-                   n == 1 ? maxSteps : n, maxSteps);
-    }
     g_arrDir = dir; g_arrBusy = TRUE; g_arrBreak = FALSE;
     if (shift) { SendEvent(VK_LSHIFT, FALSE); Sleep(COMBO_GAP); }
     for (int i = 0; i < n && i < MAX_ARROW_STEPS; i++) {
@@ -148,6 +130,43 @@ void SendArrows(int dir, int n, BOOL shift) {
     }
     g_arrBusy = FALSE;
     if (shift) SendEvent(VK_LSHIFT, TRUE);   /* 打断时也要抬 Shift，选区停在此处 */
+}
+
+/* 补正专用：即使步数达到 MaxArrowSteps 也逐格走完，**不**改道。
+   补正的步数是"目标 - 实测落点"算出来的，它不是用户要跳的距离；若再判一次
+   超限就又会改道一次，而改道之后没有任何人再回读落点 —— 补正白做、光标又
+   落回段中间（这正是 QQ 场景里"跳词跳到段中间"的根因之一）。 */
+void SendArrowsStrict(int dir, int n, BOOL shift) {
+    ArrowsEmit(dir, n, shift);
+}
+
+int SendArrows(int dir, int n, BOOL shift) {
+    /* 发送处统一判定：本次要发的步数达到 MaxArrowSteps 就改为
+         OverStepMode=1 -> 发原生 Ctrl+方向（目标程序自己的词跳，瞬时）
+         OverStepMode=0 -> 只发一个方向键（跳一格即停）
+       放在这里而不是调用方，是为了让所有调用路径都受同一约束；
+       MaxArrowSteps=0 表示不限制（硬上限仍是 256）。 */
+    int maxSteps = ConfigGetMaxArrowSteps();
+    if (maxSteps > 0 && n >= maxSteps) {
+        int want = n;
+        if (ConfigGetOverStepCtrl()) {
+            SendNativeWordJump(dir, shift);
+            if (g_recording)
+                CapLog("  -> 逐格步数 %d 达到 MaxArrowSteps(%d)，改发 Ctrl+arrow",
+                       want, maxSteps);
+            /* 改道只是"让目标程序自己跳一格词"，落点由**它的**词切分决定，
+               跟我们的算法不一定一致（中文尤其明显，见 cap.h 的说明），
+               所以必须把"本次是改道"告诉调用方去回读校验。 */
+            return ARROW_SEND_HANDOFF;
+        }
+        if (g_recording)
+            CapLog("  -> 逐格步数 %d 达到 MaxArrowSteps(%d)，只发一格",
+                   want, maxSteps);
+        ArrowsEmit(dir, 1, shift);
+        return ARROW_SEND_ONE;   /* 用户明确要"跳一格即停"：不做补正 */
+    }
+    ArrowsEmit(dir, n, shift);
+    return ARROW_SEND_STEPS;
 }
 
 /* 滚轮加速：补发 (mul-1) 个"标准刻度"，逐格发、每格之间隔 2ms。

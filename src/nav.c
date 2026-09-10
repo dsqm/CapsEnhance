@@ -1068,26 +1068,40 @@ int NavJump(int dir, BOOL shift) {
             free(t2);
         }
     }
-    /* 超限与否由 SendArrows 在发送处判定（达到阈值即改道）；这里只记一个
-       标志用于跳过补正：改道后的落点由目标程序决定、"只发一格"本就不该
-       走到 tgt，补正一叠加就会出现"跳过去又跳回来"。 */
-    BOOL overLimit = (ConfigGetMaxArrowSteps() > 0 &&
-                      steps >= ConfigGetMaxArrowSteps());
-    if (!direct && !skipArrows) SendArrows(dir, steps, shift);
+    /* 超限与否由 SendArrows 在发送处判定（达到阈值即改道）。它的返回值说明
+       本次走了哪条路，"改道"那一次**必须回读校验落点**：改道的前提是"目标
+       程序自己的词切分 == 我们算的跳法"，而中文里两者经常不一致 —— 实测
+       QQ(Chromium) 的 Ctrl+方向按 ICU 词典切、1~2 字一步，我们按"连续汉字
+       段"整段算，于是期望 tgt=82 却停在 92、再按一次停在 90：光标落在整段
+       中间，用户看到的就是"跳词跳到段中间、左右不对称"。
+       只有 OverStepMode=0 的"只发一格"不补正 —— 那是用户明确要的"跳一格
+       即停"，补正一叠加就成了"跳过去又跳回来"。 */
+    int sendMode = ARROW_SEND_STEPS;
+    if (!direct && !skipArrows) sendMode = SendArrows(dir, steps, shift);
+    BOOL handedOff = (sendMode == ARROW_SEND_HANDOFF);
+    BOOL oneStep   = (sendMode == ARROW_SEND_ONE);
     /* 自校验补正：经典 Edit 通道能读回光标。实测 EmEditor 会在直接置位后
        吞掉第一支箭头（虚拟机里也可能丢键），导致逐格跳少走一格——
        读回实际位置，按差值补发（只补一轮、差值不超过原步数，防打转）。
-       带 Shift 的选区移动不做补正（anchor 校验复杂，收益低）。 */
-    if (!direct && !overLimit && !shift && path[0] == 'E' && focus) {
+       带 Shift 的选区移动不做补正（anchor 校验复杂，收益低）。
+       补正一律走 SendArrowsStrict：步数是"还差多少"算出来的，再判一次超限
+       就又改道一次、又落不到目标，而改道之后没人再校验。
+       Scintilla 通道暂不做补正（SCI_GETCURRENTPOS 是字节域，回读后要反向
+       换算成 UTF-16 才能和 tgt 比，现无该方向的换算函数）；记此备查。 */
+    if (!direct && !oneStep && !shift && path[0] == 'E' && focus) {
         LONGLONG now = EditGetCaret(focus);
-        if (now >= 0 && now != (LONGLONG)tgt) {
+        if (now >= 0 && now == (LONGLONG)tgt) {
+            if (handedOff && g_recording)
+                CapLog("  -> 改道落点与目标一致 (caret=%lld)", now);
+        } else if (now >= 0) {
             LONGLONG diff = (LONGLONG)tgt - now;
             if (diff > 0 && diff <= steps)
-                SendArrows(DIR_RIGHT, (int)diff, FALSE);
+                SendArrowsStrict(DIR_RIGHT, (int)diff, FALSE);
             else if (diff < 0 && -diff <= steps)
-                SendArrows(DIR_LEFT, (int)-diff, FALSE);
+                SendArrowsStrict(DIR_LEFT, (int)-diff, FALSE);
             if (g_recording)
-                CapLog("  -> 箭头补正 %lld (caret=%lld -> %d)", diff, now, tgt);
+                CapLog("  -> 箭头补正 %lld (caret=%lld -> %d)%s", diff, now, tgt,
+                       handedOff ? " [改道落点不符，已补足]" : "");
         }
     }
     /* 自校验补正（UIA / IA2）：部分自定义编辑器（Electron 里带渲染装饰的
@@ -1097,24 +1111,33 @@ int NavJump(int dir, BOOL shift) {
        仅当读回的仍是同一页文本（长度与内容都一致，坐标可比）才按差值补一轮；
        差值超过原步数说明坐标系统性不可靠，放弃补正（不做任何自动切换，
        只提示）—— 这类程序请把进程名写进配置文件的 [NativeWordJump] 名单。 */
-    if (!direct && !skipArrows && !overLimit && !shift
+    if (!direct && !skipArrows && !oneStep && !shift
         && (path[0] == 'U' || path[0] == 'I') && focus) {
         WCHAR* t2 = NULL; int l2 = 0, c2 = 0;
         BOOL ok2 = (path[0] == 'U') ? UiaGetTextCaret(focus, &t2, &l2, &c2)
                                     : MsaaGetTextCaret(focus, &t2, &l2, &c2);
-        if (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0 && c2 != tgt) {
+        /* 只在"读回的仍是同一页文本"（长度与内容都一致）时才比坐标 */
+        BOOL comparable = (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0);
+        if (comparable && c2 == tgt) {
+            /* 改道的落点跟目标一致：说明这个程序的词切分和我们算的一致，
+               不必再动它（只记一行日志，便于确认改道是否可信） */
+            if (handedOff && g_recording)
+                CapLog("  -> 改道落点与目标一致 (caret=%d)", c2);
+        } else if (comparable) {
             int diff = tgt - c2;
-            if (diff > 0 && diff <= steps)        SendArrows(DIR_RIGHT,  diff, FALSE);
-            else if (diff < 0 && diff >= -steps)  SendArrows(DIR_LEFT,  -diff, FALSE);
+            if (diff > 0 && diff <= steps)        SendArrowsStrict(DIR_RIGHT,  diff, FALSE);
+            else if (diff < 0 && diff >= -steps)  SendArrowsStrict(DIR_LEFT,  -diff, FALSE);
             if (diff > steps || diff < -steps) {
                 /* 偏差比整个步长还大：坐标系统性不可靠，补也补不准，
                    放弃本次补正（只提示，不做任何自动切换）。 */
                 if (g_recording)
                     CapLog("  -> 文本坐标与实际光标不符(caret=%d 期望 %d)，差 %d 超出步数 %d，"
-                           "放弃补正。建议把该程序加入 [NativeWordJump] 名单",
-                           c2, tgt, diff, steps);
+                           "放弃补正。建议把该程序加入 [NativeWordJump] 名单%s",
+                           c2, tgt, diff, steps,
+                           handedOff ? "（或把 MaxArrowSteps 调大）" : "");
             } else if (g_recording) {
-                CapLog("  -> 箭头补正 %d (caret=%d -> %d)", diff, c2, tgt);
+                CapLog("  -> 箭头补正 %d (caret=%d -> %d)%s", diff, c2, tgt,
+                       handedOff ? " [改道落点不符，已补足]" : "");
             }
         }
         free(t2);

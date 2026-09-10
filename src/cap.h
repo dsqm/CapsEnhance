@@ -103,7 +103,18 @@ void ReleaseFill(int act, BOOL d, BOOL shift, int count);       /* 松手补齐�
    之前 hook.c(SendClick) 与 nav.c(SendArrows/兜底) 各写一份，两边的
    缺陷也不一样（缺 KEYEVENTF_EXTENDEDKEY / Ctrl 提前抬起），统一后只修一处。 */
 void SendKeyOnce(int vk, BOOL shift);        /* 单击一个键，shift 全程按住 */
-void SendArrows(int dir, int n, BOOL shift); /* n 个左/右箭头，shift 全程按住 */
+
+/* SendArrows 的返回值：本次实际走了哪条路（决定上层要不要回读校验落点）。
+   为什么要区分：MaxArrowSteps 超限后"改道发原生 Ctrl+方向"只是把跳转交给
+   目标程序，落点由**它的**词切分决定 —— 实测 QQ(Chromium/ICU 词典) 的
+   Ctrl+方向是 1~2 字一步，而我们按"连续汉字段"整段算，两者不一致时改道会
+   把光标丢在段中间。所以改道那一次必须回读并按差额补足；而 OverStepMode=0
+   的"只发一格"是用户明确的"跳一格即停"，不能补。 */
+#define ARROW_SEND_STEPS   0   /* 逐格发完 n 步（可做丢键补正）              */
+#define ARROW_SEND_HANDOFF 1   /* 改道成原生 Ctrl+方向：落点必须回读校验     */
+#define ARROW_SEND_ONE     2   /* 超限且 OverStepMode=0：只发一格，不补正    */
+int  SendArrows(int dir, int n, BOOL shift); /* n 个左/右箭头，返回 ARROW_SEND_* */
+void SendArrowsStrict(int dir, int n, BOOL shift); /* 同上但绝不改道（补正专用） */
 void SendArrowsRequestInterrupt(void);       /* 请求打断正在进行的逐格输出（钩子线程调用） */
 BOOL SendArrowsConflicts(int act);           /* act 是否与正在逐格输出的方向冲突 */
 void SendNativeWordJump(int dir, BOOL shift);/* 原生 Ctrl(+Shift)+方向：词跳兜底 */
