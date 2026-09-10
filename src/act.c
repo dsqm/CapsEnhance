@@ -32,8 +32,16 @@ static HANDLE  s_evWork = NULL;          /* auto-reset：有活干           */
 static HANDLE  s_evIdle = NULL;          /* manual-reset：空闲           */
 static HANDLE  s_thread = NULL;
 static volatile LONG s_stop = 0;
+static volatile LONG s_dead = 0;         /* 1 = 已停止：投递一律丢弃     */
 static volatile LONG s_busy = 0;         /* 1 = 正在执行某个动作         */
 static BOOL    s_init = FALSE;
+
+/* 统一的 Interlocked 读：s_stop / s_wStop / s_asStop 只在 ActStart/ActStop
+   这类"线程还没跑或已经 join"的时刻用普通赋值，其它地方一律走 Interlocked
+   —— 混用会被 MSVC /analyze 判为 C28112，而且确实没有理由混用。 */
+#define STOPPED(p) (InterlockedCompareExchange((p), 0, 0) != 0)
+#define ACTIVE(p)  (InterlockedCompareExchange((p), 0, 0) != 0)
+#define ATOMIC(p)  (InterlockedCompareExchange((p), 0, 0))
 
 static ActJob  s_q[ACT_QUEUE_MAX];
 static int     s_head = 0, s_tail = 0, s_n = 0;
@@ -73,12 +81,12 @@ static DWORD WINAPI ActThread(LPVOID p) {
     (void)p;
     for (;;) {
         /* 1s 超时是保险：即便某次 SetEvent 被吞掉也不会永久挂住 */
-        if (InterlockedCompareExchange(&s_stop, 0, 0)) break;
+        if (STOPPED(&s_stop)) break;
         WaitForSingleObject(s_evWork, 1000);
         for (;;) {
             ActJob j;
             EnterCriticalSection(&s_cs);
-            if (s_stop) { LeaveCriticalSection(&s_cs); return 0; }
+            if (STOPPED(&s_stop)) { LeaveCriticalSection(&s_cs); return 0; }
             if (s_n == 0) { LeaveCriticalSection(&s_cs); break; }
             j = s_q[s_head];
             s_head = (s_head + 1) % ACT_QUEUE_MAX;
@@ -127,12 +135,12 @@ static int     s_wHead = 0, s_wTail = 0, s_wN = 0;
 static DWORD WINAPI WheelThread(LPVOID p) {
     (void)p;
     for (;;) {
-        if (InterlockedCompareExchange(&s_wStop, 0, 0)) break;
+        if (STOPPED(&s_wStop)) break;
         WaitForSingleObject(s_wEvWork, 1000);   /* 1s 超时兜底，防事件被吞 */
         for (;;) {
             int delta, mul; BOOL horz;
             EnterCriticalSection(&s_wcs);
-            if (s_wStop) { LeaveCriticalSection(&s_wcs); return 0; }
+            if (STOPPED(&s_wStop)) { LeaveCriticalSection(&s_wcs); return 0; }
             if (s_wN == 0) { LeaveCriticalSection(&s_wcs); break; }
             delta = s_wDelta[s_wHead];
             mul   = s_wMul[s_wHead];
@@ -156,13 +164,21 @@ static void WheelPost(int delta, int n, BOOL horz) {
     if (delta == 0) return;
     if (n <= 0) return;
     if (!horz && SendWheelExtraCount(n) <= 0) return;   /* 倍数 <2：不放大 */
-    if (!s_wInit) {                        /* 线程起不来：同步兜底 */
+    if (!s_wInit) {
+        /* 分两种，不能一概"同步兜底"：
+             · 线程**从未**起来（CreateThread 失败）-> 同步注入，宁可损失
+               响应性也不能让功能失效；
+             · 已经 ActStop() 停掉了 -> **直接丢弃**。退出/重启路径是
+               ActStop() -> ... -> HookUninstall()，钩子在 ActStop 之后仍然
+               装着，这段窗口期内再来滚轮事件就会在**主线程**同步跑
+               SendWheelAxis 的 Sleep —— 正是本文件头要消灭的根因。 */
+        if (STOPPED(&s_dead)) return;
         if (horz) SendWheelHNotches(delta, n);
         else      SendWheelAccel(delta, n);
         return;
     }
     EnterCriticalSection(&s_wcs);
-    if (s_wStop) { LeaveCriticalSection(&s_wcs); return; }
+    if (STOPPED(&s_wStop)) { LeaveCriticalSection(&s_wcs); return; }
     if (s_wN == ACT_WHEEL_QMAX) {          /* 满：丢最旧的一条 */
         s_wHead = (s_wHead + 1) % ACT_WHEEL_QMAX;
         s_wN--;
@@ -190,7 +206,8 @@ void ActWheelClear(void) {
 /* 起/停滚轮通道。起不来不算致命：s_wInit 保持 FALSE，两个投递入口都退回同步注入
    （损失一点响应性，但功能不失效）。 */
 static void WheelLaneStart(void) {
-    s_wStop = 0; s_wHead = s_wTail = s_wN = 0;
+    InterlockedExchange(&s_wStop, 0);
+    s_wHead = s_wTail = s_wN = 0;
     memset(s_wHorz, 0, sizeof(s_wHorz));
     InitializeCriticalSection(&s_wcs);
     s_wEvWork = CreateEventW(NULL, FALSE, FALSE, NULL);
@@ -343,32 +360,34 @@ static volatile LONG   s_asDir    = 0;     /* +1 上滚 / -1 下滚 */
 
 /* 最快档速度（毫秒/格）。 */
 int  ActAutoScrollFastMs(void) { return AutoScrollFastMs(); }
-BOOL ActAutoScrollActive(void) { return s_asActive != 0; }
-int  ActAutoScrollGear(void)   { return s_asActive ? (int)s_asGear : 0; }
-int  ActAutoScrollDir(void)    { return s_asActive ? (int)s_asDir  : 0; }
+BOOL ActAutoScrollActive(void) { return ACTIVE(&s_asActive); }
+int  ActAutoScrollGear(void)   { return ACTIVE(&s_asActive) ? (int)ATOMIC(&s_asGear) : 0; }
+int  ActAutoScrollDir(void)    { return ACTIVE(&s_asActive) ? (int)ATOMIC(&s_asDir)  : 0; }
 /* 单测用：当前速度（每格多少毫秒）。与粒度无关 —— 平滑与否它都一样，
    所以它是"速度"的判据；Beat/Delta 才是"本拍怎么发"的判据。 */
 int  ActAutoScrollTick(void)   {
-    return s_asActive ? (int)AutoScrollTickMs((int)s_asGear) : 0;
+    return ACTIVE(&s_asActive) ? (int)AutoScrollTickMs((int)ATOMIC(&s_asGear)) : 0;
 }
 int  ActAutoScrollBeat(void)   {
-    if (!s_asActive) return 0;
+    if (!ACTIVE(&s_asActive)) return 0;
     DWORD beat; int delta;
-    AutoScrollPlan((int)s_asGear, &beat, &delta);
+    AutoScrollPlan((int)ATOMIC(&s_asGear), &beat, &delta);
     return (int)beat;
 }
 int  ActAutoScrollDelta(void)  {
-    if (!s_asActive) return 0;
+    if (!ACTIVE(&s_asActive)) return 0;
     DWORD beat; int delta;
-    AutoScrollPlan((int)s_asGear, &beat, &delta);
-    return ((int)s_asDir >= 0) ? delta : -delta;   /* 带方向 */
+    AutoScrollPlan((int)ATOMIC(&s_asGear), &beat, &delta);
+    return ((int)ATOMIC(&s_asDir) >= 0) ? delta : -delta;   /* 带方向 */
 }
 
 /* 立即终止。非阻塞：只置状态 + 唤醒工作线程，绝不在调用线程里等它收尾
    （调用方可能是键盘钩子所在的主线程）。 */
 void ActAutoScrollStop(void) {
     if (s_asInit) EnterCriticalSection(&s_asCs);
-    s_asActive = 0; s_asGear = 0; s_asDir = 0;
+    InterlockedExchange(&s_asActive, 0);
+    InterlockedExchange(&s_asGear, 0);
+    InterlockedExchange(&s_asDir, 0);
     if (s_asInit) { LeaveCriticalSection(&s_asCs); SetEvent(s_asEvPoke); }
 }
 
@@ -378,14 +397,18 @@ void ActAutoScrollWheel(int delta) {
     if (delta == 0 || !s_asInit) return;
     int dir = (delta > 0) ? 1 : -1;
     EnterCriticalSection(&s_asCs);
-    if (!s_asActive) {
-        s_asActive = 1; s_asDir = dir; s_asGear = 1;    /* 第一滚：最慢档启动 */
-    } else if ((int)s_asDir != dir) {
+    if (!ACTIVE(&s_asActive)) {
+        InterlockedExchange(&s_asActive, 1);
+        InterlockedExchange(&s_asDir, dir);
+        InterlockedExchange(&s_asGear, 1);   /* 第一滚：最慢档启动 */
+    } else if ((int)ATOMIC(&s_asDir) != dir) {
         /* 反向：立即终止，并**清零档位** —— 下次启动从第 1 档重来，
            不残留打断前的速度（用户要的"反向打断后重置滚动速度"）。 */
-        s_asActive = 0; s_asDir = 0; s_asGear = 0;
-    } else if ((int)s_asGear < AUTOSCROLL_SPEED_STEPS) {
-        s_asGear++;                                     /* 同向：平滑进一档 */
+        InterlockedExchange(&s_asActive, 0);
+        InterlockedExchange(&s_asDir, 0);
+        InterlockedExchange(&s_asGear, 0);
+    } else if ((int)ATOMIC(&s_asGear) < AUTOSCROLL_SPEED_STEPS) {
+        InterlockedExchange(&s_asGear, (LONG)ATOMIC(&s_asGear) + 1);  /* 同向：平滑进一档 */
     }
     LeaveCriticalSection(&s_asCs);
     SetEvent(s_asEvPoke);
@@ -395,28 +418,28 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
     (void)p;
     BOOL running = FALSE;
     for (;;) {
-        if (InterlockedCompareExchange(&s_asStop, 0, 0)) break;
+        if (STOPPED(&s_asStop)) break;
 
         if (!running) {
             /* 空闲：等一次状态变化（1s 超时兜底，防事件被吞）。
                先看状态再看事件 —— 否则"激活事件已被上一轮吃掉"时会白等 1s。 */
-            if (!InterlockedCompareExchange(&s_asActive, 0, 0))
+            if (!ACTIVE(&s_asActive))
                 WaitForSingleObject(s_asEvPoke, 1000);
-            if (InterlockedCompareExchange(&s_asStop, 0, 0)) break;
-            if (!InterlockedCompareExchange(&s_asActive, 0, 0)) continue;
+            if (STOPPED(&s_asStop)) break;
+            if (!ACTIVE(&s_asActive)) continue;
             running = TRUE;          /* 落到下面立刻发第一格：启动要即时响应 */
         }
 
-        if (!InterlockedCompareExchange(&s_asActive, 0, 0)) { running = FALSE; continue; }
+        if (!ACTIVE(&s_asActive)) { running = FALSE; continue; }
         /* 兜底：增强模式失效（松开 Alt/D）或松开 C 就停 */
         if (!g_cMod || !ModeDown(MODE_ENHANCE)) {
             ActAutoScrollStop(); running = FALSE; continue;
         }
-        int dir = (int)s_asDir;
+        int dir = (int)ATOMIC(&s_asDir);
         if (dir == 0) { running = FALSE; continue; }   /* 防御：不该出现 */
 
         DWORD tick; int delta;
-        AutoScrollPlan((int)s_asGear, &tick, &delta);
+        AutoScrollPlan((int)ATOMIC(&s_asGear), &tick, &delta);
         SendWheelNotches(dir > 0 ? delta : -delta, 1);
 
         /* 等满这一个节拍。**变速不打断本拍**（下一拍才生效）：未选中的唤醒
@@ -429,11 +452,11 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
             ULONGLONG now = GetTickCount64();
             if (now >= deadline) break;
             if (WaitForSingleObject(s_asEvPoke, (DWORD)(deadline - now)) == WAIT_TIMEOUT) break;
-            if (InterlockedCompareExchange(&s_asStop, 0, 0)) { ended = TRUE; break; }
-            if (!InterlockedCompareExchange(&s_asActive, 0, 0)) { ended = TRUE; break; }
+            if (STOPPED(&s_asStop)) { ended = TRUE; break; }
+            if (!ACTIVE(&s_asActive)) { ended = TRUE; break; }
         }
         if (ended) {
-            if (InterlockedCompareExchange(&s_asStop, 0, 0)) break;
+            if (STOPPED(&s_asStop)) break;
             running = FALSE;
         }
     }
@@ -443,8 +466,10 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
 /* 起/停持续滚动通道。起不来不算致命：s_asInit 保持 FALSE，ActAutoScrollWheel
    直接忽略 —— "持续滚动"没法像补一格那样在同一调用里同步兜底。 */
 static void AutoScrollLaneStart(void) {
-    s_asStop = 0;
-    s_asActive = 0; s_asGear = 0; s_asDir = 0;
+    InterlockedExchange(&s_asStop, 0);
+    InterlockedExchange(&s_asActive, 0);
+    InterlockedExchange(&s_asGear, 0);
+    InterlockedExchange(&s_asDir, 0);
     InitializeCriticalSection(&s_asCs);
     s_asEvPoke = CreateEventW(NULL, FALSE, FALSE, NULL);
     s_asThread = s_asEvPoke ? CreateThread(NULL, 0, AutoScrollThread, NULL, 0, NULL) : NULL;
@@ -475,7 +500,9 @@ BOOL ActStart(void) {
     if (s_init) return TRUE;
     memset(s_q, 0, sizeof(s_q));
     s_head = s_tail = s_n = 0;
-    s_stop = 0; s_busy = 0;
+    InterlockedExchange(&s_stop, 0);
+    InterlockedExchange(&s_dead, 0);
+    InterlockedExchange(&s_busy, 0);
     InitializeCriticalSection(&s_cs);
     s_evWork = CreateEventW(NULL, FALSE, FALSE, NULL);
     s_evIdle = CreateEventW(NULL, TRUE, TRUE, NULL);
@@ -499,9 +526,15 @@ BOOL ActStart(void) {
     return TRUE;
 }
 
-/* 停止线程。调用后本进程不再执行任何动作（退出/重启专用）。 */
+/* 停止线程。调用后本进程不再执行任何动作（退出/重启专用）。
+   **注意调用方（main.c）的收尾顺序是 ActStop() -> HookUninstall()** ——
+   两者之间钩子仍然装着、事件仍会进来，所以本函数在把 s_init 置 FALSE 的
+   同时必须置 s_dead：让所有投递入口直接丢弃请求，而不是退回"同步兜底"
+   （那会把 NavJump 的数百毫秒 IPC 或滚轮注入的 Sleep 重新塞回承载钩子的
+   主线程）。 */
 void ActStop(void) {
     if (!s_init) return;
+    InterlockedExchange(&s_dead, 1);
     AutoScrollLaneStop();                /* 先停自动滚动：它可能还在持续注入 */
     WheelLaneStop();                     /* 再停滚轮通道：它只注入鼠标滚轮 */
     InterlockedExchange(&s_stop, 1);
@@ -525,9 +558,16 @@ void ActStop(void) {
 
 void ActPost(const ActJob* job) {
     if (!job) return;
-    if (!s_init) { RunJob(job); return; }     /* 线程不可用：同步兜底 */
+    if (!s_init) {
+        /* 与 WheelPost 同一条规则：从未起来 -> 同步兜底；已 ActStop -> 丢弃。
+           这里的同步兜底更危险 —— RunJob 可能是 NavJump（数百毫秒的跨进程
+           IPC），而 ActStop() 之后钩子还没卸（见 ActStop 的注释）。 */
+        if (STOPPED(&s_dead)) return;
+        RunJob(job);
+        return;
+    }
     EnterCriticalSection(&s_cs);
-    if (s_stop) { LeaveCriticalSection(&s_cs); return; }
+    if (STOPPED(&s_stop)) { LeaveCriticalSection(&s_cs); return; }
     if (s_n == ACT_QUEUE_MAX) {
         /* 队列满（理论上不会：引擎把飞行中的动作数限制在个位数）。
            丢最旧的一条，保证最近的动作总能执行到。 */

@@ -41,7 +41,12 @@ static const int kMods[MOD_COUNT] = {
     VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL,
     VK_LMENU,  VK_RMENU,  VK_LWIN,     VK_RWIN
 };
-static BOOL g_injectedDown[MOD_COUNT] = { 0 };
+/* volatile：SendEvent 由 act.c 的**工作线程**调用写入，而 SendClearStuckModifiers
+   在退出/重启时由主线程读取。两处之间有 ActStop() 的线程 join 建立
+   happens-before，所以理论上不加也算对 —— 但这份正确性完全依赖"调用方记得
+   先 ActStop"，写成 volatile 至少让"没同步就跨线程读"这件事在代码审查时
+   一眼可见，不需要去推理调用顺序。 */
+static volatile BOOL g_injectedDown[MOD_COUNT] = { 0 };
 
 static int ModIndex(int vk) {
     for (int i = 0; i < MOD_COUNT; i++) if (kMods[i] == vk) return i;
