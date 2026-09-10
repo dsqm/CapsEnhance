@@ -86,7 +86,16 @@
 
 ### 直接置光标（远跳提速）
 
-对经典 Edit，当跳转距离 ≥ 6 个字符时，用一次 `EM_SETSEL` 直接把光标（或选区）设到目标位置——**瞬跳**，不再逐格发送方向键（规避远距离逐格慢、部分程序只认第一个键的问题）。小距离仍发送真实方向键以保持行为完全一致。置位后回读校验，控件不配合就退回逐格箭头。
+跳转距离 ≥ 6 个字符时**直接置位**（瞬跳），不再逐格发送方向键；小距离仍发真实方向键保持行为一致。置位后回读校验，控件不配合就退回逐格箭头。三条置位路径：
+
+| 通道 | API | 依据 |
+| ---- | ---- | ---- |
+| 经典 Edit / EmEditorView | `EM_SETSEL` | 经典编辑协议 |
+| Scintilla | `SCI_SETSEL` | Scintilla 消息 |
+| **UIA** | `TextRange.Select()` | 官方语义：退化（空）range 上调用 Select 时 *"the text insertion point moves to the starting endpoint"*——即直接移动光标。锚定后克隆 DocumentRange 折叠到 caret，`MoveEndpointByUnit(Character, delta)` 展开到目标，折叠到目标端 Select；带 Shift 保留展开区间产生选区。`moved` 数与期望不符（provider 不支持/越界）即放弃 |
+| **IA2** | `setCaretOffset` / `setSelection` | IAccessible2 规范：*"Sets the position of the caret"*，不支持时返回 `E_FAIL` 退回箭头 |
+
+UIA/IA2 置位的回读校验比经典 Edit 更严：置位后重新读文本+光标，**仍是同一页文本且光标恰在目标**才算成功；HRESULT 成功但回读不符时，不叠加箭头（避免双重错误），本次到此为止（诊断日志会记录）。
 
 两个实测坑：
 - EmEditor 的 `WM_GETTEXT` 返回计数把结尾 NUL 也算进去（比 `WM_GETTEXTLENGTH` 多 1），多出的 `'\0'` 会被当成一个分隔符字符参与跳词、算出越界目标——已剥掉。

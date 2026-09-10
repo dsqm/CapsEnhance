@@ -44,6 +44,16 @@ typedef struct IAccessibleTextVtbl {
     void* slot8_offsetAtPoint;
     void* slot9_selection;
     HRESULT (STDMETHODCALLTYPE *text)(IAccessibleText*, long start, long end, BSTR*);
+    void* slot11_textBeforeOffset;   /* [propget] textBeforeOffset(...) */
+    void* slot12_textAfterOffset;    /* [propget] textAfterOffset(...) */
+    void* slot13_textAtOffset;       /* [propget] textAtOffset(...) */
+    void* slot14_removeSelection;    /* removeSelection(index) */
+    /* 槽 15/16：直接置位。官方 AccessibleText.idl：
+       HRESULT setCaretOffset([in] long offset);
+       HRESULT setSelection([in] long selectionIndex, [in] long startOffset, [in] long endOffset);
+       setCaretOffset 不支持时实现返回 E_FAIL。 */
+    HRESULT (STDMETHODCALLTYPE *setCaretOffset)(IAccessibleText*, long offset);
+    HRESULT (STDMETHODCALLTYPE *setSelection)(IAccessibleText*, long index, long start, long end);
 } IAccessibleTextVtbl;
 struct IAccessibleText { const IAccessibleTextVtbl* lpVtbl; };
 
@@ -651,6 +661,136 @@ done:
     return ok;
 }
 
+/* ---- UIA 直接置位：TextRange.Select() ----
+   官方文档（learn.microsoft.com, IUIAutomationTextRange::Select）：
+   "If the Select method is called on a text range object that represents a
+   degenerate (empty) text range, the text insertion point moves to the
+   starting endpoint of the text range." —— 空 range 即"移动光标"。
+   做法：锚定流程与读取通道同源（焦点元素 -> 祖先链 -> 句柄/子树），
+   克隆 DocumentRange 折叠到 caret，再按 delta 展开到目标端，折叠后
+   Select() 落位；带 Shift 时保留展开区间 Select（产生选区）。
+   返回 TRUE 仅表示 Select 的 HRESULT 成功，调用方仍需回读校验
+   （provider 可能"成功"但没动光标）。 */
+static BOOL UiaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
+    HRESULT hr;
+    IUIAutomation *ua = NULL;
+    IUIAutomationElement *el = NULL, *ef = NULL, *eh = NULL, *owner = NULL;
+    IUIAutomationTextPattern *tp = NULL;
+    IUIAutomationTextRange *doc = NULL, *caretR = NULL, *r = NULL;
+    BOOL ok = FALSE;
+    int delta = target - caret;
+    if (delta == 0) return TRUE;                       /* 无需移动 */
+
+    hr = CoInitialize(NULL);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return FALSE;
+    hr = CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
+                          &IID_IUIAutomation, (void**)&ua);
+    if (FAILED(hr) || !ua) { CoUninitialize(); return FALSE; }
+
+    if (SUCCEEDED(IUIAutomation_GetFocusedElement(ua, &ef)) && ef) {
+        owner = FindDocElement(ua, ef);
+        IUIAutomationElement_Release(ef);
+    }
+    if (!owner && hwnd) {
+        if (SUCCEEDED(IUIAutomation_ElementFromHandle(ua, hwnd, &eh)) && eh) {
+            owner = FindDocElement(ua, eh);
+            if (!owner) owner = FindDocInSubtree(ua, eh);
+            IUIAutomationElement_Release(eh);
+        }
+    }
+    if (!owner) goto done;
+    el = owner;
+
+    hr = IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPatternId,
+                    &IID_IUIAutomationTextPattern, (void**)&tp);
+    if (FAILED(hr) || !tp) goto done;
+    hr = IUIAutomationTextPattern_get_DocumentRange(tp, &doc);
+    if (FAILED(hr) || !doc) goto done;
+
+    {
+        IUIAutomationTextPattern2* tp2 = NULL;
+        if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPattern2Id,
+                            &IID_IUIAutomationTextPattern2, (void**)&tp2)) && tp2) {
+            BOOL active = FALSE;
+            if (FAILED(IUIAutomationTextPattern2_GetCaretRange(tp2, &active, &caretR)) || !caretR)
+                caretR = NULL;
+            IUIAutomationTextPattern2_Release(tp2);
+        }
+    }
+    if (!caretR) {
+        IUIAutomationTextRangeArray* sel = NULL;
+        if (SUCCEEDED(IUIAutomationTextPattern_GetSelection(tp, &sel)) && sel) {
+            int n = 0;
+            sel->lpVtbl->get_Length(sel, &n);
+            if (n > 0) sel->lpVtbl->GetElement(sel, 0, &caretR);
+            sel->lpVtbl->Release(sel);
+        }
+    }
+    if (!caretR) goto done;
+
+    if (FAILED(IUIAutomationTextRange_Clone(doc, &r)) || !r) goto done;
+    /* 折叠 r 到 caret（两端都对齐 caretR 的 Start，与读取通道同源） */
+    if (FAILED(IUIAutomationTextRange_MoveEndpointByRange(r,
+                TextPatternRangeEndpoint_End, caretR, TextPatternRangeEndpoint_Start)) ||
+        FAILED(IUIAutomationTextRange_MoveEndpointByRange(r,
+                TextPatternRangeEndpoint_Start, caretR, TextPatternRangeEndpoint_Start)))
+        goto done;
+
+    /* 展开 delta 个字符到目标端；实际移动数不符（provider 不支持/越界）则放弃 */
+    {
+        long moved = 0;
+        int ep = (delta < 0) ? TextPatternRangeEndpoint_Start
+                             : TextPatternRangeEndpoint_End;
+        hr = IUIAutomationTextRange_MoveEndpointByUnit(r, ep, TextUnit_Character,
+                                                       (long)delta, &moved);
+        if (FAILED(hr) || moved != (long)(delta < 0 ? -delta : delta)) goto done;
+    }
+    if (!shift) {
+        /* 无 Shift：折叠到目标端点，Select 后光标落在目标 */
+        hr = (delta < 0)
+           ? IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_End,
+                                                        r, TextPatternRangeEndpoint_Start)
+           : IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_Start,
+                                                        r, TextPatternRangeEndpoint_End);
+        if (FAILED(hr)) goto done;
+    }
+    /* 带 Shift：保留 [caret,target] 展开区间，Select 产生选区 */
+    hr = IUIAutomationTextRange_Select(r);
+    ok = SUCCEEDED(hr);
+    if (g_recording)
+        CapLog("  UIA Select hr=0x%08lX delta=%d shift=%d",
+               (unsigned long)hr, delta, shift ? 1 : 0);
+
+done:
+    if (r)      IUIAutomationTextRange_Release(r);
+    if (caretR) IUIAutomationTextRange_Release(caretR);
+    if (doc)    IUIAutomationTextRange_Release(doc);
+    if (tp)     IUIAutomationTextPattern_Release(tp);
+    if (el)     IUIAutomationElement_Release(el);
+    if (ua)     IUIAutomation_Release(ua);
+    CoUninitialize();
+    return ok;
+}
+
+/* ---- IA2 直接置位：setCaretOffset / setSelection ----
+   官方 IAccessible2 文档：setCaretOffset "Sets the position of the caret"，
+   不支持时返回 E_FAIL（此时退回箭头）。 */
+static BOOL MsaaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
+    if (!hwnd) return FALSE;
+    IAccessible* acc = NULL;
+    HRESULT hr = AccessibleObjectFromWindow(hwnd, OBJID_CLIENT,
+                                            &IID_IAccessible, (void**)&acc);
+    if (FAILED(hr) || !acc) return FALSE;
+    IAccessibleText* at = NULL;
+    hr = acc->lpVtbl->QueryInterface(acc, &kIID_IAccessibleText, (void**)&at);
+    acc->lpVtbl->Release(acc);
+    if (FAILED(hr) || !at) return FALSE;
+    hr = shift ? at->lpVtbl->setSelection(at, 0, caret, target)
+               : at->lpVtbl->setCaretOffset(at, target);
+    at->lpVtbl->Release(at);
+    return SUCCEEDED(hr);
+}
+
 /* ================= IA2 通道：IAccessible2 (IAccessibleText) =================
    兜底无障碍通道，面向"既不是经典 Edit、也不暴露 UIA/SCI 文本"的控件。
    （Scintilla 系现在优先走更快的 SCI 直读通道，不再依赖这里。）
@@ -740,6 +880,7 @@ int NavJump(int dir, BOOL shift) {
        避免逐格发方向键拖慢；小距离仍走箭头以保持完全一致的键行为。
        UIA/IA2 通道无法直接设光标，一律发箭头。 */
     BOOL direct = FALSE;
+    BOOL skipArrows = FALSE;   /* 置位已发生但回读不符：不能再发箭头叠加错误 */
     if (path[0] == 'E' && focus && steps >= DIRECT_JUMP_MIN) {
         direct = ClassicSetSel(focus, caret, tgt, shift);
         if (direct) direct = EditVerifySel(focus, caret, tgt, shift);
@@ -752,8 +893,30 @@ int NavJump(int dir, BOOL shift) {
             if (direct && g_recording)
                 CapLog("  -> 直接 SCI_SETSEL caret=%lld anchor=%lld", tb, anchorB);
         }
+    } else if ((path[0] == 'U' || path[0] == 'I') && focus && steps >= DIRECT_JUMP_MIN) {
+        /* UIA/IA2 同样有"直接置位"能力（TextRange.Select / setCaretOffset）。
+           试一次并回读校验：HRESULT 失败 -> 退回箭头；置位发生但回读不符 ->
+           不能再叠加箭头（会双重错误），本次到此为止。 */
+        BOOL set = (path[0] == 'U') ? UiaSetSel(focus, caret, tgt, shift)
+                                    : MsaaSetSel(focus, caret, tgt, shift);
+        if (set) {
+            WCHAR* t2 = NULL; int l2 = 0, c2 = 0;
+            BOOL ok2 = (path[0] == 'U')
+                     ? UiaGetTextCaret(focus, &t2, &l2, &c2)
+                     : MsaaGetTextCaret(focus, &t2, &l2, &c2);
+            if (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0 && c2 == tgt) {
+                direct = TRUE;
+                if (g_recording) CapLog("  -> UIA/IA2 直接置位已校验 (caret=%d)", tgt);
+            } else {
+                skipArrows = TRUE;
+                if (g_recording)
+                    CapLog("  -> UIA/IA2 置位后回读不符(caret=%d 期望 %d)，放弃补箭头",
+                           ok2 ? c2 : -1, tgt);
+            }
+            free(t2);
+        }
     }
-    if (!direct) SendArrows(dir, steps, shift);
+    if (!direct && !skipArrows) SendArrows(dir, steps, shift);
     /* 自校验补正：经典 Edit 通道能读回光标。实测 EmEditor 会在直接置位后
        吞掉第一支箭头（虚拟机里也可能丢键），导致逐格跳少走一格——
        读回实际位置，按差值补发（只补一轮、差值不超过原步数，防打转）。
@@ -777,7 +940,7 @@ int NavJump(int dir, BOOL shift) {
        仅当读回的仍是同一页文本（长度与内容都一致，坐标可比）才按差值补一轮；
        差值超过原步数说明坐标系统性不可靠，放弃补正（不做任何自动切换，
        只提示）—— 这类程序请把进程名写进配置文件的 [NativeWordJump] 名单。 */
-    if (!direct && !shift && (path[0] == 'U' || path[0] == 'I') && focus) {
+    if (!direct && !skipArrows && !shift && (path[0] == 'U' || path[0] == 'I') && focus) {
         WCHAR* t2 = NULL; int l2 = 0, c2 = 0;
         BOOL ok2 = (path[0] == 'U') ? UiaGetTextCaret(focus, &t2, &l2, &c2)
                                     : MsaaGetTextCaret(focus, &t2, &l2, &c2);
