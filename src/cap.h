@@ -9,7 +9,7 @@
 #define WM_CAPS_DOWN  (WM_APP + 1)  /* C 按下 */
 #define WM_CAPS_UP    (WM_APP + 2)  /* C 抬起 */
 #define WM_TRIG_DOWN  (WM_APP + 3)  /* 触发键按下   wParam=act */
-#define WM_TRIG_UP    (WM_APP + 4)  /* 触发键抬起   wParam=act */
+#define WM_TRIG_UP    (WM_APP + 4)  /* 触发键抬起   wParam=act，lParam=TRIGF_* 快照 */
 #define WM_TOGGLE_TRAY (WM_APP + 5) /* 托盘自定义回调消息 */
 #define WM_ALREADY_RUNNING (WM_APP + 7) /* 已有实例在跑：新实例通知它提示后退出 */
 #define WM_PROBE       (WM_APP + 6) /* 探测焦点控件（钩子线程投递） */
@@ -20,6 +20,14 @@
                                        方向同浏览器：滚轮向上 = 向左。钩子已吞掉物理格。 */
 
 #define PROBE_KEY      VK_OEM_3    /* 按住 C 时按 ` 触发焦点探测 */
+
+/* WM_TRIG_UP 的 lParam 快照位（钩子在**抬起事件发生的那一刻**取的修饰状态）。
+   为什么必须随消息带过来、而不能等主线程处理消息时现读：钩子回调与消息
+   处理是**异步**的 —— 用户"点按 J 之后立刻松开 Alt"时，Alt 的抬起已经在
+   钩子里清掉了按住位图，而这条 WM_TRIG_UP 还排在队列里；主线程现读就会
+   读到"Alt 已松"，点按补齐于是时有时无。详见 hook.c 的 ModeSnapFlags。 */
+#define TRIGF_ENH     0x1           /* 抬起那一刻 增强模式生效 */
+#define TRIGF_SHF     0x2           /* 抬起那一刻 位移模式生效 */
 
 #define CLI_CAPS  VK_CAPITAL         /* 主映射键 C                          */
 

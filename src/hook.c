@@ -63,15 +63,120 @@ static volatile DWORD g_downMask = 0;
    不触发探测（"有时要按两下"）。复位时必须能清它，所以提到文件作用域。 */
 static volatile BOOL g_probeArmed = FALSE;
 
+/* 本次 CapsLock 是否"决定不介入"（反着按：见 ChordKeyHeldBeforeCaps）。
+   down 时决定一次，up 沿用 —— 与 g_cMod 一样是"一次会话一份决定"。 */
+static volatile BOOL g_capsSkip = FALSE;
+
+/* ---------- "本会话内被吞过 down"的按键记账（Alt 卡键的根因） ----------
+   一个键的 keydown 与 keyup 必须**同进同出**：要么都放行、要么都吞掉。
+   一吞一放会让系统侧状态错位，而危险方向是"down 放行、up 被吞" ——
+   系统此后一直认为该键按着，用户看到的就是"卡键"。
+
+   实测（用户报告）：**先按 Alt，再按 Caps，然后先松开 Alt** ——
+     · Alt down 时 Caps 还没按（g_cMod 为假）→ 走放行分支，系统看到了 Alt 按下；
+     · 之后 Caps 按住期间松开 Alt → 那次 keyup 被"C 按住期间修饰键不外泄"
+       吞掉，而往后没有任何人补发 Alt 的抬起 → 目标程序里 Alt 永久按下。
+   反过来的顺序（down 吞、up 放行）不会卡键，但会把一个孤立的 keyup 漏给
+   目标程序 —— "C 按住期间的键不外泄"这个承诺就破了。
+
+   规则：**up 沿用 down 的决定**。down 被吞的键登记在此表，其 up 无论此刻
+   Caps 是否还按着，都照吞（并出表）。于是不论松手顺序如何，两侧永远配对。
+
+   表容量 32：登记的是"被我们吞过 down"的键，上界是 8 个修饰键 + 13 个触发键
+   + 1 个探测键（末尾兜底只登记修饰键，普通字母键量大且其孤立 up 无害，
+   不占表）。只在钩子线程访问，无需加锁。 */
+#define SWALLOW_MAX 32
+static volatile int g_swallowVk[SWALLOW_MAX];
+static volatile int g_swallowN = 0;
+
+static BOOL IsModifierVk(int vk) {
+    switch (vk) {
+    case VK_LSHIFT: case VK_RSHIFT:
+    case VK_LCONTROL: case VK_RCONTROL:
+    case VK_LMENU: case VK_RMENU:
+    case VK_LWIN: case VK_RWIN:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+/* down 被吞 -> 登记，等它的 up 来配对 */
+static void SwallowNote(int vk) {
+    for (int i = 0; i < g_swallowN; i++) if (g_swallowVk[i] == vk) return;
+    if (g_swallowN < SWALLOW_MAX) g_swallowVk[g_swallowN++] = vk;
+}
+/* up 来了 -> 若 down 被我们吞过，返回 TRUE（这次 up 也必须吞）并出表 */
+static BOOL SwallowTake(int vk) {
+    for (int i = 0; i < g_swallowN; i++) {
+        if (g_swallowVk[i] != vk) continue;
+        for (int j = i; j + 1 < g_swallowN; j++) g_swallowVk[j] = g_swallowVk[j + 1];
+        g_swallowN--;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* "放行"的统一出口：若这个键的 down 曾被我们吞掉，那这次 up 也必须吞。
+   **必须只在放行点使用** —— 记账绝不能挡在内部处理之前，否则"吞掉 up"
+   会连带把 WM_TRIG_UP 之类的内部投递一起吃掉（实测：引擎再也收不到抬起，
+   短点不开火、长按停不下来）。内部处理与"是否放行给系统"是两件事。 */
+#define PASS_OR_SWALLOW(vk, down) \
+    (((!(down)) && SwallowTake(vk)) ? 1 : CallNextHookEx(g_hook, nCode, wParam, lParam))
+
+/* ---------- Caps 必须是本次和弦的**第一个**键 ----------
+   用户明确要求：反着按的组合（先按 Alt 之类、再按 Caps）本程序**完全不处理**，
+   只拦截"Caps 开头"的和弦。
+
+   这不只是偏好，也是上面那个卡键的必要防线：Caps 之前若已有键被系统看到
+   （down 已放行），我们随后开始吞它的 up 就必然不对称。与其逐键补救，
+   不如**整条会话都不介入** —— Caps 与相关键全按系统原生行为走，天然对称。
+
+   判据用 g_phys（钩子自己维护的**物理**按下表，不含注入），覆盖三类键：
+     · 修饰键（Alt/Ctrl/Shift/Win 左右）—— 系统的组合键语义会被我们打断；
+     · 触发键（J K L I P ; R W Space Tab N M）与模式激活键（默认 Alt/D/F）；
+     · 诊断键 `。
+   键位表是数据的，所以这里一律查询（ActOfVk / ModeFindByVk），不写死键名；
+   以后改键位不用回来改这里。
+
+   与"系统是否也认为它按着"交叉校验（SysKeyHeld），两个作用：
+     ① 只对有物理按下的键查（通常 0~2 次；Caps 按下又是极低频事件），
+        不构成钩子路径上的负担；
+     ② **修正残留**：物理表说按着、系统并不认为按着 —— 说明我们漏收过某个
+        抬起事件（例如锁屏时松开了键）。这种残留若不管，往后每一次 Caps
+        都会被跳过（表现为 Caps 突然完全失效、CapsLock 也不切换），所以顺手
+        清掉物理位。
+
+   SysKeyHeld 走一层可替换的函数指针：单元测试是**直接调用**这个钩子过程的，
+   系统并不知道那些伪造事件，所以测试会把它替换成自己的状态表，从而能真实
+   地验证"反着按不介入"与"吞放必须成对"这两条。 */
+static BOOL (*g_sysKeyHeld)(int vk) = NULL;
+static BOOL SysKeyHeld(int vk) {
+    if (g_sysKeyHeld) return g_sysKeyHeld(vk);
+    return (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
+
+static BOOL ChordKeyHeldBeforeCaps(void) {
+    for (int vk = 1; vk < 256; vk++) {
+        if (vk == CLI_CAPS || !g_phys[vk]) continue;
+        if (!SysKeyHeld(vk)) { g_phys[vk] = 0; continue; }
+        if (IsModifierVk(vk) || ActOfVk(vk) != ACT_NONE ||
+            ModeFindByVk(vk) >= 0 || vk == PROBE_KEY)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /* 清"按住状态"。暂停/重启时会漏掉抬起事件（钩子被跳过），留着就会粘住 ——
    比如暂停期间松开 Shift，恢复后 g_shiftMod 还是 TRUE，Caps+滚轮会莫名变成
-   横向滚动；` 的按下沿闩锁同理。所以复位时主动清掉。 */
+   横向滚动；` 的按下沿闩锁、吞放记账同理。所以复位时主动清掉。 */
 void ModHoldReset(void) {
     g_cMod = FALSE;
     s_shiftMask = 0;
     g_shiftMod = FALSE;
     g_downMask = 0;
     g_probeArmed = FALSE;
+    g_capsSkip = FALSE;
+    g_swallowN = 0;
     ModeResetAll();
 }
 
@@ -99,6 +204,22 @@ void ReleaseFill(int act, BOOL enh, BOOL shift, int count) {
     while (count < 3) { SendActOnce(act, shift); count++; }
 }
 
+/* ---------- 触发键抬起时随消息带走"这一刻"的修饰快照 ----------
+   钩子回调与主线程的消息处理是**异步**的：用户在钩子里"点按 J"之后立刻松开
+   Alt 时，Alt 的抬起**已经在钩子里**清掉了按住位图（同步执行），而这条
+   WM_TRIG_UP 还排在消息队列里等主线程处理。主线程那时再读"修饰键按住了吗"
+   就会读到"Alt 已松"，点按补齐于是**时有时无** —— 正是本项目最忌讳的那类
+   "玄学现象"。
+   所以在**事件发生的那一刻**取快照并随消息带走（lParam = TRIGF_*）。
+   注意：WM_TIMER 的稳定期开火路径**不能**这么做 —— 它要的正是"等到稳定期
+   结束再看修饰是否到位"（"J 先于 D 到达"的乱序和弦靠它生效，见 main.c）。 */
+static LPARAM ModeSnapFlags(void) {
+    LPARAM f = 0;
+    if (ModeDown(MODE_ENHANCE)) f |= TRIGF_ENH;
+    if (ModeDown(MODE_SHIFT))   f |= TRIGF_SHF;
+    return f;
+}
+
 /* 是否软件注入的按键（避免自己被自己触发） */
 static BOOL IsInjected(const KBDLLHOOKSTRUCT *p) {
     return (p->flags & LLKHF_INJECTED) != 0;
@@ -109,10 +230,17 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
         KBDLLHOOKSTRUCT *p = (KBDLLHOOKSTRUCT*)lParam;
         if (IsInjected(p)) return CallNextHookEx(g_hook, nCode, wParam, lParam);
-        if (g_state.paused) return CallNextHookEx(g_hook, nCode, wParam, lParam);
 
         BOOL down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
         int  vk   = (int)p->vkCode;
+
+        if (g_state.paused) {
+            /* 暂停期间完全不处理（连物理表都不更新）—— 但"暂停之前被我们
+               吞过 down"的键，它的 up 仍要吞，否则又是"吞 down / 放 up"的
+               不对称。这两条早退路径没有内部处理，记账放在这里最安全。 */
+            if (!down && SwallowTake(vk)) return 1;
+            return CallNextHookEx(g_hook, nCode, wParam, lParam);
+        }
 
         /* 物理状态：注入的键在上面已放行，这里记录的都是真实按键 */
         if (vk >= 0 && vk < 256) g_phys[vk] = (BYTE)(down ? 1 : 0);
@@ -127,14 +255,35 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             g_shiftMod = (s_shiftMask != 0);
         }
 
-        /* ---- C 键（CapsLock）自身 ---- */
+        /* ---- C 键（CapsLock）自身 ----
+           只有"Caps 是本次和弦第一个按下的键"时才介入；否则整条会话都不处理
+           （反着按，见 ChordKeyHeldBeforeCaps）。介入与否在 down 时决定一次，
+           up 沿用同一个决定（g_capsSkip）—— 两侧必须对称，否则不是漏了
+           CapsLock 的切换，就是把它吞掉变成完全没反应。 */
         if (vk == CLI_CAPS) {
-            if (down && !g_cMod) {
+            if (down) {
+                /* CapsLock 是 toggle 键，系统不对它发自动重复，所以每次
+                   WM_KEYDOWN 都是"新按下"。顺手清掉上一次会话可能残留的
+                   标记：万一上一次的 keyup 丢了（钩子被暂停/摘掉），这里
+                   能自愈，而不会因为残留标记把 Caps 永久吞掉。
+                   跳过分支不发任何消息 —— "不介入"就该完全不打扰，
+                   连引擎状态都不碰（可能正有别的动作在跑）。 */
+                g_cMod = FALSE;
+                g_capsSkip = FALSE;
+                if (ChordKeyHeldBeforeCaps()) {
+                    g_capsSkip = TRUE;      /* 本次会话完全不介入 */
+                    if (g_recording)
+                        CapLog("  Caps 不是和弦的第一个键（已有映射相关键按住），"
+                               "本次不介入，CapsLock 保持原功能");
+                    return CallNextHookEx(g_hook, nCode, wParam, lParam);
+                }
                 g_cMod = TRUE;
                 g_downMask = 0;
                 g_probeArmed = FALSE;   /* 新一轮和弦：探测键从"未按过"开始 */
                 PostMessageW(g_mainWnd, WM_CAPS_DOWN, 0, 0);   /* 通知主线程复位 */
-            } else if (!down && g_cMod) {
+                return 1;
+            }
+            if (g_cMod) {
                 g_cMod = FALSE;
                 g_downMask = 0;
                 /* 必须先清探测闩锁：若用户"按着 ` 直接松开 C"，` 的 keyup
@@ -143,8 +292,13 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 g_probeArmed = FALSE;
                 SendArrowsRequestInterrupt();   /* C 松开：立即打断逐格输出 */
                 PostMessageW(g_mainWnd, WM_CAPS_UP, 0, 0);
+                return 1;
             }
-            return 1;   /* 全程屏蔽，无效果 */
+            if (g_capsSkip) {           /* 反着按的那次会话：抬起来也放行 */
+                g_capsSkip = FALSE;
+                return CallNextHookEx(g_hook, nCode, wParam, lParam);
+            }
+            return 1;
         }
 
         /* ---- 修饰模式的激活键（默认 增强=Alt/D、位移=F） ----
@@ -162,15 +316,19 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             ModeKeyEvent(mode, vk, down);
             if (was && !ModeDown(mode))          /* 最后一个激活键也抬起了 */
                 PostMessageW(g_mainWnd, WM_MODE_UP, (WPARAM)mode, 0);
-            if (!g_cMod) return CallNextHookEx(g_hook, nCode, wParam, lParam);
+            if (!g_cMod) return PASS_OR_SWALLOW(vk, down);
+            if (down) SwallowNote(vk);           /* 记下：它的 up 也要吞 */
+            else      SwallowTake(vk);           /* 这次 up 已吞，出表 */
             return 1;   /* C 按住期间：修饰键本身不外泄 */
         }
 
         /* ---- 未进入映射模式：放行 ---- */
-        if (!g_cMod) return CallNextHookEx(g_hook, nCode, wParam, lParam);
+        if (!g_cMod) return PASS_OR_SWALLOW(vk, down);
 
         /* ---- C 按住期间：` 键触发焦点探测（仅按下沿） ---- */
         if (vk == PROBE_KEY) {
+            if (down) SwallowNote(vk);
+            else      SwallowTake(vk);           /* 这次 up 已吞，出表 */
             if (down && !g_probeArmed) {
                 g_probeArmed = TRUE;
                 PostMessageW(g_mainWnd, WM_PROBE, 0, 0);
@@ -185,6 +343,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         if (act != ACT_NONE) {
             DWORD bit = (DWORD)1 << act;
             if (down) {
+                SwallowNote(vk);
                 if (!(g_downMask & bit)) {       /* 去抖：忽略系统自动重复 */
                     g_downMask |= bit;
                     /* 正在逐格输出且按下了不同触发键（改道）：立即打断 */
@@ -193,15 +352,23 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                     PostMessageW(g_mainWnd, WM_TRIG_DOWN, (WPARAM)act, 0);
                 }
             } else {
+                SwallowTake(vk);                 /* 这次 up 已吞，出表 */
                 if (g_downMask & bit) {          /* 每个键都能拿到自己的抬起 */
                     g_downMask &= ~bit;
-                    PostMessageW(g_mainWnd, WM_TRIG_UP, (WPARAM)act, 0);
+                    PostMessageW(g_mainWnd, WM_TRIG_UP, (WPARAM)act,
+                                 ModeSnapFlags());   /* 事件时刻的修饰快照 */
                 }
             }
             return 1;
         }
 
-        return 1;  /* C 按住期间其它普通键：屏蔽 */
+        /* C 按住期间其它普通键：屏蔽。
+           修饰键（不在模式表里的真实 Ctrl/Shift/Win 等）要**记账** —— 它的
+           down 被我们吞了，up 也必须吞（见 g_swallowVk）。普通字母键量大且
+           遗孤的 up 无害，不占表。 */
+        if (down) { if (IsModifierVk(vk)) SwallowNote(vk); }
+        else      SwallowTake(vk);
+        return 1;
     }
     return CallNextHookEx(g_hook, nCode, wParam, lParam);
 }

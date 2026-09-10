@@ -96,6 +96,25 @@ static void KeyAlt(int vk, BOOL down) {
         down ? WM_SYSKEYDOWN : WM_SYSKEYUP, (LPARAM)&ks);
 }
 
+/* ---- 场景 X/Z 用：把钩子过程当**函数**调用，并观察它的返回值 ----
+   返回值 1 = 吞掉（不外泄给系统），0 = 放行。这是验证"吞/放必须成对"的
+   唯一可靠手段（Alt 卡键的根因就是 down 与 up 被区别对待）。
+
+   同时维护一份"系统看到的状态"：本测试是直接调钩子过程的，系统对伪造事件
+   一无所知，而生产代码要靠"系统是否也认为该键按着"来区分真按与残留。
+   所以这里按钩子的返回值模拟系统：**放行才等于系统看到了**。
+   （hook.c 的 SysKeyHeld 通过函数指针替换成 TestSysHeld。） */
+static BYTE t_sys[256];
+static BOOL TestSysHeld(int vk) { return vk >= 0 && vk < 256 && t_sys[vk]; }
+static LRESULT Sim(int vk, BOOL down) {
+    KBDLLHOOKSTRUCT ks; memset(&ks, 0, sizeof(ks));
+    ks.vkCode = (DWORD)vk; ks.flags = 0;
+    LRESULT r = LowLevelKeyboardProc(HC_ACTION,
+        down ? WM_KEYDOWN : WM_KEYUP, (LPARAM)&ks);
+    if (r == 0 && vk >= 0 && vk < 256) t_sys[vk] = (BYTE)(down ? 1 : 0);
+    return r;
+}
+
 /* ---- 取走钩子投递的滚轮请求 ----
    这里**不**去数"目标窗口收到了几条 WM_MOUSEWHEEL"：滚轮消息的落点取决于
    焦点窗口 / 光标下方的窗口（还受系统"悬停滚动非活动窗口"设置影响），让测试
@@ -185,11 +204,14 @@ static void Drain(void) {
 
 /* 场景间复位：清引擎状态与残留消息，保证场景相互独立 */
 static void Reset(void) {
-    g_cMod = FALSE;
-    ModeResetAll();          /* 模式表整体复位：门闩 + 按住位图（替代旧的 g_dMod/g_pendD） */
+    /* ModHoldReset 一次清掉全部"按住状态"：C / 真实 Shift / 模式位图 /
+       探测闩锁 / 吞放记账 / Caps 会话标记。场景之间必须彼此独立，
+       否则上一场景残留的记账会让下一场景的吞放断言飘。 */
+    ModHoldReset();
     g_actEnh = FALSE; g_actShf = FALSE; g_btnCount = 0;
     ActAutoScrollStop();     /* 上一场景可能还在自动滚动：先停，避免尾流串到下一场景 */
     memset((void*)g_phys, 0, sizeof(g_phys));   /* 物理按键表也归零 */
+    memset(t_sys, 0, sizeof(t_sys));            /* 模拟的"系统状态"也归零 */
     PostMessageW(g_mainWnd, WM_CAPS_DOWN, 0, 0);  /* → ResetEngine：清 pending/active + 停表 */
     Sink();
     Drain();   /* 等上一场景的尾巴收干净，否则残留注入会被算进下一场景 */
@@ -222,6 +244,10 @@ int main(void) {
     /* 生产路径里动作由 act.c 的执行线程发送，测试必须起同一个线程，
        否则测的是"同步兜底"分支，覆盖不到真实时序。 */
     ActStart();
+
+    /* hook.c 靠"系统是否也认为该键按着"来区分真按与残留；本测试直接调钩子
+       过程，系统并不知道伪造事件，所以换成测试自己的状态表。 */
+    g_sysKeyHeld = TestSysHeld;
 
     /* 键位表必须在引擎工作前装配好。生产路径在 WinMain 里调 KeyMapInit；
        本测试不走 WinMain（main.c 的 WinMain 被改名弃用），所以要显式调 ——
@@ -919,6 +945,89 @@ int main(void) {
     CHECK(g_whInj == 1 && g_whSum > 0,
           "V: 滚轮向下 -> 注入向右的横轴刻度（正 delta）");
     CHECK(g_wheelInj == 0, "V: 横向不会误发到纵轴");
+
+
+    /* ---- 场景X：反着按 —— Caps 不是本次和弦的第一个键 ----
+       实测缺陷：**先按 Alt、再按 Caps，然后先松开 Alt** ——
+         · Alt down 时 Caps 还没按（g_cMod 为假）→ 事件被放行，系统看到了 Alt 按下；
+         · 之后 Caps 按住期间松开 Alt → 那次 keyup 被"C 按住期间修饰键不外泄"
+           吞掉，而往后没有任何人补发 Alt 的抬起 → **目标程序里 Alt 永久按下**。
+         现象就是用户报的"Alt+caps+J 松手会卡住 Alt"。
+
+       现在的规则（用户明确要求）：**只拦截 Caps 开头的和弦**。Caps 按下时若
+       已有映射相关的键按住，整条会话都不介入 —— 所有键按系统原生行为走，
+       天然对称，也就不会有一吞一放的错位。
+
+       断言用**钩子返回值**（1=吞、0=放行）：这是"吞放是否配对"的唯一可靠
+       观测手段 —— 只要 Alt 的 down 与 up 都返回 0（都放行），系统侧就不会
+       残留"Alt 按着"的状态。 */
+    Reset();
+    CHECK(Sim(VK_LMENU, TRUE) == 0, "X: 先按 Alt -> 放行（系统看到 Alt down）");
+    CHECK(Sim(CLI_CAPS, TRUE) == 0,
+          "X: 反着按 Caps 不介入 -> 放行（CapsLock 保持原功能）");
+    CHECK(Sim('J', TRUE) == 0 && Sim('J', FALSE) == 0,
+          "X: 不介入期间触发键原样放行（J 不变成 Caps+J）");
+    CHECK(Sim(VK_LMENU, FALSE) == 0,
+          "X: **Alt 抬起也放行** —— 与它的 down 配对（卡键的根因就在这里）");
+    CHECK(Sim(CLI_CAPS, FALSE) == 0, "X: Caps 抬起同样放行（与按下对称）");
+    Pump(60); Drain();
+    CHECK(CountVk(VK_LEFT) == 0, "X: 反着按不触发任何映射动作");
+    CHECK(!g_cMod && !ModeDown(MODE_ENHANCE),
+          "X: 反着按不留任何内部状态（增强模式未生效）");
+
+    /* 反着按的另一种：先按触发键再按 Caps。同样不介入 —— 否则那个触发键的
+       up 会被吞（它的 down 已经被系统看到），又是一个孤立事件。 */
+    Reset();
+    CHECK(Sim('J', TRUE) == 0, "X: 先按 J -> 放行");
+    CHECK(Sim(CLI_CAPS, TRUE) == 0, "X: 再按 Caps 仍不介入");
+    CHECK(Sim('J', FALSE) == 0, "X: J 抬起不被吞（与它的 down 配对）");
+    CHECK(Sim(CLI_CAPS, FALSE) == 0, "X: Caps 抬起放行");
+    Pump(60); Drain();
+    CHECK(CountVk(VK_LEFT) == 0, "X: 先按触发键的组合同样不产生映射动作");
+
+    /* ---- 场景Y：正着按（Caps 第一个键）—— 吞放必须成对 ----
+       "只拦截 Caps 开头"就意味着 Caps 之后按下的修饰键**要被拦**（不能外泄），
+       但拦的时候 down/up 必须一致：只吞 down 会让系统认为它一直按着，
+       只吞 up 则会漏一个孤立抬起给目标程序。 */
+    Reset();
+    CHECK(Sim(CLI_CAPS, TRUE) == 1, "Y: Caps 是第一个键 -> 介入（吞）");
+    CHECK(Sim(VK_LMENU, TRUE) == 1, "Y: 会话内按 Alt -> 吞（不外泄）");
+    CHECK(Sim('J', TRUE) == 1 && Sim('J', FALSE) == 1, "Y: 触发键 J 也被吞");
+    /* 注意这里**不给 Pump 间隔**：让三条消息（Caps down / J down / J up）
+       与 Alt 抬起挤在同一批里处理，正是"点按 J 后立刻松 Alt"的极端情形。
+       修饰快照必须来自钩子的事件时刻，主线程现读会读到 Alt 已松。 */
+    CHECK(Sim(VK_LMENU, FALSE) == 1, "Y: Alt 抬起照样吞（与按下配对）");
+    CHECK(Sim(CLI_CAPS, FALSE) == 1, "Y: Caps 抬起被吞");
+    Pump(60); Drain();
+    CHECK(CountVk(VK_LEFT) == 3,
+          "Y: Caps+Alt+点按 J 仍补齐 3 次（修对称性没有改坏功能）");
+
+    /* ---- 场景Z：先松 Caps、再松修饰键 —— up 也要沿用 down 的决定 ----
+       进入会话后 g_cMod 在 Caps 抬起那一刻就变假了，此时修饰键的 up 若按
+       "g_cMod 为假就放行"处理，就会漏一个孤立抬起给目标程序（down 被吞、
+       up 放行）。正确做法是记账：**down 被吞过的，up 也必须吞**。 */
+    Reset();
+    CHECK(Sim(CLI_CAPS, TRUE) == 1, "Z: Caps 先按 -> 介入");
+    CHECK(Sim(VK_LCONTROL, TRUE) == 1, "Z: 会话内按 Ctrl -> 吞");
+    CHECK(Sim(CLI_CAPS, FALSE) == 1, "Z: 先松 Caps（会话结束）");
+    CHECK(Sim(VK_LCONTROL, FALSE) == 1,
+          "Z: **Caps 已松开，Ctrl 抬起仍须吞**（沿用 down 的决定，不留半截）");
+    Pump(60); Drain();
+    CHECK(!ModeDown(MODE_ENHANCE), "Z: 会话结束后无残留修饰状态");
+
+    /* ---- 场景AA：残留自愈 ----
+       物理表说"某键按着"、系统并不认为按着 —— 那是我们漏收过抬起事件
+       （例如锁屏时松开）。这种残留若不清，往后每次 Caps 都被判成"反着按"
+       而跳过，表现为 Caps 突然完全失效。所以判据里要顺手修正它。 */
+    Reset();
+    memset((void*)g_phys, 0, sizeof(g_phys));
+    g_phys[VK_LMENU] = 1;          /* 伪造：物理表说 Alt 按着 */
+    t_sys[VK_LMENU] = 0;           /* 但系统并不认为按着 = 残留 */
+    CHECK(Sim(CLI_CAPS, TRUE) == 1,
+          "AA: 物理表残留不会永久挡住 Caps（判据交叉校验后自愈）");
+    CHECK(g_phys[VK_LMENU] == 0, "AA: 残留的物理位已被修正");
+    Sim(CLI_CAPS, FALSE);
+    Pump(60); Drain();
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
     return fails;

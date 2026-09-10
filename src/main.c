@@ -500,11 +500,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int act = (int)wp;
         StackRemove(act);
         if (g_pendingAct == act) {
-            /* 短点：稳定期内即抬起，立即开火一次并补齐（修饰用门闩快照）。
-               开火 + 补齐合成一条请求：中间不会被别的动作插队，也用同一份
-               快照（旧代码靠连续两次同步调用达成同样效果）。 */
+            /* 短点：稳定期内即抬起，立即开火一次并补齐。
+               修饰快照**取钩子随这条消息带来的那份**（事件发生的那一刻），
+               不是现在现读 —— 钩子回调与本处理是异步的，用户"点按 J 之后
+               立刻松开 Alt"时，按住位图早已在钩子里被清掉，现读会丢掉补齐
+               （时有时无）。见 hook.c 的 ModeSnapFlags。
+               开火 + 补齐合成一条请求：中间不会被别的动作插队，也用同一份快照。 */
             g_pendingAct = ACT_NONE;
-            SnapMods();
+            g_actEnh = (lp & TRIGF_ENH) != 0;
+            g_actShf = (lp & TRIGF_SHF) != 0;
             g_btnCount = 1;
             /* 开关键不做松手补齐（补齐会把一次点按变成 3 次切换，等于又切回去） */
             PostAct(act, IsSingleShotAct(act) ? ACT_NONE : act, g_btnCount);
