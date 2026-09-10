@@ -143,7 +143,8 @@ void ActWheelClear(void);                /* 丢弃未补发的滚轮请求（松
      · 同向再滚 -> 逐档平滑提速，最快档 = WheelScrollMul 倍
      · 反向滚   -> 立即终止，并把速度**清零**（下次从最慢档重来）
      · 增强模式失效 / 松开 C -> 立即终止
-   每拍恒定只发一格，只用节拍长度调速（不是"每拍补一撮"），所以提速不会抖。
+   速度靠"每格之间的间隔"表达（不是"每拍补一撮"），所以提速不会抖。默认还开启
+   **平滑注入**：把一格拆成若干"小数刻度"、提高发数（见 act.c），手感接近触控板。
    主线程只投递"发生了一次滚轮"，状态机与注入都在本通道内，主线程不阻塞。
    启用条件：`WheelScrollMul >= 2`（与滚轮加速同一个开关：0/1 = 整个滚轮增强关闭）。 */
 void ActAutoScrollWheel(int delta);   /* 主线程：增强模式下的一次滚轮 */
@@ -152,7 +153,9 @@ BOOL ActAutoScrollActive(void);       /* 单测用 */
 int  ActAutoScrollGear(void);         /* 单测用：当前速度档（1..总档数，未启动为 0） */
 int  ActAutoScrollDir(void);          /* 单测用：+1 上滚 / -1 下滚 / 0 未启动 */
 int  ActAutoScrollCap(void);          /* 单测用：速度上限倍数 = WheelScrollMul；<2 表示未启用 */
-int  ActAutoScrollTick(void);         /* 单测用：当前节拍(ms)；最快 = AutoScrollInterval/WheelScrollMul */
+int  ActAutoScrollTick(void);         /* 单测用：速度档（平均每格的毫秒数）；最快 = AutoScrollInterval/WheelScrollMul */
+int  ActAutoScrollBeat(void);         /* 单测用：本拍实际间隔(ms)；平滑模式固定，否则同 Tick */
+int  ActAutoScrollDelta(void);        /* 单测用：本拍增量（带符号）；平滑模式 < 120（小数刻度） */
 
 /* ---------- 钩子模块 ---------- */
 extern HHOOK g_hook;
@@ -209,7 +212,8 @@ int  ConfigGetMaxArrowSteps(void);          /* [General] MaxArrowSteps：逐格�
 BOOL ConfigGetOverStepCtrl(void);           /* [General] OverStepMode：超限 0=仍发方向键 1=Ctrl+方向 */
 int  ConfigGetWheelScrollMul(void);         /* [General] WheelScrollMul：按住 C 时滚轮放大倍数，<2=不放大 */
 BOOL ConfigGetStr(const WCHAR* key, WCHAR* out, size_t cap); /* [General] 通用字符串项（未具名解析的） */
-int  ConfigGetAutoScrollInterval(void);     /* [General] AutoScrollInterval：自动滚动基础节奏(ms) */
+int  ConfigGetAutoScrollInterval(void);     /* [General] AutoScrollInterval：自动滚动初始节拍(ms) */
+BOOL ConfigGetAutoScrollSmooth(void);       /* [General] AutoScrollSmooth：小数刻度平滑注入 */
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中名单 */
 BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口的进程 exe 名 */
 BOOL IsRunElevated(void);                   /* 真实运行权限（查进程令牌） */

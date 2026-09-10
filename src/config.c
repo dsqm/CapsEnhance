@@ -28,10 +28,18 @@
 /* 自动滚动的**初始**节拍（ms）：启动后每 N 毫秒滚一格，即最慢档的速度。
    同向继续滚会逐档提速，最快档的节拍 = 本值 / WheelScrollMul
    —— 所以本值同时定了"初始速度"和"最快速度"的基准。
-   默认 300ms ≈ 3 格/秒：读文档时不至于看丢行。原来是 120ms（8 格/秒），
-   而系统默认每次滚 3 行 —— 相当于 25 行/秒，实际手感明显偏快。
-   嫌慢就再滚一下提速，或把这里调小。 */
-#define AUTOSCROLL_INTERVAL_DEFAULT 300
+   默认 500ms = 2 格/秒 ≈ 6 行/秒（按系统默认每次 3 行）：属于"慢慢往下
+   溜"的档，用来读文档刚好。历史值：120ms（8.3 格/秒）明显偏快、
+   300ms（3.3 格/秒）仍偏快。嫌慢就再滚一下提速，或把这里调小。 */
+#define AUTOSCROLL_INTERVAL_DEFAULT 500
+
+/* 自动滚动是否用"高分频"平滑注入（默认开）。
+   标准滚轮刻度 WHEEL_DELTA = 120 是"一格"，但 Windows 明确支持**小于**
+   WHEEL_DELTA 的增量（文档：zDelta 是 WHEEL_DELTA 的"倍数或约数"）——
+   触控板/自由滚轮就是这么滚的：次数多、每次小。于是同一速度下可以有更多
+   注入点、每次只挪一点点，手感从"一格一格跳"变成连续滑动。
+   个别程序对小数刻度不做累积（表现为完全不动），把这里设 0 退回整格模式。 */
+#define AUTOSCROLL_SMOOTH_DEFAULT 1
 
 /* 通用字符串项：明确解析的键之外，[General] 里其它键值原样留存，
    供上层模块按名字取（见 ConfigGetStr）。
@@ -78,7 +86,8 @@ static int   g_logMaxKB   = 2048;   /* 日志大小上限（KB），0 = 不限�
 static int   g_maxArrowSteps = 32;  /* 逐格词跳最大步数，超过按 overStepMode 处理 */
 static BOOL  g_overStepCtrl = FALSE; /* TRUE=超限改发 Ctrl+方向（原生词跳） */
 static int   g_wheelMul = WHEEL_MUL_DEFAULT; /* 按住 C 时滚轮放大倍数，<2 视为不放大 */
-static int   g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT; /* 自动滚动基础节奏(ms) */
+static int   g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT; /* 自动滚动初始节拍(ms) */
+static BOOL  g_autoScrollSmooth = AUTOSCROLL_SMOOTH_DEFAULT;     /* 自动滚动平滑注入 */
 
 /* 整数：只认前导十进制数字，其余（空/非法）返回默认值。
    超过 1e8 直接判非法：没有哪个配置项需要这么大，而继续累加会让
@@ -151,6 +160,7 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_overStepCtrl = FALSE;
     g_wheelMul = WHEEL_MUL_DEFAULT;
     g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT;
+    g_autoScrollSmooth = AUTOSCROLL_SMOOTH_DEFAULT;
     g_strN = 0;
 
     FILE* f = NULL;
@@ -226,6 +236,8 @@ void ConfigLoadFrom(const WCHAR* path) {
                     if (v > 1000) v = 1000;   /* 太慢等于没开 */
                     g_autoScrollInterval = v;
                 }
+                else if (_wcsicmp(key, L"autoscrollsmooth") == 0)
+                    g_autoScrollSmooth = ParseBoolW(val);
                 /* 其余 [General] 项原样留存，由需要的模块按名字取
                    （例如键位映射模块读 EnhanceKeys / ShiftKeys） */
                 else StoreStr(key, val);
@@ -280,6 +292,9 @@ void ConfigLoad(void) {
             "; 自动滚动的初始节拍（毫秒）：启动后每 N 毫秒滚一格（最慢档）。\n"
             "; 同向继续滚会逐档提速，最快档节拍 = N / WheelScrollMul。可调范围 20..1000。\n"
             "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n"
+            "; 自动滚动是否平滑注入（1=是 / 0=否）。1 时只发\"不足一格\"的小刻度、\n"
+            "; 次数更多，手感接近触控板连续滑动；个别程序不累积小刻度（完全不动）时设 0。\n"
+            "AutoScrollSmooth = " STR(AUTOSCROLL_SMOOTH_DEFAULT) "\n"
             "; ---- 和弦修饰的激活键 ----\n"
             "; 按住 C（CapsLock）期间，这些键作为\"模式修饰\"生效。\n"
             "; 键名可用：单字母 A-Z、数字 0-9、Alt / RAlt / Ctrl / Shift / Win / Space 等；\n"
@@ -351,6 +366,10 @@ static const struct {
       "; 自动滚动的初始节拍（毫秒）：启动后每 N 毫秒滚一格（最慢档）。\n"
       "; 同向继续滚会逐档提速，最快档节拍 = N / WheelScrollMul。可调范围 20..1000。\n"
       "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n" },
+    { "autoscrollsmooth",
+      "; 自动滚动是否平滑注入（1=是 / 0=否）。1 时只发\"不足一格\"的小刻度、\n"
+      "; 次数更多，手感接近触控板连续滑动；个别程序不累积小刻度（完全不动）时设 0。\n"
+      "AutoScrollSmooth = " STR(AUTOSCROLL_SMOOTH_DEFAULT) "\n" },
     { "enhancekeys",
       "; ---- 和弦修饰的激活键 ----\n"
       "; 按住 C（CapsLock）期间，这些键作为\"模式修饰\"生效。\n"
@@ -508,6 +527,10 @@ int ConfigGetWheelScrollMul(void) {
 
 int ConfigGetAutoScrollInterval(void) {
     return g_autoScrollInterval;
+}
+
+BOOL ConfigGetAutoScrollSmooth(void) {
+    return g_autoScrollSmooth;
 }
 
 /* 进程可执行文件名是否命中原生词跳名单（完全匹配，.exe 可选） */

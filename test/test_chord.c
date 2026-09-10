@@ -570,14 +570,30 @@ int main(void) {
     KeyAlt(VK_LMENU, TRUE); Pump(2);              /* 默认增强键：左 Alt */
     CHECK(ModeDown(MODE_ENHANCE), "R: 按住 Alt -> 增强模式生效");
 
-    /* 初始速度不能太快：第 1 档节拍就是配置值（缺省 300ms ≈ 3 格/秒） */
+    /* 初始速度不能太快：第 1 档的"每格时长"就是配置值（缺省 500ms = 2 格/秒） */
     int base = ConfigGetAutoScrollInterval();
-    CHECK(base == 300, "R: 初始节拍缺省 300ms（放慢过，原来 120ms）");
+    CHECK(base == 500, "R: 初始节拍缺省 500ms（两轮放慢：120 -> 300 -> 500）");
+    CHECK(ConfigGetAutoScrollSmooth(), "R: 平滑注入缺省开启");
 
     ActAutoScrollWheel(120);                      /* 第一滚：启动、最慢档、向上 */
     CHECK(ActAutoScrollActive() && ActAutoScrollDir() == 1 && ActAutoScrollGear() == 1,
           "R: 增强模式滚轮 -> 启动自动滚动（档 1 / 向上）");
-    CHECK(ActAutoScrollTick() == base, "R: 第 1 档节拍 = AutoScrollInterval");
+    CHECK(ActAutoScrollTick() == base, "R: 第 1 档速度 = AutoScrollInterval");
+
+    /* 平滑注入：把一格拆成小数刻度、发得更密，但**速度不变** */
+    CHECK(ActAutoScrollDelta() > 0 && ActAutoScrollDelta() < 120,
+          "R: 平滑模式发的是小数刻度（< 一格 120）");
+    CHECK(ActAutoScrollBeat() < ActAutoScrollTick(),
+          "R: 平滑模式节拍更短（注入更密）");
+    {
+        /* 速度等价：delta/beat 应等于 120/每格时长。delta 是整数刻度，必然
+           有四舍五入，容差取半个节拍（|d - x| <= 0.5  =>  |d*tick - 120*beat| <= tick/2）。 */
+        int lhs = ActAutoScrollDelta() * ActAutoScrollTick();
+        int rhs = WHEEL_STD_DELTA * ActAutoScrollBeat();
+        int tol = ActAutoScrollTick() / 2 + 1;
+        CHECK(lhs >= rhs - tol && lhs <= rhs + tol,
+              "R: 平滑前后速度等价（与整格模式一致，仅整数刻度舍入误差）");
+    }
 
     /* 平滑提速：缺省 cap=2 时也有多档（不是"一滚就翻倍"），节拍单调变短 */
     int t1 = ActAutoScrollTick();
@@ -594,11 +610,25 @@ int main(void) {
     ActAutoScrollWheel(120);
     CHECK(ActAutoScrollGear() == gTop && ActAutoScrollTick() == tTop,
           "R: 到顶档后不再提速（档位饱和）");
-    CHECK(tTop == base / 2, "R: 顶档节拍 = AutoScrollInterval / WheelScrollMul");
+    CHECK(tTop == base / 2, "R: 顶档速度 = AutoScrollInterval / WheelScrollMul");
+    CHECK(ActAutoScrollDelta() > 0 && ActAutoScrollDelta() < 120,
+          "R: 顶档仍是小数刻度（平滑提速靠加 delta，不是加格数）");
+
+    /* 关掉平滑 -> 退回整格：delta 恒为 120、节拍就是速度档 */
+    WriteChordIni("[General]\r\nAutoScrollSmooth = 0\r\n");
+    ConfigLoadFrom(L"bin/chordtest.ini");
+    CHECK(!ConfigGetAutoScrollSmooth(), "R: AutoScrollSmooth=0 生效");
+    CHECK(ActAutoScrollDelta() == WHEEL_STD_DELTA,
+          "R: 关平滑后每拍发整格 120（兼容不累积小数刻度的程序）");
+    CHECK(ActAutoScrollBeat() == ActAutoScrollTick(),
+          "R: 关平滑后节拍 = 速度档");
+    ConfigLoadFrom(L"bin/__absent__.ini");        /* 回缺省（平滑开） */
+    CHECK(ConfigGetAutoScrollSmooth(), "R: 回缺省后平滑重新开启");
 
     ResetWheelRec();
-    Pump(600);                                    /* 至少一个节拍（缺省 300ms） */
+    Pump(900);                                    /* 覆盖若干拍（缺省 500ms/格） */
     CHECK(g_wheelInj >= 1 && g_wheelSum > 0, "R: 自动滚动确实在持续注入上滚");
+    CHECK(g_wheelInj >= 5, "R: 平滑模式下注入点明显变密（>=5 次/900ms）");
 
     ActAutoScrollWheel(-120);                     /* 反向：立即终止 + 清零速度 */
     CHECK(!ActAutoScrollActive() && ActAutoScrollDir() == 0 && ActAutoScrollGear() == 0,
@@ -613,7 +643,8 @@ int main(void) {
     ResetWheelRec();
     ActAutoScrollWheel(-120);                     /* 下滚启动（方向 -1） */
     CHECK(ActAutoScrollActive() && ActAutoScrollDir() == -1, "R: 下滚启动（方向 -1）");
-    Pump(600);
+    CHECK(ActAutoScrollDelta() < 0, "R: 下滚时 delta 为负（带方向）");
+    Pump(900);
     CHECK(g_wheelSum < 0, "R: 下滚方向正确（与上方上滚大致抵消）");
 
     /* 松开修饰键：钩子投递 WM_MODE_UP -> 终止 */

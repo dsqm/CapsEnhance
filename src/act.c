@@ -198,6 +198,10 @@ static void WheelLaneStop(void) {
 
 /* ================= 自动滚动专用通道 =================
    增强模式（默认 Alt / D）+ 滚轮 = 持续滚动（接口说明见 cap.h）。
+   平滑注入（默认开）让注入点变密（25 次/秒），所以"绝不能跑在主线程上"
+   这条约束更重要了 —— 每次注入只是一条 INPUT、没有 Sleep（SendWheelNotches
+   只在 n>1 时才 Sleep，这里 n 恒为 1），但积少成多同样会占住主线程。
+
    为什么再开一条独立通道，而不是塞进动作队列或滚轮加速队列：
      · 它是一个**长时间运行**的循环（一直滚到用户松手），而动作队列的语义是
        "一条一条执行完就走"；
@@ -205,7 +209,10 @@ static void WheelLaneStop(void) {
      · 每个节拍都要等待，和滚轮加速一样**绝不能跑在主线程上**（主线程不在
        "等消息"状态会让系统跳过它的低级钩子事件，见文件头）。
 
-   速度模型：**每拍恒定只发一格**，只用"节拍长度"调速。
+   速度模型：速度和粒度分开 —— **速度**用"每格之间的间隔"表达，
+   **粒度**（每拍挪多少）可选整格或小数刻度。
+
+   速度（所有模式一致）：
      · 第 1 档（刚启动）节拍 = AutoScrollInterval，也就是最慢档、初始速度；
      · 同向每再滚一次进一档，节拍线性插值缩短，到末档恰好缩到
        AutoScrollInterval / WheelScrollMul —— 最快档的吞吐量仍等于
@@ -215,6 +222,13 @@ static void WheelLaneStop(void) {
      · 反向滚 = 立即终止**并把档位清零**，之后再滚从第 1 档（最慢）重新开始。
    旧写法是"每拍补 `档位` 格"：第 2 档起就是"一小串脉冲 + 一大段静默"，
    看上去在抖 —— 这就是本模型要替换掉的东西。
+
+   粒度（AutoScrollSmooth，默认开）：整格模式每拍发 120（原样一格）；平滑模式
+   把"一格"拆成若干**小数刻度**、同时把节拍缩短到 AUTOSCROLL_SMOOTH_TICK ——
+   两者速度完全等价（delta/beat 不变），但注入点更多、每次更小，于是像触控板
+   那样连续滑动，而不是"一格一格跳"。Windows 文档明确支持小数 zDelta
+   （"WHEEL_DELTA 的倍数或约数"），触控板正是这么滚的；目标程序若不做小数
+   累积就会完全不动，那种程序把 AutoScrollSmooth 设为 0 即可。
 
    状态机（active/dir/gear）由主线程在锁内更新，工作线程只按拍输出。
    终止路径：反向滚（主线程置停）、松开修饰键（钩子投 WM_MODE_UP）、
@@ -230,6 +244,11 @@ static void WheelLaneStop(void) {
 #define AUTOSCROLL_SPEED_STEPS 6
 #define AUTOSCROLL_TICK_MIN    20   /* 节拍下限（ms）：再快没有意义，注入也太密 */
 
+/* 平滑模式的固定节拍（ms）：25 次/秒。比它更快的注入对手感没有增益，
+   只会更费 CPU（注入本身有系统开销），所以平滑模式不是"越快越好"。 */
+#define AUTOSCROLL_SMOOTH_TICK 40
+
+/* 速度档 -> "每格的时长"(ms)。这是**速度**的唯一表达：值越小越快。 */
 static DWORD AutoScrollTickMs(int gear, int cap) {
     int base = ConfigGetAutoScrollInterval();
     if (cap  < 2) cap  = 2;
@@ -238,6 +257,26 @@ static DWORD AutoScrollTickMs(int gear, int cap) {
     int den = (AUTOSCROLL_SPEED_STEPS - 1) + (cap - 1) * (gear - 1);
     DWORD ms = (DWORD)(base * (AUTOSCROLL_SPEED_STEPS - 1) / den);
     return (ms < AUTOSCROLL_TICK_MIN) ? AUTOSCROLL_TICK_MIN : ms;
+}
+
+/* 本拍"实际怎么发"：间隔 beat(ms) + 增量 delta（无符号，方向由调用方加）。
+   整格模式：beat = 每格时长，delta = WHEEL_STD_DELTA。
+   平滑模式：beat 压到 AUTOSCROLL_SMOOTH_TICK，delta 按比例缩小到"一格的一个
+   零头"—— 于是 delta/beat 与整格模式完全相同（速度不变），只是拆得更碎。
+   若某档本来就比平滑节拍还快（节拍下限/小 base 的情况），保持整格，免得
+   "delta 反而比 120 还大"。 */
+static void AutoScrollPlan(int gear, int cap, DWORD* beat, int* delta) {
+    DWORD gearTick = AutoScrollTickMs(gear, cap);
+    if (ConfigGetAutoScrollSmooth() && gearTick > AUTOSCROLL_SMOOTH_TICK) {
+        int d = (int)((WHEEL_STD_DELTA * (LONG)AUTOSCROLL_SMOOTH_TICK + (LONG)gearTick / 2)
+                      / (LONG)gearTick);          /* 四舍五入 */
+        if (d < 1) d = 1;
+        *beat  = AUTOSCROLL_SMOOTH_TICK;
+        *delta = d;
+    } else {
+        *beat  = gearTick;
+        *delta = WHEEL_STD_DELTA;
+    }
 }
 
 static CRITICAL_SECTION s_asCs;
@@ -257,9 +296,22 @@ int ActAutoScrollCap(void) {
 BOOL ActAutoScrollActive(void) { return s_asActive != 0; }
 int  ActAutoScrollGear(void)   { return s_asActive ? (int)s_asGear : 0; }
 int  ActAutoScrollDir(void)    { return s_asActive ? (int)s_asDir  : 0; }
-/* 单测用：当前节拍。变速只改节拍、不改每拍格数，所以断言它最直观。 */
+/* 单测用：速度档（平均每格多少毫秒）。与粒度无关 —— 平滑与否它都一样，
+   所以它是"速度"的判据；Beat/Delta 才是"本拍怎么发"的判据。 */
 int  ActAutoScrollTick(void)   {
     return s_asActive ? (int)AutoScrollTickMs((int)s_asGear, (int)s_asCap) : 0;
+}
+int  ActAutoScrollBeat(void)   {
+    if (!s_asActive) return 0;
+    DWORD beat; int delta;
+    AutoScrollPlan((int)s_asGear, (int)s_asCap, &beat, &delta);
+    return (int)beat;
+}
+int  ActAutoScrollDelta(void)  {
+    if (!s_asActive) return 0;
+    DWORD beat; int delta;
+    AutoScrollPlan((int)s_asGear, (int)s_asCap, &beat, &delta);
+    return ((int)s_asDir >= 0) ? delta : -delta;   /* 带方向 */
 }
 
 /* 立即终止。非阻塞：只置状态 + 唤醒工作线程，绝不在调用线程里等它收尾
@@ -316,12 +368,14 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
         int dir = (int)s_asDir;
         if (dir == 0) { running = FALSE; continue; }   /* 防御：不该出现 */
 
-        DWORD tick = AutoScrollTickMs((int)s_asGear, (int)s_asCap);
-        SendWheelNotches(dir > 0 ? WHEEL_STD_DELTA : -WHEEL_STD_DELTA, 1);
+        DWORD tick; int delta;
+        AutoScrollPlan((int)s_asGear, (int)s_asCap, &tick, &delta);
+        SendWheelNotches(dir > 0 ? delta : -delta, 1);
 
         /* 等满这一个节拍。**变速不打断本拍**（下一拍才生效）：未选中的唤醒
            （提速）继续等剩下的时间；只有停止/反向（active 被清 0）才提前返回。
-           这就是"档位越高越抖"的修法之一。 */
+           这就是"档位越高越抖"的修法之一。
+           平滑模式下节拍固定为 AUTOSCROLL_SMOOTH_TICK，变速只改 delta。 */
         ULONGLONG deadline = GetTickCount64() + tick;
         BOOL ended = FALSE;
         for (;;) {

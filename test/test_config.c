@@ -199,13 +199,32 @@ int main(void) {
     EXPECT(ConfigGetAutoScrollInterval() == 1000, "CFG: AutoScrollInterval 上限钳到 1000");
     WriteIni("[General]\r\nAutoScrollInterval = abc\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollInterval() == 300, "CFG: AutoScrollInterval 非法值回落默认 300");
-    WriteIni("[Other]\r\nAutoScrollInterval = 300\r\n");
+    EXPECT(ConfigGetAutoScrollInterval() == 500, "CFG: AutoScrollInterval 非法值回落默认 500");
+    WriteIni("[Other]\r\nAutoScrollInterval = 300\r\n");   /* 非 General 段：不应生效 */
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollInterval() == 300, "CFG: 非 General 段的 AutoScrollInterval 不生效");
+    EXPECT(ConfigGetAutoScrollInterval() == 500, "CFG: 非 General 段的 AutoScrollInterval 不生效");
     WriteIni("[General]\r\n\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollInterval() == 300, "CFG: AutoScrollInterval 缺省为 300");
+    EXPECT(ConfigGetAutoScrollInterval() == 500, "CFG: AutoScrollInterval 缺省为 500");
+
+    /* 平滑注入开关 AutoScrollSmooth（默认 1）。样本用 0 —— 与默认值不同，
+       否则"自定义值生效"这条会恒真（默认值当样本的老坑）。 */
+    EXPECT(ConfigGetAutoScrollSmooth(), "CFG: AutoScrollSmooth 缺省为开");
+    WriteIni("[General]\r\nAutoScrollSmooth = 0\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(!ConfigGetAutoScrollSmooth(), "CFG: AutoScrollSmooth=0 关闭平滑");
+    WriteIni("[General]\r\nAutoScrollSmooth = 1\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetAutoScrollSmooth(), "CFG: AutoScrollSmooth=1 打开平滑");
+    /* 布尔项一律只认 "1"（与 RunAsAdmin / OverStepMode 同一套约定）：
+       其余写法（true/yes/on）都当关，不做模糊匹配。 */
+    WriteIni("[General]\r\nAutoScrollSmooth = true\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(!ConfigGetAutoScrollSmooth(),
+           "CFG: AutoScrollSmooth 只认 1（true 视为关，与其它开关一致）");
+    WriteIni("[Other]\r\nAutoScrollSmooth = 0\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetAutoScrollSmooth(), "CFG: 非 General 段的 AutoScrollSmooth 不生效");
 
     /* 激活键列表 EnhanceKeys / ShiftKeys：配置层只作"通用字符串项"留存，
        由键位映射模块（keymap.c）解析。这里断言**解析结果** ——
@@ -270,13 +289,13 @@ int main(void) {
                "UPG: 用户已有内容保留 (RunAsAdmin=1 / 名单)");
         EXPECT(ConfigGetLogMaxKB() == 2048 && ConfigGetMaxArrowSteps() == 32,
                "UPG: 缺失键补齐默认值");
-        EXPECT(ConfigGetAutoScrollInterval() == 300, "UPG: 补齐 AutoScrollInterval 默认值");
+        EXPECT(ConfigGetAutoScrollInterval() == 500, "UPG: 补齐 AutoScrollInterval 默认值");
         KeyMapInit();
         EXPECT(ModeKeyCount(MODE_ENHANCE) == 2 && ModeKeyCount(MODE_SHIFT) == 1,
                "UPG: 补齐的 EnhanceKeys/ShiftKeys 可被解析（Alt+D / F）");
         FILE* fc = NULL;
         int hasLog = 0, hasSteps = 0, hasMode = 0, hasWheel = 0;
-        int hasInterval = 0, hasEnh = 0, hasShift = 0;
+        int hasInterval = 0, hasEnh = 0, hasShift = 0, hasSmooth = 0;
         if (fopen_s(&fc, "bin/cfgtest.ini", "r") == 0 && fc) {
             char line[512];
             while (fgets(line, sizeof(line), fc)) {
@@ -284,14 +303,16 @@ int main(void) {
                 if (strstr(line, "MaxArrowSteps = 32")) hasSteps = 1;
                 if (strstr(line, "OverStepMode = 0")) hasMode = 1;
                 if (strstr(line, "WheelScrollMul = 2")) hasWheel = 1;
-                if (strstr(line, "AutoScrollInterval = 300")) hasInterval = 1;
+                if (strstr(line, "AutoScrollInterval = 500")) hasInterval = 1;
                 if (strstr(line, "EnhanceKeys = Alt, D")) hasEnh = 1;
                 if (strstr(line, "ShiftKeys = F")) hasShift = 1;
+                if (strstr(line, "AutoScrollSmooth = 1")) hasSmooth = 1;
             }
             fclose(fc);
         }
-        EXPECT(hasLog && hasSteps && hasMode && hasWheel && hasInterval && hasEnh && hasShift,
-               "UPG: 补齐块带注释写回文件（含新增三项）");
+        EXPECT(hasLog && hasSteps && hasMode && hasWheel && hasInterval && hasEnh && hasShift
+               && hasSmooth,
+               "UPG: 补齐块带注释写回文件（含新增项）");
     }
     /* 升级的容量算式必须正交覆盖四组边界：
          BOM 有/无  ×  末尾有/无换行  ×  [General] 段有/无  ×  缺部分/缺全部键
@@ -375,7 +396,8 @@ int main(void) {
                记得同步这里，和 kUpgrades 保持一致。 */
             fputs("[General]\nRunAsAdmin = 1\nLogMaxKB = 7\nMaxArrowSteps = 5\n"
                   "OverStepMode = 1\nWheelScrollMul = 5\n"
-                  "AutoScrollInterval = 250\nEnhanceKeys = Alt\nShiftKeys = Ctrl\n", fo);
+                  "AutoScrollInterval = 250\nAutoScrollSmooth = 0\n"
+                  "EnhanceKeys = Alt\nShiftKeys = Ctrl\n", fo);
             fclose(fo);
         }
         char before[512];
@@ -400,6 +422,8 @@ int main(void) {
         EXPECT(ConfigGetWheelScrollMul() == 5, "UPG: WheelScrollMul 自定义值不被覆盖");
         EXPECT(ConfigGetAutoScrollInterval() == 250,
                "UPG: AutoScrollInterval 自定义值不被覆盖");
+        EXPECT(!ConfigGetAutoScrollSmooth(),
+               "UPG: AutoScrollSmooth 自定义值不被覆盖（默认开、样本为关）");
         {
             WCHAR v[MODE_KEYS_MAXLEN] = L"";
             EXPECT(ConfigGetStr(L"EnhanceKeys", v, MODE_KEYS_MAXLEN) &&
@@ -429,7 +453,8 @@ int main(void) {
     EXPECT(TemplateHas("MaxArrowSteps = 32"),"CFG: 模板含 MaxArrowSteps 默认值");
     EXPECT(TemplateHas("OverStepMode = 0"),  "CFG: 模板含 OverStepMode 默认值");
     EXPECT(TemplateHas("WheelScrollMul = 2"),"CFG: 模板含 WheelScrollMul 默认值");
-    EXPECT(TemplateHas("AutoScrollInterval = 300"), "CFG: 模板含 AutoScrollInterval 默认值");
+    EXPECT(TemplateHas("AutoScrollInterval = 500"), "CFG: 模板含 AutoScrollInterval 默认值");
+    EXPECT(TemplateHas("AutoScrollSmooth = 1"),    "CFG: 模板含 AutoScrollSmooth 默认值");
     EXPECT(TemplateHas("EnhanceKeys = Alt, D"), "CFG: 模板含 EnhanceKeys 默认值");
     EXPECT(TemplateHas("ShiftKeys = F"),     "CFG: 模板含 ShiftKeys 默认值");
     EXPECT(TemplateHas("[NativeWordJump]"),  "CFG: 模板含 NativeWordJump 段");
