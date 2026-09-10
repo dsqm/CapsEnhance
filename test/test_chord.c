@@ -9,6 +9,7 @@
 #undef WinMain
 #include "hook.c"
 #include "send.c"      /* hook.c 的 SendActOnce 现在走统一发送模块 */
+#include "act.c"       /* 动作实际由执行线程完成：本测试要能起/停/等它 */
 #include <stdio.h>
 
 /* 词跳桩：本测试只验证 D/F 与补齐，不测文本解析 */
@@ -74,6 +75,34 @@ static void Sink(void) {
     while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE))
         DispatchMessageW(&m);
 }
+/* 只泵消息，不等待执行线程。
+   时序敏感的场景（"稳定期内抬手"）靠它 —— 一旦在这里等执行线程，
+   CHORD_SETTLE 的 50ms 稳定期就在场景中途被绕过，测的东西就变了。
+   需要等发送做完时，在断言前单独调 Drain()。 */
+static void Pump(int ms) {
+    ULONGLONG end = GetTickCount64() + ms;
+    while (GetTickCount64() < end) {
+        Sink();
+        Sleep(1);
+    }
+    Sink();   /* 收尾：把压着的 TIMER 也处理掉 */
+}
+
+/* 等执行线程把当前场景的动作做完，并把注入事件"看全"。
+   **必须一边泵消息一边等**：低级键盘钩子装在本线程上，只有本线程处于
+   "等消息"状态时系统才会调用它。发送改到执行线程之后这个坑才暴露出来 ——
+   以前发送就在本线程同步完成，事件顺手就被自己的钩子看到了；
+   现在用 WaitForSingleObject/Sleep 干等会漏记注入事件。 */
+static void Drain(void) {
+    for (int i = 0; i < 3000 && ActInFlight() != 0; i++) { Sink(); Sleep(1); }
+    /* 再泵一段：注入事件到达本线程的钩子有延迟（本机实测可达 ~60ms） */
+    ULONGLONG end = GetTickCount64() + 150;
+    while (GetTickCount64() < end) { Sink(); Sleep(1); }
+}
+
+/* 场景收尾：松开 C、泵完消息，再等执行线程把注入做完 */
+#define END_SCENE() do { Key(CLI_CAPS, FALSE); Pump(50); Drain(); } while (0)
+
 /* 场景间复位：清引擎状态与残留消息，保证场景相互独立 */
 static void Reset(void) {
     g_cMod = FALSE; g_dMod = FALSE; g_fMod = FALSE;
@@ -82,15 +111,8 @@ static void Reset(void) {
     memset((void*)g_phys, 0, sizeof(g_phys));   /* 物理按键表也归零 */
     PostMessageW(g_mainWnd, WM_CAPS_DOWN, 0, 0);  /* → ResetEngine：清 pending/active + 停表 */
     Sink();
+    Drain();   /* 等上一场景的尾巴收干净，否则残留注入会被算进下一场景 */
     ResetRec();
-}
-static void Pump(int ms) {
-    ULONGLONG end = GetTickCount64() + ms;
-    while (GetTickCount64() < end) {
-        Sink();
-        Sleep(2);
-    }
-    Sink();   /* 收尾：把压着的 TIMER 也处理掉 */
 }
 
 static int fails = 0;
@@ -103,6 +125,10 @@ static int fails = 0;
 int main(void) {
     g_state.paused = FALSE;
     SetWindowsHookExW(WH_KEYBOARD_LL, CapProc, GetModuleHandleW(NULL), 0);
+
+    /* 生产路径里动作由 act.c 的执行线程发送，测试必须起同一个线程，
+       否则测的是"同步兜底"分支，覆盖不到真实时序。 */
+    ActStart();
 
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = WndProc;
@@ -121,8 +147,7 @@ int main(void) {
     Key('D', TRUE);  Pump(2);     /* D 迟到 (乱序) -> 门闩 D */
     Key('J', FALSE); Pump(2);     /* 未到稳定期即抬手 -> 短点开火+补齐到3 */
     Key('D', FALSE); Pump(2);
-    Key(CLI_CAPS, FALSE);
-    Pump(50);
+    END_SCENE();
     CHECK(CountVk(VK_LEFT) == 3, "A: 乱序 C+J+D 点按 = 恰好 3 次左键");
 
     /* ---- 场景B：F 使 Shift 生效（严格序 C F J） ---- */
@@ -132,8 +157,7 @@ int main(void) {
     Key('J', TRUE);  Pump(2);
     Key('J', FALSE); Pump(2);    /* 短点：Shift 生效 */
     Key('F', FALSE); Pump(2);
-    Key(CLI_CAPS, FALSE);
-    Pump(50);
+    END_SCENE();
     CHECK(CountVk(VK_LEFT) == 1 && CountVk(VK_LSHIFT) >= 1,
           "B: C+F+J = Shift+左键 (1次)");
 
@@ -144,8 +168,7 @@ int main(void) {
     Key('F', TRUE);  Pump(2);    /* F 迟到仍未生效于本次短点 */
     Key('J', FALSE); Pump(2);
     Key('F', FALSE); Pump(2);
-    Key(CLI_CAPS, FALSE);
-    Pump(50);
+    END_SCENE();
     CHECK(CountVk(VK_LEFT) == 1 && CountVk(VK_LSHIFT) >= 1,
           "C: 乱序 C+F+J 仍 = Shift+左键 (1次)");
 
@@ -158,30 +181,32 @@ int main(void) {
     Key('J', FALSE); Pump(2);    /* 短点：D/F 门闩均生效 -> 3 次 Shift+左键 */
     Key('D', FALSE); Pump(2);
     Key('F', FALSE); Pump(2);
-    Key(CLI_CAPS, FALSE);
-    Pump(50);
+    END_SCENE();
     CHECK(CountVk(VK_LEFT) == 3 && CountVk(VK_LSHIFT) >= 3,
           "D: 乱序 C+D+F+J = Shift+左键 x3");
 
-    /* ---- 场景E：长按 C+J（无 D）连续重复，松手不留残余 ---- */
+    /* ---- 场景E：长按 C+J（无 D）连续重复，松手后不再输出 ----
+       发送是异步的：读计数前先 Drain，比较点都取在"松手之后"，
+       这样断言的是"松手之后不再产生新的输出"，而不是跟异步时序赛跑。 */
     Reset();
     Key(CLI_CAPS, TRUE); Pump(2);
     Key('J', TRUE); Pump(300);   /* 稳定期开火 + 首次150ms重复 + 若干 */
-    int beforeUp = CountVk(VK_LEFT);
-    Key('J', FALSE); Pump(2);    /* 抬手：不应补齐(无D) */
-    Key(CLI_CAPS, FALSE);
-    Pump(50);
+    Drain();
+    int duringHold = CountVk(VK_LEFT);
+    Key('J', FALSE); Pump(2);    /* 抬手：不应再补(无D) */
+    END_SCENE();
     int afterUp = CountVk(VK_LEFT);
-    CHECK(beforeUp >= 2 && afterUp == beforeUp,
-          "E: 长按 C+J 重复且松手无多余左键");
+    Pump(400); Drain();
+    CHECK(duringHold >= 2, "E: 长按 C+J 连续重复");
+    CHECK(afterUp - duringHold <= 1, "E: 松手后最多只剩已派发的那一发");
+    CHECK(CountVk(VK_LEFT) == afterUp, "E: 松手后不再继续输出左键");
 
     /* ---- 场景F：单点 C+J 无 D = 1 左键（不补齐） ---- */
     Reset();
     Key(CLI_CAPS, TRUE); Pump(2);
     Key('J', TRUE);  Pump(2);
     Key('J', FALSE); Pump(2);    /* 未到稳定期 -> 短点 */
-    Key(CLI_CAPS, FALSE);
-    Pump(50);
+    END_SCENE();
     CHECK(CountVk(VK_LEFT) == 1, "F: 单点 C+J = 1 左键");
 
     /* ---- 场景G：按住 C 时 F 单独按住（不触发任何 trigger）= 0 注入 ---- */
@@ -189,8 +214,7 @@ int main(void) {
     Key(CLI_CAPS, TRUE); Pump(2);
     Key('F', TRUE);  Pump(150);
     Key('F', FALSE); Pump(2);
-    Key(CLI_CAPS, FALSE);
-    Pump(50);
+    END_SCENE();
     CHECK(CountVk(VK_LEFT) == 0 && CountVk(VK_LSHIFT) == 0,
           "G: C+F 按住无 trigger = 不注入任何键");
 
@@ -203,8 +227,7 @@ int main(void) {
     Key('K', TRUE);  Pump(2);
     Key('K', FALSE); Pump(2);    /* Shift+下 */
     Key('F', FALSE); Pump(2);
-    Key(CLI_CAPS, FALSE);
-    Pump(50);
+    END_SCENE();
     CHECK(CountVk(VK_LEFT) == 1 && CountVk(VK_DOWN) == 1 && CountVk(VK_LSHIFT) >= 2,
           "H: C+F 按住点 J/K 均带 Shift");
 
@@ -220,11 +243,11 @@ int main(void) {
     Key('K', FALSE); Pump(120);      /* 松开 K：退回仍按着的 J，继续左键 */
     int leftAfterKUp = CountVk(VK_LEFT);
     Key('J', FALSE); Pump(2);        /* 松开 J：必须停止 */
+    Pump(50); Drain();
     int leftFinal = CountVk(VK_LEFT);
     int downFinal = CountVk(VK_DOWN);
-    Pump(400);                       /* 再等 400ms：不应再有任何注入 */
-    Key(CLI_CAPS, FALSE);
-    Pump(50);
+    Pump(400); Drain();              /* 再等 400ms：不应再有任何注入 */
+    END_SCENE();
     CHECK(downAtK >= 1, "I: J 按住时再按 K -> 切到下键");
     CHECK(leftAfterKUp > leftAtK, "I: 松开 K 后退回仍按着的 J（继续左键）");
     CHECK(CountVk(VK_LEFT) == leftFinal && CountVk(VK_DOWN) == downFinal,
@@ -237,8 +260,7 @@ int main(void) {
     Key('J', TRUE);  Pump(2);
     Key('J', FALSE); Pump(2);           /* 短点：增益补齐到 3 */
     KeyAlt(VK_LMENU, FALSE); Pump(2);
-    Key(CLI_CAPS, FALSE);
-    Pump(50);
+    END_SCENE();
     CHECK(CountVk(VK_LEFT) == 3, "J: 左Alt 等同 D（Caps+Alt+J = 3 次左键）");
     CHECK(CountVk(VK_LMENU) == 0, "J: Alt 本身不外泄（被屏蔽）");
 
@@ -246,11 +268,12 @@ int main(void) {
     Reset();
     Key(CLI_CAPS, TRUE); Pump(2);
     Key('J', TRUE);  Pump(200);          /* 长按重复左键 */
-    int nK = CountVk(VK_LEFT);
     Key(CLI_CAPS, FALSE); Pump(2);       /* J 还按着就松开 C：映射失效 */
     Key('J', FALSE); Pump(2);
-    Pump(400);                           /* 再等 400ms：不应再有注入 */
-    CHECK(CountVk(VK_LEFT) == nK, "K: 松开 Caps 后重复立刻停止");
+    Pump(50); Drain();
+    int nKStopped = CountVk(VK_LEFT);
+    Pump(400); Drain();                  /* 再等 400ms：不应再有注入 */
+    CHECK(CountVk(VK_LEFT) == nKStopped, "K: 松开 Caps 后重复立刻停止");
 
     /* ---- 场景L：清卡键（SendClearStuckModifiers 的判定）----
        卡键 = OS 逻辑按下 && 物理未按。注入的键同样会置位逻辑状态，
@@ -258,7 +281,7 @@ int main(void) {
     Reset();
     SendEvent(VK_LCONTROL, FALSE); Pump(30);     /* 注入 Ctrl down（逻辑按下） */
     CHECK(g_phys[VK_LCONTROL] == 0, "L: 注入的键不进物理表");
-    SendClearStuckModifiers(); Pump(30);
+    SendClearStuckModifiers(); Pump(30); Drain();
     CHECK(SeqIdx(VK_LCONTROL, 1) >= 0, "L: 卡住的 Ctrl 被补发抬起");
     SendEvent(VK_LCONTROL, TRUE); Pump(10);      /* 收尾：确保系统状态干净 */
     Pump(30);
@@ -272,7 +295,7 @@ int main(void) {
         if (kMods[i] == VK_LCONTROL) g_injectedDown[i] = FALSE;
     g_phys[VK_LCONTROL] = 1;                     /* 物理按住 */
     ResetRec();
-    SendClearStuckModifiers(); Pump(30);
+    SendClearStuckModifiers(); Pump(30); Drain();
     CHECK(SeqIdx(VK_LCONTROL, 1) < 0, "L: 物理按住的 Ctrl 不被清理");
     g_phys[VK_LCONTROL] = 0;
     SendEvent(VK_LCONTROL, TRUE); Pump(10);      /* 收尾 */
@@ -283,6 +306,7 @@ int main(void) {
        只是单格方向键。 */
     Reset();
     SendNativeWordJump(DIR_LEFT, FALSE);
+    Drain();   /* 注入事件要泵消息才会被本线程的捕获钩子看到 */
     int cd  = SeqIdx(VK_LCONTROL, 0);
     int ld  = SeqIdx(VK_LEFT, 0);
     int lu  = SeqIdx(VK_LEFT, 1);

@@ -10,7 +10,7 @@ if not exist "bin" mkdir bin
 
 cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
    /Fobin\ ^
-   src\hook.c src\nav.c src\send.c src\config.c src\main.c ^
+   src\hook.c src\nav.c src\send.c src\act.c src\config.c src\main.c ^
    /link /OUT:bin/CapsEnhance.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib ^
    /SUBSYSTEM:WINDOWS

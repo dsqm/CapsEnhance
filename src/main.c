@@ -20,16 +20,25 @@ static HMENU g_menu;
 static NOTIFYICONDATAW g_nid;
 static BOOL  g_quit = FALSE;
 
+/* 和弦引擎状态（仅主线程）：开火快照与"本动作已发送次数"。
+   实际发送由 act.c 的工作线程执行，快照随 ActJob 一起投递过去。 */
+volatile BOOL g_actD = FALSE;
+volatile BOOL g_actF = FALSE;
+volatile int  g_btnCount = 0;
+
 /* 诊断记录开关：C+` 切换（主线程读写，hook 线程投递 WM_PROBE） */
 volatile BOOL g_recording = FALSE;
 
 static CRITICAL_SECTION g_logcs;
-/* 惰性初始化。用 InterlockedCompareExchange 防双线程竞态；
-   当前 CapLog 只在主线程调用，这里按可跨线程的标准写。 */
-static void init_logcs(void) {
-    static volatile LONG once = 0;
-    if (InterlockedCompareExchange(&once, 1, 0) == 0)
-        InitializeCriticalSection(&g_logcs);
+/* 一次性初始化。此前是手写的双检锁：CAS 抢到 0 的线程还没
+   InitializeCriticalSection 完，另一个线程就可能已经 EnterCriticalSection
+   进去了。当时只有主线程写日志所以没暴露，但 act.c 的工作线程也会写 ——
+   必须换成原子的 InitOnce。 */
+static INIT_ONCE g_logOnce = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK LogCsInit(PINIT_ONCE o, PVOID p, PVOID* c) {
+    (void)o; (void)p; (void)c;
+    InitializeCriticalSection(&g_logcs);
+    return TRUE;
 }
 
 /* ============ 日志（追加写 CapsEnhance.log，exe 同目录） ============ */
@@ -43,16 +52,16 @@ static void log_path(WCHAR* out, size_t cap) {
     _snwprintf_s(out, cap, _TRUNCATE, L"%s\\CapsEnhance.log", wexe);
 }
 /* 日志超过上限时保留最近的一半（老内容丢弃），避免长期开着记录涨到几十 MB。
-   上限由配置 [General] LogMaxKB 控制，0 = 不限制。 */
+   上限由配置 [General] LogMaxKB 控制，0 = 不限制。
+   只在"确实超限"的那一次做，平时不碰这个函数 —— 它要读回半个文件再整写
+   一遍，代价远高于普通写日志。 */
 static void log_rotate_if_needed(const WCHAR* path) {
     int maxKB = ConfigGetLogMaxKB();
     if (maxKB <= 0) return;
     WIN32_FILE_ATTRIBUTE_DATA d;
     if (!GetFileAttributesExW(path, GetFileExInfoStandard, &d)) return;
-    LARGE_INTEGER sz;
-    sz.HighPart = (LONG)d.nFileSizeHigh;
-    sz.LowPart  = d.nFileSizeLow;
-    if (sz.QuadPart <= (LONGLONG)maxKB * 1024) return;
+    LONGLONG sz = ((LONGLONG)d.nFileSizeHigh << 32) | (LONGLONG)d.nFileSizeLow;
+    if (sz <= (LONGLONG)maxKB * 1024) return;
 
     LONGLONG keep = (LONGLONG)maxKB * 1024 / 2;
     FILE* f = NULL;
@@ -74,8 +83,16 @@ static void log_rotate_if_needed(const WCHAR* path) {
     free(buf);
 }
 
+/* 每条日志都开-写-关，**不要**改成"常驻句柄"：
+   Windows 的文件共享规则要求"新打开者声明的共享模式必须覆盖已授权给现有
+   句柄的所有访问权"。只要我们把句柄一直开着（哪怕用 _SH_DENYNO 打开），
+   只共享读的读者就打不开了 —— 实测 plain fopen("r")（MSVC CRT 默认）返回
+   EACCES、_SH_DENYWR 同样失败，PowerShell Get-Content 一类的读者也会失败，
+   而日志恰恰是"程序一边跑一边想打开看"的东西。logsmoke 就靠这条覆盖住了。
+   逐条开-关在记录模式下只是多条 syscall，且现在日志写入大多发生在执行线程
+   （见 act.c），不再压在主线程上 —— 不值得为它换掉可读性。 */
 void CapLog(const char* fmt, ...) {
-    init_logcs();
+    InitOnceExecuteOnce(&g_logOnce, LogCsInit, NULL, NULL);
     EnterCriticalSection(&g_logcs);
     WCHAR wpath[MAX_PATH]; log_path(wpath, MAX_PATH);
     log_rotate_if_needed(wpath);
@@ -128,12 +145,23 @@ static void EnsEngine(void) {
     if (!g_timer) g_timer = SetTimer(g_mainWnd, 2, 5, NULL);
 }
 
-/* 开火一次动作（词跳走文本解析；其余走按键发送，用开火快照修饰） */
-static void DoFireOnce(int act) {
-    if (act == ACT_WORD_L)      NavJump(DIR_LEFT, g_actF);
-    else if (act == ACT_WORD_R) NavJump(DIR_RIGHT, g_actF);
-    else                        SendActOnce(act);
+/* 把一次动作投递给执行线程（见 act.c）。
+   主线程不再自己发送：逐格方向键 / 跨进程同步 IPC / COM 往返会阻塞数百
+   毫秒，而 WH_KEYBOARD_LL 回调正跑在主线程上 —— 期间系统键盘输入得不到
+   处理（卡顿），超时还会被系统静默摘钩。
+   开火快照（g_actD/g_actF/g_btnCount）在此刻采集并随请求带走。 */
+static void PostAct(int act, int fillAct, int count) {
+    ActJob j;
+    j.act     = act;
+    j.fillAct = fillAct;
+    j.d       = g_actD;
+    j.f       = g_actF;
+    j.count   = count;
+    ActPost(&j);
 }
+
+/* 开火一次动作（词跳走文本解析；其余走按键发送，都用开火快照修饰） */
+static void DoFireOnce(int act) { PostAct(act, ACT_NONE, 0); }
 
 /* ============ 托盘 ============ */
 static const WCHAR* APP_NAME = L"CapsEnhance";
@@ -176,6 +204,7 @@ static void TrayRemove(void) {
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
 }
 static void TrayShowMenu(void) {
+    if (!g_menu) return;                 /* 菜单创建失败时不要拿 NULL 去用 */
     POINT pt;
     GetCursorPos(&pt);
     SetMenuPauseText();
@@ -202,6 +231,18 @@ void TrayAddHint(const WCHAR* s) {
     wcscpy_s(g_nid.szTip, 128, s);
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
+
+/* 弹一次气泡通知。用于"钩子安装失败""诊断已写入日志"这类必须被看到、
+   但不该打断操作的结果 —— 之前是用模态 MessageBox 弹在主线程上，
+   会把和弦引擎和键盘响应一起冻住。 */
+void TrayBalloon(const WCHAR* s) {
+    NOTIFYICONDATAW n = g_nid;
+    n.uFlags = NIF_INFO;
+    n.dwInfoFlags = NIIF_INFO;
+    wcscpy_s(n.szInfoTitle, 64, APP_NAME);
+    wcscpy_s(n.szInfo, 256, s);
+    Shell_NotifyIconW(NIM_MODIFY, &n);
+}
 static void SetMenuPauseText(void) {
     MENUITEMINFOW m;
     memset(&m, 0, sizeof(m));
@@ -215,6 +256,9 @@ static void SetMenuPauseText(void) {
 static void ResetEngine(void) {
     StopEngine();
     NavSelTrackReset();
+    /* 丢掉还没开始的"重复开火"尾流，但保留"松手补齐" —— 后者是用户本次
+       点按的一部分，不能因为紧接着松开 C 就被清掉。 */
+    ActClearKeepFill();
     g_pendingAct = ACT_NONE;
     g_activeAct  = ACT_NONE;
     g_actD = FALSE; g_actF = FALSE;
@@ -230,6 +274,9 @@ static void DoRestart(void) {
     ResetEngine();
     g_cMod = FALSE; g_dMod = FALSE; g_fMod = FALSE;
     g_pendD = FALSE; g_pendF = FALSE; g_btnCount = 0;
+    /* 必须先停执行线程并等它收尾：否则它可能正在注入，而 SendClearStuckModifiers
+       要读 send.c 里由它维护的 g_injectedDown（清卡键会读错）。 */
+    ActStop();
     SendClearStuckModifiers();
 
     WCHAR exe[MAX_PATH] = L"";
@@ -253,13 +300,28 @@ static void DoRestart(void) {
     PostMessageW(g_mainWnd, WM_CLOSE, 0, 0);
 }
 
+/* 命令行开关：按"整词"匹配。此前用 wcsstr 做子串匹配 —— 安装路径或参数里
+   恰好含 "--wait-exit" 就会误命中。边界要求两侧是空白或串首尾。
+   flag 形如 L"--wait-exit"；args 非空时写出其后紧跟的十进制参数。 */
+static BOOL HasSwitch(const WCHAR* flag, DWORD* argOut) {
+    const WCHAR* cmd = GetCommandLineW();
+    if (!cmd || !flag) return FALSE;
+    size_t fl = wcslen(flag);
+    for (const WCHAR* p = cmd; (p = wcsstr(p, flag)) != NULL; p += fl) {
+        BOOL lb = (p == cmd) || (p[-1] == L' ' || p[-1] == L'\t');
+        WCHAR c = p[fl];
+        if (!lb || (c != 0 && c != L' ' && c != L'\t')) continue;
+        if (argOut) *argOut = c ? (DWORD)wcstoul(p + fl + 1, NULL, 10) : 0;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 /* 重启流程：新实例带 --wait-exit <pid>，等旧实例退出（最多 5 秒）后再
    创建窗口/安装钩子，避免两个实例的钩子与托盘图标短暂并存。 */
 static void WaitOldInstanceExit(void) {
-    const WCHAR* flag = wcsstr(GetCommandLineW(), L"--wait-exit");
-    if (!flag) return;
-    DWORD pid = (DWORD)wcstoul(flag + 11, NULL, 10);
-    if (!pid) return;
+    DWORD pid = 0;
+    if (!HasSwitch(L"--wait-exit", &pid) || !pid) return;
     HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
     if (!h) return;                      /* 旧实例已退出 */
     WaitForSingleObject(h, 5000);
@@ -304,7 +366,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PROBE:
         /* C+`：切换诊断记录。开始=探测当前焦点并记录；再按=结束记录。
            用 MessageBeep 的两个不同系统事件音（走声卡，无需内置蜂鸣器），
-           并同步托盘悬停提示内容。 */
+           并同步托盘悬停提示内容。探测结果只写日志（原来会弹一个模态
+           对话框，既冻住引擎又难以阅读/复制）。 */
         g_recording = !g_recording;
         if (g_recording) {
             CapLog("===== REC START =====");
@@ -315,6 +378,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             MessageBeep(MB_ICONASTERISK);   /* 系统"星号"音：开始记录（与结束不同） */
             TrayHint(L"正在记录日志（C+\x60 结束）");
             NavProbe();
+            TrayBalloon(L"焦点探测已写入 CapsEnhance.log");
         } else {
             CapLog("===== REC END =====");
             MessageBeep(MB_ICONHAND);       /* 系统"手形"音：结束记录（低而不同） */
@@ -346,12 +410,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int act = (int)wp;
         StackRemove(act);
         if (g_pendingAct == act) {
-            /* 短点：稳定期内即抬起，立即开火一次并补齐（修饰用门闩快照） */
+            /* 短点：稳定期内即抬起，立即开火一次并补齐（修饰用门闩快照）。
+               开火 + 补齐合成一条请求：中间不会被别的动作插队，也用同一份
+               快照（旧代码靠连续两次同步调用达成同样效果）。 */
             g_pendingAct = ACT_NONE;
             g_actD = g_pendD; g_actF = g_pendF;
             g_btnCount = 1;
-            DoFireOnce(act);
-            ReleaseFill(act);
+            PostAct(act, act, g_btnCount);
             g_actD = FALSE; g_actF = FALSE;
             /* 还有别的键按着就继续（退回上一个），否则停 */
             int top = StackTop();
@@ -361,9 +426,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 EnsEngine();
             } else StopEngine();
         } else if (g_activeAct == act) {
-            /* 长按之后抬起：停止重复，若有增益短板则补齐 */
+            /* 长按之后抬起：停止重复，若有增益短板则补齐（快照要在清空
+               g_actD 之前采集，故先投递） */
             g_activeAct = ACT_NONE;
-            ReleaseFill(act);
+            PostAct(ACT_NONE, act, g_btnCount);
             g_actD = FALSE; g_actF = FALSE;
             int top = StackTop();
             if (top != ACT_NONE) {
@@ -383,18 +449,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp != 2) break;
         if (!g_cMod) { ResetEngine(); return 0; }
         ULONGLONG now = GetTickCount64();
-        if (g_pendingAct != ACT_NONE && now >= g_pendingTick + CHORD_SETTLE) {
+        /* ActInFlight() 门控：同一时刻只让一发动作在飞，等价于原来"主线程
+           被发送过程占住、定时器跑不了"的自然限速。没有它，长按词跳键会
+           在队列里堆出一串尾流。 */
+        if (g_pendingAct != ACT_NONE && now >= g_pendingTick + CHORD_SETTLE
+            && ActInFlight() == 0) {
             /* 稳定期到：用门闩快照修饰，开火，进入重复节奏 */
             g_activeAct = g_pendingAct; g_pendingAct = ACT_NONE;
             g_actD = g_pendD; g_actF = g_pendF;
             g_btnCount = 1;
             DoFireOnce(g_activeAct);
             g_activeNext = now + REPEAT_FIRST_DELAY;
-        } else if (g_activeAct != ACT_NONE && now >= g_activeNext) {
+        } else if (g_activeAct != ACT_NONE && now >= g_activeNext
+                   && ActInFlight() == 0) {
             DoFireOnce(g_activeAct);
             g_btnCount++;
             g_activeNext = now + REPEAT_INTERVAL;
-        } else if (g_pendingAct == ACT_NONE && g_activeAct == ACT_NONE) {
+        } else if (g_pendingAct == ACT_NONE && g_activeAct == ACT_NONE
+                   && ActInFlight() == 0) {
             StopEngine();
         }
         return 0;
@@ -423,12 +495,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     (void)hInst; (void)hPrev; (void)lpCmd; (void)nShow;
+    int rc = 0;
     g_state.paused = FALSE;
 
     /* --reset-keys：无条件把所有修饰键补一次"抬起"然后退出。
        用于程序已被杀死（状态表随进程消失）留下的卡键，等价于 AHK 社区
        常用的"把所有修饰键 Send Up 一遍"。可自建快捷方式随时调用。 */
-    if (wcsstr(GetCommandLineW(), L"--reset-keys")) {
+    if (HasSwitch(L"--reset-keys", NULL)) {
         SendForceResetKeys();
         return 0;
     }
@@ -440,7 +513,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
     wc.lpszClassName = L"CapsEnhanceMain";
-    RegisterClassW(&wc);
+    if (!RegisterClassW(&wc)) return 1;
 
     g_mainWnd = CreateWindowW(L"CapsEnhanceMain", APP_NAME,
                               WS_POPUP | WS_OVERLAPPEDWINDOW,
@@ -454,34 +527,59 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
        上下）。禁用后这些模块不再加载。 */
     ImmAssociateContext(g_mainWnd, NULL);
 
-    if (!HookInstall()) {
-        TrayHint(L"钩子安装失败");
-        return 1;
-    }
-    PhysSeedFromLogical();   /* 启动前就按着的键按物理按住处理（防误清） */
-
-    /* 启动不写日志文件；采集系统/环境基线供 C+` 诊断时输出。程序启动本身不发声。 */
-    NavBaseInfo();
-    ConfigLoad();   /* 读 CapsEnhance.ini（缺失则写注释模板） */
-
-    /* 配置要求以管理员运行且当前不是管理员：申请提权重启一次。
-       只试一次——提权起来的实例 IsRunElevated() 为真，不会循环；
-       用户取消 UAC 则按普通权限继续运行。 */
-    if (ConfigGetRunAsAdmin() && !IsRunElevated()) {
-        WCHAR exe[MAX_PATH];
-        GetModuleFileNameW(NULL, exe, MAX_PATH);
-        HINSTANCE r = ShellExecuteW(NULL, L"runas", exe, NULL, NULL, SW_SHOWNORMAL);
-        if ((int)(INT_PTR)r > 32) return 0;    /* 提权实例已拉起，本实例退出 */
-    }
-
-    g_menu = CreatePopupMenu();
-    AppendMenuW(g_menu, MF_STRING, IDM_PAUSE, L"暂停映射");
-    AppendMenuW(g_menu, MF_STRING, IDM_RESTART, L"重启程序");
-    AppendMenuW(g_menu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(g_menu, MF_STRING, IDM_EXIT, L"退出");
-
+    /* 先建托盘：后面任何一步失败才有地方提示用户。此前钩子安装失败时
+       调 TrayHint，但托盘图标还没创建，提示全部落空 —— 用户看不到原因。 */
     TrayAdd();
-    TrayHint(L"正在映射");
+
+    /* 执行线程要在装钩子之前起来：装了钩子就随时可能有动作要发。 */
+    if (!ActStart())
+        CapLog("ActStart 失败：动作退回主线程同步执行（输入响应性下降）");
+
+    if (!HookInstall()) {
+        TrayHint(L"钩子安装失败（可能被安全软件拦截）");
+        TrayBalloon(L"CapsEnhance 启动失败：键盘钩子安装失败，可能被安全软件拦截。");
+        rc = 1;
+        g_quit = TRUE;
+        DestroyWindow(g_mainWnd);      /* 走统一收尾，不留托盘残影 */
+    }
+
+    if (!g_quit) {
+        PhysSeedFromLogical();   /* 启动前就按着的键按物理按住处理（防误清） */
+
+        /* 启动不写日志文件；采集系统/环境基线供 C+` 诊断时输出。启动不发声。 */
+        NavBaseInfo();
+        ConfigLoad();   /* 读 CapsEnhance.ini（缺失则写注释模板） */
+
+        /* 配置要求以管理员运行且当前不是管理员：申请提权重启一次。
+           提权实例带 --wait-exit —— 必须等本实例释放单实例互斥量之后再装
+           钩子，否则两边抢同一把锁，提权实例会误判"已在运行"而直接退出，
+           结果是提权静默失败。用户取消 UAC 则按普通权限继续运行。 */
+        if (ConfigGetRunAsAdmin() && !IsRunElevated()) {
+            WCHAR exe[MAX_PATH] = L"";
+            GetModuleFileNameW(NULL, exe, MAX_PATH);
+            WCHAR args[64];
+            _snwprintf_s(args, 64, _TRUNCATE, L"--wait-exit %lu",
+                         (unsigned long)GetCurrentProcessId());
+            HINSTANCE r = ShellExecuteW(NULL, L"runas", exe, args, NULL, SW_SHOWNORMAL);
+            if ((int)(INT_PTR)r > 32) {
+                /* 提权实例已拉起。这里不能裸 return —— 那会跳过卸载钩子与
+                   清卡键收尾，在被让出的窗口里留下卡键和托盘残影。 */
+                g_quit = TRUE;
+                DestroyWindow(g_mainWnd);
+            }
+        }
+    }
+
+    if (!g_quit) {
+        g_menu = CreatePopupMenu();
+        if (g_menu) {
+            AppendMenuW(g_menu, MF_STRING, IDM_PAUSE, L"暂停映射");
+            AppendMenuW(g_menu, MF_STRING, IDM_RESTART, L"重启程序");
+            AppendMenuW(g_menu, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(g_menu, MF_STRING, IDM_EXIT, L"退出");
+        }
+        TrayHint(L"正在映射");
+    }
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
@@ -490,10 +588,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
         DispatchMessageW(&msg);
     }
 
+    /* ---- 统一收尾：所有启动失败路径都汇到这里 ---- */
     StopEngine();
+    ActStop();                   /* 停执行线程并等它收尾，再清卡键 */
     HookUninstall();
     SendClearStuckModifiers();   /* 退出前清掉可能卡住的注入修饰键 */
     TrayRemove();
-    DestroyMenu(g_menu);
-    return 0;
+    if (g_menu) { DestroyMenu(g_menu); g_menu = NULL; }
+    return rc;
 }

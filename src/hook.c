@@ -13,10 +13,8 @@ volatile BOOL g_fMod = FALSE;
 volatile BOOL g_pendD = FALSE;
 volatile BOOL g_pendF = FALSE;
 
-/* 开火时的修饰快照（主线程开火时写入） */
-volatile BOOL g_actD = FALSE;
-volatile BOOL g_actF = FALSE;
-volatile int  g_btnCount = 0;
+/* 注：g_actD / g_actF / g_btnCount 是和弦引擎状态，定义在 main.c。
+   实际发送跑在 act.c 的工作线程上，快照随 ActJob 传递，这里不再持有。 */
 
 /* 物理按键状态表：只记录真实（非注入）按键的按下/抬起。
    GetAsyncKeyState 反映的是 OS 的"逻辑"状态——被注入的键同样会置位，
@@ -87,21 +85,21 @@ static int ActToVk(int act) {
     }
 }
 
-/* 发一次动作（用开火快照的修饰；词跳 N/M 由主线程 NavJump 处理，不走这里） */
-void SendActOnce(int act) {
+/* 发一次动作。shift = 开火快照里的 F（位移）；词跳 N/M 由 NavJump 处理，
+   不走这里。真实 CapsLock 切换不需要带 Shift。 */
+void SendActOnce(int act, BOOL shift) {
     int vk = ActToVk(act);
     if (!vk) return;
-    /* 真实 CapsLock 切换不需要带 Shift */
-    SendKeyOnce(vk, (act == ACT_CAPSLOCK) ? FALSE : g_actF);
+    SendKeyOnce(vk, (act == ACT_CAPSLOCK) ? FALSE : shift);
 }
 
-/* 松手补齐：仅增益模式 + 非词跳动作；若开火次数<3 补齐到3 */
-void ReleaseFill(int act) {
-    if (!g_actD) return;
-    if (g_btnCount >= 3) { g_btnCount = 0; return; }
-    if (act == ACT_WORD_L || act == ACT_WORD_R) { g_btnCount = 0; return; }
-    while (g_btnCount < 3) { SendActOnce(act); g_btnCount++; }
-    g_btnCount = 0;
+/* 松手补齐：仅增益模式（快照 d 为真）+ 非词跳动作；已发送次数 <3 则补到 3。
+   次数由调用方（引擎）给出，本函数不回写任何全局状态。 */
+void ReleaseFill(int act, BOOL d, BOOL shift, int count) {
+    if (!d) return;
+    if (count >= 3) return;
+    if (act == ACT_WORD_L || act == ACT_WORD_R) return;
+    while (count < 3) { SendActOnce(act, shift); count++; }
 }
 
 /* 是否软件注入的按键（避免自己被自己触发） */

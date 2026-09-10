@@ -57,9 +57,31 @@ extern volatile BOOL g_dMod;    /* 增益 D 按住（实时） */
 extern volatile BOOL g_fMod;    /* 位移 F 按住（实时） */
 extern volatile BOOL g_pendD;   /* 本次和弦 D 门闩（钩子线程维护，物理顺序，免疫派发竞态） */
 extern volatile BOOL g_pendF;   /* 本次和弦 F 门闩 */
+
+/* 和弦引擎状态（仅主线程）：开火快照与已发送次数。
+   实际发送由 act.c 的工作线程执行，快照随请求一起投递过去。 */
 extern volatile BOOL g_actD;    /* 本次动作开火时的 D 快照 */
 extern volatile BOOL g_actF;    /* 本次动作开火时的 F 快照 */
 extern volatile int  g_btnCount;/* 本次动作已发送次数 */
+
+/* ---------- 动作执行线程（src/act.c） ----------
+   把"会阻塞数百毫秒"的发送动作从主线程挪到专职线程，避免 WH_KEYBOARD_LL
+   回调（跑在安装它的主线程上）被挡住 —— 详见 act.c 顶部说明。 */
+typedef struct {
+    int  act;       /* 要开火的动作（ACT_*）；ACT_NONE = 不开火  */
+    int  fillAct;   /* 松手补齐的动作（ACT_*）；ACT_NONE = 不补齐 */
+    BOOL d;         /* 开火快照：D 增益                          */
+    BOOL f;         /* 开火快照：F 位移                          */
+    int  count;     /* fillAct 的已发送次数（补齐时用）           */
+} ActJob;
+
+BOOL ActStart(void);              /* 启动执行线程；失败返回 FALSE（退回同步） */
+void ActStop(void);               /* 停止并等当前动作结束（退出/重启用）      */
+void ActPost(const ActJob* job);  /* 投递一次动作（FIFO）                     */
+void ActClear(void);              /* 丢弃未开始的请求（引擎复位）             */
+void ActClearKeepFill(void);      /* 同上，但保留"松手补齐"类请求             */
+int  ActInFlight(void);           /* 队列中 + 正在执行的动作数                */
+void ActDrain(void);              /* 等队列清空且当前动作结束                 */
 
 /* ---------- 钩子模块 ---------- */
 extern HHOOK g_hook;
@@ -69,8 +91,10 @@ BOOL PhysKeyDown(int vk);   /* 真实（非注入）按键是否物理按住 —
 void PhysSeedFromLogical(void); /* 装钩子后：把当前已按下的键视为物理按住，防误清 */
 
 /* ---------- 发送/补齐 ---------- */
-void SendActOnce(int act);       /* 发一次动作（用开火快照修饰） */
-void ReleaseFill(int act);       /* 松手补齐：增益模式点按 -> 补到3 */
+/* 开火快照（D/F 修饰、已发送次数）由调用方显式传入：实际执行发生在
+   act.c 的工作线程上，不能再回头读主线程的 volatile 状态。 */
+void SendActOnce(int act, BOOL shift);                          /* 发一次动作 */
+void ReleaseFill(int act, BOOL d, BOOL shift, int count);       /* 松手补齐：增益模式点按 -> 补到3 */
 
 /* ---------- 按键发送模块（src/send.c） ----------
    所有模拟按键集中在这里：扩展键标志、逐条发送节奏、Shift/Ctrl 组合。
