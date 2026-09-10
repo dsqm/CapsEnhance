@@ -63,16 +63,23 @@ static void SendEvent(int vk, BOOL up) {
 }
 
 /* 事件之间的间隔：让目标程序的消息队列逐个消化 */
-#define KEY_GAP        5      /* ms：组合键内部 */
+#define KEY_GAP        5      /* ms：同一组合键内主键的按下/抬起之间 */
 #define ARROW_GAP      8      /* ms：连续箭头之间 */
+/* 修饰键（Shift/Ctrl）与主键之间的间隔。实测：注入式按键在虚拟机上约
+   60ms 才到达目标，间隔太小时目标处理主键时读到的修饰键状态还没更新——
+   表现是"Ctrl+方向"退化成单格移动（Quicker/WPF 上抓到的：同一段文本里
+   Ctrl+← 时灵时不灵，日志交替出现 -1 与整词位移）。取 40ms（本机注入
+   延迟实测约 60ms/键，间隔要留足）：代价是组合键单次多 ~80ms，换来的是
+   不再退化成单格移动。 */
+#define COMBO_GAP      40     /* ms：修饰键 <-> 主键之间 */
 
 /* 单击一个键；shift 全程按住（Shift↓ 键↓ 键↑ Shift↑） */
 void SendKeyOnce(int vk, BOOL shift) {
-    if (shift) { SendEvent(VK_LSHIFT, FALSE); Sleep(KEY_GAP); }
+    if (shift) { SendEvent(VK_LSHIFT, FALSE); Sleep(COMBO_GAP); }
     SendEvent(vk, FALSE);
     Sleep(KEY_GAP);
     SendEvent(vk, TRUE);
-    if (shift) { Sleep(KEY_GAP); SendEvent(VK_LSHIFT, TRUE); }
+    if (shift) { Sleep(COMBO_GAP); SendEvent(VK_LSHIFT, TRUE); }
 }
 
 /* 逐格输出的打断机制：
@@ -104,7 +111,7 @@ BOOL SendArrowsConflicts(int act) {
 void SendArrows(int dir, int n, BOOL shift) {
     int vk = (dir == DIR_LEFT) ? VK_LEFT : VK_RIGHT;
     g_arrDir = dir; g_arrBusy = TRUE; g_arrBreak = FALSE;
-    if (shift) { SendEvent(VK_LSHIFT, FALSE); Sleep(KEY_GAP); }
+    if (shift) { SendEvent(VK_LSHIFT, FALSE); Sleep(COMBO_GAP); }
     for (int i = 0; i < n && i < MAX_ARROW_STEPS; i++) {
         if (g_arrBreak) break;
         SendEvent(vk, FALSE);
@@ -122,15 +129,15 @@ void SendArrows(int dir, int n, BOOL shift) {
    Ctrl 必须在方向键之前按下、之后抬起，否则目标收到的只是单格方向键。 */
 void SendNativeWordJump(int dir, BOOL shift) {
     int vk = (dir == DIR_LEFT) ? VK_LEFT : VK_RIGHT;
-    if (shift) { SendEvent(VK_LSHIFT, FALSE); Sleep(KEY_GAP); }
+    if (shift) { SendEvent(VK_LSHIFT, FALSE); Sleep(COMBO_GAP); }
     SendEvent(VK_LCONTROL, FALSE);
-    Sleep(KEY_GAP);
+    Sleep(COMBO_GAP);
     SendEvent(vk, FALSE);
     Sleep(KEY_GAP);
     SendEvent(vk, TRUE);
-    Sleep(KEY_GAP);
+    Sleep(COMBO_GAP);
     SendEvent(VK_LCONTROL, TRUE);
-    if (shift) { Sleep(KEY_GAP); SendEvent(VK_LSHIFT, TRUE); }
+    if (shift) { Sleep(COMBO_GAP); SendEvent(VK_LSHIFT, TRUE); }
 }
 
 /* 释放一个修饰键。Alt / Win 的"抬起"被系统单独看到时会被解释为
