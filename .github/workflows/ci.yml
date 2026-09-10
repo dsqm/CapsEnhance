@@ -42,6 +42,27 @@ jobs:
         shell: cmd
         run: call build.bat
 
+      # Records which toolchain produced this exe, plus its size and SHA256.
+      # Two machines can build the same source into different sizes simply
+      # because MSVC / Windows SDK differ; this file makes that a one-line
+      # diff instead of a mystery. build.bat already uses /Brepro, so with the
+      # same toolchain the hash is reproducible.
+      - name: Record build fingerprint
+        shell: cmd
+        run: |
+          call build_env.bat
+          (
+            echo toolchain:
+            echo   VS   = %VS%
+            echo   MSVC = %MSVCDIR%
+            echo   SDK  = %SDKVER%
+            echo   flags = see build.bat ^(/O2 /W4 /MT /Brepro^)
+            echo artifact:
+            for %%F in (bin\CapsEnhance.exe) do echo   size   = %%~zF bytes
+            certutil -hashfile bin\CapsEnhance.exe SHA256
+          ) > bin\BUILD-FINGERPRINT.txt
+          type bin\BUILD-FINGERPRINT.txt
+
       # 真实进程级检查：重启握手 / 单实例 / 日志轮转。
       # windows-latest 是完整交互会话，可运行 GUI 进程。
       - name: Runtime checks (restart handshake / single instance / log rotate)
@@ -59,4 +80,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: CapsEnhance-${{ github.sha }}
-          path: bin/CapsEnhance.exe
+          path: |
+            bin/CapsEnhance.exe
+            bin/BUILD-FINGERPRINT.txt

@@ -10,9 +10,19 @@ if not exist "bin" mkdir bin
 
 rem /W4 instead of /W3: this project has already been bitten by silent
 rem sign/size mismatches in cross-process message plumbing, and the extra
-rem level costs nothing. The remaining C4245s in nav.c are the OBJID_CLIENT
-rem sign mismatch (harmless, kept deliberately).
-cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
+rem level costs nothing.
+rem
+rem /Brepro = reproducible build. Without it the PE header carries a build
+rem timestamp (TimeDateStamp) plus a toolset-dependent "Rich" header, so two
+rem builds of the SAME source with the SAME toolchain still produce different
+rem SHA256. With it the exe is byte-identical, which is what makes
+rem "is this artifact the same as the one I built?" answerable at all.
+rem (Requires VS2019 16.6+ / MSVC 19.26+, i.e. any current toolset.)
+rem
+rem NOTE: identical *size* across two machines still requires the same MSVC
+rem toolset and Windows SDK version -- those two embed different instruction
+rem selection and CRT code. See README "build artifacts differ" section.
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TC ^
    /Fobin\ ^
    src\hook.c src\nav.c src\send.c src\act.c src\config.c src\keymap.c src\main.c ^
    /link /OUT:bin/CapsEnhance.exe ^
@@ -23,4 +33,7 @@ if errorlevel 1 (
     echo [ERROR] build failed
     exit /b 1
 )
-echo [OK] bin/CapsEnhance.exe built.
+rem Report what actually got built, with which toolchain. Cheap here, and it
+rem turns "the two exes differ, why?" into a one-line diff of the logs.
+for %%F in (bin\CapsEnhance.exe) do echo [OK] bin/CapsEnhance.exe built. size=%%~zF bytes
+where certutil >nul 2>&1 && certutil -hashfile bin\CapsEnhance.exe SHA256 | findstr /R /V "SHA256 CertUtil hash" 

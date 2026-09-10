@@ -18,7 +18,16 @@ if not exist "%PFX86%" set "PFX86=%ProgramFiles%"
 
 set "VS="
 set "VSW=%PFX86%\Microsoft Visual Studio\Installer\vswhere.exe"
-if exist "%VSW%" (
+rem Optional pin: set CAPS_VSVER (e.g. "[17.0,18.0)") to force a VS generation.
+rem Default is -latest, which is what makes a CI image update able to change the
+rem toolset (and therefore the exe) under a green pipeline. Pin only when you
+rem need byte-comparable artifacts across time.
+if defined CAPS_VSVER (
+    if exist "%VSW%" (
+        for /f "usebackq tokens=*" %%i in (`"%VSW%" -latest -products * -version "%CAPS_VSVER%" -property installationPath`) do set "VS=%%i"
+    )
+)
+if not defined VS if exist "%VSW%" (
     for /f "usebackq tokens=*" %%i in (`"%VSW%" -latest -products * -property installationPath`) do set "VS=%%i"
 )
 if not defined VS if exist "C:\VS2022\VC\Auxiliary\Build\vcvars64.bat" set "VS=C:\VS2022"
@@ -45,6 +54,18 @@ if not defined SDKVER goto no_sdk
 set "PATH=%MSVC%\bin\Hostx64\x64;%PATH%"
 set "INCLUDE=%MSVC%\include;%SDK%\Include\%SDKVER%\ucrt;%SDK%\Include\%SDKVER%\um;%SDK%\Include\%SDKVER%\shared"
 set "LIB=%MSVC%\lib\x64;%SDK%\Lib\%SDKVER%\ucrt\x64;%SDK%\Lib\%SDKVER%\um\x64"
+
+rem ---- Report the toolchain that was actually selected ----
+rem Two machines (or two runner images) can build the same source into
+rem different exe sizes simply because MSVC / Windows SDK differ: instruction
+rem selection, inlined CRT code and header implementations all move with the
+rem version. Printing this makes such a difference a one-line log diff
+rem instead of a mystery. VS picked by vswhere -latest, so a newer VS
+rem appearing on a CI image silently changes the toolset -- this line is how
+rem you notice.
+echo [ENV] VS=%VS%
+echo [ENV] MSVC=%MSVCDIR%
+echo [ENV] SDK=%SDKVER%
 exit /b 0
 
 :no_vs
