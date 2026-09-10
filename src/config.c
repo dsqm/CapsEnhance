@@ -21,16 +21,34 @@
 /* 横向滚动的默认倍数：**1**（不放大）。
    横向是"每次滚轮挪一列"的语义，倍数 1 = 一个物理格换一次横向滚动，
    手感与系统原生横向滚动一致；想更快再调大，0 = 完全关闭该功能。
-   为什么不跟纵向一样默认 2：纵向默认 2 是"补一格让滚动更跟手"，而横向
-   默认放大反而会让横向移动过头（列宽通常远小于行高，横向更容易"越过目标"）。 */
+   为什么不跟纵向一样默认放大：横向默认放大反而会让横向移动过头（列宽通常
+   远小于行高，横向更容易"越过目标"）。
+
+   **改默认值时务必全局搜这个数值**：源码注释、ini 模板、ini 升级块、以及
+   test_config.c 的断言与断言消息里都可能写死它（历史上"默认从 3 改成 2"时
+   就有三处文案没跟着改，见 README 的"改默认值"小节）。 */
 #define WHEEL_HMUL_DEFAULT 1
 #define STR2(x) #x
 #define STR(x)  STR2(x)
 
-/* 「Caps + 滚轮」的放大**倍数**（默认 2）：滚一格 = 系统原本一格 + 我们补 (N-1) 格。
+/* 日志文件大小上限（KB），0 = 不限制。
+   上限是**安全**问题而不是口味问题：main.c 的 log_rotate_if_needed 会按
+   "上限的一半"分配缓冲（`malloc((size_t)keep + 1)`，keep = maxKB*512），
+   在 32 位构建下 (size_t)keep 可能回绕成一个很小的数 —— malloc 拿到小缓冲，
+   随后的 fread 却按回绕前的大长度写进去，堆越界。当前是 x64 构建不会触发，
+   但把上限钳住就**永远**不可能触发。 */
+#define LOG_MAX_KB_DEFAULT 2048
+#define LOG_MAX_KB_MAX     65536
+
+/* 「Caps + 滚轮」的放大**倍数**（默认 3）：滚一格 = 系统原本一格 + 我们补 (N-1) 格。
    只在这一处定值：模板与升级块用 STR() 拼进去，避免"代码改了、字符串没改"的漂移。
-   为什么是 2 而不是 3：每补一格注入端要隔 2ms，mul=3 要补 2 格，滚动时能感觉到
-   卡顿；mul=2 只补 1 格、无间隔等待，手感与系统原生一致。
+
+   为什么又回到 3（这个值改过两轮，值得记下原因）：
+     · 最初是 3，后来因为"滚动时能感觉到卡顿"改成 2 —— 但那次是**误诊**：
+       卡顿的真因是补发时的 Sleep 跑在**主线程**上（主线程不在"等消息"状态
+       会让系统跳过低级钩子），不是"多补了一格"；
+     · 补发搬到 act.c 的滚轮专用线程之后，Sleep 只阻塞那个线程，倍数 3
+       不再有任何卡顿。手感的账要算在"线程位置"上，不是"格数"上。
    `0` / `1` = 不放大（等同关闭，滚轮完全按系统原本行为）。
    **本项只管「Caps+滚轮」**：自动滚动完全不看它，有自己的两个速度项
    （AutoScrollInterval / AutoScrollFastMs）—— 这是刻意的。倍数量与"毫秒/格"
@@ -49,20 +67,25 @@
        《义务教育语文课程标准》对 7-9 年级的要求是"每分钟不少于 500 字"）
      · 需要边读边想的**技术文本/精读**约 80..150 字/分钟
      · 中文朗读 150..250 字/分钟（电视播音 240 左右），比默读慢得多
-   换算假设：Windows 默认"每次滚 3 行"，一行按 45 字（最大化窗口的中间值），
-   于是  字/分钟 ≈ 135000 / 本值(ms) ：
+   换算假设：Windows 默认"每次滚 3 行"，一行按 45 字（最大化窗口的中间值）：
+        行/分钟 = 180000 / 本值(ms)      字/分钟 = 行/分钟 × 45
         每格ms   行/分钟   字/分钟
          120     1500     67500   <- 最初的值，比人快两个数量级
          500      360     16200
-        4000       45      2025   <- 上一版，仍是人的 4~7 倍，所以还是偏快
+        4000       45      2025   <- 中间一版，仍是人的 4~7 倍，所以还是偏快
+        1500      120      5400   <- **当前默认**：不是阅读速度，是"按住就快速
+                                      浏览"（持续滚动现在定位成翻页工具）
        18000       10       450   <- 通用默读
-       24000      7.5       338   <- **默认**：落在 300..500 的偏慢半区，
-                                      对应"边读边理解"的舒适区
+       24000      7.5       338   <- 想按阅读速度读长文就设这个（落在 300..500
+                                      的偏慢半区，对应"边读边理解"的舒适区）
        60000        3       135   <- 技术精读（80..150 字/分钟）
-   嫌慢就再滚一下提速，或把本值调小。 */
+   嫌慢就再滚一下提速，或把本值调小；想"读文档刚刚好"就调到 24000 一带。
+   （上表的值与"当前默认"必须跟着 AUTOSCROLL_INTERVAL_DEFAULT 一起改 ——
+     历史上把默认从 24000 改成 1500 时这张表没动，注释里留下了 24000 是
+     默认的说法，与代码不一致。） */
 #define AUTOSCROLL_INTERVAL_DEFAULT 1500
 
-/* AutoScrollInterval 的可调范围（ms）。下限 100 对应" 1350 行/分钟"这种
+/* AutoScrollInterval 的可调范围（ms）。下限 100 对应 1800 行/分钟这种
    非人速的扫读，留着只是不设人为障碍；上限 60000（3 行/分钟 ≈ 135 字/分钟）
    覆盖"技术精读"这一档 —— 只要有需求就不该被上限挡住。 */
 #define AUTOSCROLL_INTERVAL_MIN 100
@@ -88,10 +111,19 @@
    个别程序对小数刻度不做累积（表现为完全不动），把这里设 0 退回整格模式。 */
 #define AUTOSCROLL_SMOOTH_DEFAULT 1
 
+/* Scintilla 通道是否允许读取目标进程内存（默认开）。
+   Scintilla 的 SCI_GETTEXT 只接受"对方进程地址空间里的缓冲区"，所以读全文
+   必然要 OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ) + VirtualAllocEx
+   + ReadProcessMemory（详见 nav.c 的 SciGetTextCaret）。这是对目标进程的
+   实质性权限，虽然范围已经限定为"类名白名单 + 最多 2MB"，但**是否允许**
+   应该由用户决定：设 0 即整条 Scintilla 通道放弃，退回 UIA / IA2 /
+   原生 Ctrl+方向（Notepad3 等仍能跳，只是不再是瞬跳）。 */
+#define ALLOW_SCINTILLA_READ_DEFAULT 1
+
 static WCHAR g_names[CFG_MAX_ENTRIES][CFG_NAME_MAX];
 static int   g_count = 0;
 static BOOL  g_runAsAdmin = TRUE;    /* 缺省启用（缺省配置就是 RunAsAdmin = 1） */
-static int   g_logMaxKB   = 2048;   /* 日志大小上限（KB），0 = 不限制 */
+static int   g_logMaxKB   = LOG_MAX_KB_DEFAULT;   /* 日志大小上限（KB），0 = 不限制 */
 static int   g_maxArrowSteps = 8;   /* 逐格词跳最大步数，超过按 overStepMode 处理 */
 static BOOL  g_overStepCtrl = TRUE;  /* TRUE=超限改发 Ctrl+方向（原生词跳） */
 static int   g_wheelMul = WHEEL_MUL_DEFAULT;  /* Caps+滚轮 放大倍数，<2 = 不放大 */
@@ -99,6 +131,7 @@ static int   g_autoScrollFastMs = AUTOSCROLL_FAST_DEFAULT;       /* 自动滚动
 static int   g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT; /* 自动滚动初始节拍(ms) */
 static BOOL  g_autoScrollSmooth = AUTOSCROLL_SMOOTH_DEFAULT;     /* 自动滚动平滑注入 */
 static int   g_wheelHMul = WHEEL_HMUL_DEFAULT; /* Caps+Shift+滚轮 的横向滚动倍数，0=关闭 */
+static BOOL  g_allowSciRead = ALLOW_SCINTILLA_READ_DEFAULT; /* Scintilla 通道读目标进程内存 */
 
 /* 整数：只认前导十进制数字，其余（空/非法）返回默认值。
    超过 1e8 直接判非法：没有哪个配置项需要这么大，而继续累加会让
@@ -166,7 +199,7 @@ static void AddEntry(const WCHAR* name) {
 void ConfigLoadFrom(const WCHAR* path) {
     g_count = 0;
     g_runAsAdmin = TRUE;
-    g_logMaxKB = 2048;
+    g_logMaxKB = LOG_MAX_KB_DEFAULT;
     g_maxArrowSteps = 8;
     g_overStepCtrl = TRUE;
     g_wheelMul = WHEEL_MUL_DEFAULT;
@@ -174,6 +207,7 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT;
     g_autoScrollSmooth = AUTOSCROLL_SMOOTH_DEFAULT;
     g_wheelHMul = WHEEL_HMUL_DEFAULT;
+    g_allowSciRead = ALLOW_SCINTILLA_READ_DEFAULT;
 
     FILE* f = NULL;
     if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
@@ -230,7 +264,12 @@ void ConfigLoadFrom(const WCHAR* path) {
                 _snwprintf_s(val, CFG_VAL_LEN, _TRUNCATE, L"%s", eq + 1);
                 TrimW(key); TrimW(val); LowerW(key);
                 if (_wcsicmp(key, L"runasadmin") == 0) g_runAsAdmin = ParseBoolW(val);
-                else if (_wcsicmp(key, L"logmaxkb") == 0) g_logMaxKB = ParseIntW(val, 2048);
+                else if (_wcsicmp(key, L"logmaxkb") == 0) {
+                    int v = ParseIntW(val, LOG_MAX_KB_DEFAULT);
+                    if (v < 0) v = 0;                        /* 0 = 不限制 */
+                    if (v > LOG_MAX_KB_MAX) v = LOG_MAX_KB_MAX;
+                    g_logMaxKB = v;
+                }
                 else if (_wcsicmp(key, L"maxarrowsteps") == 0) g_maxArrowSteps = ParseIntW(val, 8);
                 else if (_wcsicmp(key, L"overstepmode") == 0) g_overStepCtrl = ParseBoolW(val);
                 else if (_wcsicmp(key, L"wheelscrollmul") == 0) {
@@ -242,8 +281,11 @@ void ConfigLoadFrom(const WCHAR* path) {
                 /* 过渡期曾把本条改名为 WheelScrollMs（毫秒/格）。两种量不可换算，
                    所以旧键名既不解析、也不据它推算任何值 —— 直接忽略即可，
                    升级机制会补上新的 WheelScrollMul（老配置里那行 WheelScrollMs
-                   会一直躺着，无害）。 */
-                else if (_wcsicmp(key, L"wheelscrollmul") == 0) { /* 忽略（旧语义） */ }
+                   会一直躺着，无害）。
+                   **键名必须是 wheelscrollms**：早期这里误写成 wheelscrollmul，
+                   与上面那条同名的分支重复 —— 那条永远先匹配，于是这块成了
+                   永不执行的死代码，还让人误以为旧键被特殊处理过。 */
+                else if (_wcsicmp(key, L"wheelscrollms") == 0) { /* 忽略（旧语义） */ }
                 else if (_wcsicmp(key, L"autoscrollinterval") == 0) {
                     int v = ParseIntW(val, AUTOSCROLL_INTERVAL_DEFAULT);
                     if (v < AUTOSCROLL_INTERVAL_MIN) v = AUTOSCROLL_INTERVAL_MIN;
@@ -264,6 +306,8 @@ void ConfigLoadFrom(const WCHAR* path) {
                 }
                 else if (_wcsicmp(key, L"autoscrollsmooth") == 0)
                     g_autoScrollSmooth = ParseBoolW(val);
+                else if (_wcsicmp(key, L"allowscintillaread") == 0)
+                    g_allowSciRead = ParseBoolW(val);
                 /* 其余 [General] 项一律忽略：本项目所有配置项都在上面具名解析。
                    不认识的键（含已废弃的旧键名）留着也只是噪音，不解析、不保存。 */
                 else { /* 忽略未知/废弃键 */ }
@@ -296,7 +340,8 @@ void ConfigLoad(void) {
             "RunAsAdmin = 1\n"
             ";\n"
             "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
-            "LogMaxKB = 2048\n"
+            "; 范围 0.." STR(LOG_MAX_KB_MAX) "，超出按上限钳制\n"
+            "LogMaxKB = " STR(LOG_MAX_KB_DEFAULT) "\n"
             ";\n"
             "; 逐格词跳的最大步数：超过该距离的逐格跳转不再逐格发送，\n"
             "; 改按 OverStepMode 处理，避免方向键发太久。0 = 不限制，最大 256\n"
@@ -328,6 +373,12 @@ void ConfigLoad(void) {
             "; 横向滚动：按住 C + Shift 滚滚轮，横向挪动。倍数 1 = 一滚一格（默认），\n"
             "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n"
             "WheelHScrollMul = 1\n"
+            ";\n"
+            "; Scintilla 通道（Notepad3 / Notepad++ / SciTE 等）读全文必须\n"
+            "; 在目标进程里开一块内存再读回来（要 PROCESS_VM_OPERATION|VM_READ）。\n"
+            "; 设为 0 即整条通道放弃，退回 UIA / IA2 / 原生 Ctrl+方向（仍能跳，\n"
+            "; 只是不再是瞬跳）。\n"
+            "AllowScintillaRead = " STR(ALLOW_SCINTILLA_READ_DEFAULT) "\n"
             ";\n"
             "[NativeWordJump]\n"
             "; 命中名单的程序：Caps+N / Caps+M 不做文本探测，\n"
@@ -364,7 +415,8 @@ static const struct {
     { "logmaxkb",
       "\n"
       "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
-      "LogMaxKB = 2048\n" },
+      "; 范围 0.." STR(LOG_MAX_KB_MAX) "，超出按上限钳制\n"
+      "LogMaxKB = " STR(LOG_MAX_KB_DEFAULT) "\n" },
     { "maxarrowsteps",
       "\n"
       "; 逐格词跳的最大步数：超过该距离的逐格跳转不再逐格发送，\n"
@@ -404,7 +456,28 @@ static const struct {
       "; 横向滚动：按住 C + Shift 滚滚轮，横向挪动。倍数 1 = 一滚一格（默认），\n"
       "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n"
       "WheelHScrollMul = " STR(WHEEL_HMUL_DEFAULT) "\n" },
+    { "allowscintillaread",
+      "\n"
+      "; Scintilla 通道（Notepad3 / Notepad++ / SciTE 等）读全文必须\n"
+      "; 在目标进程里开一块内存再读回来（要 PROCESS_VM_OPERATION|VM_READ）。\n"
+      "; 设为 0 即整条通道放弃，退回 UIA / IA2 / 原生 Ctrl+方向（仍能跳，\n"
+      "; 只是不再是瞬跳）。\n"
+      "AllowScintillaRead = " STR(ALLOW_SCINTILLA_READ_DEFAULT) "\n" },
 };
+
+/* ---- 升级键清单的只读访问（供单元测试**自动**生成 fixture）----
+   为什么值得专门开两个接口：test_config 有一条"键齐全时升级不改动文件"的
+   用例，它需要一份"把所有当前键都写上"的临时配置。此前那份配置是**手写**
+   的，于是每加一个配置项都要记得回来补一行 —— 忘了就是一条"升级逻辑被误
+   判成有缺失"的假失败（实测已经栽过一次，注释里也留了警告，但警告拦不住
+   人忘）。改成从 kUpgrades 现读现生成之后，加配置项再也无需动测试。 */
+int ConfigUpgradeKeyCount(void) {
+    return (int)(sizeof(kUpgrades) / sizeof(kUpgrades[0]));
+}
+const char* ConfigUpgradeKeyName(int i) {
+    if (i < 0 || i >= ConfigUpgradeKeyCount()) return NULL;
+    return kUpgrades[i].key;
+}
 
 /* ---- 带边界检查的输出缓冲 ----
    本项目已两次栽在"手工计算分配容量"上（见 776f468 与 ConfigUpgradeFile
@@ -426,6 +499,19 @@ static BOOL OutAdd(OutBuf* b, const void* src, size_t len) {
 static BOOL OutAddStr(OutBuf* b, const char* s) { return OutAdd(b, s, strlen(s)); }
 static BOOL OutAddCh(OutBuf* b, char c)          { return OutAdd(b, &c, 1); }
 static void OutFree(OutBuf* b) { free(b->p); b->p = NULL; b->n = b->cap = 0; }
+
+/* 复制一行到定长缓冲（结果保证以 0 结尾）。
+   长度同时受**三个**约束：缓冲容量、到缓冲结尾的距离、行内长度。
+   显式写出"到缓冲结尾的距离"这一项不是多余的：`ll < 159 ? ll : 159` 这种
+   两方 min 在语义上已经够，但 MSVC /analyze 无法把 `memchr` 的返回值与
+   分配长度关联起来，于是报 C6385（实测是误报）——每次都要人工排除一遍。
+   把三个约束都写进同一个表达式，它就变成可静态证明的。 */
+static void CopyLine(const char* start, const char* bufEnd, char* out, size_t cap) {
+    size_t avail = (start < bufEnd) ? (size_t)(bufEnd - start) : 0;
+    size_t n = (cap - 1) < avail ? (cap - 1) : avail;
+    if (n) memcpy(out, start, n);
+    out[n] = 0;
+}
 
 void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
     if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
@@ -451,10 +537,8 @@ void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
     const char* line = body;
     while (line < body + bodyLen) {
         const char* nl = memchr(line, '\n', (size_t)(body + bodyLen - line));
-        size_t ll = nl ? (size_t)(nl - line) : (size_t)(body + bodyLen - line);
         char tmp[160];
-        size_t n = ll < 159 ? ll : 159;
-        memcpy(tmp, line, n); tmp[n] = 0;
+        CopyLine(line, body + bodyLen, tmp, sizeof(tmp));
         char* s = tmp;
         while (*s == ' ' || *s == '\t' || *s == '\r') s++;
         if (*s == '[') {
@@ -476,10 +560,8 @@ void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
         for (const char* l = genStart ? genStart : body;
              l < (genStart ? genEnd : body + bodyLen) && missing[i]; ) {
             const char* nl = memchr(l, '\n', (size_t)(body + bodyLen - l));
-            size_t ll = nl ? (size_t)(nl - l) : (size_t)(body + bodyLen - l);
             char tmp[160];
-            size_t n = ll < 159 ? ll : 159;
-            memcpy(tmp, l, n); tmp[n] = 0;
+            CopyLine(l, body + bodyLen, tmp, sizeof(tmp));
             char* s = tmp;
             while (*s == ' ' || *s == '\t' || *s == '\r') s++;
             size_t klen = strlen(kUpgrades[i].key);
@@ -558,6 +640,10 @@ int ConfigGetAutoScrollFastMs(void) {
 
 BOOL ConfigGetAutoScrollSmooth(void) {
     return g_autoScrollSmooth;
+}
+
+BOOL ConfigGetAllowScintillaRead(void) {
+    return g_allowSciRead;
 }
 
 int ConfigGetWheelHScrollMul(void) {

@@ -9,6 +9,9 @@
 #include <wchar.h>
 
 void ConfigLoadFrom(const WCHAR* path);
+void ConfigUpgradeFile(const WCHAR* path);
+int  ConfigUpgradeKeyCount(void);
+const char* ConfigUpgradeKeyName(int i);
 void ConfigLoad(void);
 BOOL ConfigMatchName(const WCHAR* exeName);
 BOOL ConfigGetRunAsAdmin(void);
@@ -18,6 +21,7 @@ BOOL ConfigGetOverStepCtrl(void);
 int  ConfigGetWheelScrollMul(void);
 int  ConfigGetAutoScrollFastMs(void);
 int  ConfigGetAutoScrollInterval(void);
+BOOL ConfigGetAllowScintillaRead(void);
 BOOL IsRunElevated(void);
 
 static int fails = 0;
@@ -130,6 +134,14 @@ int main(void) {
     WriteIni("[General]\r\nLogMaxKB = abc\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(ConfigGetLogMaxKB() == 2048, "CFG: LogMaxKB 非法值回落默认 2048");
+    /* 上限钳制是**安全**要求而不是口味：main.c 的日志轮转按"上限的一半"分配
+       缓冲（keep = maxKB*512），不钳的话 (size_t)keep 在 32 位构建下会回绕成
+       一个小数 —— malloc 拿到小缓冲、fread 却按回绕前的长度写进去，就是堆越界。
+       钳住上限让这条路径永远不可能触发（当前 x64 构建本来就到不了，但"到不了"
+       和"不可能"是两回事）。 */
+    WriteIni("[General]\r\nLogMaxKB = 99999999\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetLogMaxKB() == 65536, "CFG: LogMaxKB 超过上限钳到 65536");
     WriteIni("[General]\r\nRunAsAdmin = 1\r\n[Other]\r\nLogMaxKB = 1\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(ConfigGetLogMaxKB() == 2048, "CFG: 非 General 段的 LogMaxKB 不生效");
@@ -159,7 +171,7 @@ int main(void) {
     WriteIni("[General]\r\nMaxArrowSteps = abc\r\nOverStepMode = xyz\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(ConfigGetMaxArrowSteps() == 8 && !ConfigGetOverStepCtrl(),
-           "CFG: 非法值回落默认 (32 / arrows)");
+           "CFG: 非法值回落默认 (8 / OverStepMode=1)");
     /* [Other] 里写与缺省**不同**的值，才能证明它真的没生效
        （缺省 MaxArrowSteps=8 / OverStepMode=1）。 */
     WriteIni("[Other]\r\nMaxArrowSteps = 1\r\nOverStepMode = 0\r\n");
@@ -196,7 +208,7 @@ int main(void) {
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(ConfigGetWheelScrollMul() == 3, "CFG: 废弃键 WheelScrollMs 被忽略（不参与解析）");
 
-    /* 自动滚动基础节奏 AutoScrollInterval（ms），钳制 20..1000 */
+    /* 自动滚动基础节奏 AutoScrollInterval（ms），钳制 100..60000 */
     WriteIni("[General]\r\nAutoScrollInterval = 250\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(ConfigGetAutoScrollInterval() == 250, "CFG: AutoScrollInterval=250 生效");
@@ -209,15 +221,18 @@ int main(void) {
     WriteIni("[General]\r\nAutoScrollInterval = abc\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(ConfigGetAutoScrollInterval() == 1500,
-           "CFG: AutoScrollInterval 非法值回落默认 24000");
+           "CFG: AutoScrollInterval 非法值回落默认 1500");
     WriteIni("[Other]\r\nAutoScrollInterval = 300\r\n");   /* 非 General 段：不应生效 */
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(ConfigGetAutoScrollInterval() == 1500,
            "CFG: 非 General 段的 AutoScrollInterval 不生效");
     WriteIni("[General]\r\n\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    /* 默认值来自阅读速度换算（24000ms/格 = 7.5 行/分钟 ≈ 338 字/分钟），
-       不是手感试出来的 —— 改它之前先看 config.c 里那张换算表。 */
+    /* 默认值 1500 是“按住就快速浏览”的定位，不是阅读速度；想按阅读速度读
+       长文要调到 24000 一带。换算表在 config.c 的
+       AUTOSCROLL_INTERVAL_DEFAULT 上方 —— 改默认值前先看它，并且
+       **全局搜这个数值**：注释、ini 模板、ini 升级块、本文件的断言消息
+       里都可能写死（历史上就漏改过三处）。 */
     EXPECT(ConfigGetAutoScrollInterval() == 1500,
            "CFG: AutoScrollInterval 缺省为 1500ms/格（约 2 格/秒）");
 
@@ -296,6 +311,24 @@ int main(void) {
     WriteIni("[Other]\r\nWheelHScrollMul = 7\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(ConfigGetWheelHScrollMul() == 1, "CFG: 非 General 段的 WheelHScrollMul 不生效");
+
+    /* Scintilla 通道读目标进程内存的开关 AllowScintillaRead（默认开）。
+       Scintilla 的 SCI_GETTEXT 只接受"对方进程地址空间里的缓冲区"，所以读全文
+       必然要对目标进程 OpenProcess(VM_OPERATION|VM_READ) + ReadProcessMemory。
+       这是实质性权限，默认开（否则 Notepad3 这类编辑器只能退化成逐格箭头），
+       但要给用户一个关掉它的旋钮：关掉后整条 Scintilla 通道放弃，退回
+       UIA / IA2 / 原生 Ctrl+方向（仍能跳，只是不再瞬跳）。 */
+    EXPECT(ConfigGetAllowScintillaRead(), "CFG: AllowScintillaRead 缺省为开");
+    WriteIni("[General]\r\nAllowScintillaRead = 0\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(!ConfigGetAllowScintillaRead(), "CFG: AllowScintillaRead=0 生效（关闭该通道）");
+    WriteIni("[General]\r\nAllowScintillaRead = true\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(!ConfigGetAllowScintillaRead(),
+           "CFG: AllowScintillaRead 只认 0/1，true 视为关（不是回落默认）");
+    WriteIni("[Other]\r\nAllowScintillaRead = 0\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetAllowScintillaRead(), "CFG: 非 General 段的 AllowScintillaRead 不生效");
 
     /* 激活键列表 EnhanceKeys / ShiftKeys 已**从配置里去掉**（它们是"和弦语法"
        的一部分，不是给用户调的旋钮）：解析器不再认这两个键名、KeyMapInit 也
@@ -416,17 +449,38 @@ int main(void) {
             EXPECT(allBom == 1, "UPG(BOM边界): 全文只有一个 BOM（未被复制进正文）");
         }
     }
-    /* 新格式（键齐全）：升级不改动文件 */
+    /* 新格式（键齐全）：升级不改动文件。
+       fixture **由 ConfigUpgradeKeyName 现读现生成**，不再手写键名列表 ——
+       手写时"加配置项忘了同步这里"就会让升级逻辑（正确地）判定有缺失、
+       改写文件，表现为一条假失败。实测栽过一次，所以干脆让它不可能再发生。 */
     {
+        /* 值仍写成**自定义值**（非默认），这样下面几条"自定义值不被覆盖"
+           断言才有意义。键名则一律从 ConfigUpgradeKeyName 现读 —— 新增项
+           不写进这张值表也没关系（会落到兜底值 "1"），但**一定**会被写进
+           fixture，所以"键齐全"这条不会因加配置项而假失败。 */
+        static const struct { const char* key; const char* val; } kSamples[] = {
+            { "runasadmin",         "1"   },
+            { "logmaxkb",           "7"   },
+            { "maxarrowsteps",      "5"   },
+            { "overstepmode",       "1"   },
+            { "wheelscrollmul",     "5"   },
+            { "autoscrollinterval", "250" },
+            { "autoscrollfastms",   "300" },
+            { "autoscrollsmooth",   "0"   },
+            { "wheelhscrollmul",    "4"   },
+        };
         FILE* fo = NULL;
         if (fopen_s(&fo, "bin/cfgtest.ini", "wb") == 0 && fo) {
-            /* 必须把**当前所有**新增键都写上：少写一个，升级逻辑就会（正确地）
-               认为它是老配置而改写文件。曾经就是这样漏掉的 —— 加配置项时
-               记得同步这里，和 kUpgrades 保持一致。 */
-            fputs("[General]\nRunAsAdmin = 1\nLogMaxKB = 7\nMaxArrowSteps = 5\n"
-                  "OverStepMode = 1\nWheelScrollMul = 5\n"
-                  "AutoScrollInterval = 250\nAutoScrollFastMs = 300\n"
-                  "AutoScrollSmooth = 0\nWheelHScrollMul = 4\n", fo);
+            fputs("[General]\n", fo);
+            int kn = ConfigUpgradeKeyCount();
+            for (int i = 0; i < kn; i++) {
+                const char* k = ConfigUpgradeKeyName(i);
+                if (!k) continue;
+                const char* v = "1";
+                for (int j = 0; j < (int)(sizeof(kSamples)/sizeof(kSamples[0])); j++)
+                    if (_stricmp(k, kSamples[j].key) == 0) { v = kSamples[j].val; break; }
+                fprintf(fo, "%s = %s\n", k, v);
+            }
             fclose(fo);
         }
         char before[512];
@@ -497,6 +551,7 @@ int main(void) {
     EXPECT(TemplateHas("AutoScrollInterval = 1500"), "CFG: 模板含 AutoScrollInterval 默认值");
     EXPECT(TemplateHas("AutoScrollSmooth = 1"),    "CFG: 模板含 AutoScrollSmooth 默认值");
     EXPECT(TemplateHas("WheelHScrollMul = 1"),     "CFG: 模板含 WheelHScrollMul 默认值");
+    EXPECT(TemplateHas("AllowScintillaRead = 1"),  "CFG: 模板含 AllowScintillaRead 默认值");
     /* 激活键不再进配置：模板里**不该**再出现这两项（否则用户会以为能改） */
     EXPECT(!TemplateHas("EnhanceKeys"), "CFG: 模板不再含 EnhanceKeys（已改为编译期常量）");
     EXPECT(!TemplateHas("ShiftKeys"),   "CFG: 模板不再含 ShiftKeys（已改为编译期常量）");

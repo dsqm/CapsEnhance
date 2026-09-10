@@ -174,6 +174,18 @@ static BOOL SciGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut,
                             SciPos* pos) {
     if (!hwnd || !IsScintilla(hwnd)) return FALSE;
 
+    /* 本通道要**在对方进程里开一块内存、再读回来**：Scintilla 的 SCI_GETTEXT
+       只接受"对方进程地址空间里的缓冲区"，没有别的办法绕过，所以必须申请
+       PROCESS_VM_OPERATION | PROCESS_VM_READ。这是对目标进程的实质性权限，
+       默认开启但**可由用户关掉**：`[General] AllowScintillaRead = 0` 会让整条
+       Scintilla 通道直接放弃，退回 UIA / IA2 / 原生 Ctrl+方向（功能降级，
+       但不再触碰任何进程内存）。句柄即用即关，不缓存。 */
+    if (!ConfigGetAllowScintillaRead()) {
+        if (g_recording)
+            CapLog("  Sci 通道已被配置关闭（AllowScintillaRead=0），跳过");
+        return FALSE;
+    }
+
     LONGLONG n = 0;
     if (!SendMsg(hwnd, SCI_GETTEXTLENGTH, 0, 0, &n)) return FALSE;
     if (n <= 0 || n > SCI_MAX_BYTES) return FALSE;
@@ -181,9 +193,15 @@ static BOOL SciGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut,
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
     if (!pid) return FALSE;
-    /* 只要"在对方进程开内存 + 读回来"两项权限；权限不够就整条通道放弃 */
+    /* 只要"在对方进程开内存 + 读回来"两项权限；权限不够就整条通道放弃。
+       记录模式下写明对谁申请了什么 —— 排查"权限不足导致词跳降级"时一眼可见。 */
     HANDLE hp = OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ, FALSE, pid);
-    if (!hp) return FALSE;
+    if (!hp) {
+        if (g_recording)
+            CapLog("  Sci 通道：OpenProcess(VM_OPERATION|VM_READ) 被拒 pid=%lu err=%lu",
+                   (unsigned long)pid, (unsigned long)GetLastError());
+        return FALSE;
+    }
 
     BOOL   ok  = FALSE;
     char*  buf = (char*)malloc((size_t)n + 2);

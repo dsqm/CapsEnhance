@@ -222,6 +222,10 @@ extern HWND g_mainWnd;
 void ConfigLoad(void);                       /* 启动时读配置；缺失则写注释模板 */
 void ConfigLoadFrom(const WCHAR* path);      /* 从指定路径加载（单测用） */
 void ConfigUpgradeFile(const WCHAR* path);   /* 老配置补齐新增键（单测用） */
+/* 升级键清单（只读）：单测据此**自动**生成"键齐全"的 fixture ——
+   手写 fixture 时每加一个配置项都要记得同步，漏了就变成假失败。 */
+int  ConfigUpgradeKeyCount(void);
+const char* ConfigUpgradeKeyName(int i);     /* 越界返回 NULL */
 BOOL ConfigMatchName(const WCHAR* exeName);  /* 进程名是否命中原生词跳名单 */
 BOOL ConfigGetRunAsAdmin(void);             /* [General] RunAsAdmin：启动时提权 */
 int  ConfigGetLogMaxKB(void);               /* [General] LogMaxKB：日志上限(KB)，0=不限 */
@@ -232,6 +236,7 @@ int  ConfigGetWheelHScrollMul(void);        /* [General] WheelHScrollMul：Caps+
 int  ConfigGetAutoScrollInterval(void);     /* [General] AutoScrollInterval：持续滚动初始速度(ms/格) */
 int  ConfigGetAutoScrollFastMs(void);        /* [General] AutoScrollFastMs：持续滚动最快速度(ms/格) */
 BOOL ConfigGetAutoScrollSmooth(void);       /* [General] AutoScrollSmooth：小数刻度平滑注入 */
+BOOL ConfigGetAllowScintillaRead(void);     /* [General] AllowScintillaRead：允许 Scintilla 通道读目标进程内存（0=关闭该通道） */
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中名单 */
 BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口的进程 exe 名 */
 BOOL IsRunElevated(void);                   /* 真实运行权限（查进程令牌） */

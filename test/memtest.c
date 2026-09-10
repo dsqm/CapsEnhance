@@ -31,6 +31,8 @@ BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap) {
 }
 int  ConfigGetMaxArrowSteps(void) { return 0; }   /* 0=不限制：压测照常逐格 */
 BOOL ConfigGetOverStepCtrl(void) { return FALSE; }
+/* nav.c 的 Sci 通道会先问这个开关；压测要覆盖那条代码路径，所以给 1 */
+BOOL ConfigGetAllowScintillaRead(void) { return TRUE; }
 
 #include "nav.c"
 #include "send.c"
