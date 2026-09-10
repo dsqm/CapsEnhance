@@ -679,6 +679,7 @@ static BOOL UiaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
     IUIAutomationTextRange *doc = NULL, *caretR = NULL, *r = NULL;
     BOOL ok = FALSE;
     int delta = target - caret;
+    const char* why = "";                              /* 失败点（诊断日志用） */
     if (delta == 0) return TRUE;                       /* 无需移动 */
 
     hr = CoInitialize(NULL);
@@ -734,34 +735,48 @@ static BOOL UiaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
                 TextPatternRangeEndpoint_End, caretR, TextPatternRangeEndpoint_Start)) ||
         FAILED(IUIAutomationTextRange_MoveEndpointByRange(r,
                 TextPatternRangeEndpoint_Start, caretR, TextPatternRangeEndpoint_Start)))
-        goto done;
+        { why = "collapse to caret"; goto done; }
 
-    /* 展开 delta 个字符到目标端；实际移动数不符（provider 不支持/越界）则放弃 */
-    {
-        long moved = 0;
-        int ep = (delta < 0) ? TextPatternRangeEndpoint_Start
-                             : TextPatternRangeEndpoint_End;
-        hr = IUIAutomationTextRange_MoveEndpointByUnit(r, ep, TextUnit_Character,
-                                                       (long)delta, &moved);
-        if (FAILED(hr) || moved != (long)(delta < 0 ? -delta : delta)) goto done;
-    }
     if (!shift) {
-        /* 无 Shift：折叠到目标端点，Select 后光标落在目标 */
-        hr = (delta < 0)
-           ? IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_End,
-                                                        r, TextPatternRangeEndpoint_Start)
-           : IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_Start,
-                                                        r, TextPatternRangeEndpoint_End);
-        if (FAILED(hr)) goto done;
+        /* 无 Shift：整体平移折叠 range 到目标。Move 移动两端、折叠 range
+           移动后仍折叠 —— 这是读屏器(NVDA)移动光标的标准做法。
+           不用 MoveEndpointByUnit(Start, -delta)：实测 Chromium 系(QQ/Edge)
+           对折叠 range 向左展开 Start 会被拒绝/clamp（moved=0，表现为
+           "N 不行 M 可以"），而 Move 双端平移两个方向都正常。 */
+        long moved = 0;
+        hr = IUIAutomationTextRange_Move(r, TextUnit_Character, (long)delta, &moved);
+        if (FAILED(hr) || moved != (long)(delta < 0 ? -delta : delta))
+            { why = "Move(character) moved mismatch"; goto done; }
+    } else if (delta > 0) {
+        /* 选区向右：End 从 caret 向右展开 delta（实测可行） */
+        long moved = 0;
+        hr = IUIAutomationTextRange_MoveEndpointByUnit(r, TextPatternRangeEndpoint_End,
+                TextUnit_Character, (long)delta, &moved);
+        if (FAILED(hr) || moved != delta) { why = "expand End right"; goto done; }
+    } else {
+        /* 选区向左：先把折叠 range 平移到 target（Move），再把 End 向右
+           展开回 caret —— 同样只依赖"向右展开 End"这个已验证方向 */
+        long moved = 0;
+        hr = IUIAutomationTextRange_Move(r, TextUnit_Character, (long)delta, &moved);
+        if (FAILED(hr) || moved != (long)-delta) { why = "Move left for sel"; goto done; }
+        hr = IUIAutomationTextRange_MoveEndpointByUnit(r, TextPatternRangeEndpoint_End,
+                TextUnit_Character, (long)-delta, &moved);
+        if (FAILED(hr) || moved != (long)-delta) { why = "expand End back"; goto done; }
     }
-    /* 带 Shift：保留 [caret,target] 展开区间，Select 产生选区 */
     hr = IUIAutomationTextRange_Select(r);
     ok = SUCCEEDED(hr);
+    if (ok) {
+        /* 规范不保证 Select 滚动视图：补一次 ScrollIntoView 让光标可见
+           （不支持者返回错误码，忽略即可） */
+        IUIAutomationTextRange_ScrollIntoView(r, FALSE);
+    }
     if (g_recording)
         CapLog("  UIA Select hr=0x%08lX delta=%d shift=%d",
                (unsigned long)hr, delta, shift ? 1 : 0);
 
 done:
+    if (!ok && g_recording && why[0])
+        CapLog("  UIA SetSel 失败于 %s (delta=%d)", why, delta);
     if (r)      IUIAutomationTextRange_Release(r);
     if (caretR) IUIAutomationTextRange_Release(caretR);
     if (doc)    IUIAutomationTextRange_Release(doc);
@@ -876,14 +891,20 @@ int NavJump(int dir, BOOL shift) {
         free(text);
         return 0;
     }
-    /* 能直接设光标的通道（经典 Edit / Scintilla）：距离较大时一步置到目标(瞬跳)，
-       避免逐格发方向键拖慢；小距离仍走箭头以保持完全一致的键行为。
-       UIA/IA2 通道无法直接设光标，一律发箭头。 */
+    /* 能直接设光标的通道：距离较大时一步置到目标(瞬跳)，避免逐格发方向键
+       拖慢；小距离仍走箭头以保持完全一致的键行为。 */
     BOOL direct = FALSE;
     BOOL skipArrows = FALSE;   /* 置位已发生但回读不符：不能再发箭头叠加错误 */
     if (path[0] == 'E' && focus && steps >= DIRECT_JUMP_MIN) {
         direct = ClassicSetSel(focus, caret, tgt, shift);
         if (direct) direct = EditVerifySel(focus, caret, tgt, shift);
+        if (direct) {
+            /* EM_SETSEL 不会滚动视图：光标可能被移到窗口外看不到
+               （EmEditor 实测）。EM_SCROLLCARET 把光标滚到可见，
+               已在视图内时无操作；不实现该消息的控件会忽略它。 */
+            LONGLONG dummy;
+            SendMsg(focus, 0x00B7 /* EM_SCROLLCARET */, 0, 0, &dummy);
+        }
         if (direct && g_recording) CapLog("  -> 直接 EM_SETSEL [%d,%d] 已校验", caret, tgt);
     } else if (path[0] == 'S' && focus && steps >= DIRECT_JUMP_MIN) {
         LONGLONG tb = Utf16ToDocBytes(text, tgt, sp.cp);
