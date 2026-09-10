@@ -754,9 +754,13 @@ static BOOL UiaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
         }
     }
     if (!shift) {
-        /* 无 Shift：折叠到目标端（绝对定位），Select 后光标落在目标 */
-        hr = IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_Start,
-                r, TextPatternRangeEndpoint_End);
+        /* 无 Shift：折叠到目标端（绝对定位）。向左时 tgt 在 A=Start、
+           向右时 tgt 在 B=End —— 折叠错端会让 Select 落在原地（N 失效） */
+        hr = (delta < 0)
+           ? IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_End,
+                                                        r, TextPatternRangeEndpoint_Start)
+           : IUIAutomationTextRange_MoveEndpointByRange(r, TextPatternRangeEndpoint_Start,
+                                                        r, TextPatternRangeEndpoint_End);
         if (FAILED(hr)) { why = "collapse to target"; goto done; }
     }
     /* 带 Shift：保留 [A,B] 展开区间，Select 产生选区 */
@@ -968,6 +972,11 @@ int NavJump(int dir, BOOL shift) {
             if (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0 && c2 == tgt) {
                 direct = TRUE;
                 if (g_recording) CapLog("  -> UIA/IA2 直接置位已校验 (caret=%d)", tgt);
+            } else if (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0 && c2 == caret) {
+                /* Select 返回成功但光标未动（provider 静默忽略）：
+                   光标仍在原位，从原 caret 算的 steps 依旧有效，安全退回箭头 */
+                if (g_recording)
+                    CapLog("  -> UIA Select 未生效(光标未动 c2=%d)，退回箭头", c2);
             } else {
                 skipArrows = TRUE;
                 if (g_recording)
