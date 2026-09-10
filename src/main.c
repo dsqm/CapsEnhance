@@ -42,10 +42,43 @@ static void log_path(WCHAR* out, size_t cap) {
     /* 全程用宽字符拼路径：经 ANSI 转换会在安装路径含非 ACP 字符时写错文件 */
     _snwprintf_s(out, cap, _TRUNCATE, L"%s\\CapsEnhance.log", wexe);
 }
+/* 日志超过上限时保留最近的一半（老内容丢弃），避免长期开着记录涨到几十 MB。
+   上限由配置 [General] LogMaxKB 控制，0 = 不限制。 */
+static void log_rotate_if_needed(const WCHAR* path) {
+    int maxKB = ConfigGetLogMaxKB();
+    if (maxKB <= 0) return;
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &d)) return;
+    LARGE_INTEGER sz;
+    sz.HighPart = (LONG)d.nFileSizeHigh;
+    sz.LowPart  = d.nFileSizeLow;
+    if (sz.QuadPart <= (LONGLONG)maxKB * 1024) return;
+
+    LONGLONG keep = (LONGLONG)maxKB * 1024 / 2;
+    FILE* f = NULL;
+    if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
+    if (_fseeki64(f, -keep, SEEK_END) != 0) { fclose(f); return; }
+    char* buf = (char*)malloc((size_t)keep + 1);
+    if (!buf) { fclose(f); return; }
+    size_t got = fread(buf, 1, (size_t)keep, f);
+    fclose(f);
+    /* 丢掉被切断的半行 */
+    size_t off = 0;
+    while (off < got && buf[off] != '\n') off++;
+    if (off < got) off++;
+    if (_wfopen_s(&f, path, L"wb") == 0 && f) {
+        fputs("----- 日志已达上限，较旧的内容已丢弃 -----\n", f);
+        if (got > off) fwrite(buf + off, 1, got - off, f);
+        fclose(f);
+    }
+    free(buf);
+}
+
 void CapLog(const char* fmt, ...) {
     init_logcs();
     EnterCriticalSection(&g_logcs);
     WCHAR wpath[MAX_PATH]; log_path(wpath, MAX_PATH);
+    log_rotate_if_needed(wpath);
     FILE* f = NULL;
     if (_wfopen_s(&f, wpath, L"a") == 0 && f) {
         SYSTEMTIME st; GetLocalTime(&st);
@@ -232,6 +265,24 @@ static void WaitOldInstanceExit(void) {
     CloseHandle(h);
 }
 
+/* 单实例：已经有一个实例在跑就直接退出（并请它提示一下）。
+   必须在 WaitOldInstanceExit() 之后调用 —— 重启时旧实例持有这把锁，
+   等它退出以后新实例才拿得到。 */
+#define SINGLE_MUTEX_NAME L"Local\\CapsEnhance_SingleInstance"
+static HANDLE g_singleMutex = NULL;
+static BOOL EnsureSingleInstance(void) {
+    g_singleMutex = CreateMutexW(NULL, FALSE, SINGLE_MUTEX_NAME);
+    if (!g_singleMutex) return TRUE;             /* 建不了就不拦，照常运行 */
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND prev = FindWindowW(L"CapsEnhanceMain", NULL);
+        if (prev) PostMessageW(prev, WM_ALREADY_RUNNING, 0, 0);
+        CloseHandle(g_singleMutex);
+        g_singleMutex = NULL;
+        return FALSE;
+    }
+    return TRUE;
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     static UINT s_taskbarCreated = 0;
     if (!s_taskbarCreated)
@@ -245,6 +296,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_CAPS_UP:                 /* C 抬起：停止一切 */
         ResetEngine();
+        return 0;
+    case WM_ALREADY_RUNNING:         /* 又启动了一个实例：提示后让它自己退出 */
+        TrayHint(L"已在运行中（不允许多个实例）");
         return 0;
     case WM_PROBE:
         /* C+`：切换诊断记录。开始=探测当前焦点并记录；再按=结束记录。
@@ -375,6 +429,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     }
 
     WaitOldInstanceExit();   /* 重启场景：等旧实例完全退出再初始化 */
+    if (!EnsureSingleInstance()) return 0;   /* 已有实例在跑：提示后退出 */
 
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = WndProc;

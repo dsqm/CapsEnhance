@@ -73,6 +73,21 @@ int main(void) {
     HWND hwndB = WaitMainWindow(3000);
     EXPECT(hwndB != NULL && hwndB != hwndA, "A 退出后 B 接管（新窗口出现）");
 
+    /* 单实例：B 还活着时再启动一个不带参数的 C，C 应自行退出 */
+    memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+    BOOL okC = CreateProcessW(exe, exe, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    HANDLE hC = pi.hProcess;
+    CloseHandle(pi.hThread);
+    EXPECT(okC, "C 启动成功（不带参数）");
+    if (okC) {
+        DWORD rc = WaitForSingleObject(hC, 3000);
+        EXPECT(rc == WAIT_OBJECT_0, "已有实例在跑时 C 自动退出（单实例）");
+    }
+    EXPECT(FindWindowW(L"CapsEnhanceMain", NULL) == hwndB,
+           "C 退出后窗口仍是 B 的（两个实例不并存）");
+    if (hC) CloseHandle(hC);
+
     /* 收尾：让 B 干净退出（托盘/钩子正常清理） */
     if (hwndB) PostMessageW(hwndB, WM_CLOSE, 0, 0);
     if (hB) { WaitForSingleObject(hB, 3000); CloseHandle(hB); }

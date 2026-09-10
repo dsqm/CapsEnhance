@@ -5,6 +5,13 @@
 #include <windows.h>
 #include <stdio.h>
 
+/* 文件字节数（失败返回 -1） */
+static long long file_size(const char* p) {
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (!GetFileAttributesExA(p, GetFileExInfoStandard, &d)) return -1;
+    return ((long long)d.nFileSizeHigh << 32) | (long long)d.nFileSizeLow;
+}
+
 int main(void) {
     WCHAR exe[MAX_PATH];
     DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
@@ -12,6 +19,17 @@ int main(void) {
     for (DWORD i = 0; i < n; i++) if (exe[i] == L'\\') slash = &exe[i];
     if (slash) *(slash + 1) = 0;
     wcscat_s(exe, MAX_PATH, L"CapsEnhance.exe");
+
+    /* 预置一个超上限的日志（默认 LogMaxKB=2048），验证写日志时会自动轮转 */
+    FILE* big = NULL;
+    if (fopen_s(&big, "bin/CapsEnhance.log", "wb") == 0 && big) {
+        /* 写真实文本行（约 3MB），而不是 NUL 填充——更接近实际日志 */
+        for (int i = 0; i < 42000; i++)
+            fprintf(big, "%08d padding line to grow the log file, xxxxxxxxxxxxxxxxxxxxxxxx\n", i);
+        fputs("LOGROTATE-TAIL-MARKER last line of the old log\n", big);
+        fclose(big);
+    }
+    long long before = file_size("bin/CapsEnhance.log");
 
     STARTUPINFOW si; PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
@@ -45,6 +63,28 @@ int main(void) {
     }
     printf(ok ? "[OK]   log written via wide path (_wfopen)\n"
               : "[FAIL] log not written\n");
+
+    /* 轮转：超过 LogMaxKB 后应保留最近的一半，并留下标记行 */
+    long long after = file_size("bin/CapsEnhance.log");
+    int rotated = 0, keptTail = 0;
+    FILE* f2 = NULL;
+    if (fopen_s(&f2, "bin/CapsEnhance.log", "r") == 0 && f2) {
+        char line[512];
+        while (fgets(line, sizeof(line), f2)) {
+            if (strstr(line, "日志已达上限")) rotated = 1;
+            if (strstr(line, "LOGROTATE-TAIL-MARKER")) keptTail = 1;
+        }
+        fclose(f2);
+    }
+    int sizeOK = (before > 2 * 1024 * 1024) && (after > 0) && (after <= 2048LL * 1024);
+    printf(sizeOK ? "[OK]   log rotated: %lld KB -> %lld KB (<= LogMaxKB)\n"
+                  : "[FAIL] log size not trimmed (before=%lld after=%lld)\n",
+           before / 1024, after / 1024, before, after);
+    printf(rotated ? "[OK]   rotation marker written\n"
+                   : "[FAIL] rotation marker missing\n");
+    printf(keptTail ? "[OK]   recent content kept\n"
+                    : "[FAIL] recent content lost\n");
+    if (!sizeOK || !rotated || !keptTail) ok = 0;
 
     /* NavProbe 会弹 MessageBox 阻塞主线程，直接结束进程即可 */
     TerminateProcess(pi.hProcess, 0);

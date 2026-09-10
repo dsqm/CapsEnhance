@@ -20,6 +20,19 @@
 static WCHAR g_names[CFG_MAX_ENTRIES][CFG_NAME_MAX];
 static int   g_count = 0;
 static BOOL  g_runAsAdmin = FALSE;
+static int   g_logMaxKB   = 2048;   /* 日志大小上限（KB），0 = 不限制 */
+
+/* 整数：只认前导十进制数字，其余（空/非法）返回默认值 */
+static int ParseIntW(const WCHAR* v, int def) {
+    if (!v || !v[0]) return def;
+    int n = 0; BOOL any = FALSE;
+    for (const WCHAR* p = v; *p; p++) {
+        if (*p < L'0' || *p > L'9') break;
+        n = n * 10 + (*p - L'0');
+        any = TRUE;
+    }
+    return any ? n : def;
+}
 
 typedef enum { SEC_NONE, SEC_GENERAL, SEC_NATIVE, SEC_OTHER } CfgSec;
 
@@ -72,6 +85,7 @@ static void AddEntry(const WCHAR* name) {
 void ConfigLoadFrom(const WCHAR* path) {
     g_count = 0;
     g_runAsAdmin = FALSE;
+    g_logMaxKB = 2048;
 
     FILE* f = NULL;
     if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
@@ -128,6 +142,7 @@ void ConfigLoadFrom(const WCHAR* path) {
                 _snwprintf_s(val, CFG_NAME_MAX, _TRUNCATE, L"%s", eq + 1);
                 TrimW(key); TrimW(val); LowerW(key);
                 if (_wcsicmp(key, L"runasadmin") == 0) g_runAsAdmin = ParseBoolW(val);
+                else if (_wcsicmp(key, L"logmaxkb") == 0) g_logMaxKB = ParseIntW(val, 2048);
             }
         } else if (sec == SEC_NATIVE) {
             AddEntry(line);
@@ -159,6 +174,8 @@ void ConfigLoad(void) {
             "; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）\n"
             "; 只认 0/1：1=启用，0=禁用（其它写法一律视为 0）\n"
             "RunAsAdmin = 0\n"
+            "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
+            "LogMaxKB = 2048\n"
             "\n"
             "[NativeWordJump]\n"
             "; 命中名单的程序：Caps+N / Caps+M 不做文本探测，\n"
@@ -184,6 +201,10 @@ void ConfigLoad(void) {
 
 BOOL ConfigGetRunAsAdmin(void) {
     return g_runAsAdmin;
+}
+
+int ConfigGetLogMaxKB(void) {
+    return g_logMaxKB;
 }
 
 /* 进程可执行文件名是否命中原生词跳名单（完全匹配，.exe 可选） */

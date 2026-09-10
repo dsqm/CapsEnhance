@@ -11,6 +11,7 @@
 #define WM_TRIG_DOWN  (WM_APP + 3)  /* 触发键按下   wParam=act */
 #define WM_TRIG_UP    (WM_APP + 4)  /* 触发键抬起   wParam=act */
 #define WM_TOGGLE_TRAY (WM_APP + 5) /* 托盘自定义回调消息 */
+#define WM_ALREADY_RUNNING (WM_APP + 7) /* 已有实例在跑：新实例通知它提示后退出 */
 #define WM_PROBE       (WM_APP + 6) /* 探测焦点控件（钩子线程投递） */
 
 #define PROBE_KEY      VK_OEM_3    /* 按住 C 时按 ` 触发焦点探测 */
@@ -89,6 +90,7 @@ void ConfigLoad(void);                       /* 启动时读配置；缺失则�
 void ConfigLoadFrom(const WCHAR* path);      /* 从指定路径加载（单测用） */
 BOOL ConfigMatchName(const WCHAR* exeName);  /* 进程名是否命中原生词跳名单 */
 BOOL ConfigGetRunAsAdmin(void);             /* [General] RunAsAdmin：启动时提权 */
+int  ConfigGetLogMaxKB(void);               /* [General] LogMaxKB：日志上限(KB)，0=不限 */
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中名单 */
 BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口的进程 exe 名 */
 BOOL IsRunElevated(void);                   /* 真实运行权限（查进程令牌） */

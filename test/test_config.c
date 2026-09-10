@@ -11,6 +11,7 @@ void ConfigLoadFrom(const WCHAR* path);
 void ConfigLoad(void);
 BOOL ConfigMatchName(const WCHAR* exeName);
 BOOL ConfigGetRunAsAdmin(void);
+int  ConfigGetLogMaxKB(void);
 BOOL IsRunElevated(void);
 
 static int fails = 0;
@@ -97,6 +98,20 @@ int main(void) {
     WriteIni("[General]\r\n\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(!ConfigGetRunAsAdmin(), "CFG: 缺省为假");
+
+    /* 日志上限 LogMaxKB（KB） */
+    WriteIni("[General]\r\nLogMaxKB = 512\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetLogMaxKB() == 512, "CFG: LogMaxKB=512 生效");
+    WriteIni("[General]\r\nLogMaxKB = 0\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetLogMaxKB() == 0, "CFG: LogMaxKB=0（不限制）");
+    WriteIni("[General]\r\nLogMaxKB = abc\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetLogMaxKB() == 2048, "CFG: LogMaxKB 非法值回落默认 2048");
+    WriteIni("[General]\r\nRunAsAdmin = 1\r\n[Other]\r\nLogMaxKB = 1\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetLogMaxKB() == 2048, "CFG: 非 General 段的 LogMaxKB 不生效");
 
     /* 兼容早期不分节写法 */
     WriteIni("Legacy.exe\r\n");

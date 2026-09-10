@@ -21,6 +21,9 @@ HHOOK g_hook = NULL;
 void CapLog(const char* fmt, ...) { (void)fmt; }
 /* 未链接 hook.c：物理按键状态桩 */
 BOOL PhysKeyDown(int vk) { (void)vk; return FALSE; }
+/* 未链接 config.c：配置/权限查询桩（压测不关心） */
+BOOL ConfigIsNativeWordJump(HWND focus) { (void)focus; return FALSE; }
+BOOL IsRunElevated(void) { return FALSE; }
 
 #include "nav.c"
 #include "send.c"
