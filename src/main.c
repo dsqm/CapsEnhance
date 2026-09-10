@@ -161,13 +161,15 @@ static void PostAct(int act, int fillAct, int count) {
     ActPost(&j);
 }
 
-/* 采集本次开火的模式门闩快照：增强（点按补齐到 3 次）与位移（带 Shift）。
-   门闩由钩子线程维护（ModePending = "本次和弦内按下过"），开火那一刻拷贝成
-   g_actEnh/g_actShf —— 于是"动作先按、修饰后到"的乱序也不会丢修饰，而开火
-   之后的修饰变化不影响本次动作（快照随 ActJob 带走，工作线程不读主线程状态）。 */
+/* 采集本次开火的模式快照：增强（点按补齐到 3 次）与位移（带 Shift）。
+   判据是"激活键此刻是否按住"（ModeDown）—— 与鼠标钩子判断滚轮语义用的是
+   同一个查询，不会分叉成两种修饰判定。
+   "动作先按、修饰后到"的乱序由 CHORD_SETTLE（50ms 稳定期）cover：开火前
+   修饰到位即可，开火之后的修饰变化不影响本次动作（快照随 ActJob 带走，
+   工作线程不读主线程状态）。 */
 static void SnapMods(void) {
-    g_actEnh = ModePending(MODE_ENHANCE);
-    g_actShf = ModePending(MODE_SHIFT);
+    g_actEnh = ModeDown(MODE_ENHANCE);
+    g_actShf = ModeDown(MODE_SHIFT);
 }
 
 /* 开火一次动作（词跳走文本解析；其余走按键发送，都用开火快照修饰） */
@@ -284,8 +286,9 @@ static void ResetEngine(void) {
     g_pendingAct = ACT_NONE;
     g_activeAct  = ACT_NONE;
     g_actEnh = FALSE; g_actShf = FALSE;
-    /* 清门闩但保留"按住状态"：Alt 还按着时，鼠标侧的增强模式判定仍成立 */
-    ModeResetPending();
+    /* 刻意不动修饰键的按住状态：Alt 还按着时，本次 C 会话内的增强模式
+       判定依然成立（ModeDown 是唯一判据，见 cap.h）。以前这里会单独清一份
+       "门闩"位图，导致"按住 Alt 再按 C"时点按补齐静默失效。 */
     StackClear();
 }
 

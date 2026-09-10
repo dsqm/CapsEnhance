@@ -868,6 +868,38 @@ int main(void) {
     ConfigLoadFrom(L"bin/__absent__.ini");
     KeyMapInit();
 
+    /* ---- 场景W：**先按修饰键、后按 C**（P1-1 回归） ----
+       实测缺陷：按住 Alt 不放、再按 C、然后点按 J，**只发 1 次左键**（本该
+       补齐到 3 次）。根因是当时并行维护了两份修饰状态：一份"此刻按住"
+       （downMask），一份"本次和弦内按下过"的门闩（pendMask）。两者本来就
+       同步置位、同步清除（恒等），偏偏引擎复位（按 C）会**单独清掉门闩**
+       —— 而那一刻 Alt 已经按着、之后不再产生 keydown，于是本次 C 会话内
+       增强模式永远不成立。
+       现在只保留"此刻按住"一份，按 C 不再动它（见 keymap.c 的 ModeKeyEvent
+       与 main.c 的 SnapMods）。顺带把滚轮与点按的修饰判定统一到同一个查询 ——
+       否则会出现"滚轮算增强、点按不算"的分裂。
+       下面两段是同一件事的两个顺序，必须都绿：前者是刚修的缺陷，后者是
+       一直正常的老路径，防止修前面时把后面改坏。 */
+    Reset();
+    KeyAlt(VK_LMENU, TRUE); Pump(2);      /* 先按修饰键 */
+    Key(CLI_CAPS, TRUE);    Pump(2);      /* 后按 C：关键就是这个顺序 */
+    Key('J', TRUE);  Pump(2);
+    Key('J', FALSE); Pump(2);             /* 短点 -> 应补齐到 3 次 */
+    KeyAlt(VK_LMENU, FALSE); Pump(2);
+    END_SCENE();
+    CHECK(CountVk(VK_LEFT) == 3,
+          "W: 先按 Alt 再按 C，点按 J 仍补齐 3 次（P1-1：修饰状态只有一份）");
+
+    Reset();
+    Key(CLI_CAPS, TRUE); Pump(2);         /* 老路径：先 C 后 Alt */
+    KeyAlt(VK_LMENU, TRUE); Pump(2);
+    Key('J', TRUE);  Pump(2);
+    Key('J', FALSE); Pump(2);
+    KeyAlt(VK_LMENU, FALSE); Pump(2);
+    END_SCENE();
+    CHECK(CountVk(VK_LEFT) == 3,
+          "W: 先按 C 再按 Alt 同样补齐 3 次（老路径未回归）");
+
     /* ---- 场景V：横向滚动的**注入方向**（与系统约定一致） ----
        "横向滚动的方向反了" —— 修好之后：滚轮**向上** = 向左（负 delta），
        向下 = 向右（正 delta）。这不是随便定的：`Shift + 滚轮` 在浏览器 /

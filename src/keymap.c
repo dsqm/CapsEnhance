@@ -91,13 +91,12 @@ typedef struct {
     const char*  defKeys;   /* 激活键文本（cap.h 里单点定义）      */
     int          keys[MODE_KEY_MAX];   /* 当前生效的激活键          */
     int          nKeys;
-    volatile DWORD downMask;           /* bit i = keys[i] 物理按住（钩子线程写） */
-    volatile DWORD pendMask;           /* bit i = 本次和弦内按下过（门闩）      */
+    volatile DWORD downMask;           /* bit i = keys[i] 此刻按住（钩子线程写） */
 } ModeDef;
 
 static ModeDef kModes[MODE_COUNT] = {
-    { MODE_ENHANCE, MODE_ENHANCE_KEYS_DEFAULT, { 0 }, 0, 0, 0 },
-    { MODE_SHIFT,   MODE_SHIFT_KEYS_DEFAULT,   { 0 }, 0, 0, 0 },
+    { MODE_ENHANCE, MODE_ENHANCE_KEYS_DEFAULT, { 0 }, 0, 0 },
+    { MODE_SHIFT,   MODE_SHIFT_KEYS_DEFAULT,   { 0 }, 0, 0 },
 };
 
 static ModeDef* ModeOf(int mode) {
@@ -180,7 +179,6 @@ static void ModeSetKeys(int mode, const int* keys, int n) {
     for (int i = 0; i < n; i++) m->keys[i] = keys[i];
     /* 键集合变了，旧位图不再对应任何键：清空，避免残留位指向错误的键 */
     m->downMask = 0;
-    m->pendMask = 0;
 }
 
 /* 启动时装配：把 MODE_*_KEYS_DEFAULT 的文本解析成虚拟键表。
@@ -211,15 +209,24 @@ int ModeFindByVk(int vk) {
 }
 
 /* 钩子线程调用。位图按"键在 keys[] 里的下标"记 ——
-   这样一个模式挂多个键时，松开其中一个不会误清另一个。 */
+   这样一个模式挂多个键时，松开其中一个不会误清另一个。
+
+   **只维护"此刻按住"这一份状态**。此前还并行维护过一份"本次和弦内按下过"
+   的 pendMask（门闩），但它与 downMask 同步置位、同步清除，两者恒等 ——
+   于是"门闩"从未真正生效，反而引出一个真实缺陷：引擎复位（按 C）时会单独
+   清 pendMask，而此时 Alt 仍按着、之后不再产生 keydown，于是本次 C 会话里
+   "按住 Alt 点按"的增强补齐全部失效。
+   **语义有且只有一个：模式生效 == 激活键此刻按住。** 和弦引擎在开火那一刻
+   取快照（main.c 的 SnapMods），鼠标钩子判断滚轮语义时也读同一个值 ——
+   两条路必须同源，否则就会出现"滚轮是增强、点按不是增强"这种割裂。 */
 void ModeKeyEvent(int mode, int vk, BOOL down) {
     ModeDef* m = ModeOf(mode);
     if (!m) return;
     for (int i = 0; i < m->nKeys; i++) {
         if (m->keys[i] != vk) continue;
         DWORD bit = (DWORD)1 << i;
-        if (down) { m->downMask |= bit; m->pendMask |= bit; }
-        else      { m->downMask &= ~bit; m->pendMask &= ~bit; }
+        if (down) m->downMask |= bit;
+        else      m->downMask &= ~bit;
         return;
     }
 }
@@ -229,20 +236,8 @@ BOOL ModeDown(int mode) {
     return m ? (m->downMask != 0) : FALSE;
 }
 
-BOOL ModePending(int mode) {
-    const ModeDef* m = ModeOf(mode);
-    return m ? (m->pendMask != 0) : FALSE;
-}
-
-void ModeResetPending(void) {
-    for (int i = 0; i < MODE_COUNT; i++) kModes[i].pendMask = 0;
-}
-
 void ModeResetAll(void) {
-    for (int i = 0; i < MODE_COUNT; i++) {
-        kModes[i].pendMask = 0;
-        kModes[i].downMask = 0;
-    }
+    for (int i = 0; i < MODE_COUNT; i++) kModes[i].downMask = 0;
 }
 
 int ModeKeyCount(int mode) {

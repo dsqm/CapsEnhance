@@ -6,7 +6,7 @@ GlobalState g_state;
 
 /* C（CapsLock）实时状态：钩子线程写，主线程与鼠标钩子读。
    修饰模式（增强/位移）的按住位图不在这里 —— 它在 keymap.c 的模式表里，
-   由 ModeKeyEvent 维护、ModeDown/ModePending 查询。
+   由 ModeKeyEvent 维护、ModeDown 查询（唯一判据，见 cap.h）。
    钩子从不判断"按的是 D 还是 Alt"，只问"这个键属于哪个模式"。 */
 volatile BOOL g_cMod = FALSE;
 

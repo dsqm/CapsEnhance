@@ -107,10 +107,14 @@ BOOL ActHasFlag(int act, unsigned flag);/* 动作是否带某属性标志 */
 
 int  ModeFindByVk(int vk);              /* vk 是哪个模式激活键；-1 = 不是 */
 void ModeKeyEvent(int mode, int vk, BOOL down); /* 钩子线程：更新按住位图 */
-BOOL ModeDown(int mode);                /* 该模式此刻是否生效（任一激活键按住） */
-BOOL ModePending(int mode);             /* 本次和弦的门闩（开火快照取它） */
-void ModeResetPending(void);            /* 引擎复位：清门闩（按住状态保留） */
-void ModeResetAll(void);                /* 暂停/重启：门闩与按住状态一起清 */
+/* 该模式此刻是否生效（任一激活键按住）。
+   **这是"模式生效吗"的唯一判据** —— 和弦引擎开火快照（main.c 的 SnapMods）
+   与鼠标钩子的滚轮语义判定（hook.c）都读它，两处必须同源。
+   此前还有一份"本次和弦内按下过"的 pendMask 门闩，但它与按住位图同步置位、
+   同步清除，恒等却单独被引擎复位清掉 —— 结果是"按住 Alt 不放再按 C，点按
+   补齐失效"。两份状态只留一份，语义才不会分叉。 */
+BOOL ModeDown(int mode);
+void ModeResetAll(void);                /* 暂停/重启：清按住状态 */
 int  ModeKeyCount(int mode);            /* 配置/测试用 */
 int  ModeKeyAt(int mode, int i);
 int  ModeKeysText(int mode, WCHAR* out, size_t cap); /* 拼 "Alt, D"（日志/测试） */
