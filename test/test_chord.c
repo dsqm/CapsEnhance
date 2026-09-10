@@ -60,19 +60,21 @@ static int SeqIdx(int vk, int up) {
 }
 static void ResetRec(void) { g_recN = 0; g_seqN = 0; }
 
-/* ---- 滚轮注入计数钩子（场景Q用）----
-   统计"我们注入出去的滚轮事件"格数与方向和：验证挪到专用线程以后仍然逐格
-   补发、格数换算正确。这**不是**生产那个 LowLevelMouseProc（它做加速决策），
-   所以不存在"注入事件被自己再放大"的风险 —— 本钩子只计数。 */
-static int g_wheelInj = 0;     /* 注入的滚轮事件条数 */
-static int g_wheelSum = 0;     /* 注入的 delta 之和（方向也在这里） */
-static void ResetWheelRec(void) { g_wheelInj = 0; g_wheelSum = 0; }
+/* ---- 滚轮注入计数钩子（场景Q/T 用）----
+   统计"我们注入出去的滚轮事件"格数与方向和，纵轴与横轴各一套。这**不是**生产
+   那个 LowLevelMouseProc（它做决策），所以不存在"注入事件被自己再放大"的风险。 */
+static int g_wheelInj = 0;     /* 注入的**纵轴**事件条数 */
+static int g_wheelSum = 0;     /* 注入的纵轴 delta 之和（方向也在这里） */
+static int g_whInj = 0;        /* 注入的**横轴**事件条数 */
+static int g_whSum = 0;        /* 注入的横轴 delta 之和（正=右，负=左） */
+static void ResetWheelRec(void) { g_wheelInj = 0; g_wheelSum = 0; g_whInj = 0; g_whSum = 0; }
 LRESULT CALLBACK WheelCapProc(int n, WPARAM w, LPARAM l) {
-    if (n == HC_ACTION && w == WM_MOUSEWHEEL) {
+    if (n == HC_ACTION && (w == WM_MOUSEWHEEL || w == WM_MOUSEHWHEEL)) {
         const MSLLHOOKSTRUCT* m = (const MSLLHOOKSTRUCT*)l;
         if (m && (m->flags & LLMHF_INJECTED)) {
-            g_wheelInj++;
-            g_wheelSum += (int)(short)HIWORD(m->mouseData);
+            int d = (int)(short)HIWORD(m->mouseData);
+            if (w == WM_MOUSEWHEEL) { g_wheelInj++; g_wheelSum += d; }
+            else                    { g_whInj++;    g_whSum    += d; }
         }
     }
     return CallNextHookEx(NULL, n, w, l);
@@ -805,6 +807,26 @@ int main(void) {
     /* 复位默认键位（别给以后新增的场景留坑） */
     ConfigLoadFrom(L"bin/__absent__.ini");
     KeyMapInit();
+
+    /* ---- 场景V：横向滚动的**注入方向**（与系统约定一致） ----
+       "横向滚动的方向反了" —— 修好之后：滚轮**向上** = 向左（负 delta），
+       向下 = 向右（正 delta）。这不是随便定的：`Shift + 滚轮` 在浏览器 /
+       资源管理器 / 表格里就是这个方向（Firefox 官方快捷键表明写
+       `Shift + 上滚 = 向左滚动`），照抄系统约定用户才不用重建肌肉记忆。
+       这里直接查注入出去的横轴刻度符号（计数钩子只数 LLMHF_INJECTED）。 */
+    Reset();
+    Pump(150); Sink();                            /* 冲掉残留请求 */
+    ResetWheelRec();
+    ActWheelPostH(120, 1);                        /* 物理上滚 */
+    Pump(100); Drain();
+    CHECK(g_whInj == 1 && g_whSum < 0,
+          "V: 滚轮向上 -> 注入向左的横轴刻度（负 delta）");
+    ResetWheelRec();
+    ActWheelPostH(-120, 1);                       /* 物理下滚 */
+    Pump(100); Drain();
+    CHECK(g_whInj == 1 && g_whSum > 0,
+          "V: 滚轮向下 -> 注入向右的横轴刻度（正 delta）");
+    CHECK(g_wheelInj == 0, "V: 横向不会误发到纵轴");
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
     return fails;

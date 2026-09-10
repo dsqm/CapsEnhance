@@ -217,7 +217,7 @@ void SendWheelNotches(int delta, int n)  { SendWheelAxis(delta, n, FALSE); }
    （倍数 1 = 正好一格），物理格的原始大小（高精度滚轮可能小于 120）不参与。 */
 void SendWheelHNotches(int delta, int n) {
     if (delta == 0) return;
-    SendWheelAxis((delta > 0) ? WHEEL_STD_DELTA : -WHEEL_STD_DELTA, n, TRUE);
+    SendWheelAxis((delta > 0) ? -WHEEL_STD_DELTA : WHEEL_STD_DELTA, n, TRUE);
 }
 
 /* 倍数 -> 要补发的格数。单独拎出来是为了能被单测直接断言换算
