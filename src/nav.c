@@ -976,7 +976,8 @@ int NavJump(int dir, BOOL shift) {
                 /* Select 返回成功但光标未动（provider 静默忽略）：
                    光标仍在原位，从原 caret 算的 steps 依旧有效，安全退回箭头 */
                 if (g_recording)
-                    CapLog("  -> UIA Select 未生效(光标未动 c2=%d)，退回箭头", c2);
+                    CapLog("  -> UIA Select 未生效(光标未动 c2=%d)，退回箭头。"
+                           "嫌慢可把该程序加入 [NativeWordJump]", c2);
             } else {
                 skipArrows = TRUE;
                 if (g_recording)
