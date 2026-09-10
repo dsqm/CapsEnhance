@@ -27,6 +27,15 @@ jobs:
         shell: cmd
         run: call test\build_keytest.bat
 
+      # /W4 only reports what the front end is sure about. /analyze runs the
+      # deeper data-flow engine and has already caught real defects in this
+      # codebase (Interlocked-vs-plain mixed access on the stop flags, and
+      # hand-computed buffer capacities). Remaining findings are documented
+      # false positives; this step compiles only, so it is cheap.
+      - name: Static analysis (/W4 + /analyze)
+        shell: cmd
+        run: call test\build_analyze.bat
+
       # 先编译主程序：restarttest / logsmoke 会用 CreateProcessW 启动
       # bin\CapsEnhance.exe 做真实进程级检查，必须先有它。
       - name: Build release exe

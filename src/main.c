@@ -628,7 +628,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return 0;
 }
 
-int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
+/* 形参写成与 SDK 声明一致的 SAL 批注：不加的话 /analyze 会报 C28251
+   （"WinMain 的批注不一致"）。这是纯噪音，盖掉它才能让这条步骤的输出只剩
+   真正需要看的发现。 */
+int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
+                   _In_ LPSTR lpCmd, _In_ int nShow) {
     (void)hInst; (void)hPrev; (void)lpCmd; (void)nShow;
     int rc = 0;
     g_state.paused = FALSE;

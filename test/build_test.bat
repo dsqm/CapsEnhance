@@ -7,16 +7,16 @@ if errorlevel 1 exit /b 1
 
 if not exist "bin" mkdir bin
 rem test_chord.c includes main.c, which now also uses config.c and keymap.c
-cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
    /Isrc /c /Fobin\config_chord.obj src\config.c
 if errorlevel 1 exit /b 1
-cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
    /Isrc /c /Fobin\keymap_chord.obj src\keymap.c
 if errorlevel 1 exit /b 1
-cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
    /Isrc /c /Fobin\test_chord.obj test\test_chord.c
 if errorlevel 1 exit /b 1
-cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE ^
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE ^
    bin\test_chord.obj bin\config_chord.obj bin\keymap_chord.obj ^
    /link /OUT:bin/test_chord.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib ^

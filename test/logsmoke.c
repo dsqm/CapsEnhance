@@ -39,7 +39,7 @@ int main(void) {
                 exe, GetLastError());
         return 2;
     }
-    DWORD pid = pi.dwProcessId;
+    DWORD pid = pi.dwProcessId;      /* 只在下面那条失败信息里用得上 */
     CloseHandle(pi.hThread);
 
     HWND h = NULL;
@@ -47,7 +47,11 @@ int main(void) {
         h = FindWindowW(L"CapsEnhanceMain", NULL);
         if (!h) Sleep(100);
     }
-    if (!h) { printf("no window\n"); TerminateProcess(pi.hProcess, 2); CloseHandle(pi.hProcess); return 2; }
+    if (!h) {
+        printf("no window (pid=%lu)\n", (unsigned long)pid);
+        TerminateProcess(pi.hProcess, 2); CloseHandle(pi.hProcess);
+        return 2;
+    }
     Sleep(300);
 
     /* WM_PROBE = WM_APP+6：等价 C+` 开始记录（CapLog("===== REC START =====")） */

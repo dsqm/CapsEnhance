@@ -897,8 +897,12 @@ done:
    不支持时返回 E_FAIL（此时退回箭头）。 */
 static BOOL MsaaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
     if (!hwnd) return FALSE;
+    /* OBJID_CLIENT 在 winuser.h 里是 ((LONG)0xFFFFFFFC)，而该 API 的形参是
+       DWORD —— 不加转换会有一条 C4245（有符号/无符号不匹配）。语义上完全
+       无害（就是那个固定值），但显式转一下能让 /W4 输出保持干净：以后新增的
+       警告不会被这三条"已知无害"的噪音淹掉。 */
     IAccessible* acc = NULL;
-    HRESULT hr = AccessibleObjectFromWindow(hwnd, OBJID_CLIENT,
+    HRESULT hr = AccessibleObjectFromWindow(hwnd, (DWORD)OBJID_CLIENT,
                                             &IID_IAccessible, (void**)&acc);
     if (FAILED(hr) || !acc) return FALSE;
     IAccessibleText* at = NULL;
@@ -918,7 +922,7 @@ static BOOL MsaaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
 static BOOL MsaaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
     if (!hwnd) return FALSE;
     IAccessible* acc = NULL;
-    HRESULT hr = AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, &IID_IAccessible, (void**)&acc);
+    HRESULT hr = AccessibleObjectFromWindow(hwnd, (DWORD)OBJID_CLIENT, &IID_IAccessible, (void**)&acc);
     if (FAILED(hr) || !acc) return FALSE;
 
     IAccessibleText* at = NULL;
@@ -1387,7 +1391,7 @@ void NavProbe(void) {
     /* IA2 (IAccessibleText) 是否可用 —— Scintilla 系编辑器的通道 */
     if (focus) {
         IAccessible* acc = NULL;
-        if (SUCCEEDED(AccessibleObjectFromWindow(focus, OBJID_CLIENT, &IID_IAccessible, (void**)&acc)) && acc) {
+        if (SUCCEEDED(AccessibleObjectFromWindow(focus, (DWORD)OBJID_CLIENT, &IID_IAccessible, (void**)&acc)) && acc) {
             IAccessibleText* at = NULL;
             if (SUCCEEDED(acc->lpVtbl->QueryInterface(acc, &kIID_IAccessibleText, (void**)&at)) && at) {
                 long co = -1;

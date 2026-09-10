@@ -8,28 +8,28 @@ if errorlevel 1 exit /b 1
 
 if not exist "bin" mkdir bin
 
-cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
    test\keytest.c /link /OUT:bin/keytest.exe user32.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 
-cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
    test\uiprobe.c /link /OUT:bin/uiprobe.exe user32.lib ole32.lib oleaut32.lib oleacc.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 
 rem memtest: include nav.c/send.c directly, link only its own obj
-cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Isrc /Fobin\ ^
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Isrc /Fobin\ ^
    test\memtest.c /link /OUT:bin/memtest.exe user32.lib gdi32.lib advapi32.lib ole32.lib oleaut32.lib oleacc.lib psapi.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 
-cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
    test\restarttest.c /link /OUT:bin/restarttest.exe user32.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 
-cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
    test\traymemtest.c /link /OUT:bin/traymemtest.exe user32.lib psapi.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 
-cl /nologo /O2 /W3 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
    test\logsmoke.c /link /OUT:bin/logsmoke.exe user32.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 

@@ -627,7 +627,7 @@ int main(void) {
        所以每段观测前先 ResetWheelRec。 */
     Reset();
     int base = ConfigGetAutoScrollInterval();     /* 最慢档 = 1500 */
-    int fast = ConfigGetAutoScrollFastMs();        /* 最快档 = 8000（独立配置项） */
+    int fast = ConfigGetAutoScrollFastMs();        /* 最快档 = 800（独立配置项） */
     CHECK(fast == 800, "R: 最快档 = AutoScrollFastMs 缺省 800ms/格");
     CHECK(ConfigGetWheelScrollMul() == 3,
           "R: 倍数项与水平无关（WheelScrollMul 仍是 3，两边各自独立）");

@@ -57,10 +57,11 @@ int main(void) {
     memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
     memset(&pi, 0, sizeof(pi));
     BOOL okB = CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
-    DWORD pidB = pi.dwProcessId;
     HANDLE hB = pi.hProcess;
     CloseHandle(pi.hThread);
     EXPECT(okB, "B 带 --wait-exit 启动成功");
+    if (okB) wprintf(L"B pid=%lu (wait-exit %lu)\n",
+                     (unsigned long)pi.dwProcessId, (unsigned long)pidA);
 
     Sleep(1500);
     HWND now = FindWindowW(L"CapsEnhanceMain", NULL);
