@@ -61,15 +61,41 @@ static const IID kIID_IAccessibleText =
     {0x24FD2FFB, 0x3AAD, 0x4a08, {0x83,0x35,0xA3,0xAD,0x89,0xC0,0xFB,0x4B}};
 
 
+/* ---- 一次词跳的同步 IPC 预算 ----
+   NavJump 会串行发多条跨进程消息（Edit 通道 3 条、Sci 通道最多 6 条），每条
+   各自 300ms 超时。目标窗口卡住时这些超时是**相加**的：最坏能叠到 1.8s，
+   用户看到的是"按一下键整个输入粘住"。
+   现在整个 NavJump 共用一个预算：花完就没了，后续 IPC 直接失败 —— 于是
+   NavJump 走"读不到文本"的正常分支，退回原生 Ctrl+方向兜底，而不是卡在那里。
+   预算是**线程局部**的：NavJump 通常跑在 act.c 的工作线程上，但同步兜底
+   路径（ActPost 在 !s_init 时）也可能在主线程，两条路不能互相干扰。 */
+#define NAV_IPC_TIMEOUT_MS  300   /* 单条上限 */
+#define NAV_IPC_BUDGET_MS   600   /* 一次 NavJump 的总预算 */
+static __declspec(thread) ULONGLONG t_ipcDeadline = 0;
+
+static void NavIpcBudgetBegin(void) {
+    t_ipcDeadline = GetTickCount64() + NAV_IPC_BUDGET_MS;
+}
+static void NavIpcBudgetEnd(void) { t_ipcDeadline = 0; }
+static DWORD NavIpcTimeout(void) {
+    if (!t_ipcDeadline) return NAV_IPC_TIMEOUT_MS;   /* 未开预算（NavProbe 等） */
+    ULONGLONG now = GetTickCount64();
+    if (now >= t_ipcDeadline) return 0;              /* 预算耗尽：IPC 直接放弃 */
+    ULONGLONG left = t_ipcDeadline - now;
+    return (left > NAV_IPC_TIMEOUT_MS) ? NAV_IPC_TIMEOUT_MS : (DWORD)left;
+}
+
 /* ---- 跨进程发消息：取窗口过程的"真实返回值" ----
    坑：SendMessageTimeout 自己的返回值只表示"有没有发成功(非0)"，窗口过程的
    返回值写进最后一个参数 lpdwResult。之前所有调用都传 NULL，于是拿到的恒为 1
    —— 表现为 WM_GETTEXTLENGTH 恒等于 1、读到的文本恒被截成一个字符，
    词边界算法只能在"长度 1 的文本"上算，自然跳不动。 */
 static BOOL SendMsg(HWND hwnd, UINT msg, WPARAM w, LPARAM l, LONGLONG* out) {
+    DWORD ms = NavIpcTimeout();
+    if (ms == 0) return FALSE;      /* 本次词跳的预算已用完 */
     DWORD_PTR r = 0;
     if (!SendMessageTimeoutW(hwnd, msg, w, l,
-                             SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, &r))
+                             SMTO_ABORTIFHUNG | SMTO_BLOCK, ms, &r))
         return FALSE;
     if (out) *out = (LONGLONG)(LONG_PTR)r;
     return TRUE;
@@ -384,7 +410,9 @@ static int WordJumpTarget(const WCHAR* s, int len, int caret, int dir, int* step
     return i;
 }
 
-/* 非 static 仅供词跳单元测试（test_nav.c）直接调用。 */
+/* 非 static 仅供词跳单元测试（test/test_nav.c）直接调用。
+   声明在 cap.h 里（不要在每个测试文件里各自 extern —— 签名一改就会漏改一处，
+   而漏改的后果是链接期才发现，或者更糟：隐式声明按 int 返回值调用）。 */
 int ComputeSteps(const WCHAR* s, int len, int caret, int dir) {
     int steps = 0;
     WordJumpTarget(s, len, caret, dir, &steps);
@@ -932,7 +960,30 @@ static BOOL MsaaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut
 static int  g_selAnchor = -1;         /* -1 = 未在位移序列中 */
 static int  g_selAnchorLen = -1;
 static BOOL g_selAnchorIsStart = FALSE;
-void NavSelTrackReset(void) { g_selAnchor = -1; g_selAnchorLen = -1; }
+
+/* 这几份状态（以及下面的 g_noSetProc / g_noSetCount）的**归属必须说清**：
+   NavJump 跑在 act.c 的**工作线程**上（ActPost 的同步兜底路径还可能落在
+   主线程），而 NavSelTrackReset() 由主线程的和弦引擎调用 —— 两边都会读写。
+   用一把临界区包住（只在读写这几个变量的那几行持有，中间不做任何 I/O），
+   是这里最省事也最不容易搞错的做法。 */
+static CRITICAL_SECTION g_navCs;
+static INIT_ONCE g_navOnce = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK NavCsInit(PINIT_ONCE o, PVOID p, PVOID* c) {
+    (void)o; (void)p; (void)c;
+    InitializeCriticalSection(&g_navCs);
+    return TRUE;
+}
+#define NAV_LOCK()   do { \
+        InitOnceExecuteOnce(&g_navOnce, NavCsInit, NULL, NULL); \
+        EnterCriticalSection(&g_navCs); \
+    } while (0)
+#define NAV_UNLOCK() LeaveCriticalSection(&g_navCs)
+
+void NavSelTrackReset(void) {
+    NAV_LOCK();
+    g_selAnchor = -1; g_selAnchorLen = -1;
+    NAV_UNLOCK();
+}
 
 /* 置位"无效"程序的会话内记忆：
    部分实现（Quicker 等 WPF 控件）的 TextRange.Select 会短暂改变显示光标
@@ -943,12 +994,23 @@ void NavSelTrackReset(void) { g_selAnchor = -1; g_selAnchorLen = -1; }
 static WCHAR g_noSetProc[64] = {0};
 static int   g_noSetCount = 0;
 
+static int NavJumpInner(int dir, BOOL shift);
+
+/* 对外的入口只做一件事：给本次跳转开一个同步 IPC 预算（见 NavIpcBudgetBegin），
+   把"目标程序卡住时超时会叠加"的最坏情况从 ~1.8s 压到 NAV_IPC_BUDGET_MS。 */
 int NavJump(int dir, BOOL shift) {
+    NavIpcBudgetBegin();
+    int r = NavJumpInner(dir, shift);
+    NavIpcBudgetEnd();
+    return r;
+}
+
+static int NavJumpInner(int dir, BOOL shift) {
     WCHAR* text = NULL;
     int len = 0, caret = 0;
     if (g_recording) CapLog("NavJump dir=%d shift=%d", dir, shift);
 
-    if (!shift) { g_selAnchor = -1; g_selAnchorLen = -1; }
+    if (!shift) { NAV_LOCK(); g_selAnchor = -1; g_selAnchorLen = -1; NAV_UNLOCK(); }
 
     BOOL got = FALSE;
     const char* path = "native";
@@ -984,15 +1046,19 @@ int NavJump(int dir, BOOL shift) {
        Sci 通道例外：SCI_GETCURRENTPOS 本身就是活动端，caret 直接可用。 */
     int activeCaret = caret;
     if (got && shift && path[0] == 'E') {
+        NAV_LOCK();
         if (g_selAnchor < 0 || g_selAnchorLen != len) {
             g_selAnchorIsStart = (dir == DIR_RIGHT);
             g_selAnchor = g_selAnchorIsStart ? caret : selEnd;
             g_selAnchorLen = len;
         }
         activeCaret = g_selAnchorIsStart ? selEnd : caret;
+        NAV_UNLOCK();
     } else if (!shift) {
+        NAV_LOCK();
         g_selAnchor = -1;
         g_selAnchorLen = -1;
+        NAV_UNLOCK();
     }
 
     int steps = 0;
@@ -1012,17 +1078,22 @@ int NavJump(int dir, BOOL shift) {
     BOOL skipArrows = FALSE;   /* 置位已发生但回读不符：不能再发箭头叠加错误 */
     WCHAR procName[64] = {0};
     if (focus) ConfigGetProcessName(focus, procName, 64);
-    BOOL skipSetTry = (g_noSetProc[0] && procName[0] &&
-                       !_wcsicmp(g_noSetProc, procName));
+    BOOL skipSetTry;
+    NAV_LOCK();
+    skipSetTry = (g_noSetProc[0] && procName[0] && !_wcsicmp(g_noSetProc, procName));
+    NAV_UNLOCK();
     if (path[0] == 'E' && focus && steps >= DIRECT_JUMP_MIN) {
         /* 期望选区（有序）：锚已建立时活动端=tgt、锚端固定；
            无 Shift 收缩为一点。 */
         int ws, we;
+        NAV_LOCK();
+        int anchor = g_selAnchor;      /* 在锁内取快照：别把锁带进下面的 IPC */
+        NAV_UNLOCK();
         if (!shift) {
             ws = we = tgt;
-        } else if (g_selAnchor >= 0) {
-            ws = (tgt < g_selAnchor) ? tgt : g_selAnchor;
-            we = (tgt < g_selAnchor) ? g_selAnchor : tgt;
+        } else if (anchor >= 0) {
+            ws = (tgt < anchor) ? tgt : anchor;
+            we = (tgt < anchor) ? anchor : tgt;
         } else {
             ws = (dir == DIR_LEFT) ? tgt : caret;
             we = (dir == DIR_LEFT) ? selEnd : tgt;
@@ -1061,7 +1132,9 @@ int NavJump(int dir, BOOL shift) {
                      : MsaaGetTextCaret(focus, &t2, &l2, &c2);
             if (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0 && c2 == tgt) {
                 direct = TRUE;
+                NAV_LOCK();
                 g_noSetProc[0] = 0; g_noSetCount = 0;
+                NAV_UNLOCK();
                 if (g_recording) CapLog("  -> UIA/IA2 直接置位已校验 (caret=%d)", tgt);
             } else if (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0 && c2 == caret) {
                 /* Select 返回成功但光标未动（provider 静默忽略）：
@@ -1071,12 +1144,16 @@ int NavJump(int dir, BOOL shift) {
                            "嫌慢可把该程序加入 [NativeWordJump]", c2);
                 /* 连续两次无效 -> 本次会话内不再尝试（WPF 上它会让显示光标
                    闪一下却不生效，每次试一次就每次都闪） */
+                BOOL justDisabled = FALSE;
+                NAV_LOCK();
                 if (++g_noSetCount >= 2 && procName[0]) {
                     wcscpy_s(g_noSetProc, 64, procName);
-                    if (g_recording)
-                        CapLog("  -> 该程序连续 2 次置位无效，本次会话内不再尝试"
-                               "（消除多余闪烁，重启程序恢复）");
+                    justDisabled = TRUE;     /* 只在"刚跨过阈值"那一次记日志 */
                 }
+                NAV_UNLOCK();
+                if (justDisabled && g_recording)
+                    CapLog("  -> 该程序连续 2 次置位无效，本次会话内不再尝试"
+                           "（消除多余闪烁，重启程序恢复）");
             } else {
                 skipArrows = TRUE;
                 if (g_recording)
@@ -1196,7 +1273,11 @@ void NavBaseInfo(void) {
     {
         typedef struct { ULONG cb; DWORD major, minor, build, plt; WCHAR csd[128]; } MYROV;
         typedef LONG (WINAPI *PGETV)(void*);
-        PGETV pGetV = (PGETV)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
+        /* ntdll 一定已加载，但 GetModuleHandleW 的返回值理论上可以是 NULL
+           （/analyze 的 C6387 就是提这一条）；先取句柄再判空，
+           免得把 NULL 喂给 GetProcAddress。诊断代码不该有任何崩溃可能。 */
+        HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+        PGETV pGetV = hNtdll ? (PGETV)GetProcAddress(hNtdll, "RtlGetVersion") : NULL;
         if (pGetV) {
             MYROV ro; memset(&ro, 0, sizeof(ro)); ro.cb = sizeof(ro);
             if (pGetV(&ro) == 0)
