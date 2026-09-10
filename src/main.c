@@ -405,8 +405,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 ModeKeysText(MODE_SHIFT,   sk, MODE_KEYS_MAXLEN);
                 WideCharToMultiByte(CP_UTF8, 0, ek, -1, eb, (int)sizeof(eb), NULL, NULL);
                 WideCharToMultiByte(CP_UTF8, 0, sk, -1, sb, (int)sizeof(sb), NULL, NULL);
-                CapLog("按键: 增强=%s 位移=%s（固定值，不读配置） WheelScrollMs=%d AutoScrollInterval=%d",
-                       eb, sb, ConfigGetWheelScrollMs(), ConfigGetAutoScrollInterval());
+                CapLog("按键: 增强=%s 位移=%s（固定值，不读配置） WheelScrollMul=%d "
+                       "AutoScrollInterval=%d AutoScrollFastMs=%d",
+                       eb, sb, ConfigGetWheelScrollMul(), ConfigGetAutoScrollInterval(),
+                       ConfigGetAutoScrollFastMs());
             }
             MessageBeep(MB_ICONASTERISK);   /* 系统"星号"音：开始记录（与结束不同） */
             TrayHint(L"正在记录日志（C+\x60 结束）");
@@ -535,11 +537,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_WHEEL_ACCEL:
+        /* Caps+滚轮：逐格放大。只投递给专用线程，**主线程绝不在这里做注入**。
+           原来在这里直接 SendWheelAccel（内含 Sleep 逐格补发），主线程一进
+           Sleep 就不在"等消息"状态，系统会把这段时间到达的低级钩子事件**直接
+           跳过**：松开 Caps 的 keyup 被漏掉 -> g_cMod 卡在 TRUE -> 松开 C 后
+           滚轮还在滚、随后按 Tab 又冒出大写锁定。同一根因也造成倍数高时卡顿。 */
+        ActWheelPost((int)wp, (int)lp);
+        return 0;
     case WM_WHEEL_ENH:
-        /* Caps(+增强修饰) 下的滚轮：驱动连续滚动（act.c 的连续滚动通道）。
-           lParam = 1 表示"跟手档"（只按 Caps，按 WheelScrollMs 跟着滚轮走），
-           0 表示"增强档"（滚一下就自己一直滚）。这里同样只投递，主线程绝不注入。 */
-        ActAutoScrollWheel((int)wp, (BOOL)(lp != 0));
+        /* Caps+Alt/D+滚轮：驱动持续滚动（act.c 的持续滚动通道）。
+           这里同样只投递，主线程绝不做注入。 */
+        ActAutoScrollWheel((int)wp);
         return 0;
     case WM_WHEEL_HACCEL:
         /* Caps+Shift+滚轮：横向滚动。钩子已经吞掉物理那一格（否则会横纵混滚），
@@ -548,10 +557,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_MODE_UP:
         /* 某个修饰模式的激活键全部抬起了（钩子投递）：增强模式一失效，
-           进行中的增强档连续滚动立刻停 —— 这就是"松开 Alt 立即终止"的快速路径
-           （工作线程每拍也会自查一遍，两条路互为兜底）。
-           只对增强档生效：跟手档本来就没按修饰键，不该被它打断。 */
-        if ((int)wp == MODE_ENHANCE) ActAutoScrollStopEnh();
+           进行中的持续滚动立刻停 —— 这就是"松开 Alt 立即终止"的快速路径
+           （工作线程每拍也会自查一遍，两条路互为兜底）。 */
+        if ((int)wp == MODE_ENHANCE) ActAutoScrollStop();
         return 0;
     /* ---- 托盘 ---- */
     case WM_TOGGLE_TRAY:

@@ -15,7 +15,8 @@ BOOL ConfigGetRunAsAdmin(void);
 int  ConfigGetLogMaxKB(void);
 int  ConfigGetMaxArrowSteps(void);
 BOOL ConfigGetOverStepCtrl(void);
-int  ConfigGetWheelScrollMs(void);
+int  ConfigGetWheelScrollMul(void);
+int  ConfigGetAutoScrollFastMs(void);
 int  ConfigGetAutoScrollInterval(void);
 BOOL IsRunElevated(void);
 
@@ -164,35 +165,34 @@ int main(void) {
     EXPECT(ConfigGetMaxArrowSteps() == 32 && !ConfigGetOverStepCtrl(),
            "CFG: 非 General 段不生效");
 
-    /* 滚轮最快速度 WheelScrollMs（毫秒/格，与 AutoScrollInterval 同单位）：
-       Caps+滚轮 就按它连续滚；Caps+Alt/D+滚轮 的提速上限也是它。
-       0 = 关闭纵向那两档（滚轮退回系统原生行为）。
-       样本用与默认值不同的值（默认值当样本会让"自定义生效"恒真）。 */
-    WriteIni("[General]\r\nWheelScrollMs = 250\r\n");
+    /* 按住 C 时滚轮的放大倍数 WheelScrollMul（只管 Caps+滚轮；与自动滚动无关）。
+       样本一律用与默认值不同的值（默认值当样本会让"自定义生效"恒真）。 */
+    WriteIni("[General]\r\nWheelScrollMul = 5\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMs() == 250, "CFG: WheelScrollMs=250 生效");
-    WriteIni("[General]\r\nWheelScrollMs = 0\r\n");
+    EXPECT(ConfigGetWheelScrollMul() == 5, "CFG: WheelScrollMul=5 生效");
+    WriteIni("[General]\r\nWheelScrollMul = 0\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMs() == 0, "CFG: WheelScrollMs=0（关闭纵向滚轮增强）");
-    WriteIni("[General]\r\nWheelScrollMs = 999999\r\n");
+    EXPECT(ConfigGetWheelScrollMul() == 0, "CFG: WheelScrollMul=0（不放大）");
+    WriteIni("[General]\r\nWheelScrollMul = 1\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMs() == 60000, "CFG: WheelScrollMs 超过上限钳到 60000");
-    WriteIni("[General]\r\nWheelScrollMs = abc\r\n");
+    EXPECT(ConfigGetWheelScrollMul() == 1, "CFG: WheelScrollMul=1（不放大）");
+    WriteIni("[General]\r\nWheelScrollMul = 9999\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMs() == 100, "CFG: WheelScrollMs 非法值回落默认 100");
-    WriteIni("[Other]\r\nWheelScrollMs = 9\r\n");
+    EXPECT(ConfigGetWheelScrollMul() == 16, "CFG: WheelScrollMul 超过上限钳到 16");
+    WriteIni("[General]\r\nWheelScrollMul = abc\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMs() == 100, "CFG: 非 General 段的 WheelScrollMs 不生效");
+    EXPECT(ConfigGetWheelScrollMul() == 2, "CFG: WheelScrollMul 非法值回落默认 2");
+    WriteIni("[Other]\r\nWheelScrollMul = 9\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetWheelScrollMul() == 2, "CFG: 非 General 段的 WheelScrollMul 不生效");
     WriteIni("[General]\r\n\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    /* 缺省 100 = 10 格/秒 = 30 行/秒（"快速下翻"）：跟手档就按这个节奏滚。
-       历史值 1000（1 格/秒）比人正常滚轮还慢，"按住 Caps 增强"反而更慢。 */
-    EXPECT(ConfigGetWheelScrollMs() == 100, "CFG: WheelScrollMs 缺省为 100（跟手档速度）");
-    /* 旧键名 WheelScrollMul 必须被当作"不认识"（语义不同，不能硬换算）：
-       它既不影响新键，也不该被解析成任何值 —— 回落到新键的缺省。 */
-    WriteIni("[General]\r\nWheelScrollMul = 16\r\n");
+    EXPECT(ConfigGetWheelScrollMul() == 2, "CFG: WheelScrollMul 缺省为 2");
+    /* 过渡期的键名 WheelScrollMs（毫秒/格）已废弃：两种量不可换算，所以既不解析
+       也不据它推算任何值 —— 写进去必须完全无副作用。 */
+    WriteIni("[General]\r\nWheelScrollMs = 50\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMs() == 100, "CFG: 旧键 WheelScrollMul 被忽略（不参与解析）");
+    EXPECT(ConfigGetWheelScrollMul() == 2, "CFG: 废弃键 WheelScrollMs 被忽略（不参与解析）");
 
     /* 自动滚动基础节奏 AutoScrollInterval（ms），钳制 20..1000 */
     WriteIni("[General]\r\nAutoScrollInterval = 250\r\n");
@@ -218,6 +218,37 @@ int main(void) {
        不是手感试出来的 —— 改它之前先看 config.c 里那张换算表。 */
     EXPECT(ConfigGetAutoScrollInterval() == 24000,
            "CFG: AutoScrollInterval 缺省为 24000（≈338 字/分钟，阅读舒适区）");
+
+    /* 持续滚动的最快速度 AutoScrollFastMs（毫秒/格，越小越快）。它与初始速度
+       **各自独立**：一个管起步、一个管顶档，互不牵制。 */
+    WriteIni("[General]\r\nAutoScrollFastMs = 250\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetAutoScrollFastMs() == 250, "CFG: AutoScrollFastMs=250 生效");
+    WriteIni("[General]\r\nAutoScrollFastMs = 1\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetAutoScrollFastMs() == 20, "CFG: AutoScrollFastMs 下限钳到 20");
+    WriteIni("[General]\r\nAutoScrollFastMs = 999999\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetAutoScrollFastMs() == 60000, "CFG: AutoScrollFastMs 上限钳到 60000");
+    WriteIni("[General]\r\nAutoScrollFastMs = abc\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetAutoScrollFastMs() == 1000, "CFG: AutoScrollFastMs 非法值回落默认 1000");
+    WriteIni("[Other]\r\nAutoScrollFastMs = 99\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetAutoScrollFastMs() == 1000, "CFG: 非 General 段的 AutoScrollFastMs 不生效");
+    WriteIni("[General]\r\n\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetAutoScrollFastMs() == 1000,
+           "CFG: AutoScrollFastMs 缺省为 1000（≈180 行/分钟）");
+    /* 两项互不影响：改一个不该动另一个（这正是"单位/数值各自独立"的要求） */
+    WriteIni("[General]\r\nAutoScrollInterval = 8000\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetAutoScrollFastMs() == 1000 && ConfigGetAutoScrollInterval() == 8000,
+           "CFG: 改初始速度不影响最快速度（两项独立）");
+    WriteIni("[General]\r\nAutoScrollFastMs = 300\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetAutoScrollFastMs() == 300 && ConfigGetAutoScrollInterval() == 24000,
+           "CFG: 改最快速度不影响初始速度（两项独立）");
 
     /* 平滑注入开关 AutoScrollSmooth（默认 1）。样本用 0 —— 与默认值不同，
        否则"自定义值生效"这条会恒真（默认值当样本的老坑）。 */
@@ -284,20 +315,22 @@ int main(void) {
         EXPECT(ConfigGetLogMaxKB() == 2048 && ConfigGetMaxArrowSteps() == 32,
                "UPG: 缺失键补齐默认值");
         EXPECT(ConfigGetAutoScrollInterval() == 24000, "UPG: 补齐 AutoScrollInterval 默认值");
-        EXPECT(ConfigGetWheelScrollMs() == 100, "UPG: 补齐 WheelScrollMs 默认值");
+        EXPECT(ConfigGetWheelScrollMul() == 2, "UPG: 补齐 WheelScrollMul 默认值");
+        EXPECT(ConfigGetAutoScrollFastMs() == 1000, "UPG: 补齐 AutoScrollFastMs 默认值");
         KeyMapInit();
         EXPECT(ModeKeyCount(MODE_ENHANCE) == 2 && ModeKeyCount(MODE_SHIFT) == 1,
                "UPG: 激活键是编译期常量（Alt+D / F），与配置文件无关");
         FILE* fc = NULL;
         int hasLog = 0, hasSteps = 0, hasMode = 0, hasWheel = 0;
-        int hasInterval = 0, hasSmooth = 0, hasHMul = 0;
+        int hasInterval = 0, hasSmooth = 0, hasHMul = 0, hasFast = 0;
         if (fopen_s(&fc, "bin/cfgtest.ini", "r") == 0 && fc) {
             char line[512];
             while (fgets(line, sizeof(line), fc)) {
                 if (strstr(line, "LogMaxKB = 2048")) hasLog = 1;
                 if (strstr(line, "MaxArrowSteps = 32")) hasSteps = 1;
                 if (strstr(line, "OverStepMode = 0")) hasMode = 1;
-                if (strstr(line, "WheelScrollMs = 100")) hasWheel = 1;
+                if (strstr(line, "WheelScrollMul = 2")) hasWheel = 1;
+                if (strstr(line, "AutoScrollFastMs = 1000")) hasFast = 1;
                 if (strstr(line, "AutoScrollInterval = 24000")) hasInterval = 1;
                 if (strstr(line, "AutoScrollSmooth = 1")) hasSmooth = 1;
                 if (strstr(line, "WheelHScrollMul = 1")) hasHMul = 1;
@@ -305,7 +338,7 @@ int main(void) {
             fclose(fc);
         }
         EXPECT(hasLog && hasSteps && hasMode && hasWheel && hasInterval
-               && hasSmooth && hasHMul,
+               && hasSmooth && hasHMul && hasFast,
                "UPG: 补齐块带注释写回文件（含新增项）");
     }
     /* 升级的容量算式必须正交覆盖四组边界：
@@ -389,9 +422,9 @@ int main(void) {
                认为它是老配置而改写文件。曾经就是这样漏掉的 —— 加配置项时
                记得同步这里，和 kUpgrades 保持一致。 */
             fputs("[General]\nRunAsAdmin = 1\nLogMaxKB = 7\nMaxArrowSteps = 5\n"
-                  "OverStepMode = 1\nWheelScrollMs = 250\n"
-                  "AutoScrollInterval = 250\nAutoScrollSmooth = 0\n"
-                  "WheelHScrollMul = 4\n", fo);
+                  "OverStepMode = 1\nWheelScrollMul = 5\n"
+                  "AutoScrollInterval = 250\nAutoScrollFastMs = 300\n"
+                  "AutoScrollSmooth = 0\nWheelHScrollMul = 4\n", fo);
             fclose(fo);
         }
         char before[512];
@@ -413,7 +446,9 @@ int main(void) {
         ConfigLoadFrom(L"bin/cfgtest.ini");
         EXPECT(ConfigGetLogMaxKB() == 7 && ConfigGetMaxArrowSteps() == 5 && ConfigGetOverStepCtrl(),
                "UPG: 用户自定义值不被覆盖");
-        EXPECT(ConfigGetWheelScrollMs() == 250, "UPG: WheelScrollMs 自定义值不被覆盖");
+        EXPECT(ConfigGetWheelScrollMul() == 5, "UPG: WheelScrollMul 自定义值不被覆盖");
+        EXPECT(ConfigGetAutoScrollFastMs() == 300,
+               "UPG: AutoScrollFastMs 自定义值不被覆盖（默认 1000、样本 300）");
         EXPECT(ConfigGetAutoScrollInterval() == 250,
                "UPG: AutoScrollInterval 自定义值不被覆盖");
         EXPECT(!ConfigGetAutoScrollSmooth(),
@@ -446,7 +481,8 @@ int main(void) {
     EXPECT(TemplateHas("LogMaxKB = 2048"),   "CFG: 模板含 LogMaxKB 默认值");
     EXPECT(TemplateHas("MaxArrowSteps = 32"),"CFG: 模板含 MaxArrowSteps 默认值");
     EXPECT(TemplateHas("OverStepMode = 0"),  "CFG: 模板含 OverStepMode 默认值");
-    EXPECT(TemplateHas("WheelScrollMs = 100"), "CFG: 模板含 WheelScrollMs 默认值");
+    EXPECT(TemplateHas("WheelScrollMul = 2"), "CFG: 模板含 WheelScrollMul 默认值");
+    EXPECT(TemplateHas("AutoScrollFastMs = 1000"), "CFG: 模板含 AutoScrollFastMs 默认值");
     EXPECT(TemplateHas("AutoScrollInterval = 24000"), "CFG: 模板含 AutoScrollInterval 默认值");
     EXPECT(TemplateHas("AutoScrollSmooth = 1"),    "CFG: 模板含 AutoScrollSmooth 默认值");
     EXPECT(TemplateHas("WheelHScrollMul = 1"),     "CFG: 模板含 WheelHScrollMul 默认值");

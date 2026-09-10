@@ -3,7 +3,7 @@
    用另一个捕获钩子统计软件真实注入的方向键/Shift。
    覆盖：模式修饰（增强=Alt/D、位移=F）在"按键乱序到达"下仍正确、
    长按重复/松手补齐、原生词跳按键序列，
-   以及"Caps+滚轮 = 跟手快滚"、"Caps+Alt/D+滚轮 = 增强档持续滚动"
+   以及"Caps+滚轮 = 逐格放大（倍数）"、"Caps+Alt/D+滚轮 = 持续滚动"
    （都用注入计数钩子观测），"Caps+Shift+滚轮 = 横向滚动"
    （真实 Shift 决定轴向，且钩子吞掉物理格）。
    注意：引擎只问"某个模式是否生效"，从不判断按的是哪个键 ——
@@ -96,18 +96,27 @@ static void KeyAlt(int vk, BOOL down) {
         down ? WM_SYSKEYDOWN : WM_SYSKEYUP, (LPARAM)&ks);
 }
 
-/* ---- 取走钩子投递的"连续滚动"请求 ----
+/* ---- 取走钩子投递的滚轮请求 ----
    这里**不**去数"目标窗口收到了几条 WM_MOUSEWHEEL"：滚轮消息的落点取决于
    焦点窗口 / 光标下方的窗口（还受系统"悬停滚动非活动窗口"设置影响），让测试
    依赖系统把消息派发到哪个窗口是不稳的 —— 实测 10 次里有 1 次因为光标被挪开
    而完全收不到。
    改成验证**钩子的决策**：它该不该投递请求、投递的参数对不对，以及**有没有
    吞掉物理那一格**（返回 1）。这部分完全在本进程内可观测，稳定。 */
-static BOOL TakeWheelEnh(int* delta, int* manual) {
+static BOOL TakeWheelAccel(int* delta, int* mul) {
+    MSG m;
+    if (PeekMessageW(&m, g_mainWnd, WM_WHEEL_ACCEL, WM_WHEEL_ACCEL, PM_REMOVE)) {
+        if (delta) *delta = (int)m.wParam;
+        if (mul)   *mul   = (int)m.lParam;
+        return TRUE;
+    }
+    return FALSE;
+}
+/* 取走钩子投递的"持续滚动"请求。 */
+static BOOL TakeWheelEnh(int* delta) {
     MSG m;
     if (PeekMessageW(&m, g_mainWnd, WM_WHEEL_ENH, WM_WHEEL_ENH, PM_REMOVE)) {
-        if (delta)  *delta  = (int)m.wParam;
-        if (manual) *manual = (int)m.lParam;
+        if (delta) *delta = (int)m.wParam;
         return TRUE;
     }
     return FALSE;
@@ -406,54 +415,53 @@ int main(void) {
           "M: 顺序正确 Ctrl↓ -> ←↓ -> ←↑ -> Ctrl↑");
     CHECK(CountVk(VK_LCONTROL) == 1, "M: Ctrl 只按一次");
 
-    /* ---- 场景N：按住 C 时鼠标滚轮的决策（两种档位 + 吞格差异） ----
-       Caps + 滚轮 = **跟手档**：按 WheelScrollMs 的节奏跟着滚轮走，滚轮停即停；
-       Caps + 增强修饰 + 滚轮 = **增强档**：滚一下就自己一直滚。
-       两者对"物理那一格"的处理**不同**（这是本轮修正的关键）：
-         · 跟手档 = "增强"，物理格**照常放行**（只会更快，不会更慢）；
-         · 增强档 = "替换"，物理格**吞掉**（否则我们滚一段、系统再滚一格）。
-       WheelScrollMs = 0 时两种都不接管，完全退回系统原生滚动。
+    /* ---- 场景N：按住 C 时鼠标滚轮的决策（三路分流 + 吞格只发生在横向） ----
+       Caps + 滚轮            = **逐格放大**（WheelScrollMul 倍）-> WM_WHEEL_ACCEL
+       Caps + Alt/D + 滚轮     = **持续滚动**                   -> WM_WHEEL_ENH
+       Caps + Shift + 滚轮     = **横向滚动**（吞物理格）        -> WM_WHEEL_HACCEL
+       纵向两路都**不吞**物理格（它们是"加强"不是"替换"——尤其持续滚动档，
+       若吞掉那一格，缺省最慢档 24000ms/格 下"滚一下二十多秒没反应"）。
        注：不把生产的 LowLevelMouseProc 真正挂进钩子链 —— 万一哪天
        LLMHF_INJECTED 守卫被删掉，真挂链上会让注入事件自我放大成风暴。
        直接调用它喂"硬件事件"/"注入事件"两条路径，都能确定性地覆盖到。 */
     Reset();
-    int d = 0, man = 0;
+    int d = 0, mul = 0;
 
     Key(CLI_CAPS, FALSE); Pump(2);       /* 先确保未按 C 的基线 */
-    CHECK(Wheel(120, 0) != 1 && !TakeWheelEnh(NULL, NULL),
+    CHECK(Wheel(120, 0) != 1 && !TakeWheelAccel(NULL, NULL),
           "N: 未按 C -> 不吞、不投递");
 
     Key(CLI_CAPS, TRUE); Pump(2);
-    CHECK(Wheel(120, 0) != 1, "N: 只按 C（跟手档）-> 物理那一格照常放行");
-    CHECK(TakeWheelEnh(&d, &man) && d == 120 && man == 1,
-          "N: 只按 C -> 跟手档（lParam=1）");
-    CHECK(!TakeWheelEnh(NULL, NULL), "N: 一次滚轮只投递一次请求");
+    CHECK(Wheel(120, 0) != 1, "N: 只按 C（逐格放大）-> 物理那一格照常放行");
+    CHECK(TakeWheelAccel(&d, &mul) && d == 120 && mul == 2,
+          "N: 只按 C -> 投递放大请求（倍数 = WheelScrollMul 缺省 2）");
+    CHECK(!TakeWheelAccel(NULL, NULL), "N: 一次滚轮只投递一次请求");
 
     Wheel(-120, 0);                      /* 方向要带对 */
-    CHECK(TakeWheelEnh(&d, &man) && d == -120 && man == 1,
+    CHECK(TakeWheelAccel(&d, &mul) && d == -120 && mul == 2,
           "N: 按住 C 下滚 -> 投递 delta=-120（方向原样带过去）");
 
-    /* 加上增强修饰键 -> 增强档（滚一下就自己一直滚） */
+    /* 加上增强修饰键 -> 持续滚动（另一条消息） */
     Key('D', TRUE); Pump(2);
-    CHECK(Wheel(120, 0) == 1, "N: C+D+滚轮（增强档）-> 吞掉物理那一格");
-    CHECK(TakeWheelEnh(&d, &man) && d == 120 && man == 0,
-          "N: C+D+滚轮 -> 增强档（lParam=0）");
+    CHECK(Wheel(120, 0) != 1, "N: C+D+滚轮（持续滚动）-> 物理那一格也放行");
+    CHECK(TakeWheelEnh(&d) && d == 120, "N: C+D+滚轮 -> 投递持续滚动请求");
+    CHECK(!TakeWheelAccel(NULL, NULL), "N: 持续滚动时不走放大通道（互斥）");
     Key('D', FALSE); Pump(2);
 
     Wheel(120, LLMHF_INJECTED);          /* 我们注入出去的滚轮回到钩子 */
-    CHECK(!TakeWheelEnh(NULL, NULL),
+    CHECK(!TakeWheelAccel(NULL, NULL) && !TakeWheelEnh(NULL),
           "N: 注入的滚轮不再投递（防无限放大）");
 
     g_state.paused = TRUE;               /* 暂停映射：也不接管 */
-    CHECK(Wheel(120, 0) != 1 && !TakeWheelEnh(NULL, NULL), "N: 暂停时不吞也不投递");
+    CHECK(Wheel(120, 0) != 1 && !TakeWheelAccel(NULL, NULL), "N: 暂停时不吞也不投递");
     g_state.paused = FALSE;
 
-    /* WheelScrollMs = 0 -> 纵向连续滚动关闭：放行，退回系统原生滚动 */
-    WriteChordIni("[General]\r\nWheelScrollMs = 0\r\n");
+    /* WheelScrollMul < 2 -> 放大关闭：不投递放大请求（物理格本来就没吞） */
+    WriteChordIni("[General]\r\nWheelScrollMul = 1\r\n");
     ConfigLoadFrom(L"bin/chordtest.ini");
-    CHECK(Wheel(120, 0) != 1 && !TakeWheelEnh(NULL, NULL),
-          "N: WheelScrollMs=0 -> 不接管（原生滚动）");
-    ConfigLoadFrom(L"bin/__absent__.ini");   /* 回缺省 */
+    CHECK(Wheel(120, 0) != 1 && !TakeWheelAccel(NULL, NULL),
+          "N: WheelScrollMul=1 -> 不放大（完全按系统原本行为）");
+    ConfigLoadFrom(L"bin/__absent__.ini");   /* 回缺省（2） */
 
     Key(CLI_CAPS, FALSE); Pump(2);
 
@@ -504,39 +512,62 @@ int main(void) {
         Pump(30); Drain();
     }
 
-    /* ---- 场景Q：横向注入跑到专用线程上（不在主线程 Sleep） ----
+    /* ---- 场景Q：滚轮注入跑到专用线程上（不在主线程 Sleep） ----
        注入里带 Sleep（逐格 2ms），主线程一旦不在"等消息"状态，系统对低级钩子的
        事件是**直接跳过**（不是延后补发）——松开 Caps 的 keyup 被漏掉就卡住
        g_cMod，表现是"松开 C 后还在滚 + 之后按 Tab 冒出大写锁定"。
-       这里验证经专用线程发出去之后，格数与方向都正确。
-       注意横向的 n 是"注入几格"（不像旧的纵向加速是"补 n-1 格"）：
-       物理那一格已被钩子吞掉，所以全部由我们发 —— 倍数 1 = 正好一格。
+       这里验证经专用线程发出去之后，格数与方向都正确。两轴语义不同：
+         · 纵向放大：只补 (mul-1) 格（物理那格由系统照常送达）；
+         · 横向滚动：注入**全部** n 格（物理那格已被钩子吞掉）。
+       倍数换算单独断言 SendWheelExtraCount（真注入条数不好稳定观测）。
        左右各来一次（净滚动量为 0），避免测试真的把光标下的窗口滚走。 */
     Reset();
     Pump(150); Sink();                   /* 先把残留的请求冲干净 */
 
-    ResetWheelRec();
-    ActWheelPostH(120, 1);               /* 倍数 1 -> 注入 1 格 */
-    Pump(100); Drain();
-    CHECK(g_whInj == 1 && g_whSum != 0,
-          "Q: 横向倍数 1 -> 注入 1 格（由工作线程注入）");
+    CHECK(SendWheelExtraCount(0) == 0 && SendWheelExtraCount(1) == 0,
+          "Q: 倍数 0/1 -> 不补格（等同关闭）");
+    CHECK(SendWheelExtraCount(2) == 1 && SendWheelExtraCount(3) == 2,
+          "Q: 倍数 -> 补 N-1 格");
+    CHECK(SendWheelExtraCount(999) == WHEEL_EXTRA_MAX,
+          "Q: 倍数超上限 -> 补格数被钳住");
 
     ResetWheelRec();
-    ActWheelPostH(120, 3);               /* 倍数 3 -> 注入 3 格 */
+    ActWheelPost(120, 2);                /* 纵向倍数 2 -> 补 1 格 */
+    Pump(100); Drain();
+    CHECK(g_wheelInj == 1 && g_wheelSum != 0, "Q: 纵向倍数 2 -> 补 1 格");
+    CHECK(g_whInj == 0, "Q: 纵向不会误发到横轴");
+
+    ResetWheelRec();
+    ActWheelPost(-120, 3);               /* 方向原样带过去 */
+    Pump(100); Drain();
+    CHECK(g_wheelInj == 2 && g_wheelSum < 0, "Q: 倍数 3 -> 补 2 格、方向为负");
+
+    ResetWheelRec();
+    ActWheelPost(120, 1);                /* 倍数 1 = 不放大 -> 一格都不补 */
+    Pump(100); Drain();
+    CHECK(g_wheelInj == 0, "Q: 倍数 1 -> 一格都不补（物理格交给系统）");
+
+    ResetWheelRec();
+    ActWheelPostH(120, 1);               /* 横向倍数 1 -> 注入 1 格 */
+    Pump(100); Drain();
+    CHECK(g_whInj == 1 && g_whSum != 0, "Q: 横向倍数 1 -> 注入 1 格");
+
+    ResetWheelRec();
+    ActWheelPostH(120, 3);               /* 横向倍数 3 -> 注入 3 格 */
     Pump(100); Drain();
     CHECK(g_whInj == 3, "Q: 横向倍数 3 -> 注入 3 格");
+    CHECK(g_wheelInj == 0, "Q: 横向不会误发到纵轴");
 
     ResetWheelRec();
     ActWheelPostH(-120, 2);              /* 方向原样带过去 */
     Pump(100); Drain();
-    CHECK(g_whInj == 2, "Q: 反向滚同样注入 2 格");
+    CHECK(g_whInj == 2, "Q: 横向反向同样注入 2 格");
 
     ResetWheelRec();
-    ActWheelPostH(120, 0);               /* 关闭 / 无效参数 */
+    ActWheelPostH(120, 0);               /* 无效参数 */
     ActWheelPostH(0, 3);
     Pump(100); Drain();
     CHECK(g_whInj == 0, "Q: 倍数 0 或 delta=0 -> 一格都不注入");
-    CHECK(g_wheelInj == 0, "Q: 横向不会误发到纵轴");
 
     /* ---- 场景O：超限"改道"的落点校验契约 ----
        背景（QQ 实测）：MaxArrowSteps 超限后 SendArrows 改发原生 Ctrl+方向，
@@ -584,18 +615,20 @@ int main(void) {
        （SendArrows 的行为受 MaxArrowSteps/OverStepMode 影响） */
     ConfigLoadFrom(L"bin/__absent__.ini");         /* 文件不存在 -> 全部回缺省 */
 
-    /* ---- 场景R：Caps+增强修饰+滚轮 = 连续滚动（增强档） ----
+    /* ---- 场景R：Caps+增强修饰+滚轮 = 持续滚动 ----
        "滚一下就一直滚、继续同向滚提速、反向滚/松开修饰/松开 C 立即停"，
-       并且**最快不超过手动滚轮的速度**（WheelScrollMs）。
+       速度两端 = AutoScrollInterval（起步）/ AutoScrollFastMs（上限），
+       **各自独立配置**（不再跟倍数项 WheelScrollMul 共用任何值）。
        状态机（active/dir/gear）由主线程在锁内维护，可确定性断言；
        "真的在注入"由滚轮计数钩子观测（方向要与 dir 一致）。
        计数钩子只数**我们注入的**滚轮（LLMHF_INJECTED），与场景Q/T 共用，
        所以每段观测前先 ResetWheelRec。 */
     Reset();
     int base = ConfigGetAutoScrollInterval();     /* 最慢档 = 24000 */
-    int fast = ConfigGetWheelScrollMs();          /* 最快档 = 1000（手动速度） */
-    CHECK(ActAutoScrollFastMs() == fast && fast > 0,
-          "R: 最快档 = WheelScrollMs（手动滚轮的速度）");
+    int fast = ConfigGetAutoScrollFastMs();        /* 最快档 = 1000（独立配置项） */
+    CHECK(fast == 1000, "R: 最快档 = AutoScrollFastMs 缺省 1000ms/格");
+    CHECK(ConfigGetWheelScrollMul() == 2,
+          "R: 倍数项与水平无关（WheelScrollMul 仍是 2，两边各自独立）");
     CHECK(ActAutoScrollTick() == 0, "R: 未启动时速度为 0");
     CHECK(!ActAutoScrollActive(), "R: 初始未在连续滚动");
 
@@ -608,10 +641,10 @@ int main(void) {
     CHECK(base == 24000, "R: 初始速度缺省 24000ms（≈338 字/分钟，按阅读速度定）");
     CHECK(ConfigGetAutoScrollSmooth(), "R: 平滑注入缺省开启");
 
-    ActAutoScrollWheel(120, FALSE);               /* 第一滚：增强档、最慢档、向上 */
-    CHECK(ActAutoScrollActive() && !ActAutoScrollFollow() &&
+    ActAutoScrollWheel(120);               /* 第一滚：增强档、最慢档、向上 */
+    CHECK(ActAutoScrollActive() &&
           ActAutoScrollDir() == 1 && ActAutoScrollGear() == 1,
-          "R: 增强档 -> 从最慢档启动（档 1 / 向上）");
+          "R: 从最慢档启动（档 1 / 向上）");
     CHECK(ActAutoScrollTick() == base, "R: 第 1 档速度 = AutoScrollInterval");
 
     /* 平滑注入：把一格拆成小数刻度、发得更密，但**速度不变**。
@@ -632,20 +665,20 @@ int main(void) {
 
     /* 逐档提速：中间档不止两档，速度单调变快（每格时长单调变短） */
     int t1 = ActAutoScrollTick();
-    ActAutoScrollWheel(120, FALSE);
+    ActAutoScrollWheel(120);
     int t2 = ActAutoScrollTick();
     CHECK(ActAutoScrollGear() == 2 && t2 < t1, "R: 同向再滚 -> 进第 2 档、速度变快");
-    ActAutoScrollWheel(120, FALSE);
+    ActAutoScrollWheel(120);
     int t3 = ActAutoScrollTick();
     CHECK(ActAutoScrollGear() == 3 && t3 < t2, "R: 再滚 -> 第 3 档（中间档不止两档）");
 
     /* 到顶：速度恰好等于 WheelScrollMs，**不会超过**（用户要的上限） */
-    for (int i = 0; i < 10; i++) ActAutoScrollWheel(120, FALSE);
+    for (int i = 0; i < 10; i++) ActAutoScrollWheel(120);
     int tTop = ActAutoScrollTick(), gTop = ActAutoScrollGear();
-    ActAutoScrollWheel(120, FALSE);
+    ActAutoScrollWheel(120);
     CHECK(ActAutoScrollGear() == gTop && ActAutoScrollTick() == tTop,
           "R: 到顶档后不再提速（档位饱和）");
-    CHECK(tTop == fast, "R: 顶档速度 == WheelScrollMs（不超过跟手档速度）");
+    CHECK(tTop == fast, "R: 顶档速度 == AutoScrollFastMs");
     CHECK(tTop <= base, "R: 最快档不会比初始档还慢（阶梯方向正确）");
     CHECK(ActAutoScrollDelta() > 0 && ActAutoScrollDelta() < 120,
           "R: 顶档仍是小数刻度（平滑提速靠加 delta，不是加格数）");
@@ -669,18 +702,18 @@ int main(void) {
     CHECK(ActAutoScrollBeat() < ActAutoScrollTick(),
           "R: 平滑节拍仍短于每格时长（细水长流而非一次一大格）");
 
-    ActAutoScrollWheel(-120, FALSE);              /* 反向：立即终止 + 清零速度 */
+    ActAutoScrollWheel(-120);              /* 反向：立即终止 + 清零速度 */
     CHECK(!ActAutoScrollActive() && ActAutoScrollDir() == 0 && ActAutoScrollGear() == 0,
           "R: 反向滚动 -> 立即终止并清零档位");
 
     /* 反向打断后再滚：必须从**最慢档**重来，不残留打断前的速度 */
-    ActAutoScrollWheel(120, FALSE);
+    ActAutoScrollWheel(120);
     CHECK(ActAutoScrollActive() && ActAutoScrollGear() == 1 && ActAutoScrollTick() == base,
-          "R: 反向打断后重置速度 -> 增强档再滚从第 1 档（最慢）重来");
-    ActAutoScrollWheel(-120, FALSE);              /* 收起，免得影响后面的用例 */
+          "R: 反向打断后重置速度 -> 再滚从第 1 档（最慢）重来");
+    ActAutoScrollWheel(-120);              /* 收起，免得影响后面的用例 */
 
     ResetWheelRec();
-    ActAutoScrollWheel(-120, FALSE);              /* 下滚启动（方向 -1） */
+    ActAutoScrollWheel(-120);              /* 下滚启动（方向 -1） */
     CHECK(ActAutoScrollActive() && ActAutoScrollDir() == -1, "R: 下滚启动（方向 -1）");
     CHECK(ActAutoScrollDelta() < 0, "R: 下滚时 delta 为负（带方向）");
     Pump(300);
@@ -693,18 +726,17 @@ int main(void) {
 
     /* 松开 C：WM_CAPS_UP -> ResetEngine -> 终止 */
     KeyAlt(VK_LMENU, TRUE); Pump(2);              /* 重新按住 Alt 才能再启动 */
-    ActAutoScrollWheel(120, FALSE);
+    ActAutoScrollWheel(120);
     CHECK(ActAutoScrollActive(), "R: 重新启动成功");
     END_SCENE();                                  /* 松开 C */
     CHECK(!ActAutoScrollActive(), "R: 松开 Caps -> 立即终止连续滚动");
 
-    /* WheelScrollMs = 0 关闭纵向那两档 */
-    WriteChordIni("[General]\r\nWheelScrollMs = 0\r\n");
+    /* 两端配成相等 -> 阶梯退化为恒定速度（而不是出错或反向提速） */
+    WriteChordIni("[General]\r\nAutoScrollInterval = 1000\r\n"
+                  "AutoScrollFastMs = 1000\r\n");
     ConfigLoadFrom(L"bin/chordtest.ini");
-    CHECK(ActAutoScrollFastMs() == 0, "R: WheelScrollMs=0 -> 纵向连续滚动未启用");
-    ActAutoScrollWheel(120, FALSE);
-    ActAutoScrollWheel(120, TRUE);
-    CHECK(!ActAutoScrollActive(), "R: 未启用时滚轮不启动");
+    ActAutoScrollWheel(120);
+    CHECK(ActAutoScrollTick() == 1000, "R: 两端配成相等 -> 速度恒定 1000ms/格");
 
     /* 端到端：钩子路由（增强档 / 手动档）与吞格 */
     ConfigLoadFrom(L"bin/__absent__.ini");        /* 回缺省（1000ms） */
@@ -713,17 +745,16 @@ int main(void) {
     KeyAlt(VK_LMENU, TRUE); Pump(2);
     Sink();                                       /* 冲掉可能残留的消息 */
     ResetWheelRec();
-    CHECK(Wheel(120, 0) == 1, "R: 增强档经钩子 -> 吞掉物理那一格");
+    CHECK(Wheel(120, 0) != 1, "R: 持续滚动档 -> 物理格放行（不吞）");
     Pump(300);                                    /* 泵消息：驱动状态机并注入 */
-    CHECK(ActAutoScrollActive() && !ActAutoScrollFollow() &&
-          ActAutoScrollDir() == 1 && g_wheelInj >= 1,
-          "R: 增强档经钩子路由 -> 启动连续滚动");
+    CHECK(ActAutoScrollActive() && ActAutoScrollDir() == 1 && g_wheelInj >= 1,
+          "R: 经钩子路由 -> 启动持续滚动");
     END_SCENE();
     ConfigLoadFrom(L"bin/__absent__.ini");
 
     /* ---- 场景T：Caps+Shift+滚轮 = 横向滚动 ----
-       "该功能无须实现 Alt 和 D，只要能正常横向滚动即可；速度可在配置文件调整，
-        默认保持 1"。注意这里用的是**真实 Shift**，与 keymap 的"位移模式 F"无关。
+       只需真实 Shift（与 keymap 的"位移模式 F"无关）；速度 WheelHScrollMul 默认 1。
+       轴向优先级高于纵向两路：Shift 排最前。
        方向照抄系统约定：滚轮**向上 = 向左**（浏览器 / 资源管理器 / 表格都是这个
        方向，Firefox 官方快捷键表就写着 Shift+上滚 = 向左）。 */
     Reset();
@@ -738,8 +769,9 @@ int main(void) {
     CHECK(consumed == 1, "T: Caps+Shift+滚轮 -> 钩子吞掉物理这一格（防横纵混滚）");
     CHECK(TakeWheelHAccel(&hd, &hm), "T: 投递横向滚动请求");
     CHECK(hd == 120 && hm == 1, "T: 请求带原始方向与倍数 1");
-    CHECK(!TakeWheelEnh(NULL, NULL), "T: 不走纵向连续滚动通道（轴向互斥）");
-    CHECK(!ActAutoScrollActive(), "T: 也不启动连续滚动（按的是 Shift）");
+    CHECK(!TakeWheelAccel(NULL, NULL), "T: 不走纵向放大通道（轴向互斥）");
+    CHECK(!TakeWheelEnh(NULL), "T: 也不启动持续滚动（按的是 Shift）");
+    CHECK(!ActAutoScrollActive(), "T: 确实没有启动持续滚动");
 
     /* 方向：滚轮向上(delta>0) = 向左(负) —— 与系统 Shift+滚轮一致 */
     ResetWheelRec();
@@ -770,16 +802,16 @@ int main(void) {
     Key(VK_LSHIFT, FALSE); Pump(2); Sink();
     Key(VK_LSHIFT, TRUE);  Pump(2); Sink();
     ResetWheelRec();
-    CHECK(Wheel(120, 0) != 1, "T: WheelHScrollMul=0 -> 改由纵向接管（跟手档放行物理格）");
+    CHECK(Wheel(120, 0) != 1, "T: WheelHScrollMul=0 -> 改由纵向接管（放大档，不吞物理格）");
     CHECK(!TakeWheelHAccel(NULL, NULL), "T: 关闭时不再投递横向请求");
-    CHECK(TakeWheelEnh(NULL, NULL), "T: 关闭横向后退回纵向连续滚动");
+    CHECK(TakeWheelAccel(NULL, NULL), "T: 关闭横向后退回纵向放大");
     ConfigLoadFrom(L"bin/__absent__.ini");
 
     /* 松开 Shift 就回到纵向；Caps+Shift 之外不受影响 */
     Key(VK_LSHIFT, FALSE); Pump(2); Sink();
-    CHECK(Wheel(120, 0) != 1, "T: 松开 Shift 后退回纵向（跟手档放行物理格）");
+    CHECK(Wheel(120, 0) != 1, "T: 松开 Shift 后退回纵向放大（不吞物理格）");
     int dS = 0, mS = 0;
-    CHECK(TakeWheelEnh(&dS, &mS) && mS == 1, "T: 松开 Shift -> 纵向跟手档（lParam=1）");
+    CHECK(TakeWheelAccel(&dS, &mS) && mS == 2, "T: 松开 Shift -> 纵向放大（缺省 2 倍）");
     CHECK(!TakeWheelHAccel(NULL, NULL), "T: 松开 Shift 后不再横向");
 
     /* 真 Shift 的按住状态必须被正确清掉（否则会粘住） */
@@ -789,82 +821,11 @@ int main(void) {
 
     Key(CLI_CAPS, TRUE); Pump(2);                 /* 用 Ctrl 也一样不该横向 */
     Key(VK_LCONTROL, TRUE); Pump(2); Sink();
-    CHECK(Wheel(120, 0) != 1 && TakeWheelEnh(NULL, NULL),
+    CHECK(Wheel(120, 0) != 1 && TakeWheelAccel(NULL, NULL),
           "T: Caps+Ctrl+滚轮 仍是纵向（只有 Shift 决定轴向）");
     CHECK(!TakeWheelHAccel(NULL, NULL), "T: Caps+Ctrl+滚轮 不横向");
     Key(VK_LCONTROL, FALSE); Pump(2);
     END_SCENE();
-
-    /* ---- 场景U：Caps+滚轮（不加修饰键）= 跟手档 ----
-       "C+滚轮，快速滚动，临时增强滚轮滚动速度，速度使用 WheelScrollMs 的速度；
-        松开 caps 立即停止增强；滚轮停就立即停止" —— 与增强档的本质区别就是
-       这一条：**它跟着滚轮走**，滚轮一停就收工，不会自己在后台一直转。
-       验证：恒速 = WheelScrollMs、方向随滚轮掉头、WM_MODE_UP 不影响它、
-       滚轮停（空闲超时）后自己收工、松开 C 立即停，以及"增强档顶速不会
-       超过它"。 */
-    Reset();
-    int uFast = ConfigGetWheelScrollMs();
-    int uBase = ConfigGetAutoScrollInterval();
-    CHECK(uFast > 0 && uFast < uBase, "U: 跟手档速度比增强档初始速度快");
-
-    Key(CLI_CAPS, TRUE); Pump(2);                 /* 只按 C，不按增强修饰键 */
-    ActAutoScrollWheel(120, TRUE);                /* 跟手档 */
-    CHECK(ActAutoScrollActive() && ActAutoScrollFollow(),
-          "U: 只按 C + 滚轮 -> 跟手档启动");
-    CHECK(ActAutoScrollGear() == AUTOSCROLL_SPEED_STEPS && ActAutoScrollTick() == uFast,
-          "U: 跟手档恒为最快档（= WheelScrollMs），不参与提速阶梯");
-    CHECK(ActAutoScrollTick() < uBase, "U: 跟手档比增强档起步更快");
-
-    /* 跟手档没有修饰键可松开：WM_MODE_UP 不该把它打断 */
-    ActAutoScrollStopEnh();
-    CHECK(ActAutoScrollActive(), "U: 跟手档不受 WM_MODE_UP 影响（它没按修饰键）");
-
-    /* 滚轮还在动 -> 一直按节奏滚（空闲时限是 150ms，50ms 远未到） */
-    ResetWheelRec();
-    Pump(50);
-    CHECK(g_wheelInj >= 1 && g_wheelSum > 0, "U: 跟手档立刻按 WheelScrollMs 的节奏注入");
-    CHECK(ActAutoScrollActive(), "U: 滚轮还在动 -> 不自己收工");
-
-    /* 滚轮停了：空闲超时 -> 自己收工（这正是"不再一直滚"的保证） */
-    Pump(AUTOSCROLL_FOLLOW_IDLE_MS + 300);
-    CHECK(!ActAutoScrollActive(), "U: 滚轮停 -> 空闲超时后自己收工（不残留持续滚动）");
-
-    /* 方向随滚轮掉头（跟手），不需要先终止 */
-    ActAutoScrollWheel(120, TRUE); Pump(20);
-    CHECK(ActAutoScrollDir() == 1, "U: 跟手档向上");
-    ActAutoScrollWheel(-120, TRUE); Pump(20);
-    CHECK(ActAutoScrollActive() && ActAutoScrollDir() == -1,
-          "U: 跟手档反向 -> 方向跟着掉头（仍在滚，而不是像增强档那样打断）");
-    Pump(AUTOSCROLL_FOLLOW_IDLE_MS + 300);        /* 收工 */
-
-    /* 增强档的顶速与跟手档完全相同（"上限不超过手动速度"） */
-    KeyAlt(VK_LMENU, TRUE); Pump(2);
-    ActAutoScrollWheel(120, FALSE);
-    for (int i = 0; i < AUTOSCROLL_SPEED_STEPS; i++) ActAutoScrollWheel(120, FALSE);
-    CHECK(ActAutoScrollTick() == uFast && !ActAutoScrollFollow(),
-          "U: 增强档顶速 == 跟手档速度（上限就是它，不会更快）");
-    KeyAlt(VK_LMENU, FALSE); Pump(2); Sink();
-    CHECK(!ActAutoScrollActive(), "U: 增强档松开修饰键 -> 终止");
-
-    /* 换档：滚动途中按下/松开增强修饰键要重新起步，不是接着加速 */
-    KeyAlt(VK_LMENU, TRUE); Pump(2);
-    ActAutoScrollWheel(120, FALSE);
-    for (int i = 0; i < AUTOSCROLL_SPEED_STEPS; i++) ActAutoScrollWheel(120, FALSE);
-    KeyAlt(VK_LMENU, FALSE); Pump(2); Sink();
-    ActAutoScrollWheel(120, TRUE);                /* 切成跟手档 -> 重新起步到最快 */
-    CHECK(ActAutoScrollActive() && ActAutoScrollFollow() &&
-          ActAutoScrollGear() == AUTOSCROLL_SPEED_STEPS,
-          "U: 滚动途中松开修饰键 -> 切跟手档、重新起步到最快档");
-    ActAutoScrollWheel(120, TRUE);                /* 同向再滚：跟手档恒速，不提速 */
-    CHECK(ActAutoScrollGear() == AUTOSCROLL_SPEED_STEPS,
-          "U: 跟手档恒速：同向再滚也不提速");
-    KeyAlt(VK_LMENU, TRUE); Pump(2);
-    ActAutoScrollWheel(120, FALSE);               /* 切成增强档 -> 回到第 1 档 */
-    CHECK(ActAutoScrollActive() && !ActAutoScrollFollow() && ActAutoScrollGear() == 1,
-          "U: 切回增强档 -> 从第 1 档重新起步（不残留速度）");
-
-    END_SCENE();                                  /* 松开 C -> 终止 */
-    CHECK(!ActAutoScrollActive(), "U: 跟手档松开 C -> 立即终止");
 
     /* ---- 场景S：EnhanceKeys / ShiftKeys 已**不再读配置** ----
        "配置项中，去掉 EnhanceKeys = Alt, D 与 ShiftKeys = F，没必要读取配置"

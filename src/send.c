@@ -212,6 +212,20 @@ static void SendWheelAxis(int delta, int n, BOOL horizontal) {
 
 void SendWheelNotches(int delta, int n)  { SendWheelAxis(delta, n, FALSE); }
 
+/* 纵向放大：倍数 -> 要补发的格数。单独拎出来是为了能被单测直接断言换算
+   （真注入的条数没法在本进程里稳定观测，见 test_chord 场景Q 的说明）。
+   注意只补 (mul-1) 格 —— 物理那一格由系统照常送达（跟手/放大是"加强"，
+   不是"替换"），所以"倍数 2"总共恰好是两格。 */
+int SendWheelExtraCount(int mul) {
+    if (mul <= 1) return 0;
+    int extra = mul - 1;
+    return extra > WHEEL_EXTRA_MAX ? WHEEL_EXTRA_MAX : extra;
+}
+
+void SendWheelAccel(int delta, int mul) {
+    SendWheelNotches(delta, SendWheelExtraCount(mul));
+}
+
 /* 横向滚动：n 个**固定** ±120 的刻度。这里不沿用物理格的原值而统一成
    WHEEL_STD_DELTA —— 横向是"每次滚轮换一列"的语义，放大倍数才有确定含义
    （倍数 1 = 正好一格），物理格的原始大小（高精度滚轮可能小于 120）不参与。

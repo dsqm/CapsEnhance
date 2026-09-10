@@ -191,21 +191,18 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 /* ================= 鼠标钩子：按住 C 时的滚轮 =================
-   三种语义，按 Shift > 增强修饰 > 无修饰 的优先级判定。注意**纵向两种的
-   处理方式不同**（这是本轮修正的关键）：
+   三种语义，按 Shift > 增强修饰 > 无修饰 的优先级判定：
 
      · Caps+Shift（真实 Shift）：**横向滚动** —— 换轴向，物理格**必须吞掉**
-       （放行就是"横一下、纵一下"的混滚）；
-     · Caps + 增强修饰（默认 Alt/D）：**增强档** —— 滚一下就自己一直滚
-       （从 AutoScrollInterval 起步、逐档提速到 WheelScrollMs）。
-       物理格**吞掉**：语义完全由我们接管，再放行一格就是"我们滚一段 +
-       系统滚一格"地打架；
-     · Caps（无修饰）：**跟手档** —— 按 WheelScrollMs 的节奏连续滚，
-       跟着滚轮走（滚轮停即停）。物理格**照常放行**：这是"增强"而不是
-       "替换"，所以它只会比系统更快、不会更慢；吞掉它反而要我们自己补发
-       那一格，白白多一次注入。
+       （放行就是"横一下、纵一下"的混滚，见下面 SendWheelHNotches 的说明）；
+     · Caps + 增强修饰（默认 Alt/D）：**持续滚动** —— 滚一下就自己一直滚；
+     · Caps（无修饰）：**倍数放大** —— 每格补发 (N-1) 格（N = WheelScrollMul）。
 
-   WheelScrollMs = 0 时纵向两种都关闭，物理格照常放行（完全退回系统原生）。
+   **纵向两种都不吞物理格**（照常放行）：它们都是"加强"而不是"替换" ——
+   放大档是"系统滚一格 + 我们补几格"；持续滚动档若把那一格吞掉，在最慢档
+   （缺省 24000ms/格）下用户滚一下会**二十多秒没有任何反馈**，明显是坏的。
+   放行之后系统先给一次即时反馈，我们的第 1 拍紧接着跟上，手感才对。
+
    为什么 Shift 排最前：它显式指定了"轴向"，比"滚多快"更具体。
 
    为什么用低级钩子而不是 Raw Input：**必须能认出"这个滚轮事件是我们自己
@@ -242,18 +239,17 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
                         return 1;
                     }
                 }
-                /* 纵向：Caps + 滚轮（可再加增强修饰键）。
-                   增强档（按了 Alt/D）吞掉物理格 —— 它接管到底；
-                   跟手档（只按 Caps）放行物理格，另起一条按 WheelScrollMs
-                   节奏的流派去"叠"在系统滚动之上（所以只会更快）。
-                   lParam = 1 表示跟手档，0 表示增强档。
-                   WheelScrollMs = 0（关闭）时完全不接管，退回系统原生。 */
-                if (ConfigGetWheelScrollMs() > 0) {
-                    BOOL follow = !ModeDown(MODE_ENHANCE);
-                    PostMessageW(g_mainWnd, WM_WHEEL_ENH,
-                                 (WPARAM)delta, (LPARAM)(follow ? 1 : 0));
-                    if (!follow) return 1;      /* 增强档：吞掉物理格 */
-                    /* 跟手档：不吞（落到函数末尾的 CallNextHookEx 放行） */
+                if (ModeDown(MODE_ENHANCE)) {
+                    /* 增强模式（默认 Caps+Alt/D）：滚轮语义是"启动/提速持续
+                       滚动"，由 act.c 的持续滚动通道接管。物理格**不吞** ——
+                       见上面说明（吞掉会让最慢档下"滚一下半天没反应"）。 */
+                    PostMessageW(g_mainWnd, WM_WHEEL_ENH, (WPARAM)delta, 0);
+                } else {
+                    /* 普通（只按住 C）：逐格放大 N 倍 —— 见 main.c 的
+                       WM_WHEEL_ACCEL。物理格不吞（它是"加强"）。 */
+                    int mul = ConfigGetWheelScrollMul();
+                    if (mul > 1)
+                        PostMessageW(g_mainWnd, WM_WHEEL_ACCEL, (WPARAM)delta, (LPARAM)mul);
                 }
             }
         }

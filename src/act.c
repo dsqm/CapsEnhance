@@ -97,11 +97,13 @@ static DWORD WINAPI ActThread(LPVOID p) {
     return 0;
 }
 
-/* ================= 滚轮注入通道（横向滚动用） =================
-   纵向那套（Caps+滚轮 / Caps+Alt+滚轮）已经不在这里了 —— 它现在是"连续滚动"，
-   走下面的连续滚动通道。本通道只剩**横向**：一次注入 n 个 ±120 的横轴刻度。
-   （保留成独立通道而不是塞进连续滚动通道，是因为语义完全不同：
-     横向是"一次滚轮换 n 列"的瞬时动作，不是"按某个间隔持续输出"。）
+/* ================= 滚轮注入通道（纵向放大 / 横向滚动） =================
+   两种"瞬时"滚轮动作共用这一条通道（`Caps+Alt/D+滚轮` 的持续滚动走下面
+   另一条通道，因为它是"按某个间隔持续输出"，语义不同）：
+     · 纵向放大（`Caps+滚轮`）：倍数 N -> 补发 (N-1) 格（物理那格系统照常送达）；
+     · 横向滚动（`Caps+Shift+滚轮`）：物理那格是纵向事件、已被钩子吞掉，
+       所以我们注入**全部** N 格（于是"倍数 1" = 一次标准横向滚动）。
+   两者只差 dwFlags 与 n 的算法，共用一条队列 + 线程。
 
    为什么不并入上面的动作队列：那条队列带 ActInFlight() 门控、且严格 FIFO，
    会被几百毫秒的词跳拖住。
@@ -117,8 +119,9 @@ static HANDLE  s_wEvWork = NULL;    /* auto-reset：有滚轮要补             
 static HANDLE  s_wThread = NULL;
 static volatile LONG s_wStop = 0;
 static BOOL    s_wInit = FALSE;
-static int     s_wDelta[ACT_WHEEL_QMAX];  /* 方向（符号有用，幅度由注入端归一） */
-static int     s_wN1[ACT_WHEEL_QMAX];     /* 注入几格 */
+static int     s_wDelta[ACT_WHEEL_QMAX];  /* 方向（符号有意义，幅度由注入端归一） */
+static int     s_wMul[ACT_WHEEL_QMAX];    /* 纵向：放大倍数；横向：注入格数 */
+static BOOL    s_wHorz[ACT_WHEEL_QMAX];   /* 本条是横向吗（Caps+Shift+滚轮） */
 static int     s_wHead = 0, s_wTail = 0, s_wN = 0;
 
 static DWORD WINAPI WheelThread(LPVOID p) {
@@ -127,28 +130,37 @@ static DWORD WINAPI WheelThread(LPVOID p) {
         if (InterlockedCompareExchange(&s_wStop, 0, 0)) break;
         WaitForSingleObject(s_wEvWork, 1000);   /* 1s 超时兜底，防事件被吞 */
         for (;;) {
-            int delta, n;
+            int delta, mul; BOOL horz;
             EnterCriticalSection(&s_wcs);
             if (s_wStop) { LeaveCriticalSection(&s_wcs); return 0; }
             if (s_wN == 0) { LeaveCriticalSection(&s_wcs); break; }
             delta = s_wDelta[s_wHead];
-            n     = s_wN1[s_wHead];
+            mul   = s_wMul[s_wHead];
+            horz  = s_wHorz[s_wHead];
             s_wHead = (s_wHead + 1) % ACT_WHEEL_QMAX;
             s_wN--;
             LeaveCriticalSection(&s_wcs);
-            SendWheelHNotches(delta, n);   /* 里面的 Sleep 只阻塞本线程 */
+            /* 里面的 Sleep 只阻塞本线程 */
+            if (horz) SendWheelHNotches(delta, mul);   /* 横向：注入 mul 格 */
+            else      SendWheelAccel(delta, mul);      /* 纵向：物理格已送达，补 mul-1 */
         }
     }
     return 0;
 }
 
-/* 投递一次横向滚动（Caps+Shift+滚轮）。**主线程调用，绝不阻塞**。
-   n = 要注入的格数（= WheelHScrollMul）。物理那一格是**纵向**事件、已被钩子
-   吞掉（不吞就会横纵混滚），所以我们负责全部 n 格 —— 于是"倍数 1"恰好等于
-   一次标准横向滚动。 */
-void ActWheelPostH(int delta, int n) {
-    if (delta == 0 || n <= 0) return;
-    if (!s_wInit) { SendWheelHNotches(delta, n); return; }  /* 线程起不来：同步兜底 */
+/* 投递一次滚轮请求。**主线程调用，绝不阻塞**（原来的 Sleep 就是缺陷根源）。
+   horz=FALSE：纵向放大，n = 倍数（只补 n-1 格，物理那格系统照常送达）；
+   horz=TRUE ：横向滚动，n = 注入格数（物理那格是纵向、已被钩子吞掉，
+               所以全部由我们注入）。 */
+static void WheelPost(int delta, int n, BOOL horz) {
+    if (delta == 0) return;
+    if (n <= 0) return;
+    if (!horz && SendWheelExtraCount(n) <= 0) return;   /* 倍数 <2：不放大 */
+    if (!s_wInit) {                        /* 线程起不来：同步兜底 */
+        if (horz) SendWheelHNotches(delta, n);
+        else      SendWheelAccel(delta, n);
+        return;
+    }
     EnterCriticalSection(&s_wcs);
     if (s_wStop) { LeaveCriticalSection(&s_wcs); return; }
     if (s_wN == ACT_WHEEL_QMAX) {          /* 满：丢最旧的一条 */
@@ -156,12 +168,16 @@ void ActWheelPostH(int delta, int n) {
         s_wN--;
     }
     s_wDelta[s_wTail] = delta;
-    s_wN1[s_wTail]    = n;
+    s_wMul[s_wTail]   = n;
+    s_wHorz[s_wTail]  = horz;
     s_wTail = (s_wTail + 1) % ACT_WHEEL_QMAX;
     s_wN++;
     LeaveCriticalSection(&s_wcs);
     SetEvent(s_wEvWork);
 }
+
+void ActWheelPost(int delta, int mul)  { WheelPost(delta, mul, FALSE); }
+void ActWheelPostH(int delta, int n)   { WheelPost(delta, n,   TRUE);  }
 
 /* 丢弃还没补发的滚轮请求（松开 C / 引擎复位时）。
    用户的预期是"松开 C 就是普通滚轮"，所以松手后不该再有加速尾流。 */
@@ -171,10 +187,11 @@ void ActWheelClear(void) {
     s_wHead = s_wTail = s_wN = 0;
     LeaveCriticalSection(&s_wcs);
 }
-/* 起/停滚轮通道。起不来不算致命：s_wInit 保持 FALSE，ActWheelPostH 退回同步注入
+/* 起/停滚轮通道。起不来不算致命：s_wInit 保持 FALSE，两个投递入口都退回同步注入
    （损失一点响应性，但功能不失效）。 */
 static void WheelLaneStart(void) {
     s_wStop = 0; s_wHead = s_wTail = s_wN = 0;
+    memset(s_wHorz, 0, sizeof(s_wHorz));
     InitializeCriticalSection(&s_wcs);
     s_wEvWork = CreateEventW(NULL, FALSE, FALSE, NULL);
     s_wThread = s_wEvWork ? CreateThread(NULL, 0, WheelThread, NULL, 0, NULL) : NULL;
@@ -202,16 +219,15 @@ static void WheelLaneStop(void) {
     s_wInit = FALSE;
 }
 
-/* ================= 连续滚动专用通道 =================
-   两种用法共用（接口说明见 cap.h），但**持续方式完全不同**：
-     · 跟手档（只有 Caps）：跟着滚轮走，滚轮停即停；
-     · 增强档（Caps + Alt/D）：滚一下就自己一直滚，与滚轮是否还在动无关。
+/* ================= 持续滚动专用通道 =================
+   只有 `Caps + 增强修饰键（默认 Alt/D） + 滚轮` 走这里（接口说明见 cap.h）：
+   滚一下就自己一直滚，与滚轮是否还在动无关。
    平滑注入（默认开）让注入点变密（25 次/秒），所以"绝不能跑在主线程上"
    这条约束更重要了 —— 每次注入只是一条 INPUT、没有 Sleep（SendWheelNotches
    只在 n>1 时才 Sleep，这里 n 恒为 1），但积少成多同样会占住主线程。
 
-   为什么再开一条独立通道，而不是塞进动作队列或横向滚轮队列：
-     · 增强档是一个**长时间运行**的循环（一直滚到用户松手），而动作队列的
+   为什么再开一条独立通道，而不是塞进动作队列或滚轮注入通道：
+     · 它是一个**长时间运行**的循环（一直滚到用户松手），而动作队列的
        语义是"一条一条执行完就走"；
      · 它不该受 ActInFlight() 门控（那门控是给和弦重复限速的）；
      · 每个节拍都要等待，和滚轮加速一样**绝不能跑在主线程上**（主线程不在
@@ -220,18 +236,13 @@ static void WheelLaneStop(void) {
    速度模型：速度和粒度分开 —— **速度**用"每格之间的间隔"表达，
    **粒度**（每拍挪多少）可选整格或小数刻度。
 
-   两种档位（共用同一套输出机制，区别只在"起始档"和"何时收工"）：
-     · 跟手档（只有 Caps）：恒速 = WheelScrollMs（最快档），跟着滚轮走 ——
-       滚轮还在滚就一直滚，`AUTOSCROLL_FOLLOW_IDLE_MS` 内没有新的滚轮就收工。
-       **不会**在滚轮停后自己一直转（那是"跟手"与"持续"的分界）。
-     · 增强档（Caps + 增强修饰键）：从 AutoScrollInterval 起步（阅读速度），
-       同向继续滚逐档提速，**上限仍是 WheelScrollMs** —— 所以"自动滚动永远
-       不会比手动滚轮更快"是同一个数，一眼可验证。
-   速度阶梯（增强档）：
-     · 第 1 档 = AutoScrollInterval（最慢、初始）；第 S 档 = WheelScrollMs（最快）；
+   速度阶梯（唯一的一种模式）：
+     · 第 1 档 = AutoScrollInterval（最慢、初始）；第 S 档 = AutoScrollFastMs（最快）；
      · 中间各档在**对数**上均匀插值（几何插值）—— 每档倍率相同，手感才均匀。
-       不用线性插值的原因见 AutoScrollTickMs 的注释（两端差两个数量级时，
+       不用线性插值的原因见 AutoScrollTickMs 的注释（两端差一个数量级以上时，
        线性插值的第一步就是几十倍，"再滚一下直接飞出去"）；
+     · 两端是**两个独立配置项**（一个管起步、一个管顶档），本通道完全不看
+       WheelScrollMul —— 倍数量与时间量是两种量，不混用；
      · 变速**不打断当前节拍**（下一拍才生效）。否则滚轮每动一下就立刻多插
        一格，"档位越高抖得越厉害"；
      · 反向滚 = 立即终止**并把档位清零**，之后再滚从第 1 档重新开始。
@@ -245,32 +256,24 @@ static void WheelLaneStop(void) {
    （"WHEEL_DELTA 的倍数或约数"），触控板正是这么滚的；目标程序若不做小数
    累积就会完全不动，那种程序把 AutoScrollSmooth 设为 0 即可。
 
-   状态机（active/dir/gear/follow/idleUntil）由主线程在锁内更新，工作线程只按拍
-   输出。终止路径：反向滚（仅增强档，主线程置停）、松开修饰键（钩子投
-   WM_MODE_UP，只对增强档生效）、松开 C / 引擎复位（ResetEngine ->
-   ActAutoScrollStop）、跟手档的滚轮空闲超时。工作线程另外每拍自查 g_cMod
-   （以及增强档下的 ModeDown）与空闲时限作兜底 —— 不依赖任何消息也能自愈。 */
+   状态机（active/dir/gear）由主线程在锁内更新，工作线程只按拍输出。
+   终止路径：反向滚（主线程置停）、松开修饰键（钩子投 WM_MODE_UP）、
+   松开 C / 引擎复位（ResetEngine -> ActAutoScrollStop）。工作线程另外每拍
+   自查 ModeDown 与 g_cMod 作兜底 —— 不依赖任何消息也能自愈。 */
 
 /* 速度档数与节拍下限。档位 i ∈ 1..AUTOSCROLL_SPEED_STEPS：
        i = 1 -> AutoScrollInterval （初始速度，最慢）
-       i = S -> WheelScrollMs      （最快；也正好是跟手档的固定速度）
+       i = S -> AutoScrollFastMs   （最快；独立配置项）
    中间按**几何**插值（在速度的对数上均匀），所以每档倍率相同、手感均匀。
    档数 S 固定：两端相差多少倍，阶梯就有多少倍可走；两端相等则退化为恒定。
-   取 8 档是因为缺省的 24000 与 100 差 240 倍 —— 6 档时每档要翻 3 倍，
-   明显发跳；8 档约 2.2 倍一档，既够细又不用滚太多次。 */
+   取 8 档是因为缺省的 24000 与 1000 差 24 倍 —— 6 档时每档要翻约 1.9 倍，
+   略陡；8 档约 1.55 倍一档，过渡更顺。 */
 #define AUTOSCROLL_SPEED_STEPS 8
 #define AUTOSCROLL_TICK_MIN    20   /* 节拍下限（ms）：再快没有意义，注入也太密 */
 
-/* 跟手档的"滚轮还在动"时限（ms）。必须**大于**连续滚动时两格之间的间隔
-   （手快速滚滚轮约 50..100ms 一格），否则滚得稍慢就会"流派断了再续上"，
-   听着就是一顿一顿；也不能太长，否则"滚轮一停就停"会拖尾。
-   150ms 是这两者之间的折中。 */
-#define AUTOSCROLL_FOLLOW_IDLE_MS 150
-
-/* 滚轮最快速度（毫秒/格）。<= 0 表示"关闭纵向滚轮增强"（两种档位都不可用）。 */
+/* 持续滚动的最快速度（毫秒/格），来自 AutoScrollFastMs。 */
 static int AutoScrollFastMs(void) {
-    int v = ConfigGetWheelScrollMs();
-    return (v > 0) ? v : 0;
+    return ConfigGetAutoScrollFastMs();
 }
 
 /* 平滑模式的固定节拍（ms）：25 次/秒。比它更快的注入对手感没有增益，
@@ -280,15 +283,14 @@ static int AutoScrollFastMs(void) {
 /* 速度档 -> "每格的时长"(ms)。这是**速度**的唯一表达：值越小越快。
 
    几何插值：tick(i) = slow * (fast/slow)^((i-1)/(S-1))。
-   为什么不用"线性插值"（在格/秒 上等距）：两端常常差两个数量级 ——
-   缺省 24000 与 100 差 240 倍。线性插值会把第 1→2 档做成 48 倍，
-   手感上就是"再滚一下直接飞出去"，而后面几档几乎分不出来。
-   几何插值让每档的**倍率**相同，快慢过渡才是均匀的。 */
+   为什么不用"线性插值"（在格/秒 上等距）：两端常差一个数量级以上 ——
+   缺省 24000 与 1000 差 24 倍，若两端拉开（比如 FastMs 设成 100）就更多。
+   线性插值会把第 1→2 档做成几十倍，手感上就是"再滚一下直接飞出去"，
+   而后面几档几乎分不出来。几何插值让每档的**倍率**相同，过渡才均匀。 */
 static DWORD AutoScrollTickMs(int gear) {
     int slow = ConfigGetAutoScrollInterval();
     int fast = AutoScrollFastMs();
-    if (fast <= 0)   fast = slow;   /* 未启用：阶梯退化（正常走不到这里） */
-    if (fast > slow) fast = slow;   /* 配置不当（"最快"比初始还慢）：退化为恒定 */
+    if (fast > slow) fast = slow;   /* 配置不当（"最快"比初始还慢）：退化为恒定速度 */
     if (gear < 1) gear = 1;
     if (gear > AUTOSCROLL_SPEED_STEPS) gear = AUTOSCROLL_SPEED_STEPS;
     if (gear == 1) return (DWORD)slow;
@@ -337,15 +339,10 @@ static BOOL            s_asInit   = FALSE;
 static volatile LONG   s_asActive = 0;
 static volatile LONG   s_asGear   = 0;     /* 速度档：1..AUTOSCROLL_SPEED_STEPS */
 static volatile LONG   s_asDir    = 0;     /* +1 上滚 / -1 下滚 */
-static volatile LONG   s_asFollow = 0;     /* 跟手档（只有 Caps）：跟着滚轮走 */
-static volatile LONG   s_asIdleUntil = 0;  /* 跟手档：此刻之后还没新滚轮就收工
-                                              （GetTickCount 的 32 位值，比较时按
-                                                无符号差值判断，天然抗翻转） */
 
-/* 最快档速度（毫秒/格）；0 = 纵向滚轮增强关闭。 */
+/* 最快档速度（毫秒/格）。 */
 int  ActAutoScrollFastMs(void) { return AutoScrollFastMs(); }
 BOOL ActAutoScrollActive(void) { return s_asActive != 0; }
-BOOL ActAutoScrollFollow(void) { return s_asFollow != 0; }
 int  ActAutoScrollGear(void)   { return s_asActive ? (int)s_asGear : 0; }
 int  ActAutoScrollDir(void)    { return s_asActive ? (int)s_asDir  : 0; }
 /* 单测用：当前速度（每格多少毫秒）。与粒度无关 —— 平滑与否它都一样，
@@ -370,52 +367,25 @@ int  ActAutoScrollDelta(void)  {
    （调用方可能是键盘钩子所在的主线程）。 */
 void ActAutoScrollStop(void) {
     if (s_asInit) EnterCriticalSection(&s_asCs);
-    s_asActive = 0; s_asGear = 0; s_asDir = 0; s_asFollow = 0;
+    s_asActive = 0; s_asGear = 0; s_asDir = 0;
     if (s_asInit) { LeaveCriticalSection(&s_asCs); SetEvent(s_asEvPoke); }
 }
 
-/* 只在"增强档"时终止。WM_MODE_UP 是"增强修饰键抬起"的通知；跟手档
-   （只按 Caps）本来就没按修饰键，不该被它打断。 */
-void ActAutoScrollStopEnh(void) {
-    if (s_asInit) EnterCriticalSection(&s_asCs);
-    BOOL follow = (s_asFollow != 0);
-    if (!follow) { s_asActive = 0; s_asGear = 0; s_asDir = 0; }
-    if (s_asInit) { LeaveCriticalSection(&s_asCs); SetEvent(s_asEvPoke); }
-}
-
-/* 主线程调用：Caps(+增强修饰) 下的一次滚轮。非阻塞（只更新状态）。
-   follow = TRUE  -> 跟手档（只有 Caps）：恒速最快档，跟着滚轮走 ——
-                     每次滚轮只刷新"滚轮还在动"的时限，方向也随着滚轮掉头；
-   follow = FALSE -> 增强档（Caps + 增强修饰键）：从最慢档起步、同向滚逐档提速，
-                     反向则终止并清零。 */
-void ActAutoScrollWheel(int delta, BOOL follow) {
+/* 主线程调用：增强模式（Caps + 增强修饰键）下的一次滚轮。非阻塞（只更新状态）。
+   第一次滚 -> 从最慢档启动；同向再滚 -> 逐档提速；反向 -> 终止并清零。 */
+void ActAutoScrollWheel(int delta) {
     if (delta == 0 || !s_asInit) return;
-    if (AutoScrollFastMs() <= 0) return;       /* WheelScrollMs=0：纵向滚轮增强关闭 */
     int dir = (delta > 0) ? 1 : -1;
-    int startGear = follow ? AUTOSCROLL_SPEED_STEPS : 1;
     EnterCriticalSection(&s_asCs);
     if (!s_asActive) {
-        s_asActive = 1; s_asDir = dir; s_asGear = startGear; s_asFollow = follow ? 1 : 0;
-    } else if ((BOOL)s_asFollow != follow) {
-        /* **换档**：滚动途中按下/松开增强修饰键。按新档重新起步
-           （跟手档 -> 最快档；增强档 -> 最慢档），而不是"接着上一档继续加速" ——
-           否则"按下 Alt 想慢一点"会变成接着加速。
-           注意"松开 Alt 立即终止"是另一条路径（钩子投 WM_MODE_UP ->
-           ActAutoScrollStopEnh），它先于下一次滚轮到达，所以这里不会互相打架。 */
-        s_asDir = dir; s_asGear = startGear; s_asFollow = follow ? 1 : 0;
-    } else if (follow) {
-        /* 跟手档：方向随滚轮掉头，速度恒定（就是最快档），不需要换档 */
-        s_asDir = dir;
+        s_asActive = 1; s_asDir = dir; s_asGear = 1;    /* 第一滚：最慢档启动 */
     } else if ((int)s_asDir != dir) {
-        /* 增强档反向：立即终止，并**清零档位** —— 下次启动从第 1 档重来，
+        /* 反向：立即终止，并**清零档位** —— 下次启动从第 1 档重来，
            不残留打断前的速度（用户要的"反向打断后重置滚动速度"）。 */
-        s_asActive = 0; s_asDir = 0; s_asGear = 0; s_asFollow = 0;
+        s_asActive = 0; s_asDir = 0; s_asGear = 0;
     } else if ((int)s_asGear < AUTOSCROLL_SPEED_STEPS) {
         s_asGear++;                                     /* 同向：平滑进一档 */
     }
-    /* 跟手档：刷新"滚轮还在动"的时限（工作线程据此决定何时收工） */
-    if (s_asActive && follow)
-        s_asIdleUntil = (LONG)(GetTickCount() + AUTOSCROLL_FOLLOW_IDLE_MS);
     LeaveCriticalSection(&s_asCs);
     SetEvent(s_asEvPoke);
 }
@@ -437,14 +407,8 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
         }
 
         if (!InterlockedCompareExchange(&s_asActive, 0, 0)) { running = FALSE; continue; }
-        /* 兜底：映射模式失效（松开 C）就停；增强档还要看修饰键。
-           跟手档只依赖 C —— 它没有修饰键可松开。 */
-        if (!g_cMod || (!s_asFollow && !ModeDown(MODE_ENHANCE))) {
-            ActAutoScrollStop(); running = FALSE; continue;
-        }
-        /* 跟手档的"滚轮停了"：超过时限没有新的滚轮就收工（这正是它与
-           增强档的分界 —— 增强档没有这一条，所以会一直滚到松手）。 */
-        if (s_asFollow && (LONG)(GetTickCount() - (DWORD)s_asIdleUntil) >= 0) {
+        /* 兜底：增强模式失效（松开 Alt/D）或松开 C 就停 */
+        if (!g_cMod || !ModeDown(MODE_ENHANCE)) {
             ActAutoScrollStop(); running = FALSE; continue;
         }
         int dir = (int)s_asDir;
@@ -455,23 +419,15 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
         SendWheelNotches(dir > 0 ? delta : -delta, 1);
 
         /* 等满这一个节拍。**变速不打断本拍**（下一拍才生效）：未选中的唤醒
-           （提速 / 跟手档刷新时限）继续等剩下的时间；只有停止/换向（active
-           被清 0）才提前返回。这就是"档位越高越抖"的修法之一。
-           平滑模式下节拍固定为 AUTOSCROLL_SMOOTH_TICK，变速只改 delta。
-           跟手档还要盯"滚轮是否还在动"：把等待切成 min(本节拍, 空闲剩余)，
-           到点就回循环顶重新判断（该发格就发、该收工就收工）。 */
+           （提速）继续等剩下的时间；只有停止/反向（active 被清 0）才提前返回。
+           这就是"档位越高越抖"的修法之一。
+           平滑模式下节拍固定为 AUTOSCROLL_SMOOTH_TICK，变速只改 delta。 */
         ULONGLONG deadline = GetTickCount64() + tick;
         BOOL ended = FALSE;
         for (;;) {
             ULONGLONG now = GetTickCount64();
             if (now >= deadline) break;
-            DWORD wait = (DWORD)(deadline - now);
-            if (s_asFollow) {
-                LONG rem = (LONG)((DWORD)s_asIdleUntil - GetTickCount());
-                if (rem <= 0) { ended = TRUE; break; }     /* 滚轮停了：立即收工 */
-                if ((DWORD)rem < wait) wait = (DWORD)rem;  /* 空闲先到就先醒 */
-            }
-            if (WaitForSingleObject(s_asEvPoke, wait) == WAIT_TIMEOUT) continue;
+            if (WaitForSingleObject(s_asEvPoke, (DWORD)(deadline - now)) == WAIT_TIMEOUT) break;
             if (InterlockedCompareExchange(&s_asStop, 0, 0)) { ended = TRUE; break; }
             if (!InterlockedCompareExchange(&s_asActive, 0, 0)) { ended = TRUE; break; }
         }
@@ -483,11 +439,11 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
     return 0;
 }
 
-/* 起/停连续滚动通道。起不来不算致命：s_asInit 保持 FALSE，ActAutoScrollWheel
+/* 起/停持续滚动通道。起不来不算致命：s_asInit 保持 FALSE，ActAutoScrollWheel
    直接忽略 —— "持续滚动"没法像补一格那样在同一调用里同步兜底。 */
 static void AutoScrollLaneStart(void) {
     s_asStop = 0;
-    s_asActive = 0; s_asGear = 0; s_asDir = 0; s_asFollow = 0; s_asIdleUntil = 0;
+    s_asActive = 0; s_asGear = 0; s_asDir = 0;
     InitializeCriticalSection(&s_asCs);
     s_asEvPoke = CreateEventW(NULL, FALSE, FALSE, NULL);
     s_asThread = s_asEvPoke ? CreateThread(NULL, 0, AutoScrollThread, NULL, 0, NULL) : NULL;

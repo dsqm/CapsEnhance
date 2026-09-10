@@ -27,21 +27,21 @@
 #define STR2(x) #x
 #define STR(x)  STR2(x)
 
-/* 滚轮滚动的**最快速度**：每 N 毫秒滚一格 —— 与 AutoScrollInterval **同一个单位**
-   （毫秒/格），**值越小越快**。这一个值同时管两件事（本来就是"同一个速度"的两种用法）：
-     · 「Caps + 滚轮」：按住 Caps 滚滚轮，就按这个节奏连续滚动；滚轮一停立即停；
-     · 「Caps + Alt/D + 滚轮」：自动滚动从这里往上的**上限** —— 只会更慢，不会更快。
-   0 = 关闭上面两个纵向滚轮功能（滚轮完全退回系统原生行为；横向另看 WheelHScrollMul）。
-   默认 100 = 10 格/秒 = 30 行/秒 ≈ 1800 行/分钟（按系统每次滚 3 行）："快速下翻"的手感。
-   注意历史值 1000（1 格/秒）比人正常滚轮还慢 —— 于是"按住 Caps 增强"反而更慢了，
-   这正是它被改掉的原因。嫌快就调大、嫌慢就调小。 */
-#define WHEEL_MS_DEFAULT 100
-#define WHEEL_MS_MIN     0      /* 0 = 关闭（见上）；下限只管住"负数"这种非法写法 */
-#define WHEEL_MS_MAX     60000
+/* 「Caps + 滚轮」的放大**倍数**（默认 2）：滚一格 = 系统原本一格 + 我们补 (N-1) 格。
+   只在这一处定值：模板与升级块用 STR() 拼进去，避免"代码改了、字符串没改"的漂移。
+   为什么是 2 而不是 3：每补一格注入端要隔 2ms，mul=3 要补 2 格，滚动时能感觉到
+   卡顿；mul=2 只补 1 格、无间隔等待，手感与系统原生一致。
+   `0` / `1` = 不放大（等同关闭，滚轮完全按系统原本行为）。
+   **本项只管「Caps+滚轮」**：自动滚动完全不看它，有自己的两个速度项
+   （AutoScrollInterval / AutoScrollFastMs）—— 这是刻意的。倍数量与"毫秒/格"
+   是两种量，既不能比较也不能互相约束，硬凑成一个值只会两边都不好用。 */
+#define WHEEL_MUL_DEFAULT 2
+#define WHEEL_MUL_MAX     16   /* 单次最多补发 15 格（每格间隔 2ms） */
 
 /* 自动滚动的**初始**节拍（ms）：启动后每 N 毫秒滚"一格"，即最慢档的速度。
-   同向继续滚会逐档提速，**最快只到 WheelScrollMs**（跟手档的速度）
-   —— 所以本值是"初始速度"，WheelScrollMs 是"最快速度"。
+   同向继续滚会逐档提速，**最快到 AutoScrollFastMs**（另一项，独立配置）。
+   两个值同单位（毫秒/格）但**语义独立**：本值管"刚启动时多快"，FastMs 管
+   "最快能多快"，各自调、互不牵制。
 
    默认值的依据是**人的实际阅读速度**，不是手感试出来的（前几版就是靠试，
    结果 120 -> 300 -> 500 -> 4000 改了四轮都还偏快）：
@@ -59,7 +59,7 @@
        24000      7.5       338   <- **默认**：落在 300..500 的偏慢半区，
                                       对应"边读边理解"的舒适区
        60000        3       135   <- 技术精读（80..150 字/分钟）
-   嫌慢就再滚一下提速，或把本值调小（6 档从本值一路缩到 WheelScrollMs）。 */
+   嫌慢就再滚一下提速，或把本值调小。 */
 #define AUTOSCROLL_INTERVAL_DEFAULT 24000
 
 /* AutoScrollInterval 的可调范围（ms）。下限 100 对应" 1350 行/分钟"这种
@@ -67,6 +67,18 @@
    覆盖"技术精读"这一档 —— 只要有需求就不该被上限挡住。 */
 #define AUTOSCROLL_INTERVAL_MIN 100
 #define AUTOSCROLL_INTERVAL_MAX 60000
+
+/* 「Caps + Alt/D + 滚轮」持续滚动的**最快速度**（毫秒/格，越小越快）。
+   自动滚动的速度阶梯 = 从 AutoScrollInterval 起步、逐档提速到本值为止
+   （几何插值，见 act.c），所以本值是"上限"而不是"起始值"。
+   默认 1000 = 1 格/秒 = 3 行/秒 ≈ 180 行/分钟（按系统每次滚 3 行）—— 已经比
+   任何阅读速度都快，属于"看完了、快速往下翻"的档位；想更快就调小（下限 20），
+   想让它也慢下来就调大。
+   注：本项与 AutoScrollInterval **有意分开、不共用** —— 虽然同单位，但一个管
+   "起始速度"、一个管"上限"，拆开各自调才不会互相牵制。 */
+#define AUTOSCROLL_FAST_DEFAULT 1000
+#define AUTOSCROLL_FAST_MIN      20
+#define AUTOSCROLL_FAST_MAX   60000
 
 /* 自动滚动是否用"高分频"平滑注入（默认开）。
    标准滚轮刻度 WHEEL_DELTA = 120 是"一格"，但 Windows 明确支持**小于**
@@ -82,7 +94,8 @@ static BOOL  g_runAsAdmin = FALSE;
 static int   g_logMaxKB   = 2048;   /* 日志大小上限（KB），0 = 不限制 */
 static int   g_maxArrowSteps = 32;  /* 逐格词跳最大步数，超过按 overStepMode 处理 */
 static BOOL  g_overStepCtrl = FALSE; /* TRUE=超限改发 Ctrl+方向（原生词跳） */
-static int   g_wheelMs = WHEEL_MS_DEFAULT;    /* 滚轮最快速度：毫秒/格，0=关闭纵向滚轮增强 */
+static int   g_wheelMul = WHEEL_MUL_DEFAULT;  /* Caps+滚轮 放大倍数，<2 = 不放大 */
+static int   g_autoScrollFastMs = AUTOSCROLL_FAST_DEFAULT;       /* 自动滚动最快速度(ms/格) */
 static int   g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT; /* 自动滚动初始节拍(ms) */
 static BOOL  g_autoScrollSmooth = AUTOSCROLL_SMOOTH_DEFAULT;     /* 自动滚动平滑注入 */
 static int   g_wheelHMul = WHEEL_HMUL_DEFAULT; /* Caps+Shift+滚轮 的横向滚动倍数，0=关闭 */
@@ -156,7 +169,8 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_logMaxKB = 2048;
     g_maxArrowSteps = 32;
     g_overStepCtrl = FALSE;
-    g_wheelMs = WHEEL_MS_DEFAULT;
+    g_wheelMul = WHEEL_MUL_DEFAULT;
+    g_autoScrollFastMs = AUTOSCROLL_FAST_DEFAULT;
     g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT;
     g_autoScrollSmooth = AUTOSCROLL_SMOOTH_DEFAULT;
     g_wheelHMul = WHEEL_HMUL_DEFAULT;
@@ -219,21 +233,28 @@ void ConfigLoadFrom(const WCHAR* path) {
                 else if (_wcsicmp(key, L"logmaxkb") == 0) g_logMaxKB = ParseIntW(val, 2048);
                 else if (_wcsicmp(key, L"maxarrowsteps") == 0) g_maxArrowSteps = ParseIntW(val, 32);
                 else if (_wcsicmp(key, L"overstepmode") == 0) g_overStepCtrl = ParseBoolW(val);
-                else if (_wcsicmp(key, L"wheelscrollms") == 0) {
-                    int v = ParseIntW(val, WHEEL_MS_DEFAULT);
-                    if (v < WHEEL_MS_MIN) v = WHEEL_MS_MIN;   /* 负数按非法处理 */
-                    if (v > WHEEL_MS_MAX) v = WHEEL_MS_MAX;
-                    g_wheelMs = v;
+                else if (_wcsicmp(key, L"wheelscrollmul") == 0) {
+                    int v = ParseIntW(val, WHEEL_MUL_DEFAULT);
+                    if (v < 0) v = 0;
+                    if (v > WHEEL_MUL_MAX) v = WHEEL_MUL_MAX;
+                    g_wheelMul = v;
                 }
-                /* 兼容旧键名 WheelScrollMul（倍数语义）：**不**换算成毫秒 ——
-                   "放大 2 倍"和"每格 2 毫秒"是两种量，硬换算只会得到荒谬的值。
-                   旧键留在这里被忽略；升级机制会补上新的 WheelScrollMs。 */
+                /* 过渡期曾把本条改名为 WheelScrollMs（毫秒/格）。两种量不可换算，
+                   所以旧键名既不解析、也不据它推算任何值 —— 直接忽略即可，
+                   升级机制会补上新的 WheelScrollMul（老配置里那行 WheelScrollMs
+                   会一直躺着，无害）。 */
                 else if (_wcsicmp(key, L"wheelscrollmul") == 0) { /* 忽略（旧语义） */ }
                 else if (_wcsicmp(key, L"autoscrollinterval") == 0) {
                     int v = ParseIntW(val, AUTOSCROLL_INTERVAL_DEFAULT);
                     if (v < AUTOSCROLL_INTERVAL_MIN) v = AUTOSCROLL_INTERVAL_MIN;
                     if (v > AUTOSCROLL_INTERVAL_MAX) v = AUTOSCROLL_INTERVAL_MAX;
                     g_autoScrollInterval = v;
+                }
+                else if (_wcsicmp(key, L"autoscrollfastms") == 0) {
+                    int v = ParseIntW(val, AUTOSCROLL_FAST_DEFAULT);
+                    if (v < AUTOSCROLL_FAST_MIN) v = AUTOSCROLL_FAST_MIN;
+                    if (v > AUTOSCROLL_FAST_MAX) v = AUTOSCROLL_FAST_MAX;
+                    g_autoScrollFastMs = v;
                 }
                 else if (_wcsicmp(key, L"wheelhscrollmul") == 0) {
                     int v = ParseIntW(val, WHEEL_HMUL_DEFAULT);
@@ -291,25 +312,34 @@ void ConfigLoad(void) {
             ";   1 = 改发 Ctrl+方向键（由目标程序自己的词跳完成，瞬时）\n"
             "OverStepMode = 0\n"
             "\n"
-            "; ============ 滚轮（单位「毫秒/格」，越小越快）============\n"
-            "; 滚轮滚动的**最快速度**：每 N 毫秒滚一格。\n"
-            ";   · 按住 C 滚滚轮 = 就按这个节奏连续滚，滚轮停 / 反向 / 松开 C 立即停；\n"
-            ";   · 按住 C + Alt/D 滚滚轮 = 自动滚动，从这里起步慢慢滚、逐档提速，\n"
-            ";     但**这个值就是上限**（只会更慢，不会更快）。\n"
-            "; 0 = 关闭上面两个纵向滚轮功能（滚轮完全按系统原本行为）。\n"
-            "; 缺省 100 = 10 格/秒 = 30 行/秒 ≈ 1800 行/分钟（按每次滚 3 行）；\n"
-            "; 嫌快就调大、嫌慢就调小。可调范围 0.."
-            STR(WHEEL_MS_MAX) "。\n"
-            "; 只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），也不写注册表。\n"
-            "WheelScrollMs = " STR(WHEEL_MS_DEFAULT) "\n"
+            "; ============ 滚轮 ============" "\n"
+            "; 按住 C 滚滚轮 = 每格放大成 N 倍（倍数项，见下面 WheelScrollMul）。" "\n"
+            "; 按住 C + Alt/D 滚滚轮 = 持续滚动（速度项，见下面两项）。" "\n"
+            "; 按住 C + Shift 滚滚轮 = 横向滚动（见 WheelHScrollMul）。" "\n"
+            "; 三者的配置项**各自独立**：倍数量与毫秒/格是两种量，不混用。" "\n"
+            "; 只做输入注入，**不改系统设置**（不碰 SPI_SETWHEELSCROLLLINES），也不写注册表。" "\n"
+            ";" "\n"
+            "; 按住 C 时滚轮的放大倍数：滚一格 = 原本一格 + 补 (N-1) 格。" "\n"
+            "; 0 或 1 = 不放大（滚轮按系统原本行为）。可调范围 0.." STR(WHEEL_MUL_MAX) "。" "\n"
+            "; 缺省 2：只补 1 格、没有间隔等待，手感与系统原生一致；3 以上要隔 2ms 补格，" "\n"
+            "; 滚动时能感觉到卡顿。" "\n"
+            "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n"
             "\n"
-            "; 自动滚动的初始速度（毫秒/格）：越大越慢。同向继续滚会逐档提速，\n"
-            "; 最快只到 WheelScrollMs（跟手档的速度），不会更快。\n"
-            "; 缺省 24000 = 7.5 行/分钟 ≈ 338 字/分钟，落在成人中文默读\n"
+            "; 持续滚动（按住 C + Alt/D 滚滚轮）的**初始**速度：每 N 毫秒滚一格，越大越慢。" "\n"
+            "; 同向继续滚会逐档提速，最快到下面 AutoScrollFastMs 为止。" "\n"
+            "; 缺省 24000 = 7.5 行/分钟 ≈ 338 字/分钟，落在成人中文默读" "\n"
             "; 300..500 字/分钟的舒适区；最慢可到 " STR(AUTOSCROLL_INTERVAL_MAX)
-            "（约 135 字/分钟，技术精读）。\n"
-            "; 可调范围 " STR(AUTOSCROLL_INTERVAL_MIN) ".." STR(AUTOSCROLL_INTERVAL_MAX) "。\n"
+            "（约 135 字/分钟，技术精读）。" "\n"
+            "; 可调范围 " STR(AUTOSCROLL_INTERVAL_MIN) ".." STR(AUTOSCROLL_INTERVAL_MAX) "。" "\n"
             "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n"
+            "\n"
+            "; 持续滚动的**最快**速度：每 N 毫秒滚一格，越小越快。这是提速的上限，" "\n"
+            "; 与上面那个初始速度各自独立（一个管起步、一个管顶档）。" "\n"
+            "; 缺省 1000 = 1 格/秒 = 3 行/秒 ≈ 180 行/分钟（按每次滚 3 行）——" "\n"
+            "; 比任何阅读速度都快，属于看完了、快速往下翻的档位。" "\n"
+            "; 想更快就调小（下限 " STR(AUTOSCROLL_FAST_MIN) "），想让它也慢下来就调大。" "\n"
+            "; 可调范围 " STR(AUTOSCROLL_FAST_MIN) ".." STR(AUTOSCROLL_FAST_MAX) "。" "\n"
+            "AutoScrollFastMs = " STR(AUTOSCROLL_FAST_DEFAULT) "\n"
             "\n"
             "; 自动滚动是否平滑注入（1=是 / 0=否）。1 时只发\"不足一格\"的小刻度、\n"
             "; 次数更多，手感接近触控板连续滑动；个别程序不累积小刻度（完全不动）时设 0。\n"
@@ -373,22 +403,24 @@ static const struct {
       ";   0 = 只发送一个方向键（跳一格即停）\n"
       ";   1 = 改发 Ctrl+方向键（由目标程序自己的词跳完成，瞬时）\n"
       "OverStepMode = 0\n" },
-    { "wheelscrollms",
+    { "wheelscrollmul",
       "\n"
-      "; 滚轮滚动的**最快速度**：每 N 毫秒滚一格（与 AutoScrollInterval 同单位）。\n"
-      ";   · 按住 C 滚滚轮 = 就按这个节奏连续滚，滚轮停 / 反向 / 松开 C 立即停；\n"
-      ";   · 按住 C + Alt/D 滚滚轮 = 自动滚动，从这里起步、逐档提速，\n"
-      ";     但**这个值就是上限**（只会更慢，不会更快）。\n"
-      "; 0 = 关闭上面两个纵向滚轮功能（滚轮按系统原本行为）。\n"
-      "; 缺省 100 = 10 格/秒 = 30 行/秒 ≈ 1800 行/分钟；嫌快就调大、嫌慢就调小。\n"
-      "; 范围 0.."
-      STR(WHEEL_MS_MAX) "。\n"
-      "; 注：旧版这里是倍数项 WheelScrollMul，语义不同，无法自动换算，已废弃。\n"
-      "WheelScrollMs = " STR(WHEEL_MS_DEFAULT) "\n" },
+      "; 按住 C 时滚轮的放大倍数：滚一格 = 原本一格 + 补 (N-1) 格。" "\n"
+      "; 0 或 1 = 不放大（滚轮按系统原本行为）。范围 0.." STR(WHEEL_MUL_MAX) "。" "\n"
+      "; 注：过渡期这里曾是 WheelScrollMs（毫秒/格），两种量不可换算，已改回倍数；" "\n"
+      "; 老的 WheelScrollMs 行不再解析，可以删掉。" "\n"
+      "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n" },
+    { "autoscrollfastms",
+      "\n"
+      "; 持续滚动（按住 C + Alt/D）的**最快**速度：每 N 毫秒滚一格，越小越快。" "\n"
+      "; 与下面 AutoScrollInterval（初始速度）各自独立：一个管起步、一个管顶档。" "\n"
+      "; 缺省 1000 ≈ 180 行/分钟；想更快就调小，想让它也慢下来就调大。" "\n"
+      "; 范围 " STR(AUTOSCROLL_FAST_MIN) ".." STR(AUTOSCROLL_FAST_MAX) "。" "\n"
+      "AutoScrollFastMs = " STR(AUTOSCROLL_FAST_DEFAULT) "\n" },
     { "autoscrollinterval",
       "\n"
       "; 自动滚动的初始速度（毫秒/格，越大越慢）：同向继续滚会逐档提速，\n"
-      "; 最快只到 WheelScrollMs（跟手档的速度），不会更快。\n"
+      "; 最快到 AutoScrollFastMs 为止（另一项，独立配置）。\n"
       "; 可调范围 " STR(AUTOSCROLL_INTERVAL_MIN) ".." STR(AUTOSCROLL_INTERVAL_MAX) "。\n"
       "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n" },
     { "autoscrollsmooth",
@@ -542,12 +574,16 @@ BOOL ConfigGetOverStepCtrl(void) {
     return g_overStepCtrl;
 }
 
-int ConfigGetWheelScrollMs(void) {
-    return g_wheelMs;
+int ConfigGetWheelScrollMul(void) {
+    return g_wheelMul;
 }
 
 int ConfigGetAutoScrollInterval(void) {
     return g_autoScrollInterval;
+}
+
+int ConfigGetAutoScrollFastMs(void) {
+    return g_autoScrollFastMs;
 }
 
 BOOL ConfigGetAutoScrollSmooth(void) {
