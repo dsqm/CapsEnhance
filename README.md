@@ -200,11 +200,21 @@ build.bat                  rem 生成 bin/CapsEnhance.exe
 
 ```bat
 test\build_nav.bat         rem 词跳测试：算法单测(ComputeSteps) + Scintilla/Edit 通道集成测试(test_sci)
-test\build_test.bat        rem 和弦引擎回归（D/F 乱序、长按、增益补齐）
+                           rem            + 配置文件解析(test_config)
+test\build_test.bat        rem 和弦引擎回归（D/F 乱序、长按、增益补齐、多键同按、
+                           rem            左Alt=D、清卡键判定、原生词跳序列）
 test\build_keytest.bat     rem 诊断工具：keytest(按键投递实测) + uiprobe(UIA 逐步探测)
-                           rem            + memtest(UIA 内存压测) + restarttest(重启握手)
-                           rem            + traymemtest(托盘菜单内存定位)
+                           rem            + memtest(UIA 内存压测) + restarttest(重启握手+单实例)
+                           rem            + traymemtest(托盘菜单内存定位) + logsmoke(日志轮转)
 ```
+
+### CI（GitHub Actions）
+
+`.github/workflows/ci.yml`：**每次 push / PR** 自动在 `windows-latest` 上依次执行——
+单元与集成测试（`build_nav` + `build_test`，任一用例失败即红）→ 诊断工具构建 →
+真实进程级检查（`restarttest` 重启握手/单实例、`logsmoke` 日志轮转）→ 全部通过后
+`build.bat` 编译，并把 `CapsEnhance.exe` 作为 artifact 上传。工具链用 runner 自带的
+VS2022，由 `build_env.bat` 的 vswhere 探测定位，与本地同一套脚本。
 
 工具链脚本 `build_env.bat` 被所有构建脚本共用：定位 VS/MSVC/SDK 并显式设置
 `PATH/INCLUDE/LIB`（不走 vcvars64，避开它的注册表探测；批处理里含 `(x86)` 的

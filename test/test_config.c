@@ -113,6 +113,19 @@ int main(void) {
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(ConfigGetLogMaxKB() == 2048, "CFG: 非 General 段的 LogMaxKB 不生效");
 
+    /* UTF-8 BOM + LF 行尾（Linux 编辑器保存的格式） */
+    {
+        FILE* fb = NULL;
+        if (fopen_s(&fb, "bin/cfgtest.ini", "wb") == 0 && fb) {
+            fputc(0xEF, fb); fputc(0xBB, fb); fputc(0xBF, fb);   /* BOM */
+            fputs("[General]\nRunAsAdmin = 1\n\n[NativeWordJump]\nBomApp\n", fb);
+            fclose(fb);
+        }
+        ConfigLoadFrom(L"bin/cfgtest.ini");
+        EXPECT(ConfigGetRunAsAdmin() && ConfigMatchName(L"bomapp"),
+               "CFG: UTF-8 BOM + LF 行尾");
+    }
+
     /* 兼容早期不分节写法 */
     WriteIni("Legacy.exe\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");

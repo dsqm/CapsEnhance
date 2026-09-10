@@ -16,20 +16,28 @@ int NavJump(int dir, BOOL shift) { (void)dir; (void)shift; return 0; }
 void NavProbe(void) { /* 诊断探测：本测试桩掉 */ }
 void NavBaseInfo(void) { /* 启动基线采集：本测试桩掉 */ }
 
-/* ---- 捕获钩子：统计注入的按键（只计按下，按下+抬起=一次点按） ---- */
+/* ---- 捕获钩子：记录注入的完整事件序列（按下/抬起），并可统计次数 ---- */
 typedef struct { int vk; int n; } Rec;
 static Rec g_rec[256]; static int g_recN = 0;
-static void RecAdd(int vk) {
-    for (int i = 0; i < g_recN; i++)
-        if (g_rec[i].vk == vk) { g_rec[i].n++; return; }
-    g_rec[g_recN].vk = vk; g_rec[g_recN].n = 1; g_recN++;
+/* 事件序列：验证发送顺序用（如 Ctrl 必须先于方向键按下、后于方向键抬起） */
+typedef struct { int vk; int up; } Ev;
+static Ev g_seq[512]; static int g_seqN = 0;
+static void RecAdd(int vk, int up) {
+    if (!up) {
+        for (int i = 0; i < g_recN; i++)
+            if (g_rec[i].vk == vk) { g_rec[i].n++; return; }
+        if (g_recN < 256) { g_rec[g_recN].vk = vk; g_rec[g_recN].n = 1; g_recN++; }
+    }
+    if (g_seqN < 512) { g_seq[g_seqN].vk = vk; g_seq[g_seqN].up = up; g_seqN++; }
 }
 LRESULT CALLBACK CapProc(int n, WPARAM w, LPARAM l) {
     if (n == HC_ACTION) {
         KBDLLHOOKSTRUCT *p = (KBDLLHOOKSTRUCT*)l;
-        if ((p->flags & LLKHF_INJECTED) &&
-            (w == WM_KEYDOWN || w == WM_SYSKEYDOWN))
-            RecAdd((int)p->vkCode);
+        if (p->flags & LLKHF_INJECTED) {
+            BOOL down = (w == WM_KEYDOWN || w == WM_SYSKEYDOWN);
+            BOOL upEv = (w == WM_KEYUP   || w == WM_SYSKEYUP);
+            if (down || upEv) RecAdd((int)p->vkCode, !down);
+        }
     }
     return CallNextHookEx(NULL, n, w, l);
 }
@@ -37,7 +45,13 @@ static int CountVk(int vk) {
     for (int i = 0; i < g_recN; i++) if (g_rec[i].vk == vk) return g_rec[i].n;
     return 0;
 }
-static void ResetRec(void) { g_recN = 0; }
+/* 事件序列里某个 (vk, up) 的索引；找不到返回 -1 */
+static int SeqIdx(int vk, int up) {
+    for (int i = 0; i < g_seqN; i++)
+        if (g_seq[i].vk == vk && g_seq[i].up == up) return i;
+    return -1;
+}
+static void ResetRec(void) { g_recN = 0; g_seqN = 0; }
 
 /* ---- 仿真工具 ---- */
 static void Key(int vk, BOOL down) {
@@ -64,6 +78,7 @@ static void Reset(void) {
     g_cMod = FALSE; g_dMod = FALSE; g_fMod = FALSE;
     g_pendD = FALSE; g_pendF = FALSE;
     g_actD = FALSE; g_actF = FALSE; g_btnCount = 0;
+    memset((void*)g_phys, 0, sizeof(g_phys));   /* 物理按键表也归零 */
     PostMessageW(g_mainWnd, WM_CAPS_DOWN, 0, 0);  /* → ResetEngine：清 pending/active + 停表 */
     Sink();
     ResetRec();
@@ -225,6 +240,57 @@ int main(void) {
     Pump(50);
     CHECK(CountVk(VK_LEFT) == 3, "J: 左Alt 等同 D（Caps+Alt+J = 3 次左键）");
     CHECK(CountVk(VK_LMENU) == 0, "J: Alt 本身不外泄（被屏蔽）");
+
+    /* ---- 场景K：长按 J 中途松开 Caps -> 重复必须立刻停止 ---- */
+    Reset();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Key('J', TRUE);  Pump(200);          /* 长按重复左键 */
+    int nK = CountVk(VK_LEFT);
+    Key(CLI_CAPS, FALSE); Pump(2);       /* J 还按着就松开 C：映射失效 */
+    Key('J', FALSE); Pump(2);
+    Pump(400);                           /* 再等 400ms：不应再有注入 */
+    CHECK(CountVk(VK_LEFT) == nK, "K: 松开 Caps 后重复立刻停止");
+
+    /* ---- 场景L：清卡键（SendClearStuckModifiers 的判定）----
+       卡键 = OS 逻辑按下 && 物理未按。注入的键同样会置位逻辑状态，
+       但不会更新物理表 —— 所以注入 down 之后调用清理，应补发 up。 */
+    Reset();
+    SendEvent(VK_LCONTROL, FALSE); Pump(30);     /* 注入 Ctrl down（逻辑按下） */
+    CHECK(g_phys[VK_LCONTROL] == 0, "L: 注入的键不进物理表");
+    SendClearStuckModifiers(); Pump(30);
+    CHECK(SeqIdx(VK_LCONTROL, 1) >= 0, "L: 卡住的 Ctrl 被补发抬起");
+    SendEvent(VK_LCONTROL, TRUE); Pump(10);      /* 收尾：确保系统状态干净 */
+    Pump(30);
+
+    /* 物理按住的键不能被清掉（用户真的按着 Ctrl 时清理应放过它）。
+       模拟：注入 down 后手工把"注入过"标记清零、物理表置位，
+       相当于"用户物理按住且与我们无关"的状态。 */
+    SendEvent(VK_LCONTROL, FALSE); Pump(30);
+    /* 直接清 send.c 的注入标记：g_injectedDown 在同一编译单元 */
+    for (int i = 0; i < 8; i++)
+        if (kMods[i] == VK_LCONTROL) g_injectedDown[i] = FALSE;
+    g_phys[VK_LCONTROL] = 1;                     /* 物理按住 */
+    ResetRec();
+    SendClearStuckModifiers(); Pump(30);
+    CHECK(SeqIdx(VK_LCONTROL, 1) < 0, "L: 物理按住的 Ctrl 不被清理");
+    g_phys[VK_LCONTROL] = 0;
+    SendEvent(VK_LCONTROL, TRUE); Pump(10);      /* 收尾 */
+    Pump(30);
+
+    /* ---- 场景M：原生词跳的按键序列（Ctrl 提前抬起 bug 的回归）----
+       Ctrl 必须先于方向键按下、后于方向键抬起，否则目标收到的
+       只是单格方向键。 */
+    Reset();
+    SendNativeWordJump(DIR_LEFT, FALSE);
+    int cd  = SeqIdx(VK_LCONTROL, 0);
+    int ld  = SeqIdx(VK_LEFT, 0);
+    int lu  = SeqIdx(VK_LEFT, 1);
+    int cu  = SeqIdx(VK_LCONTROL, 1);
+    CHECK(cd >= 0 && ld >= 0 && lu >= 0 && cu >= 0,
+          "M: Ctrl+方向 四段序列齐全");
+    CHECK(cd < ld && ld < lu && lu < cu,
+          "M: 顺序正确 Ctrl↓ -> ←↓ -> ←↑ -> Ctrl↑");
+    CHECK(CountVk(VK_LCONTROL) == 1, "M: Ctrl 只按一次");
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
     return fails;
