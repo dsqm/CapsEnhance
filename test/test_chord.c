@@ -2,11 +2,12 @@
    和弦引擎回归测试：直接调用底层钩子进程，注入按键序列，
    用另一个捕获钩子统计软件真实注入的方向键/Shift。
    覆盖：模式修饰（增强=Alt/D、位移=F）在"按键乱序到达"下仍正确、
-   长按重复/松手补齐、原生词跳按键序列、滚轮加速，
-   以及"增强模式 + 滚轮 = 自动滚动"（注入计数钩子观测）、
-   "Caps+Shift+滚轮 = 横向滚动"（真实 Shift 决定轴向，且钩子吞掉物理格）。
+   长按重复/松手补齐、原生词跳按键序列，
+   以及"Caps+滚轮 = 跟手快滚"、"Caps+Alt/D+滚轮 = 增强档持续滚动"
+   （都用注入计数钩子观测），"Caps+Shift+滚轮 = 横向滚动"
+   （真实 Shift 决定轴向，且钩子吞掉物理格）。
    注意：引擎只问"某个模式是否生效"，从不判断按的是哪个键 ——
-   键位表在 keymap.c，可由配置改（场景S验证"把 D 去掉只留 Alt"）。
+   键位表在 keymap.c，激活键是编译期常量（场景S验证"配置里写了也忽略"）。
    ============================================================ */
 #define WinMain __CapsEnhanceRealWinMain_Unused
 #include "cap.h"
@@ -405,12 +406,13 @@ int main(void) {
           "M: 顺序正确 Ctrl↓ -> ←↓ -> ←↑ -> Ctrl↑");
     CHECK(CountVk(VK_LCONTROL) == 1, "M: Ctrl 只按一次");
 
-    /* ---- 场景N：按住 C 时鼠标滚轮的决策（两种档位 + 吞格） ----
-       Caps + 滚轮 = 连续滚动的**手动档**（直接最快速度）；
-       Caps + 增强修饰 + 滚轮 = **增强档**（从最慢档起步、同向滚提速）。
-       两档的"最快"都是 WheelScrollMs，所以自动滚动不会超过手动速度。
-       这里同时验证：这一格被**吞掉**（返回 1），否则物理的纵向刻度会和我们的
-       注入打架；WheelScrollMs = 0 时放行（完全退回系统原生滚动）。
+    /* ---- 场景N：按住 C 时鼠标滚轮的决策（两种档位 + 吞格差异） ----
+       Caps + 滚轮 = **跟手档**：按 WheelScrollMs 的节奏跟着滚轮走，滚轮停即停；
+       Caps + 增强修饰 + 滚轮 = **增强档**：滚一下就自己一直滚。
+       两者对"物理那一格"的处理**不同**（这是本轮修正的关键）：
+         · 跟手档 = "增强"，物理格**照常放行**（只会更快，不会更慢）；
+         · 增强档 = "替换"，物理格**吞掉**（否则我们滚一段、系统再滚一格）。
+       WheelScrollMs = 0 时两种都不接管，完全退回系统原生滚动。
        注：不把生产的 LowLevelMouseProc 真正挂进钩子链 —— 万一哪天
        LLMHF_INJECTED 守卫被删掉，真挂链上会让注入事件自我放大成风暴。
        直接调用它喂"硬件事件"/"注入事件"两条路径，都能确定性地覆盖到。 */
@@ -422,18 +424,18 @@ int main(void) {
           "N: 未按 C -> 不吞、不投递");
 
     Key(CLI_CAPS, TRUE); Pump(2);
-    CHECK(Wheel(120, 0) == 1, "N: 按住 C -> 吞掉物理那一格（语义由我们接管）");
+    CHECK(Wheel(120, 0) != 1, "N: 只按 C（跟手档）-> 物理那一格照常放行");
     CHECK(TakeWheelEnh(&d, &man) && d == 120 && man == 1,
-          "N: 只按 C -> 手动档（lParam=1）");
+          "N: 只按 C -> 跟手档（lParam=1）");
     CHECK(!TakeWheelEnh(NULL, NULL), "N: 一次滚轮只投递一次请求");
 
     Wheel(-120, 0);                      /* 方向要带对 */
     CHECK(TakeWheelEnh(&d, &man) && d == -120 && man == 1,
           "N: 按住 C 下滚 -> 投递 delta=-120（方向原样带过去）");
 
-    /* 加上增强修饰键 -> 增强档（从最慢档起步） */
+    /* 加上增强修饰键 -> 增强档（滚一下就自己一直滚） */
     Key('D', TRUE); Pump(2);
-    Wheel(120, 0);
+    CHECK(Wheel(120, 0) == 1, "N: C+D+滚轮（增强档）-> 吞掉物理那一格");
     CHECK(TakeWheelEnh(&d, &man) && d == 120 && man == 0,
           "N: C+D+滚轮 -> 增强档（lParam=0）");
     Key('D', FALSE); Pump(2);
@@ -607,7 +609,7 @@ int main(void) {
     CHECK(ConfigGetAutoScrollSmooth(), "R: 平滑注入缺省开启");
 
     ActAutoScrollWheel(120, FALSE);               /* 第一滚：增强档、最慢档、向上 */
-    CHECK(ActAutoScrollActive() && !ActAutoScrollManual() &&
+    CHECK(ActAutoScrollActive() && !ActAutoScrollFollow() &&
           ActAutoScrollDir() == 1 && ActAutoScrollGear() == 1,
           "R: 增强档 -> 从最慢档启动（档 1 / 向上）");
     CHECK(ActAutoScrollTick() == base, "R: 第 1 档速度 = AutoScrollInterval");
@@ -643,7 +645,7 @@ int main(void) {
     ActAutoScrollWheel(120, FALSE);
     CHECK(ActAutoScrollGear() == gTop && ActAutoScrollTick() == tTop,
           "R: 到顶档后不再提速（档位饱和）");
-    CHECK(tTop == fast, "R: 顶档速度 == WheelScrollMs（不超过手动滚轮）");
+    CHECK(tTop == fast, "R: 顶档速度 == WheelScrollMs（不超过跟手档速度）");
     CHECK(tTop <= base, "R: 最快档不会比初始档还慢（阶梯方向正确）");
     CHECK(ActAutoScrollDelta() > 0 && ActAutoScrollDelta() < 120,
           "R: 顶档仍是小数刻度（平滑提速靠加 delta，不是加格数）");
@@ -713,7 +715,7 @@ int main(void) {
     ResetWheelRec();
     CHECK(Wheel(120, 0) == 1, "R: 增强档经钩子 -> 吞掉物理那一格");
     Pump(300);                                    /* 泵消息：驱动状态机并注入 */
-    CHECK(ActAutoScrollActive() && !ActAutoScrollManual() &&
+    CHECK(ActAutoScrollActive() && !ActAutoScrollFollow() &&
           ActAutoScrollDir() == 1 && g_wheelInj >= 1,
           "R: 增强档经钩子路由 -> 启动连续滚动");
     END_SCENE();
@@ -768,16 +770,16 @@ int main(void) {
     Key(VK_LSHIFT, FALSE); Pump(2); Sink();
     Key(VK_LSHIFT, TRUE);  Pump(2); Sink();
     ResetWheelRec();
-    CHECK(Wheel(120, 0) == 1, "T: WheelHScrollMul=0 -> 改由纵向接管（仍吞格）");
+    CHECK(Wheel(120, 0) != 1, "T: WheelHScrollMul=0 -> 改由纵向接管（跟手档放行物理格）");
     CHECK(!TakeWheelHAccel(NULL, NULL), "T: 关闭时不再投递横向请求");
     CHECK(TakeWheelEnh(NULL, NULL), "T: 关闭横向后退回纵向连续滚动");
     ConfigLoadFrom(L"bin/__absent__.ini");
 
     /* 松开 Shift 就回到纵向；Caps+Shift 之外不受影响 */
     Key(VK_LSHIFT, FALSE); Pump(2); Sink();
-    CHECK(Wheel(120, 0) == 1, "T: 松开 Shift 后退回纵向（仍吞格）");
+    CHECK(Wheel(120, 0) != 1, "T: 松开 Shift 后退回纵向（跟手档放行物理格）");
     int dS = 0, mS = 0;
-    CHECK(TakeWheelEnh(&dS, &mS) && mS == 1, "T: 松开 Shift -> 纵向手动档");
+    CHECK(TakeWheelEnh(&dS, &mS) && mS == 1, "T: 松开 Shift -> 纵向跟手档（lParam=1）");
     CHECK(!TakeWheelHAccel(NULL, NULL), "T: 松开 Shift 后不再横向");
 
     /* 真 Shift 的按住状态必须被正确清掉（否则会粘住） */
@@ -787,70 +789,82 @@ int main(void) {
 
     Key(CLI_CAPS, TRUE); Pump(2);                 /* 用 Ctrl 也一样不该横向 */
     Key(VK_LCONTROL, TRUE); Pump(2); Sink();
-    CHECK(Wheel(120, 0) == 1 && TakeWheelEnh(NULL, NULL),
+    CHECK(Wheel(120, 0) != 1 && TakeWheelEnh(NULL, NULL),
           "T: Caps+Ctrl+滚轮 仍是纵向（只有 Shift 决定轴向）");
     CHECK(!TakeWheelHAccel(NULL, NULL), "T: Caps+Ctrl+滚轮 不横向");
     Key(VK_LCONTROL, FALSE); Pump(2);
     END_SCENE();
 
-    /* ---- 场景U：Caps+滚轮（不加修饰键）= 连续滚动·手动档 ----
-       "caps+滚轮的滚动速度，单位要和自动滚动的一样"+"上限不超过 WheelScrollMul 的
-        速度" —— 于是这里是"直接以最快档连续滚"，而增强档的提速上限就是它。
-       验证：手动档从**最快档**起步（而不是最慢），松开 C 立即停，
-       以及"两档的顶速完全相同"。 */
+    /* ---- 场景U：Caps+滚轮（不加修饰键）= 跟手档 ----
+       "C+滚轮，快速滚动，临时增强滚轮滚动速度，速度使用 WheelScrollMs 的速度；
+        松开 caps 立即停止增强；滚轮停就立即停止" —— 与增强档的本质区别就是
+       这一条：**它跟着滚轮走**，滚轮一停就收工，不会自己在后台一直转。
+       验证：恒速 = WheelScrollMs、方向随滚轮掉头、WM_MODE_UP 不影响它、
+       滚轮停（空闲超时）后自己收工、松开 C 立即停，以及"增强档顶速不会
+       超过它"。 */
     Reset();
     int uFast = ConfigGetWheelScrollMs();
     int uBase = ConfigGetAutoScrollInterval();
-    CHECK(uFast > 0 && uFast < uBase, "U: 最快速度比初始速度更快（1000 < 24000）");
+    CHECK(uFast > 0 && uFast < uBase, "U: 跟手档速度比增强档初始速度快");
 
     Key(CLI_CAPS, TRUE); Pump(2);                 /* 只按 C，不按增强修饰键 */
-    ActAutoScrollWheel(120, TRUE);                /* 手动档 */
-    CHECK(ActAutoScrollActive() && ActAutoScrollManual(),
-          "U: 只按 C + 滚轮 -> 手动档启动");
-    CHECK(ActAutoScrollGear() == 6 && ActAutoScrollTick() == uFast,
-          "U: 手动档直接从最快档起步（= WheelScrollMs）");
-    CHECK(ActAutoScrollTick() < uBase, "U: 手动档比增强档起步更快");
+    ActAutoScrollWheel(120, TRUE);                /* 跟手档 */
+    CHECK(ActAutoScrollActive() && ActAutoScrollFollow(),
+          "U: 只按 C + 滚轮 -> 跟手档启动");
+    CHECK(ActAutoScrollGear() == AUTOSCROLL_SPEED_STEPS && ActAutoScrollTick() == uFast,
+          "U: 跟手档恒为最快档（= WheelScrollMs），不参与提速阶梯");
+    CHECK(ActAutoScrollTick() < uBase, "U: 跟手档比增强档起步更快");
 
-    /* 手动档没有修饰键可松开：WM_MODE_UP 不该把它打断 */
+    /* 跟手档没有修饰键可松开：WM_MODE_UP 不该把它打断 */
     ActAutoScrollStopEnh();
-    CHECK(ActAutoScrollActive(), "U: 手动档不受 WM_MODE_UP 影响（它没按修饰键）");
+    CHECK(ActAutoScrollActive(), "U: 跟手档不受 WM_MODE_UP 影响（它没按修饰键）");
 
+    /* 滚轮还在动 -> 一直按节奏滚（空闲时限是 150ms，50ms 远未到） */
     ResetWheelRec();
-    Pump(300);                                    /* 顶速 1000ms/格，至少 1 拍 */
-    CHECK(g_wheelInj >= 1 && g_wheelSum > 0, "U: 手动档确实在持续注入上滚");
+    Pump(50);
+    CHECK(g_wheelInj >= 1 && g_wheelSum > 0, "U: 跟手档立刻按 WheelScrollMs 的节奏注入");
+    CHECK(ActAutoScrollActive(), "U: 滚轮还在动 -> 不自己收工");
 
-    /* 反向 -> 立即终止并清零 */
-    ActAutoScrollWheel(-120, TRUE);
-    CHECK(!ActAutoScrollActive() && ActAutoScrollGear() == 0,
-          "U: 手动档反向滚 -> 立即终止并清零");
+    /* 滚轮停了：空闲超时 -> 自己收工（这正是"不再一直滚"的保证） */
+    Pump(AUTOSCROLL_FOLLOW_IDLE_MS + 300);
+    CHECK(!ActAutoScrollActive(), "U: 滚轮停 -> 空闲超时后自己收工（不残留持续滚动）");
 
-    /* 增强档的顶速与手动档完全相同（"上限不超过手动速度"） */
+    /* 方向随滚轮掉头（跟手），不需要先终止 */
+    ActAutoScrollWheel(120, TRUE); Pump(20);
+    CHECK(ActAutoScrollDir() == 1, "U: 跟手档向上");
+    ActAutoScrollWheel(-120, TRUE); Pump(20);
+    CHECK(ActAutoScrollActive() && ActAutoScrollDir() == -1,
+          "U: 跟手档反向 -> 方向跟着掉头（仍在滚，而不是像增强档那样打断）");
+    Pump(AUTOSCROLL_FOLLOW_IDLE_MS + 300);        /* 收工 */
+
+    /* 增强档的顶速与跟手档完全相同（"上限不超过手动速度"） */
     KeyAlt(VK_LMENU, TRUE); Pump(2);
     ActAutoScrollWheel(120, FALSE);
-    for (int i = 0; i < 10; i++) ActAutoScrollWheel(120, FALSE);
-    CHECK(ActAutoScrollTick() == uFast && !ActAutoScrollManual(),
-          "U: 增强档顶速 == 手动档速度（上限就是它，不会更快）");
+    for (int i = 0; i < AUTOSCROLL_SPEED_STEPS; i++) ActAutoScrollWheel(120, FALSE);
+    CHECK(ActAutoScrollTick() == uFast && !ActAutoScrollFollow(),
+          "U: 增强档顶速 == 跟手档速度（上限就是它，不会更快）");
     KeyAlt(VK_LMENU, FALSE); Pump(2); Sink();
     CHECK(!ActAutoScrollActive(), "U: 增强档松开修饰键 -> 终止");
 
-    /* 切档：滚动中途按下/松开增强修饰键要重新起步，不是接着加速 */
+    /* 换档：滚动途中按下/松开增强修饰键要重新起步，不是接着加速 */
     KeyAlt(VK_LMENU, TRUE); Pump(2);
     ActAutoScrollWheel(120, FALSE);
-    for (int i = 0; i < 10; i++) ActAutoScrollWheel(120, FALSE);   /* 爬到顶档 */
+    for (int i = 0; i < AUTOSCROLL_SPEED_STEPS; i++) ActAutoScrollWheel(120, FALSE);
     KeyAlt(VK_LMENU, FALSE); Pump(2); Sink();
-    ActAutoScrollWheel(120, TRUE);                /* 切成手动档 -> 重新起步到最快 */
-    CHECK(ActAutoScrollActive() && ActAutoScrollManual() && ActAutoScrollGear() == 6,
-          "U: 滚动途中松开修饰键 -> 切手动档、重新起步到最快档");
-    ActAutoScrollWheel(120, TRUE);                /* 已是手动档：继续同档，不重复起步 */
-    CHECK(ActAutoScrollGear() == 6, "U: 手动档到顶后不再提速（饱和）");
+    ActAutoScrollWheel(120, TRUE);                /* 切成跟手档 -> 重新起步到最快 */
+    CHECK(ActAutoScrollActive() && ActAutoScrollFollow() &&
+          ActAutoScrollGear() == AUTOSCROLL_SPEED_STEPS,
+          "U: 滚动途中松开修饰键 -> 切跟手档、重新起步到最快档");
+    ActAutoScrollWheel(120, TRUE);                /* 同向再滚：跟手档恒速，不提速 */
+    CHECK(ActAutoScrollGear() == AUTOSCROLL_SPEED_STEPS,
+          "U: 跟手档恒速：同向再滚也不提速");
     KeyAlt(VK_LMENU, TRUE); Pump(2);
-    ActAutoScrollWheel(120, FALSE);               /* 切成增强档 -> 回到最慢档 */
-    CHECK(ActAutoScrollActive() && !ActAutoScrollManual() && ActAutoScrollGear() == 1,
-          "U: 切回增强档 -> 从最慢档重新起步（不残留速度）");
+    ActAutoScrollWheel(120, FALSE);               /* 切成增强档 -> 回到第 1 档 */
+    CHECK(ActAutoScrollActive() && !ActAutoScrollFollow() && ActAutoScrollGear() == 1,
+          "U: 切回增强档 -> 从第 1 档重新起步（不残留速度）");
 
     END_SCENE();                                  /* 松开 C -> 终止 */
-    CHECK(!ActAutoScrollActive(), "U: 手动档松开 C -> 立即终止");
-
+    CHECK(!ActAutoScrollActive(), "U: 跟手档松开 C -> 立即终止");
 
     /* ---- 场景S：EnhanceKeys / ShiftKeys 已**不再读配置** ----
        "配置项中，去掉 EnhanceKeys = Alt, D 与 ShiftKeys = F，没必要读取配置"

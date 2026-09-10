@@ -191,15 +191,22 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 /* ================= 鼠标钩子：按住 C 时的滚轮 =================
-   三种语义（按 Shift 优先级从高到低判定），**都由本钩子吞掉物理格**（返回 1），
-   完全由我们注入 —— 物理滚轮给的只是"纵向一格"，放行就会和我们的注入打架：
-     · Caps+Shift（真实 Shift）：**横向滚动** —— WM_WHEEL_HACCEL（换轴向，
-       物理的纵向格更不能放行，否则横纵混滚）；
-     · Caps + 增强修饰（默认 Alt/D）：**连续滚动·增强档** —— 起点在
-       AutoScrollInterval，同向滚逐档提速，上限 WheelScrollMs；
-     · Caps（无修饰）：**连续滚动·手动档** —— 直接以 WheelScrollMs 连续滚。
+   三种语义，按 Shift > 增强修饰 > 无修饰 的优先级判定。注意**纵向两种的
+   处理方式不同**（这是本轮修正的关键）：
+
+     · Caps+Shift（真实 Shift）：**横向滚动** —— 换轴向，物理格**必须吞掉**
+       （放行就是"横一下、纵一下"的混滚）；
+     · Caps + 增强修饰（默认 Alt/D）：**增强档** —— 滚一下就自己一直滚
+       （从 AutoScrollInterval 起步、逐档提速到 WheelScrollMs）。
+       物理格**吞掉**：语义完全由我们接管，再放行一格就是"我们滚一段 +
+       系统滚一格"地打架；
+     · Caps（无修饰）：**跟手档** —— 按 WheelScrollMs 的节奏连续滚，
+       跟着滚轮走（滚轮停即停）。物理格**照常放行**：这是"增强"而不是
+       "替换"，所以它只会比系统更快、不会更慢；吞掉它反而要我们自己补发
+       那一格，白白多一次注入。
+
+   WheelScrollMs = 0 时纵向两种都关闭，物理格照常放行（完全退回系统原生）。
    为什么 Shift 排最前：它显式指定了"轴向"，比"滚多快"更具体。
-   WheelScrollMs = 0 时纵向那两档关闭，物理格照常放行（退回系统原生滚动）。
 
    为什么用低级钩子而不是 Raw Input：**必须能认出"这个滚轮事件是我们自己
    注入的"**。Raw Input（RIDEV_INPUTSINK）拿不到"注入"标记，放大后的滚轮会
@@ -235,19 +242,18 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
                         return 1;
                     }
                 }
-                /* 纵向：Caps + 滚轮（也可再加增强修饰键）= 连续滚动。
-                   分两档：
-                     · 按住增强修饰键（默认 Alt/D）-> 从最慢档起步、同向滚提速；
-                     · 只按住 Caps               -> 直接以最快档（手动速度）滚。
-                   两者的"最快"是同一个值（WheelScrollMs），所以手动速度就是上限。
-                   这一格也**吞掉**（返回 1）：语义已完全由我们接管，再放行一格
-                   原生纵向滚动就会"我们滚一段 + 系统滚一格"地打架。
-                   WheelScrollMs = 0（关闭）时放行，完全退回系统原生行为。 */
+                /* 纵向：Caps + 滚轮（可再加增强修饰键）。
+                   增强档（按了 Alt/D）吞掉物理格 —— 它接管到底；
+                   跟手档（只按 Caps）放行物理格，另起一条按 WheelScrollMs
+                   节奏的流派去"叠"在系统滚动之上（所以只会更快）。
+                   lParam = 1 表示跟手档，0 表示增强档。
+                   WheelScrollMs = 0（关闭）时完全不接管，退回系统原生。 */
                 if (ConfigGetWheelScrollMs() > 0) {
-                    BOOL manual = !ModeDown(MODE_ENHANCE);
+                    BOOL follow = !ModeDown(MODE_ENHANCE);
                     PostMessageW(g_mainWnd, WM_WHEEL_ENH,
-                                 (WPARAM)delta, (LPARAM)(manual ? 1 : 0));
-                    return 1;
+                                 (WPARAM)delta, (LPARAM)(follow ? 1 : 0));
+                    if (!follow) return 1;      /* 增强档：吞掉物理格 */
+                    /* 跟手档：不吞（落到函数末尾的 CallNextHookEx 放行） */
                 }
             }
         }

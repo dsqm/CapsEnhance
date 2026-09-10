@@ -179,18 +179,20 @@ int main(void) {
     EXPECT(ConfigGetWheelScrollMs() == 60000, "CFG: WheelScrollMs 超过上限钳到 60000");
     WriteIni("[General]\r\nWheelScrollMs = abc\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMs() == 1000, "CFG: WheelScrollMs 非法值回落默认 1000");
+    EXPECT(ConfigGetWheelScrollMs() == 100, "CFG: WheelScrollMs 非法值回落默认 100");
     WriteIni("[Other]\r\nWheelScrollMs = 9\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMs() == 1000, "CFG: 非 General 段的 WheelScrollMs 不生效");
+    EXPECT(ConfigGetWheelScrollMs() == 100, "CFG: 非 General 段的 WheelScrollMs 不生效");
     WriteIni("[General]\r\n\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMs() == 1000, "CFG: WheelScrollMs 缺省为 1000");
+    /* 缺省 100 = 10 格/秒 = 30 行/秒（"快速下翻"）：跟手档就按这个节奏滚。
+       历史值 1000（1 格/秒）比人正常滚轮还慢，"按住 Caps 增强"反而更慢。 */
+    EXPECT(ConfigGetWheelScrollMs() == 100, "CFG: WheelScrollMs 缺省为 100（跟手档速度）");
     /* 旧键名 WheelScrollMul 必须被当作"不认识"（语义不同，不能硬换算）：
        它既不影响新键，也不该被解析成任何值 —— 回落到新键的缺省。 */
     WriteIni("[General]\r\nWheelScrollMul = 16\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMs() == 1000, "CFG: 旧键 WheelScrollMul 被忽略（不参与解析）");
+    EXPECT(ConfigGetWheelScrollMs() == 100, "CFG: 旧键 WheelScrollMul 被忽略（不参与解析）");
 
     /* 自动滚动基础节奏 AutoScrollInterval（ms），钳制 20..1000 */
     WriteIni("[General]\r\nAutoScrollInterval = 250\r\n");
@@ -282,6 +284,7 @@ int main(void) {
         EXPECT(ConfigGetLogMaxKB() == 2048 && ConfigGetMaxArrowSteps() == 32,
                "UPG: 缺失键补齐默认值");
         EXPECT(ConfigGetAutoScrollInterval() == 24000, "UPG: 补齐 AutoScrollInterval 默认值");
+        EXPECT(ConfigGetWheelScrollMs() == 100, "UPG: 补齐 WheelScrollMs 默认值");
         KeyMapInit();
         EXPECT(ModeKeyCount(MODE_ENHANCE) == 2 && ModeKeyCount(MODE_SHIFT) == 1,
                "UPG: 激活键是编译期常量（Alt+D / F），与配置文件无关");
@@ -294,11 +297,10 @@ int main(void) {
                 if (strstr(line, "LogMaxKB = 2048")) hasLog = 1;
                 if (strstr(line, "MaxArrowSteps = 32")) hasSteps = 1;
                 if (strstr(line, "OverStepMode = 0")) hasMode = 1;
-                if (strstr(line, "WheelScrollMs = 1000")) hasWheel = 1;
+                if (strstr(line, "WheelScrollMs = 100")) hasWheel = 1;
                 if (strstr(line, "AutoScrollInterval = 24000")) hasInterval = 1;
                 if (strstr(line, "AutoScrollSmooth = 1")) hasSmooth = 1;
                 if (strstr(line, "WheelHScrollMul = 1")) hasHMul = 1;
-                if (strstr(line, "WheelScrollMs = 1000")) hasWheel = 1;
             }
             fclose(fc);
         }
@@ -444,8 +446,7 @@ int main(void) {
     EXPECT(TemplateHas("LogMaxKB = 2048"),   "CFG: 模板含 LogMaxKB 默认值");
     EXPECT(TemplateHas("MaxArrowSteps = 32"),"CFG: 模板含 MaxArrowSteps 默认值");
     EXPECT(TemplateHas("OverStepMode = 0"),  "CFG: 模板含 OverStepMode 默认值");
-    EXPECT(TemplateHas("WheelScrollMs = 1000"), "CFG: 模板含 WheelScrollMs 默认值");
-    EXPECT(TemplateHas("WheelScrollMs = 1000"), "CFG: 模板含滚轮速度（毫秒/格）项");
+    EXPECT(TemplateHas("WheelScrollMs = 100"), "CFG: 模板含 WheelScrollMs 默认值");
     EXPECT(TemplateHas("AutoScrollInterval = 24000"), "CFG: 模板含 AutoScrollInterval 默认值");
     EXPECT(TemplateHas("AutoScrollSmooth = 1"),    "CFG: 模板含 AutoScrollSmooth 默认值");
     EXPECT(TemplateHas("WheelHScrollMul = 1"),     "CFG: 模板含 WheelHScrollMul 默认值");

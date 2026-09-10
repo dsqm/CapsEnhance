@@ -537,8 +537,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_WHEEL_ENH:
         /* Caps(+增强修饰) 下的滚轮：驱动连续滚动（act.c 的连续滚动通道）。
-           lParam = 1 表示"手动档"（只按 Caps，直接最快速度）。这里同样只投递，
-           主线程绝不做注入。 */
+           lParam = 1 表示"跟手档"（只按 Caps，按 WheelScrollMs 跟着滚轮走），
+           0 表示"增强档"（滚一下就自己一直滚）。这里同样只投递，主线程绝不注入。 */
         ActAutoScrollWheel((int)wp, (BOOL)(lp != 0));
         return 0;
     case WM_WHEEL_HACCEL:
@@ -548,8 +548,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_MODE_UP:
         /* 某个修饰模式的激活键全部抬起了（钩子投递）：增强模式一失效，
-           进行中的自动滚动立刻停 —— 这就是"松开 Alt 立即终止"的快速路径
-           （工作线程每拍也会自查一遍，两条路互为兜底）。 */
+           进行中的增强档连续滚动立刻停 —— 这就是"松开 Alt 立即终止"的快速路径
+           （工作线程每拍也会自查一遍，两条路互为兜底）。
+           只对增强档生效：跟手档本来就没按修饰键，不该被它打断。 */
         if ((int)wp == MODE_ENHANCE) ActAutoScrollStopEnh();
         return 0;
     /* ---- 托盘 ---- */
@@ -661,7 +662,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
             AppendMenuW(g_menu, MF_STRING, IDM_EXIT, L"退出");
         }
         /* 鼠标钩子（滚轮加速）装不上不影响主映射，但要让人看见，别静默降级 */
-        TrayHint(HookMouseAvailable() ? L"正在映射" : L"正在映射（滚轮加速不可用）");
+        TrayHint(HookMouseAvailable() ? L"正在映射" : L"正在映射（滚轮功能不可用）");
     }
 
     MSG msg;

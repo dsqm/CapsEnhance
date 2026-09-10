@@ -13,7 +13,7 @@
 #define WM_TOGGLE_TRAY (WM_APP + 5) /* 托盘自定义回调消息 */
 #define WM_ALREADY_RUNNING (WM_APP + 7) /* 已有实例在跑：新实例通知它提示后退出 */
 #define WM_PROBE       (WM_APP + 6) /* 探测焦点控件（钩子线程投递） */
-#define WM_WHEEL_ENH   (WM_APP + 9) /* Caps(+修饰)+滚轮：wParam=delta，lParam=1 表示"手动档" */
+#define WM_WHEEL_ENH   (WM_APP + 9) /* Caps(+修饰)+滚轮：wParam=delta，lParam=1 表示"跟手档" */
 #define WM_MODE_UP     (WM_APP + 10)/* 某修饰模式的激活键全部抬起：wParam=mode */
 #define WM_WHEEL_HACCEL (WM_APP + 11)/* 横向滚动（Caps+Shift+滚轮）：wParam=delta，lParam=倍数。
                                        方向同浏览器：滚轮向上 = 向左。 */
@@ -142,31 +142,32 @@ void ActWheelPostH(int delta, int n);    /* 投递一次横向滚动（Caps+Shif
 void ActWheelClear(void);                /* 丢弃未补发的滚轮请求（松开 C）  */
 
 /* ================= 连续滚动通道（act.c：独立状态 + 独立线程） =================
-   **Caps + 滚轮** 与 **Caps + 增强修饰键 + 滚轮** 共用这一条通道，都是"滚一下
-   就持续滚，直到反向或松手"，只有起始速度不同：
+   **Caps + 滚轮** 与 **Caps + 增强修饰键 + 滚轮** 共用这一条通道，但**持续方式
+   完全不同** —— 这是两者的本质区别：
 
-     · manual = TRUE （只有 Caps）：
-         直接以**最快档**（WheelScrollMs）连续滚动 —— 也就是"手动速度"。
-     · manual = FALSE（Caps + 增强修饰，默认 Alt/D）：
-         从**最慢档**（AutoScrollInterval）起步，同向继续滚逐档提速，
-         **上限 = WheelScrollMs**（不会比手动滚轮更快）。
+     · 跟手档（follow = TRUE，只有 Caps）：
+         速度恒为 WheelScrollMs（"快速下翻"的节奏），跟着滚轮走 ——
+         滚轮还在滚就一直按这个节奏滚，**滚轮一停（约 0.15s 没有新的滚动）
+         立即停**，不会自己在后台一直转。松开 C 同样立即停。
+     · 增强档（follow = FALSE，Caps + 增强修饰，默认 Alt/D）：
+         **滚一下就一直滚**（真正的持续滚动，与滚轮是否还在动无关）：
+         从 AutoScrollInterval（阅读速度）起步，同向继续滚逐档提速，
+         **上限 = WheelScrollMs**（与跟手档同一个数，所以永远不会比它更快）；
+         反向滚 -> 立即终止并清零速度；松开 C 或修饰键 -> 立即终止。
 
-   共同点：反向滚 -> 立即终止并把速度清零；松开 C -> 立即终止；
-   增强档还会在修饰键全抬起时终止。
-
-   速度一律用"每格多少毫秒"表达（与两个配置项同单位），渐进的提速靠缩短间隔、
+   速度一律用"每格多少毫秒"表达（与两个配置项同单位），提速靠缩短间隔、
    不是"每拍补一撮"，所以不会抖。默认还开启 **平滑注入**：把一格拆成若干
    "小数刻度"、提高发数（见 act.c），手感接近触控板。
    主线程只投递"发生了一次滚轮"，状态机与注入都在本通道内，主线程不阻塞。
-   启用条件：`WheelScrollMs > 0`（= 0 表示关闭纵向滚轮增强）。 */
-void ActAutoScrollWheel(int delta, BOOL manual);  /* 主线程：Caps(+修饰) 下的一次滚轮 */
+   启用条件：`WheelScrollMs > 0`（= 0 表示关闭纵向滚轮增强，滚轮完全交还系统）。 */
+void ActAutoScrollWheel(int delta, BOOL follow);  /* 主线程：Caps(+修饰) 下的一次滚轮 */
 void ActAutoScrollStop(void);         /* 立即终止（松手 / 复位 / 退出） */
-void ActAutoScrollStopEnh(void);      /* 只在"增强档"时终止（WM_MODE_UP 用，别打扰手动档） */
+void ActAutoScrollStopEnh(void);      /* 只在"增强档"时终止（WM_MODE_UP 用，别打扰跟手档） */
 BOOL ActAutoScrollActive(void);       /* 单测用 */
-BOOL ActAutoScrollManual(void);       /* 单测用：当前是手动档（等于最快速度）吗 */
+BOOL ActAutoScrollFollow(void);       /* 单测用：当前是跟手档（跟着滚轮走）吗 */
 int  ActAutoScrollGear(void);         /* 单测用：当前速度档（1..总档数，未启动为 0） */
 int  ActAutoScrollDir(void);          /* 单测用：+1 上滚 / -1 下滚 / 0 未启动 */
-int  ActAutoScrollFastMs(void);       /* 单测用：最快档的毫秒/格（= WheelScrollMs，0=未启用） */
+int  ActAutoScrollFastMs(void);       /* 单测用：跟手档速度 / 增强档上限（= WheelScrollMs，0=未启用） */
 int  ActAutoScrollTick(void);         /* 单测用：当前速度（每格多少毫秒） */
 int  ActAutoScrollBeat(void);         /* 单测用：本拍实际间隔(ms) */
 int  ActAutoScrollDelta(void);        /* 单测用：本拍增量（带符号）；平滑模式 < 120（小数刻度） */
