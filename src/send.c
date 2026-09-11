@@ -13,7 +13,7 @@
       只认第一个键（这也是 SendArrows 一直逐条发的原因）。
 
    3) 组合键里修饰键必须真的按住：Shift/Ctrl 全程在目标键之前按下、之后抬起。
-      之前兜底词跳把 Ctrl↓ Ctrl↑ 连续发出，目标收到的方向键 ctrl=0，
+      之前兜底按词跳转把 Ctrl↓ Ctrl↑ 连续发出，目标收到的方向键 ctrl=0，
       于是退化成"单格方向键"——这正是 caps+N/M 在多个程序里"只挪一格"的原因。
 */
 
@@ -66,7 +66,7 @@ static void SendEvent(int vk, BOOL up) {
     if (up)                i.ki.dwFlags |= KEYEVENTF_KEYUP;
     /* 返回值必须看：目标窗口的完整性级别高于本进程时（例如对方以管理员
        运行而本程序没有），UIPI 会把整批注入拒掉、SendInput 返回 0。此前
-       丢弃返回值，于是现象是"词跳完全没反应"而日志干净无事 —— 无法诊断。
+       丢弃返回值，于是现象是"按词跳转完全没反应"而日志干净无事 —— 无法诊断。
        只在记录模式写日志：常规模式不打扰用户，也不改变任何行为。 */
     if (SendInput(1, &i, sizeof(INPUT)) == 0 && g_recording)
         CapLog("  !! SendInput 被拒 vk=0x%02X up=%d err=%lu",
@@ -117,7 +117,7 @@ BOOL SendArrowsConflicts(int act) {
 
 /* 逐方向键移动：发送 n 个左/右箭头（可带 Shift 位移）。
    每个箭头单独发送并微小间隔，避免大批量 SendInput 在部分程序中只认第一个键；
-   Shift 在整个跳词期间持续按住以维持选区。 */
+   Shift 在整个按词跳转期间持续按住以维持选区。 */
 #define MAX_ARROW_STEPS 256
 /* 真正的逐格发送：不做任何超限判定，n 步就是 n 步。 */
 static void ArrowsEmit(int dir, int n, BOOL shift) {
@@ -140,14 +140,14 @@ static void ArrowsEmit(int dir, int n, BOOL shift) {
 /* 补正专用：即使步数达到 MaxArrowSteps 也逐格走完，**不**改道。
    补正的步数是"目标 - 实测落点"算出来的，它不是用户要跳的距离；若再判一次
    超限就又会改道一次，而改道之后没有任何人再回读落点 —— 补正白做、光标又
-   落回段中间（这正是 QQ 场景里"跳词跳到段中间"的根因之一）。 */
+   落回段中间（这正是 QQ 场景里"按词跳转落到段中间"的根因之一）。 */
 void SendArrowsStrict(int dir, int n, BOOL shift) {
     ArrowsEmit(dir, n, shift);
 }
 
 int SendArrows(int dir, int n, BOOL shift) {
     /* 发送处统一判定：本次要发的步数达到 MaxArrowSteps 就改为
-         OverStepMode=1 -> 发原生 Ctrl+方向（目标程序自己的词跳，瞬时）
+         OverStepMode=1 -> 发原生 Ctrl+方向（目标程序自己的按词跳转，瞬时）
          OverStepMode=0 -> 只发一个方向键（跳一格即停）
        放在这里而不是调用方，是为了让所有调用路径都受同一约束；
        MaxArrowSteps=0 表示不限制（硬上限仍是 256）。 */
@@ -244,7 +244,7 @@ void SendWheelHNotches(int delta, int n) {
     SendWheelAxis((delta > 0) ? -WHEEL_STD_DELTA : WHEEL_STD_DELTA, n, TRUE);
 }
 
-/* 兜底：文字读取失败时，用系统原生 Ctrl(+Shift)+方向键做词跳。
+/* 兜底：文字读取失败时，用系统原生 Ctrl(+Shift)+方向键做按词跳转。
    Ctrl 必须在方向键之前按下、之后抬起，否则目标收到的只是单格方向键。 */
 void SendNativeWordJump(int dir, BOOL shift) {
     int vk = (dir == DIR_LEFT) ? VK_LEFT : VK_RIGHT;

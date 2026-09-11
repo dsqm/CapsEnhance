@@ -64,7 +64,7 @@ static const IID kIID_IAccessibleText =
     {0x24FD2FFB, 0x3AAD, 0x4a08, {0x83,0x35,0xA3,0xAD,0x89,0xC0,0xFB,0x4B}};
 
 
-/* ---- 一次词跳的同步 IPC 预算 ----
+/* ---- 一次按词跳转的同步 IPC 预算 ----
    NavJump 会串行发多条跨进程消息（Edit 通道 3 条、Sci 通道最多 6 条），每条
    各自 300ms 超时。目标窗口卡住时这些超时是**相加**的：最坏能叠到 1.8s，
    用户看到的是"按一下键整个输入粘住"。
@@ -95,7 +95,7 @@ static DWORD NavIpcTimeout(void) {
    词边界算法只能在"长度 1 的文本"上算，自然跳不动。 */
 static BOOL SendMsg(HWND hwnd, UINT msg, WPARAM w, LPARAM l, LONGLONG* out) {
     DWORD ms = NavIpcTimeout();
-    if (ms == 0) return FALSE;      /* 本次词跳的预算已用完 */
+    if (ms == 0) return FALSE;      /* 本次按词跳转的预算已用完 */
     DWORD_PTR r = 0;
     if (!SendMessageTimeoutW(hwnd, msg, w, l,
                              SMTO_ABORTIFHUNG | SMTO_BLOCK, ms, &r))
@@ -223,7 +223,7 @@ static BOOL SciGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut,
     GetWindowThreadProcessId(hwnd, &pid);
     if (!pid) return FALSE;
     /* 只要"在对方进程开内存 + 读回来"两项权限；权限不够就整条通道放弃。
-       记录模式下写明对谁申请了什么 —— 排查"权限不足导致词跳降级"时一眼可见。 */
+       记录模式下写明对谁申请了什么 —— 排查"权限不足导致按词跳转降级"时一眼可见。 */
     HANDLE hp = OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ, FALSE, pid);
     if (!hp) {
         if (g_recording)
@@ -282,12 +282,12 @@ done:
 }
 
 /* 代理对判定：补充平面字符用两个 UTF-16 code unit 表示（高+低代理），
-   必须当作"一个字符"整体推进，否则会把它们拆散导致跳词错乱。 */
+   必须当作"一个字符"整体推进，否则会把它们拆散导致按词跳转错乱。 */
 static BOOL IsHighSurrogateW(WCHAR c) { return c >= 0xD800 && c <= 0xDBFF; }
 static BOOL IsLowSurrogateW(WCHAR c)  { return c >= 0xDC00 && c <= 0xDFFF; }
 
-/* 字符类别：决定跳词边界。连续同类字符串视为"一个词"，
-   跳词就停在这些词(与词/分隔符)的边界处。
+/* 字符类别：决定按词跳转边界。连续同类字符串视为"一个词"，
+   按词跳转就停在这些词(与词/分隔符)的边界处。
    英文与数字同组（21M 是一个词）；谚文（韩文）自成一组；
    采用"反向"判定：先把 字母数字/谚文/符号 归类，
    其余兜底一律算 CH_OTHER（汉字、其他语言字符、生僻字、emoji 等）。 */
@@ -340,12 +340,12 @@ static int CharStartBefore(const WCHAR* s, int len, int i) {
     return i - 1;
 }
 
-/* 词跳核心：返回跳转后光标应处的 code-unit 位置，同时写出"需发送的箭头次数"。
+/* 按词跳转核心：返回跳转后光标应处的 code-unit 位置，同时写出"需发送的箭头次数"。
    左右箭头在编辑框内按"字符"（code point）移动，因此步数(箭头数)按字符单位计数，
    代理对整体只计 1 步；目标 code-unit 位置供经典 Edit 直接置光标(瞬跳)。
    步数由 target 与 caret 的字符数差得到，与逐箭头移动完全等价。
 
-   行边界规则：词跳默认不跨行（\r/\n 是分隔符，但分隔符串只在行内跨）。
+   行边界规则：按词跳转默认不跨行（\r/\n 是分隔符，但分隔符串只在行内跨）。
    只有出发点已经在行尾时，右跳才跨过换行落到下一行行首词；
    只有出发点已经在行首时，左跳才跨过换行落到上一行行尾词。 */
 static int WordJumpTarget(const WCHAR* s, int len, int caret, int dir, int* steps) {
@@ -413,7 +413,7 @@ static int WordJumpTarget(const WCHAR* s, int len, int caret, int dir, int* step
     return i;
 }
 
-/* 非 static 仅供词跳单元测试（test/test_nav.c）直接调用。
+/* 非 static 仅供按词跳转单元测试（test/test_nav.c）直接调用。
    声明在 cap.h 里（不要在每个测试文件里各自 extern —— 签名一改就会漏改一处，
    而漏改的后果是链接期才发现，或者更糟：隐式声明按 int 返回值调用）。 */
 int ComputeSteps(const WCHAR* s, int len, int caret, int dir) {
@@ -444,7 +444,7 @@ static HWND GetFocusControl(void) {
 
 /* 是否"经典 Edit 协议"控件（可靠支持 WM_GETTEXT + EM_GETSEL）。
    白名单外不放行：Chromium 系窗口对 WM_GETTEXT 回的是标题、EM_GETSEL 是
-   垃圾值，混进来会把跳词带偏。EmEditor 的 EmEditorView 实测完美支持这套
+   垃圾值，混进来会把按词跳转带偏。EmEditor 的 EmEditorView 实测完美支持这套
    协议（文本/光标都是 UTF-16 下标），只是类名不在经典名单里。 */
 static BOOL IsClassicEdit(HWND hwnd) {
     WCHAR c[96];
@@ -480,7 +480,7 @@ static BOOL FastGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut
         return FALSE;
     }
     /* EmEditor 等控件的 WM_GETTEXT 返回计数把结尾 NUL 也算进去（got=长度+1）。
-       多出的 '\0' 会被当成一个分隔符参与跳词，算出越界目标（tgt=文档长+1），
+       多出的 '\0' 会被当成一个分隔符参与按词跳转，算出越界目标（tgt=文档长+1），
        必须剥掉。 */
     while (got > 0 && buf[got - 1] == L'\0') got--;
     if (got <= 0) { free(buf); return FALSE; }
@@ -538,7 +538,7 @@ static IUIAutomationElement* FindDocElement(IUIAutomation* ua, IUIAutomationElem
     /* 只释放本函数**自己拿到**的引用（chain[1..n-1]，来自 GetParentElement）。
        chain[0] 是调用方传进来的 start —— 它不属于本函数，调用方随后还会
        Release 一次，这里再释放就是**双重释放**。
-       实测后果（2026-09-11）：WPS 不提供 UIA 文本，每次词跳都走"找不到
+       实测后果（2026-09-11）：WPS 不提供 UIA 文本，每次按词跳转都走"找不到
        doc element"的失败路径 → 每次都对调用方的 ef/eh 多释放一次 →
        refcount 归零、对象被销毁 → 调用方的 Release 读已释放内存的 vtable
        指针 → c0000005（WER 定位在 UiaGetTextCaret 的 Release 调用点）。
@@ -550,7 +550,7 @@ static IUIAutomationElement* FindDocElement(IUIAutomation* ua, IUIAutomationElem
 
 /* ================= COM / UIA 资源缓存 =================
    原来每个 UIA 函数都成对 CoInitialize/CoUninitialize，并且每次
-   CoCreateInstance(CLSID_CUIAutomation)；而一次词跳最多走两遍（读取 +
+   CoCreateInstance(CLSID_CUIAutomation)；而一次按词跳转最多走两遍（读取 +
    置位后回读校验）。CUIAutomation 的创建要拉起 UIA 服务与缓存层，开销在
    数十毫秒量级 —— 全落在大键路径上，还叠加了主线程阻塞。
 
@@ -684,7 +684,7 @@ static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut)
     /* 锚定候选：优先 UIA 焦点元素（GetFocusedElement 能命中 Chromium/WinUI 的
        真正文本框），取不到 TextPattern 时再回退 ElementFromHandle(hwnd)。
        曾改为 ElementFromHandle 直取顶层窗口，但 Chromium(Chrome_WidgetWin_1)
-       顶层窗口本身无 TextPattern，向上也找不到 → 造成 QQ/Edge 跳词回归。
+       顶层窗口本身无 TextPattern，向上也找不到 → 造成 QQ/Edge 按词跳转回归。
        现在补第三级：句柄元素沿祖先链找不到时，往子树里找真正的文本框。 */
     IUIAutomationElement *owner = NULL, *ef = NULL, *eh = NULL;
     hr = IUIAutomation_GetFocusedElement(ua, &ef);
@@ -764,7 +764,7 @@ static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut)
             if (alen < 2) {
                 if (g_recording)
                     CapLog("  UIA doc text len=%d -> a11y 占位。VSCode 请在 settings.json "
-                           "设 \"editor.accessibilitySupport\": \"on\" 后即可用词跳引擎", alen);
+                           "设 \"editor.accessibilitySupport\": \"on\" 后即可用按词跳转引擎", alen);
                 goto done;
             }
             if (idx > alen) idx = alen;
@@ -1055,7 +1055,7 @@ static int NavJumpInner(int dir, BOOL shift) {
     if (focus && ConfigIsNativeWordJump(focus)) {
         SendNativeWordJump(dir, shift);
         if (g_recording)
-            CapLog("  -> 进程命中原生词跳名单，直接 Ctrl+arrow");
+            CapLog("  -> 进程命中原生按词跳转名单，直接 Ctrl+arrow");
         return -1;
     }
     int selEnd = caret;          /* 选区另一端（Edit 的 HIWORD / WPS 的 Selection.End），无选区=caret */
@@ -1243,7 +1243,7 @@ static int NavJumpInner(int dir, BOOL shift) {
        程序自己的词切分 == 我们算的跳法"，而中文里两者经常不一致 —— 实测
        QQ(Chromium) 的 Ctrl+方向按 ICU 词典切、1~2 字一步，我们按"连续汉字
        段"整段算，于是期望 tgt=82 却停在 92、再按一次停在 90：光标落在整段
-       中间，用户看到的就是"跳词跳到段中间、左右不对称"。
+       中间，用户看到的就是"按词跳转落到段中间、左右不对称"。
        只有 OverStepMode=0 的"只发一格"不补正 —— 那是用户明确要的"跳一格
        即停"，补正一叠加就成了"跳过去又跳回来"。 */
     int sendMode = ARROW_SEND_STEPS;
@@ -1327,7 +1327,7 @@ static int NavJumpInner(int dir, BOOL shift) {
 
 /* ================= 诊断：探测当前焦点控件 =================
    把「前台窗口 / 焦点控件 / 能否读文本 / 光标 / 是否支持 UIA」写日志并弹窗，
-   用于排查跳词为何不生效。 */
+   用于排查按词跳转为何不生效。 */
 /* 安全地向 rep 追加格式化文本；超容量即截断并不再追加，避免越界。 */
 static void RepAppend(WCHAR* rep, int cap, int* o, const WCHAR* fmt, ...) {
     if (!rep || !o || *o < 0 || *o >= cap || cap <= 0) return;
@@ -1378,7 +1378,7 @@ void NavBaseInfo(void) {
 
     /* UIA 自动化是否可用 */
     {
-        /* 顺带让本线程的 UIA 实例在启动时就建好，后续跳词直接用缓存 */
+        /* 顺带让本线程的 UIA 实例在启动时就建好，后续按词跳转直接用缓存 */
         BOOL uiaOK = (UiaGet() != NULL);
         RepAppend(b, 1700, &o, L"UIA 自动化可用 = %s\n", uiaOK ? L"是" : L"否");
     }

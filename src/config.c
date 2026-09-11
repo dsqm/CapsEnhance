@@ -124,8 +124,8 @@ static WCHAR g_names[CFG_MAX_ENTRIES][CFG_NAME_MAX];
 static int   g_count = 0;
 static BOOL  g_runAsAdmin = TRUE;    /* 缺省启用（缺省配置就是 RunAsAdmin = 1） */
 static int   g_logMaxKB   = LOG_MAX_KB_DEFAULT;   /* 日志大小上限（KB），0 = 不限制 */
-static int   g_maxArrowSteps = 8;   /* 逐格词跳最大步数，超过按 overStepMode 处理 */
-static BOOL  g_overStepCtrl = TRUE;  /* TRUE=超限改发 Ctrl+方向（原生词跳） */
+static int   g_maxArrowSteps = 8;   /* 逐格按词跳转最大步数，超过按 overStepMode 处理 */
+static BOOL  g_overStepCtrl = TRUE;  /* TRUE=超限改发 Ctrl+方向（原生按词跳转） */
 static int   g_wheelMul = WHEEL_MUL_DEFAULT;  /* Caps+滚轮 放大倍数，<2 = 不放大 */
 static int   g_autoScrollFastMs = AUTOSCROLL_FAST_DEFAULT;       /* 自动滚动最快速度(ms/格) */
 static int   g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT; /* 自动滚动初始节拍(ms) */
@@ -343,7 +343,7 @@ void ConfigLoad(void) {
             "; 范围 0.." STR(LOG_MAX_KB_MAX) "，超出按上限钳制\n"
             "LogMaxKB = " STR(LOG_MAX_KB_DEFAULT) "\n"
             ";\n"
-            "; 逐格词跳的最大步数：超过该距离的逐格跳转不再逐格发送，\n"
+            "; 逐格按词跳转的最大步数：超过该距离的逐格跳转不再逐格发送，\n"
             "; 改按 OverStepMode 处理，避免方向键发太久。0 = 不限制，最大 256\n"
             "MaxArrowSteps = 8\n"
             ";\n"
@@ -352,8 +352,8 @@ void ConfigLoad(void) {
             ";   1 = 改发 Ctrl+方向键\n"
             "OverStepMode = 1\n"
             ";\n"
-            "; 按住 C 时滚轮的放大倍数：滚一格 = 原本一格 + 补 (N-1) 格。\n"
-            "; 0 或 1 = 不放大（滚轮按系统原本行为）。范围 0..16。\n"
+            "; 按住 C 时滚轮快速滚动：滚一格当 N 格（倍数 WheelScrollMul）。\n"
+            "; 0 或 1 = 关闭（滚轮按系统原本行为）。范围 0..16。\n"
             "WheelScrollMul = 3\n"
             ";\n"
             "; 自动滚动的初始速度（毫秒/格，越大越慢）\n"
@@ -383,7 +383,7 @@ void ConfigLoad(void) {
             "[NativeWordJump]\n"
             "; 命中名单的程序：Caps+N / Caps+M 不做文本探测，\n"
             "; 直接发送 Ctrl+← / Ctrl+→，由该程序自身的词导航完成按词跳转（Shift 位移同样支持）。\n"
-            "; 适用于文本读取不到、或读到的文本坐标与实际光标不符（跳词超调、光标乱飘）的程序。\n"
+            "; 适用于文本读取不到、或读到的文本坐标与实际光标不符（按词跳转超调、光标乱飘）的程序。\n"
             "; 每行一个进程名：完全匹配、大小写不敏感、.exe 后缀可写可不写\n"
             "Obsidian.exe";
         FILE* w = NULL;
@@ -419,7 +419,7 @@ static const struct {
       "LogMaxKB = " STR(LOG_MAX_KB_DEFAULT) "\n" },
     { "maxarrowsteps",
       "\n"
-      "; 逐格词跳的最大步数：超过该距离的逐格跳转不再逐格发送，\n"
+      "; 逐格按词跳转的最大步数：超过该距离的逐格跳转不再逐格发送，\n"
       "; 改按 OverStepMode 处理，避免方向键发太久。0 = 不限制，最大 256\n"
       "MaxArrowSteps = 8\n" },
     { "overstepmode",
@@ -430,8 +430,8 @@ static const struct {
       "OverStepMode = 1\n" },
     { "wheelscrollmul",
       "\n"
-      "; 按住 C 时滚轮的放大倍数：滚一格 = 原本一格 + 补 (N-1) 格。\n"
-      "; 0 或 1 = 不放大（滚轮按系统原本行为）。范围 0.." STR(WHEEL_MUL_MAX) "。\n"
+      "; 按住 C 时滚轮快速滚动：滚一格当 N 格（倍数 WheelScrollMul）。\n"
+      "; 0 或 1 = 关闭（滚轮按系统原本行为）。范围 0.." STR(WHEEL_MUL_MAX) "。\n"
       "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n" },
     { "autoscrollinterval",
       "\n"
@@ -650,7 +650,7 @@ int ConfigGetWheelHScrollMul(void) {
     return g_wheelHMul;
 }
 
-/* 进程可执行文件名是否命中原生词跳名单（完全匹配，.exe 可选） */
+/* 进程可执行文件名是否命中原生按词跳转名单（完全匹配，.exe 可选） */
 BOOL ConfigMatchName(const WCHAR* exeName) {
     if (g_count == 0 || !exeName || !exeName[0]) return FALSE;
     WCHAR name[CFG_NAME_MAX];

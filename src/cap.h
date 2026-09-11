@@ -13,7 +13,7 @@
 #define WM_TOGGLE_TRAY (WM_APP + 5) /* 托盘自定义回调消息 */
 #define WM_ALREADY_RUNNING (WM_APP + 7) /* 已有实例在跑：新实例通知它提示后退出 */
 #define WM_PROBE       (WM_APP + 6) /* 探测焦点控件（钩子线程投递） */
-#define WM_WHEEL_ACCEL (WM_APP + 8) /* Caps+滚轮 逐格放大：wParam=delta，lParam=倍数 */
+#define WM_WHEEL_ACCEL (WM_APP + 8) /* Caps+滚轮 快速滚动：wParam=delta，lParam=倍数 */
 #define WM_WHEEL_ENH   (WM_APP + 9) /* Caps+Alt/D+滚轮 持续滚动：wParam=delta */
 #define WM_MODE_UP     (WM_APP + 10)/* 某修饰模式的激活键全部抬起：wParam=mode */
 #define WM_WHEEL_HACCEL (WM_APP + 11)/* 横向滚动（Caps+Shift+滚轮）：wParam=delta，lParam=倍数。
@@ -27,7 +27,7 @@
    钩子里清掉了按住位图，而这条 WM_TRIG_UP 还排在队列里；主线程现读就会
    读到"Alt 已松"，点按补齐于是时有时无。详见 hook.c 的 ModeSnapFlags。 */
 #define TRIGF_ENH     0x1           /* 抬起那一刻 增强模式生效 */
-#define TRIGF_SHF     0x2           /* 抬起那一刻 位移模式生效 */
+#define TRIGF_SHF     0x2           /* 抬起那一刻 选区模式生效 */
 
 #define CLI_CAPS  VK_CAPITAL         /* 主映射键 C                          */
 
@@ -42,8 +42,8 @@
 #define ACT_DELETE 8
 #define ACT_ENTER 9
 #define ACT_CAPSLOCK 10              /* 恢复输出真实 CapsLock                */
-#define ACT_WORD_L 11                /* 词跳向左                             */
-#define ACT_WORD_R 12                /* 词跳向右                             */
+#define ACT_WORD_L 11                /* 按词跳转向左                             */
+#define ACT_WORD_R 12                /* 按词跳转向右                             */
 #define ACT_PROBE  13                /* 诊断：探测当前焦点控件                */
 
 #define DIR_LEFT 0
@@ -54,9 +54,9 @@
    不是散落在各处的 if/switch。加一个动作只改键位表一处，不会再出现"改了重复
    逻辑忘了改补齐逻辑"这种漏改。 */
 #define ACTF_SINGLE_SHOT 0x01   /* 翻转类：按一次只生效一次，不进重复节奏、不做松手补齐 */
-#define ACTF_WORDJUMP    0x02   /* 词跳：交给 nav.c 的 NavJump，不走按键发送 */
+#define ACTF_WORDJUMP    0x02   /* 按词跳转：交给 nav.c 的 NavJump，不走按键发送 */
 #define ACTF_PROBE       0x04   /* 诊断：交给 nav.c 的 NavProbe，不走按键发送 */
-#define ACTF_NO_SHIFT    0x08   /* 不吃位移修饰：即使位移模式生效也裸发（开关键用） */
+#define ACTF_NO_SHIFT    0x08   /* 不吃选区修饰：即使选区模式生效也裸发（开关键用） */
 
 /* ---------- 修饰（和弦）模式 ----------
    按住 C 期间生效的"组合修饰"。**激活键是编译期常量，不读配置**（见下面
@@ -67,7 +67,7 @@
    具体按的是哪个键，所以以后想换/删某个激活键，只改这一处常量即可，
    不用碰任何逻辑（keymap.c 的查询接口一律不变）。 */
 #define MODE_ENHANCE 0   /* 增强模式：激活键 Alt + D（点按触发键补齐到 3 次；配合滚轮自动滚动） */
-#define MODE_SHIFT   1   /* 位移模式：激活键 F（带 Shift 的选区位移） */
+#define MODE_SHIFT   1   /* 选区模式：激活键 F（带 Shift 的选区位移） */
 #define MODE_COUNT   2
 
 #define MODE_KEY_MAX     8    /* 单个模式最多几个激活键     */
@@ -81,7 +81,7 @@
 /* 长按重复节奏 */
 #define REPEAT_FIRST_DELAY   150     /* ms：开火到第一次重复                 */
 #define REPEAT_INTERVAL      35      /* ms：后续重复间隔                      */
-#define CHORD_SETTLE         50      /* ms：和弦稳定期，等增强/位移修饰到位  */
+#define CHORD_SETTLE         50      /* ms：和弦稳定期，等增强/选区修饰到位  */
 
 /* ---------- 全局共享状态（钩子线程写，主线程读） ---------- */
 typedef struct {
@@ -101,7 +101,7 @@ extern volatile BOOL g_shiftMod;   /* 真实 Shift 按住（Caps+Shift+滚轮 = 
    实际发送由 act.c 的工作线程执行，快照随请求一起投递过去。
    enh/shf 是"开火那一刻"的模式快照 —— 命名不叫 D/F，因为按哪个键由配置决定。 */
 extern volatile BOOL g_actEnh;  /* 本次动作开火时的 增强模式 快照 */
-extern volatile BOOL g_actShf;  /* 本次动作开火时的 位移模式 快照 */
+extern volatile BOOL g_actShf;  /* 本次动作开火时的 选区模式 快照 */
 extern volatile int  g_btnCount;/* 本次动作已发送次数 */
 
 /* ---------- 键位映射（src/keymap.c） ----------
@@ -110,7 +110,7 @@ extern volatile int  g_btnCount;/* 本次动作已发送次数 */
 void KeyMapInit(void);                  /* 启动时装配修饰激活键（配置优先） */
 int  ActOfVk(int vk);                   /* 触发键 -> 动作；ACT_NONE = 不是触发键 */
 int  ActOutVk(int act);                 /* 动作 -> 目标虚拟键；0 = 不发键（看标志） */
-int  ActWordDir(int act);               /* 词跳动作 -> DIR_*；其余返回 -1 */
+int  ActWordDir(int act);               /* 按词跳转动作 -> DIR_*；其余返回 -1 */
 BOOL ActHasFlag(int act, unsigned flag);/* 动作是否带某属性标志 */
 
 int  ModeFindByVk(int vk);              /* vk 是哪个模式激活键；-1 = 不是 */
@@ -134,7 +134,7 @@ typedef struct {
     int  act;       /* 要开火的动作（ACT_*）；ACT_NONE = 不开火  */
     int  fillAct;   /* 松手补齐的动作（ACT_*）；ACT_NONE = 不补齐 */
     BOOL enh;       /* 开火快照：增强模式（点按补齐到 3 次）      */
-    BOOL shf;       /* 开火快照：位移模式（带 Shift）             */
+    BOOL shf;       /* 开火快照：选区模式（带 Shift）             */
     int  count;     /* fillAct 的已发送次数（补齐时用）           */
 } ActJob;
 
@@ -207,7 +207,7 @@ void PhysSeedFromLogical(void); /* 装钩子后：把当前已按下的键视为
 void ModHoldReset(void);    /* 清"按住状态"（C / 真实 Shift / 模式门闩）—— 暂停、重启用 */
 
 /* ---------- 发送/补齐 ---------- */
-/* 开火快照（增强/位移模式、已发送次数）由调用方显式传入：实际执行发生在
+/* 开火快照（增强/选区模式、已发送次数）由调用方显式传入：实际执行发生在
    act.c 的工作线程上，不能再回头读主线程的 volatile 状态。 */
 void SendActOnce(int act, BOOL shift);                          /* 发一次动作 */
 void ReleaseFill(int act, BOOL enh, BOOL shift, int count);     /* 松手补齐：增强模式点按 -> 补到3 */
@@ -231,7 +231,7 @@ int  SendArrows(int dir, int n, BOOL shift); /* n 个左/右箭头，返回 ARRO
 void SendArrowsStrict(int dir, int n, BOOL shift); /* 同上但绝不改道（补正专用） */
 void SendArrowsRequestInterrupt(void);       /* 请求打断正在进行的逐格输出（钩子线程调用） */
 BOOL SendArrowsConflicts(int act);           /* act 是否与正在逐格输出的方向冲突 */
-void SendNativeWordJump(int dir, BOOL shift);/* 原生 Ctrl(+Shift)+方向：词跳兜底 */
+void SendNativeWordJump(int dir, BOOL shift);/* 原生 Ctrl(+Shift)+方向：按词跳转兜底 */
 void SendWheelAccel(int delta, int mul);     /* 纵向放大：补发 (mul-1) 个同值刻度 */
 int  SendWheelExtraCount(int mul);           /* 倍数 -> 补发格数（单测用） */
 void SendWheelNotches(int delta, int n);     /* 补发 n 个同值刻度（持续滚动用） */
@@ -251,10 +251,10 @@ void ConfigUpgradeFile(const WCHAR* path);   /* 老配置补齐新增键（单�
    手写 fixture 时每加一个配置项都要记得同步，漏了就变成假失败。 */
 int  ConfigUpgradeKeyCount(void);
 const char* ConfigUpgradeKeyName(int i);     /* 越界返回 NULL */
-BOOL ConfigMatchName(const WCHAR* exeName);  /* 进程名是否命中原生词跳名单 */
+BOOL ConfigMatchName(const WCHAR* exeName);  /* 进程名是否命中原生按词跳转名单 */
 BOOL ConfigGetRunAsAdmin(void);             /* [General] RunAsAdmin：启动时提权 */
 int  ConfigGetLogMaxKB(void);               /* [General] LogMaxKB：日志上限(KB)，0=不限 */
-int  ConfigGetMaxArrowSteps(void);          /* [General] MaxArrowSteps：逐格词跳最大步数 */
+int  ConfigGetMaxArrowSteps(void);          /* [General] MaxArrowSteps：逐格按词跳转最大步数 */
 BOOL ConfigGetOverStepCtrl(void);           /* [General] OverStepMode：超限 0=仍发方向键 1=Ctrl+方向 */
 int  ConfigGetWheelScrollMul(void);         /* [General] WheelScrollMul：Caps+滚轮 放大倍数，<2=不放大 */
 int  ConfigGetWheelHScrollMul(void);        /* [General] WheelHScrollMul：Caps+Shift+滚轮 横向倍数，0=关闭 */
@@ -271,8 +271,8 @@ void CapLog(const char* fmt, ...);   /* 追加写 CapsEnhance.log（可多线程
 void NavProbe(void);                 /* 探测当前焦点控件并写入日志 + 弹窗 */
 void NavBaseInfo(void);              /* 启动时采集系统/环境基线（不落盘，C+` 诊断时输出） */
 
-/* ---------- 词跳模块 ---------- */
-int NavJump(int dir, BOOL shift);      /* 前台控件 + dir + shift(位移=F) -> 移动；返回移动格数(<0失败) */
+/* ---------- 按词跳转模块 ---------- */
+int NavJump(int dir, BOOL shift);      /* 前台控件 + dir + shift(选区=F) -> 移动；返回移动格数(<0失败) */
 void NavSelTrackReset(void);           /* 清除 Shift 位移序列的锚点跟踪（引擎复位时） */
 int  ComputeSteps(const WCHAR* s, int len, int caret, int dir); /* 词边界算法，仅供单测 */
 

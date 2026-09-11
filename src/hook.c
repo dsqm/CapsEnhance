@@ -5,14 +5,14 @@ HHOOK g_hook = NULL;
 GlobalState g_state;
 
 /* C（CapsLock）实时状态：钩子线程写，主线程与鼠标钩子读。
-   修饰模式（增强/位移）的按住位图不在这里 —— 它在 keymap.c 的模式表里，
+   修饰模式（增强/选区）的按住位图不在这里 —— 它在 keymap.c 的模式表里，
    由 ModeKeyEvent 维护、ModeDown 查询（唯一判据，见 cap.h）。
    钩子从不判断"按的是 D 还是 Alt"，只问"这个键属于哪个模式"。 */
 volatile BOOL g_cMod = FALSE;
 
 /* 真实 Shift 的按住状态：钩子线程写，鼠标钩子读。
    用途只有一个 —— **Caps + Shift + 滚轮 = 横向滚动**。
-   注意与 keymap.c 的"位移模式"（默认 F，作用是给动作加 Shift）不是一回事：
+   注意与 keymap.c 的"选区模式"（默认 F，作用是给动作加 Shift）不是一回事：
    那是"模拟 Shift 的效果"，这里读的是**用户真的按着 Shift**。
    为什么不在鼠标钩子里直接调 GetAsyncKeyState：那个回调在全局鼠标输入的关键
    路径上（每次鼠标移动都进来），任何系统查询都会明显加剧鼠标卡顿 —— 所以状态
@@ -181,9 +181,9 @@ void ModHoldReset(void) {
 }
 
 /* 发一次动作。目标键与属性都来自键位表（src/keymap.c）：
-   · 目标虚拟键用 ActOutVk —— 表里 outVk=0 的动作（词跳/诊断）不走这里；
-   · 带 ACTF_NO_SHIFT 的动作（开关键）即便位移模式生效也裸发。
-   shift 是**开火快照**里的位移模式，不是"此刻按着 F 吗"。 */
+   · 目标虚拟键用 ActOutVk —— 表里 outVk=0 的动作（按词跳转/诊断）不走这里；
+   · 带 ACTF_NO_SHIFT 的动作（开关键）即便选区模式生效也裸发。
+   shift 是**开火快照**里的选区模式，不是"此刻按着 F 吗"。 */
 void SendActOnce(int act, BOOL shift) {
     int vk = ActOutVk(act);
     if (!vk) return;
@@ -193,7 +193,7 @@ void SendActOnce(int act, BOOL shift) {
 /* 松手补齐：仅增强模式（快照 enh 为真）时补到 3 次；已发送次数由调用方
    （引擎）给出，本函数不回写任何全局状态。
    排除规则也来自键位表的标志，不再一个一个列举动作 id：
-     · ACTF_WORDJUMP    —— 词跳不走按键发送，补齐无意义；
+     · ACTF_WORDJUMP    —— 按词跳转不走按键发送，补齐无意义；
      · ACTF_SINGLE_SHOT —— 翻转动作补齐会把"切一次"变成"切三次"（净效果又回到
        原状态），这正是 caps+tab 时灵时不灵的成因之一。 */
 void ReleaseFill(int act, BOOL enh, BOOL shift, int count) {
@@ -318,7 +318,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             return 1;
         }
 
-        /* ---- 修饰模式的激活键（默认 增强=Alt/D、位移=F） ----
+        /* ---- 修饰模式的激活键（默认 增强=Alt/D、选区=F） ----
            哪些键属于哪个模式由 keymap.c 的模式表决定（可由配置改），这里只问
            "这个 vk 属于哪个模式" —— 所以"以后把 D 删掉、只留 Alt"不用动这里一行。
 
@@ -482,7 +482,7 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
             return 1;
         }
 
-        /* 普通（只按住 C）：逐格放大 N 倍 —— 见 main.c 的 WM_WHEEL_ACCEL。
+        /* 普通（只按住 C）：快速滚动 N 倍 —— 见 main.c 的 WM_WHEEL_ACCEL。
            物理格不吞（它是"加强"，不是"替换"）。 */
         if (vert && chord && delta != 0) {
             int mul = ConfigGetWheelScrollMul();

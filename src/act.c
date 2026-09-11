@@ -6,7 +6,7 @@
    为什么需要它（这不是"优化"，是在修一个架构级缺陷）：
 
    WH_KEYBOARD_LL 的回调**在安装它的那个线程**上执行，而钩子由主线程安装
-   （dwThreadId = 0 只表示"全局钩子"，不表示"系统线程"）。一次词跳在主线程
+   （dwThreadId = 0 只表示"全局钩子"，不表示"系统线程"）。一次按词跳转在主线程
    上可能连续阻塞数百毫秒：
      · SendArrows 逐格发送   最多 256 步 x ~13ms  ≈ 3.3s（默认配置约 0.4s）
      · SendNativeWordJump    4 x COMBO_GAP(40ms)  = 160ms
@@ -48,7 +48,7 @@ static int     s_head = 0, s_tail = 0, s_n = 0;
 
 /* 执行一条请求。顺序必须与"开火 -> 补齐"的原始语义一致。
    走哪条分支由动作标志决定（见 keymap.c），这里不再列举动作 id ——
-   加一个词跳/诊断类动作不必再回来改这个函数。 */
+   加一个按词跳转/诊断类动作不必再回来改这个函数。 */
 static void RunJob(const ActJob* j) {
     int act = j->act;
     if (act != ACT_NONE) {
@@ -114,7 +114,7 @@ static DWORD WINAPI ActThread(LPVOID p) {
    两者只差 dwFlags 与 n 的算法，共用一条队列 + 线程。
 
    为什么不并入上面的动作队列：那条队列带 ActInFlight() 门控、且严格 FIFO，
-   会被几百毫秒的词跳拖住。
+   会被几百毫秒的按词跳转拖住。
    但真正的根因是：注入里带 Sleep（`SendWheelAxis` 逐格间隔 2ms）。主线程一旦
    不在"等消息"状态，系统对低级钩子的处理是**直接跳过**（不是延后补发，见
    test_chord 的 SinkWait 注释）——于是松开 Caps 的那个 keyup 可能被整个漏掉，
@@ -717,7 +717,7 @@ void ActClearKeepFill(void) {
 
 /* 队列中 + 正在执行的动作数。引擎用它保持"同一时刻只有一发在飞" ——
    这正是原来同步执行时的天然行为（主线程被占住时定时器根本跑不了），
-   否则长按词跳键会在队列里堆出一串尾流，松手后还在跳。 */
+   否则长按按词跳转键会在队列里堆出一串尾流，松手后还在跳。 */
 int ActInFlight(void) {
     if (!s_init) return 0;
     EnterCriticalSection(&s_cs);

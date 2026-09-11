@@ -51,7 +51,7 @@ static void ForceFg(HWND w) {
     if (att) AttachThreadInput(fgTid, myTid, FALSE);
 }
 
-/* 当前前台窗口 + 焦点控件属于谁 —— 跳词为什么"没走 WPS 通道"多半就在这两者。
+/* 当前前台窗口 + 焦点控件属于谁 —— 按词跳转为什么"没走 WPS 通道"多半就在这两者。
    focus 这一级照抄 nav.c 的 GetFocusControl（GetGUIThreadInfo 取 hwndFocus），
    因为"前台是 WPS，但焦点控件取不到"会直接让 WPS 通道判定失败。 */
 static void FgInfo(char* out, size_t cap) {
@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
         printf("[SKIP] 找不到 WPS 文字 窗口（没运行或没打开文档）\n");
         return 0;
     }
-    printf("WPS 窗口 = 0x%p，置前并开始跳词（会移动光标，不改内容）\n", (void*)w);
+    printf("WPS 窗口 = 0x%p，置前并开始按词跳转（会移动光标，不改内容）\n", (void*)w);
     ConfigLoad();                       /* MaxArrowSteps 等取 bin\CapsEnhance.ini */
     SetForegroundWindow(w);
     Sleep(800);

@@ -194,7 +194,7 @@ static void PostAct(int act, int fillAct, int count) {
     ActPost(&j);
 }
 
-/* 采集本次开火的模式快照：增强（点按补齐到 3 次）与位移（带 Shift）。
+/* 采集本次开火的模式快照：增强（点按补齐到 3 次）与选区（带 Shift）。
    判据是"激活键此刻是否按住"（ModeDown）—— 与鼠标钩子判断滚轮语义用的是
    同一个查询，不会分叉成两种修饰判定。
    "动作先按、修饰后到"的乱序由 CHORD_SETTLE（50ms 稳定期）cover：开火前
@@ -205,7 +205,7 @@ static void SnapMods(void) {
     g_actShf = ModeDown(MODE_SHIFT);
 }
 
-/* 开火一次动作（词跳走文本解析；其余走按键发送，都用开火快照修饰） */
+/* 开火一次动作（按词跳转走文本解析；其余走按键发送，都用开火快照修饰） */
 static void DoFireOnce(int act) { PostAct(act, ACT_NONE, 0); }
 
 /* 翻转类动作（开关键：按一次只该切换一次）。属性现在写在键位表里
@@ -470,7 +470,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 ModeKeysText(MODE_SHIFT,   sk, MODE_KEYS_MAXLEN);
                 WideCharToMultiByte(CP_UTF8, 0, ek, -1, eb, (int)sizeof(eb), NULL, NULL);
                 WideCharToMultiByte(CP_UTF8, 0, sk, -1, sb, (int)sizeof(sb), NULL, NULL);
-                CapLog("按键: 增强=%s 位移=%s（固定值，不读配置） WheelScrollMul=%d "
+                CapLog("按键: 增强=%s 选区=%s（固定值，不读配置） WheelScrollMul=%d "
                        "AutoScrollInterval=%d AutoScrollFastMs=%d",
                        eb, sb, ConfigGetWheelScrollMul(), ConfigGetAutoScrollInterval(),
                        ConfigGetAutoScrollFastMs());
@@ -496,7 +496,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                的数据外带"，必须在开始那一刻说清；托盘悬停提示只有一行、还要
                悬停才看得到，承担不了这个提醒。 */
             TrayBalloon(L"开始记录日志。注意隐私：记录期间会写入焦点控件的文本片段"
-                        L"（前 160 字符）与跳词位置，敏感内容上请勿长时间开启。");
+                        L"（前 160 字符）与按词跳转位置，敏感内容上请勿长时间开启。");
         } else {
             CapLog("===== REC END =====");
             MessageBeep(MB_ICONHAND);       /* 系统"手形"音：结束记录（低而不同） */
@@ -583,7 +583,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (!g_cMod) { ResetEngine(); return 0; }
         ULONGLONG now = GetTickCount64();
         /* ActInFlight() 门控：同一时刻只让一发动作在飞，等价于原来"主线程
-           被发送过程占住、定时器跑不了"的自然限速。没有它，长按词跳键会
+           被发送过程占住、定时器跑不了"的自然限速。没有它，长按按词跳转键会
            在队列里堆出一串尾流。 */
         if (g_pendingAct != ACT_NONE && now >= g_pendingTick + CHORD_SETTLE
             && ActInFlight() == 0) {
@@ -625,7 +625,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_WHEEL_ACCEL:
-        /* Caps+滚轮：逐格放大。只投递给专用线程，**主线程绝不在这里做注入**。
+        /* Caps+滚轮：快速滚动。只投递给专用线程，**主线程绝不在这里做注入**。
            原来在这里直接 SendWheelAccel（内含 Sleep 逐格补发），主线程一进
            Sleep 就不在"等消息"状态，系统会把这段时间到达的低级钩子事件**直接
            跳过**：松开 Caps 的 keyup 被漏掉 -> g_cMod 卡在 TRUE -> 松开 C 后

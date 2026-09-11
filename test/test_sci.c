@@ -236,7 +236,7 @@ int main(void) {
     }
 
     /* ---- G. 真实 Edit 控件：验证 WM_GETTEXT/EM_GETSEL/EM_SETSEL 链路 ----
-       之前 SendMessageTimeout 结果指针传 NULL，长度恒读到 1，词跳完全失效。 */
+       之前 SendMessageTimeout 结果指针传 NULL，长度恒读到 1，按词跳转完全失效。 */
     {
         HWND e = CreateWindowW(L"EDIT", L"hello world foo bar",
                                WS_CHILD | WS_VISIBLE | ES_LEFT | ES_AUTOHSCROLL,

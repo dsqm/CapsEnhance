@@ -10,7 +10,7 @@
    以前它是散开的：hook.c 的 kMap[]（触发键 -> 动作）、hook.c 的 ActToVk()
    switch（动作 -> 目标键）、main.c 的 IsSingleShotAct() switch（动作属性）、
    hook.c 里写死的 `vk == 'D' || vk == VK_LMENU`（增益修饰）、
-   hook.c 的 `vk == 'F'`（位移修饰）。
+   hook.c 的 `vk == 'F'`（选区修饰）。
    加一个动作要改三处、漏一处就冒出诡异现象（例如"新增的翻转键长按会切偶数次"）；
    而"把 D 换成别的键"更是要动钩子逻辑本身。
 
@@ -29,7 +29,7 @@ typedef struct {
     int      act;    /* 动作 id（ACT_*）                          */
     int      vk;     /* 触发键；0 = 没有触发键（只能由内部投递）    */
     int      outVk;  /* 目标虚拟键；0 = 不发键（见 flags）         */
-    int      dir;    /* 词跳方向 DIR_*（仅 ACTF_WORDJUMP 有意义）  */
+    int      dir;    /* 按词跳转方向 DIR_*（仅 ACTF_WORDJUMP 有意义）  */
     unsigned flags;
 } ActionDef;
 
@@ -45,9 +45,9 @@ static const ActionDef kActions[] = {
     { ACT_DELETE,    'W',        VK_DELETE,   -1, 0 },
     { ACT_ENTER,     VK_SPACE,   VK_RETURN,   -1, 0 },
     /* 开关键：翻转动作，按一次只切一次 —— 属性写在表里，见 ACTF_SINGLE_SHOT。
-       同时 ACTF_NO_SHIFT：它不是光标动作，不该被位移模式套上 Shift。 */
+       同时 ACTF_NO_SHIFT：它不是光标动作，不该被选区模式套上 Shift。 */
     { ACT_CAPSLOCK,  VK_TAB,     VK_CAPITAL,  -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT },
-    /* 词跳：方向写在表里，免得运行时靠 ACT_WORD_L/R 的数值去反推左右 */
+    /* 按词跳转：方向写在表里，免得运行时靠 ACT_WORD_L/R 的数值去反推左右 */
     { ACT_WORD_L,    'N',        0,          DIR_LEFT,  ACTF_WORDJUMP },
     { ACT_WORD_R,    'M',        0,          DIR_RIGHT, ACTF_WORDJUMP },
     /* 诊断：没有触发键（由 PROBE_KEY 的特殊路径投递） */

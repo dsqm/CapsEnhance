@@ -2,8 +2,8 @@
    和弦引擎回归测试：直接调用底层钩子进程，注入按键序列，
    用另一个捕获钩子统计软件真实注入的方向键/Shift。
    覆盖：模式修饰（增强=Alt/D、位移=F）在"按键乱序到达"下仍正确、
-   长按重复/松手补齐、原生词跳按键序列，
-   以及"Caps+滚轮 = 逐格放大（倍数）"、"Caps+Alt/D+滚轮 = 持续滚动"
+   长按重复/松手补齐、原生按词跳转按键序列，
+   以及"Caps+滚轮 = 快速滚动（倍数）"、"Caps+Alt/D+滚轮 = 持续滚动"
    （都用注入计数钩子观测），"Caps+Shift+滚轮 = 横向滚动"
    （真实 Shift 决定轴向，且钩子吞掉物理格）。
    注意：引擎只问"某个模式是否生效"，从不判断按的是哪个键 ——
@@ -18,7 +18,7 @@
 #include "act.c"       /* 动作实际由执行线程完成：本测试要能起/停/等它 */
 #include <stdio.h>
 
-/* 词跳桩：本测试只验证模式修饰/补齐/自动滚动，不测文本解析 */
+/* 按词跳转桩：本测试只验证模式修饰/补齐/自动滚动，不测文本解析 */
 int NavJump(int dir, BOOL shift) { (void)dir; (void)shift; return 0; }
 void NavProbe(void) { /* 诊断探测：本测试桩掉 */ }
 void NavBaseInfo(void) { /* 启动基线采集：本测试桩掉 */ }
@@ -458,7 +458,7 @@ int main(void) {
     SendEvent(VK_LCONTROL, TRUE); Pump(10);      /* 收尾 */
     Pump(30);
 
-    /* ---- 场景M：原生词跳的按键序列（Ctrl 提前抬起 bug 的回归）----
+    /* ---- 场景M：原生按词跳转的按键序列（Ctrl 提前抬起 bug 的回归）----
        Ctrl 必须先于方向键按下、后于方向键抬起，否则目标收到的
        只是单格方向键。 */
     Reset();
@@ -475,7 +475,7 @@ int main(void) {
     CHECK(CountVk(VK_LCONTROL) == 1, "M: Ctrl 只按一次");
 
     /* ---- 场景N：按住 C 时鼠标滚轮的决策（三路分流 + 吞格只发生在横向） ----
-       Caps + 滚轮            = **逐格放大**（WheelScrollMul 倍）-> WM_WHEEL_ACCEL
+       Caps + 滚轮            = **快速滚动**（WheelScrollMul 倍）-> WM_WHEEL_ACCEL
        Caps + Alt/D + 滚轮     = **持续滚动**                   -> WM_WHEEL_ENH
        Caps + Shift + 滚轮     = **横向滚动**                    -> WM_WHEEL_HACCEL
        **吞不吞物理格**：横向吞（物理格是纵向事件，放行就横纵混滚）；
@@ -493,7 +493,7 @@ int main(void) {
           "N: 未按 C -> 不吞、不投递");
 
     Key(CLI_CAPS, TRUE); Pump(2);
-    CHECK(Wheel(120, 0) != 1, "N: 只按 C（逐格放大）-> 物理那一格照常放行");
+    CHECK(Wheel(120, 0) != 1, "N: 只按 C（快速滚动）-> 物理那一格照常放行");
     CHECK(TakeWheelAccel(&d, &mul) && d == 120 && mul == 3,
           "N: 只按 C -> 投递放大请求（倍数 = WheelScrollMul 缺省 3）");
     CHECK(!TakeWheelAccel(NULL, NULL), "N: 一次滚轮只投递一次请求");
@@ -927,7 +927,7 @@ int main(void) {
     ConfigLoadFrom(L"bin/__absent__.ini");
 
     /* ---- 场景T：Caps+Shift+滚轮 = 横向滚动 ----
-       只需真实 Shift（与 keymap 的"位移模式 F"无关）；速度 WheelHScrollMul 默认 1。
+       只需真实 Shift（与 keymap 的"选区模式 F"无关）；速度 WheelHScrollMul 默认 1。
        轴向优先级高于纵向两路：Shift 排最前。
        方向照抄系统约定：滚轮**向上 = 向左**（浏览器 / 资源管理器 / 表格都是这个
        方向，Firefox 官方快捷键表就写着 Shift+上滚 = 向左）。 */
@@ -1012,7 +1012,7 @@ int main(void) {
     KeyMapInit();
     CHECK(ModeFindByVk(VK_LMENU) == MODE_ENHANCE && ModeFindByVk('D') == MODE_ENHANCE,
           "S: 配置里的 EnhanceKeys 被忽略 —— 增强键仍是固定的 Alt + D");
-    CHECK(ModeFindByVk('F') == MODE_SHIFT, "S: 位移键仍是固定的 F");
+    CHECK(ModeFindByVk('F') == MODE_SHIFT, "S: 选区键仍是固定的 F");
     CHECK(ModeFindByVk('X') == -1 && ModeFindByVk('Y') == -1,
           "S: 配置里写的 X / Y 不会变成激活键");
 
