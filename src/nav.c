@@ -525,7 +525,15 @@ static IUIAutomationElement* FindDocElement(IUIAutomation* ua, IUIAutomationElem
     if (wk) IUIAutomationTreeWalker_Release(wk);
 
     if (result) IUIAutomationElement_AddRef(result);   /* 抄一份给调用者 */
-    for (int i = 0; i < n; i++)
+    /* 只释放本函数**自己拿到**的引用（chain[1..n-1]，来自 GetParentElement）。
+       chain[0] 是调用方传进来的 start —— 它不属于本函数，调用方随后还会
+       Release 一次，这里再释放就是**双重释放**。
+       实测后果（2026-09-11）：WPS 不提供 UIA 文本，每次词跳都走"找不到
+       doc element"的失败路径 → 每次都对调用方的 ef/eh 多释放一次 →
+       refcount 归零、对象被销毁 → 调用方的 Release 读已释放内存的 vtable
+       指针 → c0000005（WER 定位在 UiaGetTextCaret 的 Release 调用点）。
+       同一处还导致 FindDocInSubtree(ua, eh) 拿着已释放的 eh 继续用。 */
+    for (int i = 1; i < n; i++)
         if (chain[i] && chain[i] != result) IUIAutomationElement_Release(chain[i]);
     return result;
 }
