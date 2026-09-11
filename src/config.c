@@ -122,11 +122,18 @@
    原生 Ctrl+方向（Notepad3 等仍能跳，只是不再是瞬跳）。 */
 #define ALLOW_SCINTILLA_READ_DEFAULT 1
 
+/* 逐格按词跳转的最大步数：判定是"达到即改道"（n >= 该值就改发 Ctrl+方向），
+   所以 4 表示"4 格及以上瞬跳、3 格以内逐格"。0 = 不限制（硬上限仍是 256）。
+   为什么需要它而不一律逐格：逐格是 SendInput 一对 down/up + 两次 Sleep，
+   约 13ms/格且目标程序要逐个处理，长跳会有可见的"光标爬行"；改发原生
+   Ctrl+方向是一次到位（代价是落点由目标程序的词切分决定，需回读补正）。 */
+#define MAX_ARROW_STEPS_DEFAULT 4
+
 static WCHAR g_names[CFG_MAX_ENTRIES][CFG_NAME_MAX];
 static int   g_count = 0;
 static BOOL  g_runAsAdmin = TRUE;    /* 缺省启用（缺省配置就是 RunAsAdmin = 1） */
 static int   g_logMaxKB   = LOG_MAX_KB_DEFAULT;   /* 日志大小上限（KB），0 = 不限制 */
-static int   g_maxArrowSteps = 8;   /* 逐格按词跳转最大步数，超过按 overStepMode 处理 */
+static int   g_maxArrowSteps = MAX_ARROW_STEPS_DEFAULT;  /* 逐格步数上限，达到即改道 */
 static BOOL  g_overStepCtrl = TRUE;  /* TRUE=超限改发 Ctrl+方向（原生按词跳转） */
 static int   g_wheelMul = WHEEL_MUL_DEFAULT;  /* Caps+滚轮 放大倍数，<2 = 不放大 */
 static int   g_autoScrollFastMs = AUTOSCROLL_FAST_DEFAULT;       /* 自动滚动最快速度(ms/格) */
@@ -202,7 +209,7 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_count = 0;
     g_runAsAdmin = TRUE;
     g_logMaxKB = LOG_MAX_KB_DEFAULT;
-    g_maxArrowSteps = 8;
+    g_maxArrowSteps = MAX_ARROW_STEPS_DEFAULT;
     g_overStepCtrl = TRUE;
     g_wheelMul = WHEEL_MUL_DEFAULT;
     g_autoScrollFastMs = AUTOSCROLL_FAST_DEFAULT;
@@ -275,7 +282,7 @@ void ConfigLoadFrom(const WCHAR* path) {
                     if (v > LOG_MAX_KB_MAX) v = LOG_MAX_KB_MAX;
                     g_logMaxKB = v;
                 }
-                else if (_wcsicmp(key, L"maxarrowsteps") == 0) g_maxArrowSteps = ParseIntW(val, 8);
+                else if (_wcsicmp(key, L"maxarrowsteps") == 0) g_maxArrowSteps = ParseIntW(val, MAX_ARROW_STEPS_DEFAULT);
                 else if (_wcsicmp(key, L"overstepmode") == 0) g_overStepCtrl = ParseBoolW(val);
                 else if (_wcsicmp(key, L"wheelscrollmul") == 0) {
                     int v = ParseIntW(val, WHEEL_MUL_DEFAULT);
@@ -347,9 +354,10 @@ void ConfigLoad(void) {
             "; 范围 0.." STR(LOG_MAX_KB_MAX) "，超出按上限钳制\n"
             "LogMaxKB = " STR(LOG_MAX_KB_DEFAULT) "\n"
             ";\n"
-            "; 逐格按词跳转的最大步数：超过该距离的逐格跳转不再逐格发送，\n"
-            "; 改按 OverStepMode 处理，避免方向键发太久。0 = 不限制，最大 256\n"
-            "MaxArrowSteps = 8\n"
+            "; 逐格按词跳转的最大步数：达到该步数就不再逐格发送，\n"
+            "; 改按 OverStepMode 处理（4 = 4 格及以上即瞬跳），避免方向键发太久。\n"
+            "; 0 = 不限制（一律逐格），最大 256\n"
+            "MaxArrowSteps = " STR(MAX_ARROW_STEPS_DEFAULT) "\n"
             ";\n"
             "; 超过 MaxArrowSteps 时的替代方式\n"
             ";   0 = 只发送一个方向键\n"
@@ -423,9 +431,10 @@ static const struct {
       "LogMaxKB = " STR(LOG_MAX_KB_DEFAULT) "\n" },
     { "maxarrowsteps",
       "\n"
-      "; 逐格按词跳转的最大步数：超过该距离的逐格跳转不再逐格发送，\n"
-      "; 改按 OverStepMode 处理，避免方向键发太久。0 = 不限制，最大 256\n"
-      "MaxArrowSteps = 8\n" },
+      "; 逐格按词跳转的最大步数：达到该步数就不再逐格发送，\n"
+      "; 改按 OverStepMode 处理（4 = 4 格及以上即瞬跳），避免方向键发太久。\n"
+      "; 0 = 不限制（一律逐格），最大 256\n"
+      "MaxArrowSteps = " STR(MAX_ARROW_STEPS_DEFAULT) "\n" },
     { "overstepmode",
       "\n"
       "; 超过 MaxArrowSteps 时的替代方式\n"

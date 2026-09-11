@@ -170,14 +170,14 @@ int main(void) {
            "CFG: MaxArrowSteps=0(不限制) + OverStepMode=0 生效");
     WriteIni("[General]\r\nMaxArrowSteps = abc\r\nOverStepMode = xyz\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetMaxArrowSteps() == 8 && !ConfigGetOverStepCtrl(),
-           "CFG: 非法值回落默认 (8 / OverStepMode=1)");
+    EXPECT(ConfigGetMaxArrowSteps() == 4 && !ConfigGetOverStepCtrl(),
+           "CFG: 非法值回落默认 (4 / OverStepMode=1)");
     /* [Other] 里写与缺省**不同**的值，才能证明它真的没生效
-       （缺省 MaxArrowSteps=8 / OverStepMode=1）。 */
+       （缺省 MaxArrowSteps=4 / OverStepMode=1）。 */
     WriteIni("[Other]\r\nMaxArrowSteps = 1\r\nOverStepMode = 0\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetMaxArrowSteps() == 8 && ConfigGetOverStepCtrl(),
-           "CFG: 非 General 段不生效（仍取缺省 8 / 1）");
+    EXPECT(ConfigGetMaxArrowSteps() == 4 && ConfigGetOverStepCtrl(),
+           "CFG: 非 General 段不生效（仍取缺省 4 / 1）");
 
     /* 按住 C 时滚轮的放大倍数 WheelScrollMul（只管 Caps+滚轮；与自动滚动无关）。
        样本一律用与默认值不同的值（默认值当样本会让"自定义生效"恒真）。 */
@@ -347,7 +347,7 @@ int main(void) {
         ConfigLoadFrom(L"bin/cfgtest.ini");
         EXPECT(ConfigGetRunAsAdmin() && ConfigMatchName(L"oldapp"),
                "UPG: 用户已有内容保留 (RunAsAdmin=1 / 名单)");
-        EXPECT(ConfigGetLogMaxKB() == 2048 && ConfigGetMaxArrowSteps() == 8,
+        EXPECT(ConfigGetLogMaxKB() == 2048 && ConfigGetMaxArrowSteps() == 4,
                "UPG: 缺失键补齐默认值");
         EXPECT(ConfigGetAutoScrollInterval() == 1500, "UPG: 补齐 AutoScrollInterval 默认值");
         EXPECT(ConfigGetWheelScrollMul() == 3, "UPG: 补齐 WheelScrollMul 默认值");
@@ -362,7 +362,7 @@ int main(void) {
             char line[512];
             while (fgets(line, sizeof(line), fc)) {
                 if (strstr(line, "LogMaxKB = 2048")) hasLog = 1;
-                if (strstr(line, "MaxArrowSteps = 8")) hasSteps = 1;
+                if (strstr(line, "MaxArrowSteps = 4")) hasSteps = 1;
                 if (strstr(line, "OverStepMode = 1")) hasMode = 1;
                 if (strstr(line, "WheelScrollMul = 3")) hasWheel = 1;
                 if (strstr(line, "AutoScrollFastMs = 800")) hasFast = 1;
@@ -548,7 +548,10 @@ int main(void) {
     /* 模板必须把每个 [General] 开关连默认值写出来，否则用户不知道有这些项 */
     EXPECT(TemplateHas("RunAsAdmin = 1"),    "CFG: 模板含 RunAsAdmin 默认值");
     EXPECT(TemplateHas("LogMaxKB = 2048"),   "CFG: 模板含 LogMaxKB 默认值");
-    EXPECT(TemplateHas("MaxArrowSteps = 8"), "CFG: 模板含 MaxArrowSteps 默认值");
+    /* 默认值来自 config.c 的编译期常量：这里按取值现拼，改默认不会漏改断言 */
+    { char tpl[64];
+      _snprintf_s(tpl, sizeof(tpl), _TRUNCATE, "MaxArrowSteps = %d", ConfigGetMaxArrowSteps());
+      EXPECT(TemplateHas(tpl), "CFG: 模板含 MaxArrowSteps 默认值"); }
     EXPECT(TemplateHas("OverStepMode = 1"),  "CFG: 模板含 OverStepMode 默认值");
     EXPECT(TemplateHas("WheelScrollMul = 3"), "CFG: 模板含 WheelScrollMul 默认值");
     EXPECT(TemplateHas("AutoScrollFastMs = 800"), "CFG: 模板含 AutoScrollFastMs 默认值");

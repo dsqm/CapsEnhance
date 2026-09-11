@@ -99,7 +99,7 @@ Windows **CapsLock** 快捷键增强程序。按住 `CapsLock` 当作修饰键�
 | `AutoScrollSmooth` | `1` | 持续滚动是否平滑注入（1 = 触控板那种连续滑动）；老程序不认小数刻度时可设 `0` |
 | `WheelHScrollMul` | `1` | `C+Shift+滚轮` 横向倍数；`0` = 关闭，上限 `16` |
 | `AllowScintillaRead` | `1` | 是否允许读取 Scintilla 程序（Notepad3/Notepad++）的进程内存来实现瞬跳；设 `0` 退回 UIA / 原生 Ctrl+方向 |
-| `MaxArrowSteps` | `8` | 按词跳转逐格发送超过多少步时触发 `OverStepMode` 策略；`0` = 不限制 |
+| `MaxArrowSteps` | `4` | 按词跳转逐格发送达到多少步就触发 `OverStepMode` 策略（4 = 4 格及以上瞬跳、3 格以内逐格）；`0` = 不限制（一律逐格） |
 | `OverStepMode` | `1` | `0` = 只发一个方向键；`1` = 改发 `Ctrl+方向`（由目标程序自身按词跳转） |
 
 > 想换增强键或选区键？不支持。`Alt + D` 与 `F` 属于"和弦语法"本身，改它等于改功能，所以不做成配置开关（这部分属于本项目刻意为之，具体理由见开发者文档）。
