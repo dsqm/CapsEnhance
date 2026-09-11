@@ -229,6 +229,10 @@ static void TrimWorkingSet(void) {
 static void SetMenuPauseText(void);
 static void ResetEngine(void);   /* 前向声明（定义在下方，TrayShowMenu 先调用） */
 static void DoRestart(void);     /* 前向声明（定义在下方，TrayShowMenu 先调用） */
+/* 切换"暂停映射"要做的全部事情（托盘菜单调用；也供单测直接调用）。
+   抽成函数是为了能被验证：**暂停必须停掉持续滚动**，否则暂停期间钩子整段被
+   跳过（连"按任意键打断"都收不到），那个滚动就成了没人能停的东西。 */
+void ApplyPauseState(void);
 void TrayAddHint(const WCHAR* s);
 /* 托盘悬停提示统一入口：按"真实运行权限"追加管理员标注
    （查进程令牌，不看配置值，避免配置与实际不一致时误导） */
@@ -262,15 +266,7 @@ static void TrayShowMenu(void) {
     int cmd = TrackPopupMenu(g_menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
                              pt.x, pt.y, 0, g_mainWnd, NULL);
     if (cmd == IDM_PAUSE) {
-        g_state.paused = !g_state.paused;
-        /* 切换暂停时清掉残留的修饰/引擎状态，避免恢复后粘滞。
-           用 ModHoldReset 而不是只清 g_cMod：暂停期间钩子被跳过，
-           抬起事件收不到（含真实 Shift），不主动清就会一直粘着。 */
-        ModHoldReset();
-        g_btnCount = 0;
-        ResetEngine();
-        if (!g_state.paused) TrayHint(L"正在映射");
-        else TrayHint(L"已暂停（CapsLock 恢复原功能）");
+        ApplyPauseState();
     } else if (cmd == IDM_RESTART) {
         DoRestart();
     } else if (cmd == IDM_EXIT) {
@@ -304,6 +300,25 @@ static void SetMenuPauseText(void) {
     SetMenuItemInfoW(g_menu, IDM_PAUSE, FALSE, &m);
 }
 
+/* 切换暂停 / 恢复。菜单项与单测都走这一条。 */
+void ApplyPauseState(void) {
+    g_state.paused = !g_state.paused;
+    /* 切换暂停时清掉残留的修饰/引擎状态，避免恢复后粘滞。
+       用 ModHoldReset 而不是只清 g_cMod：暂停期间钩子被跳过，
+       抬起事件收不到（含真实 Shift），不主动清就会一直粘着。 */
+    ModHoldReset();
+    g_btnCount = 0;
+    ResetEngine();
+    /* **暂停必须显式停掉持续滚动**：暂停期间钩子整段被跳过（连"按任意键
+       打断"都收不到），不停就等于"谁也没法让它停"，只能等 10 分钟超时 ——
+       而它是往别的程序里持续注入滚轮，属于最不能留的尾巴。
+       这事**不能靠 ResetEngine 代做**：松手不再打断之后，ResetEngine 已经不
+       管持续滚动了（见那里的注释）。 */
+    ActAutoScrollStop();
+    if (!g_state.paused) TrayHint(L"正在映射");
+    else TrayHint(L"已暂停（CapsLock 恢复原功能）");
+}
+
 /* ============ 窗口过程 ============ */
 static void ResetEngine(void) {
     StopEngine();
@@ -314,8 +329,10 @@ static void ResetEngine(void) {
     /* 滚轮加速的待补队列也一起丢：松开 C 之后不该再有加速尾流
        （用户预期"松开 C 就是普通滚轮"）。 */
     ActWheelClear();
-    /* 自动滚动一律立即终止（松开 C / 重新按下 C 都该停） */
-    ActAutoScrollStop();
+    /* **持续滚动刻意不在这里停**（2026-09-11 改版）：用户要的是"滚一下就能
+       松手读，想停的时候按一下键"，所以松开 C / 松开修饰键都不该打断它。
+       它的终止条件见 cap.h 的持续滚动一节：反向滚、用户新输入、超时、
+       以及暂停/退出/重启（后两者在各自的路径上显式调 ActAutoScrollStop）。 */
     g_pendingAct = ACT_NONE;
     g_activeAct  = ACT_NONE;
     g_actEnh = FALSE; g_actShf = FALSE;
@@ -606,10 +623,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         ActWheelPostH((int)wp, (int)lp);
         return 0;
     case WM_MODE_UP:
-        /* 某个修饰模式的激活键全部抬起了（钩子投递）：增强模式一失效，
-           进行中的持续滚动立刻停 —— 这就是"松开 Alt 立即终止"的快速路径
-           （工作线程每拍也会自查一遍，两条路互为兜底）。 */
-        if ((int)wp == MODE_ENHANCE) ActAutoScrollStop();
+        /* 某个修饰模式的激活键全部抬起了（钩子投递）。
+           **这里刻意不终止持续滚动**（2026-09-11 改版）：松开 Alt/D 不再打断，
+           滚动继续，直到用户按任意键/鼠标，或超过 10 分钟上限（act.c）。
+           （此前这里有一句 `if (mode == MODE_ENHANCE) ActAutoScrollStop()`，
+           与工作线程每拍自查 g_cMod/ModeDown 一起构成"松手即停"，现均按用户
+           要求移除。） */
+        (void)wp;
         return 0;
     /* ---- 托盘 ---- */
     case WM_TOGGLE_TRAY:

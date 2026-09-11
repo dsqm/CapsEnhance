@@ -162,7 +162,11 @@ void ActWheelClear(void);                /* 丢弃未补发的滚轮请求（松
      · 第一次滚 -> 启动，从 AutoScrollInterval 起步（阅读速度，最慢档）；
      · 同向再滚 -> 逐档提速（几何插值，见 act.c），**最快到 AutoScrollFastMs**；
      · 反向滚   -> 立即终止，并把速度**清零**（下次从最慢档重来）；
-     · 松开修饰键 / 松开 C -> 立即终止。
+     · **松开 Caps / 松开修饰键都不再终止**（2026-09-11 改）：滚起来就能松手读；
+     · 终止条件：反向滚、**用户任何新输入**（按下任意键 / 按下鼠标键 / 不带和弦的
+       滚轮 —— 见 ActAutoScrollInterrupt）、**超过 AUTOSCROLL_MAX_MS（10 分钟）**、
+       以及暂停映射 / 退出 / 重启。
+       超时是为了"人走开了也要能停"：松手之后没有任何输入进来时，它是最后一道闸。
 
    速度一律用"每格多少毫秒"表达，提速靠缩短间隔、不是"每拍补一撮"，所以不会抖。
    默认还开启 **平滑注入**：把一格拆成若干"小数刻度"、提高发数（见 act.c），
@@ -171,7 +175,8 @@ void ActWheelClear(void);                /* 丢弃未补发的滚轮请求（松
    速度两端（AutoScrollInterval / AutoScrollFastMs）各自独立配置，本通道不读
    WheelScrollMul（倍数量与时间量是两种量，不混用）。 */
 void ActAutoScrollWheel(int delta);   /* 主线程：增强模式下的一次滚轮 */
-void ActAutoScrollStop(void);         /* 立即终止（松手 / 复位 / 退出） */
+void ActAutoScrollStop(void);         /* 立即终止（暂停 / 退出 / 重启 / 反向滚） */
+void ActAutoScrollInterrupt(void);    /* 钩子线程：用户有新输入（按键/鼠标）-> 打断 */
 BOOL ActAutoScrollActive(void);       /* 单测用 */
 int  ActAutoScrollGear(void);         /* 单测用：当前速度档（1..总档数，未启动为 0） */
 int  ActAutoScrollDir(void);          /* 单测用：+1 上滚 / -1 下滚 / 0 未启动 */
@@ -179,6 +184,8 @@ int  ActAutoScrollFastMs(void);       /* 单测用：最快档的毫秒/格（= 
 int  ActAutoScrollTick(void);         /* 单测用：当前速度（每格多少毫秒） */
 int  ActAutoScrollBeat(void);         /* 单测用：本拍实际间隔(ms) */
 int  ActAutoScrollDelta(void);        /* 单测用：本拍增量（带符号）；平滑模式 < 120（小数刻度） */
+int  ActAutoScrollRemainMs(void);     /* 单测用：距离超时还剩多少毫秒（未启动 0） */
+void ActAutoScrollTestSetMax(int ms); /* 单测用：缩短超时上限（<=0 回缺省 10 分钟） */
 
 /* ---------- 钩子模块 ---------- */
 extern HHOOK g_hook;

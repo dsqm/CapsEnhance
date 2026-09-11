@@ -165,6 +165,13 @@ static LRESULT Wheel(int delta, DWORD flags) {
     ms.flags = flags;
     return LowLevelMouseProc(HC_ACTION, WM_MOUSEWHEEL, (LPARAM)&ms);
 }
+/* 模拟鼠标的其它动作（按键按下/抬起、移动、横滚轮）。
+   持续滚动的"按任意键（含鼠标）终止"规则要靠它来验。 */
+static LRESULT MouseEv(UINT msg, DWORD flags) {
+    MSLLHOOKSTRUCT ms; memset(&ms, 0, sizeof(ms));
+    ms.flags = flags;
+    return LowLevelMouseProc(HC_ACTION, msg, (LPARAM)&ms);
+}
 /* 排干所有待处理消息（含残留 TIMER/TRIG） */
 static void Sink(void) {
     MSG m;
@@ -755,17 +762,80 @@ int main(void) {
     Pump(300);
     CHECK(g_wheelSum < 0, "R: 下滚方向正确（与上方上滚大致抵消）");
 
-    /* 松开修饰键：钩子投递 WM_MODE_UP -> 终止 */
-    KeyAlt(VK_LMENU, FALSE); Pump(2);
-    Sink();
-    CHECK(!ActAutoScrollActive(), "R: 松开 Alt -> 立即终止连续滚动");
+    /* ---- 终止规则（2026-09-11 改版）：**松手不再打断** ----
+       用户要的是"滚一下就能松手读，想停的时候按一下键"，于是：
+         松开 Alt/D、松开 Caps -> 继续滚；
+         按任意键 / 鼠标按键按下 / 不带和弦的滚轮 -> 终止；
+         Caps+Alt（增强修饰）+滚轮 -> 那是控制杆（调速），**不**终止；
+         超过上限 -> 自行终止（避免"人走开了还在滚"）。 */
+    KeyAlt(VK_LMENU, FALSE); Pump(2); Sink();
+    CHECK(ActAutoScrollActive(), "R: 松开 Alt -> 继续滚动（不再终止）");
 
-    /* 松开 C：WM_CAPS_UP -> ResetEngine -> 终止 */
-    KeyAlt(VK_LMENU, TRUE); Pump(2);              /* 重新按住 Alt 才能再启动 */
+    /* 但"按任意键"包括我们自己的激活键：重新按下 Alt 就是一次真实按键 -> 终止 */
+    KeyAlt(VK_LMENU, TRUE); Pump(2); Sink();
+    CHECK(!ActAutoScrollActive(), "R: 重新按下 Alt（也算任意键）-> 终止");
+
+    /* 再启动一次，验证"松开 Caps"同样不终止 */
     ActAutoScrollWheel(120);
     CHECK(ActAutoScrollActive(), "R: 重新启动成功");
-    END_SCENE();                                  /* 松开 C */
-    CHECK(!ActAutoScrollActive(), "R: 松开 Caps -> 立即终止连续滚动");
+    Key(CLI_CAPS, FALSE); Pump(2); Sink();
+    CHECK(ActAutoScrollActive(), "R: 松开 Caps -> 继续滚动（不再终止）");
+
+    /* 按任意键（普通字母）-> 终止 */
+    Key('A', TRUE); Pump(2); Sink();
+    CHECK(!ActAutoScrollActive(), "R: 按任意键 -> 终止连续滚动");
+    Key('A', FALSE); Pump(2);
+
+    /* 鼠标按键按下 -> 终止 */
+    Key(CLI_CAPS, TRUE); Pump(2); KeyAlt(VK_LMENU, TRUE); Pump(2);
+    ActAutoScrollWheel(120);
+    Sink();
+    CHECK(ActAutoScrollActive(), "R: 鼠标场景已重新启动");
+    MouseEv(WM_LBUTTONDOWN, 0);
+    CHECK(!ActAutoScrollActive(), "R: 鼠标按键按下 -> 终止连续滚动");
+    MouseEv(WM_LBUTTONUP, 0);
+
+    /* 鼠标移动 -> **不**终止（移动不是"按键"，否则手一抖就停） */
+    ActAutoScrollWheel(120);
+    CHECK(ActAutoScrollActive(), "R: 移动场景已启动");
+    MouseEv(WM_MOUSEMOVE, 0);
+    CHECK(ActAutoScrollActive(), "R: 鼠标移动 -> 不终止");
+
+    /* 带着和弦（Caps+Alt）的滚轮 = 控制杆，只调速、不终止 */
+    CHECK(Wheel(120, 0) == 1, "R: 控制杆那一格仍被吞掉（滚轮是控制杆）");
+    Sink();                                    /* 让 WM_WHEEL_ENH 走完（同向 -> 进档） */
+    CHECK(ActAutoScrollActive(), "R: Caps+Alt+滚轮（控制杆）-> 不终止（只调速）");
+
+    /* 不带和弦的普通滚轮 -> 终止（"没按住时直接打断"） */
+    Key(CLI_CAPS, FALSE); Pump(2); KeyAlt(VK_LMENU, FALSE); Pump(2); Sink();
+    CHECK(ActAutoScrollActive(), "R: 松手后仍在滚");
+    CHECK(Wheel(120, 0) == 0, "R: 不带和弦的滚轮 -> 放行（只剩持续滚动还在跑）");
+    CHECK(!ActAutoScrollActive(), "R: 不带和弦的滚轮 -> 终止连续滚动");
+
+    /* 超时 -> 自行终止。这里把上限缩短到 250ms，免得真等 10 分钟；
+       注意要**先设上限再启动**，因为超时时刻是在启动/调速时算出来的。 */
+    ActAutoScrollTestSetMax(250);
+    Key(CLI_CAPS, TRUE); Pump(2); KeyAlt(VK_LMENU, TRUE); Pump(2); Sink();
+    ActAutoScrollWheel(120);
+    CHECK(ActAutoScrollActive() && ActAutoScrollRemainMs() > 0,
+          "R: 超时场景已启动（剩余时间 > 0）");
+    Pump(700);                                 /* 泵消息：让工作线程自己走到超时 */
+    CHECK(!ActAutoScrollActive(), "R: 超过上限 -> 自动终止（不会永远滚）");
+    CHECK(ActAutoScrollRemainMs() == 0, "R: 终止后剩余超时为 0");
+    ActAutoScrollTestSetMax(0);                /* 回缺省 10 分钟 */
+    Key(CLI_CAPS, FALSE); Pump(2); KeyAlt(VK_LMENU, FALSE); Pump(2); Sink();
+
+    /* 暂停映射 -> 必须停掉持续滚动。
+       暂停期间钩子整段被跳过（连"按任意键打断"都收不到），所以这是一条
+       **只能靠显式调用**兜住的生命周期路径：漏了它就是"往别的程序里一直滚、
+       谁也停不下来"。这里直接调菜单那条路径（ApplyPauseState）。 */
+    ActAutoScrollTestSetMax(0);
+    ActAutoScrollWheel(120);
+    CHECK(ActAutoScrollActive(), "R: 暂停前已启动持续滚动");
+    ApplyPauseState();                             /* 托盘"暂停映射" */
+    CHECK(!ActAutoScrollActive(), "R: 暂停映射 -> 终止连续滚动");
+    ApplyPauseState();                             /* 恢复映射 */
+    CHECK(!g_state.paused && !ActAutoScrollActive(), "R: 恢复映射后仍不在滚动");
 
     /* 两端配成相等 -> 阶梯退化为恒定速度（而不是出错或反向提速） */
     WriteChordIni("[General]\r\nAutoScrollInterval = 1000\r\n"

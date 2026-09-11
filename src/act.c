@@ -274,9 +274,15 @@ static void WheelLaneStop(void) {
    累积就会完全不动，那种程序把 AutoScrollSmooth 设为 0 即可。
 
    状态机（active/dir/gear）由主线程在锁内更新，工作线程只按拍输出。
-   终止路径：反向滚（主线程置停）、松开修饰键（钩子投 WM_MODE_UP）、
-   松开 C / 引擎复位（ResetEngine -> ActAutoScrollStop）。工作线程另外每拍
-   自查 ModeDown 与 g_cMod 作兜底 —— 不依赖任何消息也能自愈。 */
+
+   **终止路径（2026-09-11 改版：松手不再打断）**：
+     · 反向滚（主线程置停，并清零档位）；
+     · **用户产生任何新输入** —— 按下任意键、按下鼠标键、或没有带着和弦的滚轮
+       （`ActAutoScrollInterrupt`，由钩子线程调用）；
+     · **超时**：从最后一次调速起算 AUTOSCROLL_MAX_MS（10 分钟），到点自行终止；
+     · 暂停映射 / 退出 / 重启（`ActAutoScrollStop` / ActStop）。
+   松开 Caps 或增强修饰键 **不再**终止 —— 用户要的是"滚起来就能松手读，
+   想停的时候按一下键"。工作线程也不再自查 g_cMod/ModeDown（那是旧规则）。 */
 
 /* 速度档数与节拍下限。档位 i ∈ 1..AUTOSCROLL_SPEED_STEPS：
        i = 1 -> AutoScrollInterval （初始速度，最慢）
@@ -288,6 +294,14 @@ static void WheelLaneStop(void) {
    比较平衡 —— 多滚几次才能到顶，长按提速的层次感也还在。 */
 #define AUTOSCROLL_SPEED_STEPS 6
 #define AUTOSCROLL_TICK_MIN    20   /* 节拍下限（ms）：再快没有意义，注入也太密 */
+
+/* 持续滚动的最长持续时间：从"最后一次调速"起算，到点自动停。
+   为什么要它：松手之后滚动由它自己驱动，一旦用户离开（或者钩子被系统摘掉、
+   没人再送输入进来），就没有任何东西能让它停了 —— 那是"永远在滚"的最坏情况。
+   10 分钟足够读完很长的一页，又不会让人回来发现还在滚。
+   不是"从启动算死的硬上限"：用户在调速说明人还在，于是每次滚轮都续期。 */
+#define AUTOSCROLL_MAX_MS 600000
+static volatile LONG s_asMaxMs = AUTOSCROLL_MAX_MS;   /* 单测可缩短，见 cap.h */
 
 /* 持续滚动的最快速度（毫秒/格），来自 AutoScrollFastMs。 */
 static int AutoScrollFastMs(void) {
@@ -354,9 +368,24 @@ static HANDLE          s_asEvPoke = NULL;  /* auto-reset：状态变了（启动
 static HANDLE          s_asThread = NULL;
 static volatile LONG   s_asStop   = 0;
 static BOOL            s_asInit   = FALSE;
+/* 本通道的状态只有两类访问者：① **主线程**（消息处理、钩子回调、暂停/退出）；
+   ② 本通道自己的工作线程（只读 + 超时那一处调 ActAutoScrollStop）。
+   低级键盘/鼠标钩子的回调**跑在装钩子的线程**上（见 hook.c），也就是主线程 ——
+   所以"钩子回调"与"消息处理"天然串行，不存在两者同时进临界区的可能；
+   工作线程与 s_asCs 的关系则被 AutoScrollLaneStop 的 join 隔开（它在 join
+   之后才删临界区）。**这两条不变量就是这里不需要"生命周期锁"的原因**：
+   所有跨线程可见的东西要么是 volatile/Interlocked 标量，要么由 s_asCs 保护。
+   哪天要把本通道的某个入口搬到第三个线程上，先回来重读这段。 */
 static volatile LONG   s_asActive = 0;
 static volatile LONG   s_asGear   = 0;     /* 速度档：1..AUTOSCROLL_SPEED_STEPS */
 static volatile LONG   s_asDir    = 0;     /* +1 上滚 / -1 下滚 */
+/* 超时的时刻。**故意只存 32 位**：它要在两个线程之间无锁读写，32 位对齐的
+   读写本身是原子的，64 位值则可能被撕裂（x86 上真要出事）。
+   取的是 GetTickCount64 的**低 32 位**（而不是 GetTickCount），比较写成
+   `(LONG)(deadline - now) <= 0` —— 回绕语义下只要真实差值 < 2^31 就恒正确，
+   我们的上限是 10 分钟，差得远。（/analyze 会提示 GetTickCount 每 49 天回绕，
+   这里正是按那条提示做的：既避开它，又保留单字宽的无锁读写。） */
+static volatile LONG   s_asDeadline = 0;
 
 /* 最快档速度（毫秒/格）。 */
 int  ActAutoScrollFastMs(void) { return AutoScrollFastMs(); }
@@ -391,12 +420,39 @@ void ActAutoScrollStop(void) {
     if (s_asInit) { LeaveCriticalSection(&s_asCs); SetEvent(s_asEvPoke); }
 }
 
+/* 用户产生了新输入（按键 / 鼠标动作）-> 打断持续滚动。
+   **钩子线程（= 主线程）会调它**，所以"没在滚"时必须几乎零成本：先读一次
+   active，只有真在滚才去拿锁 + SetEvent。否则等于给每一次按键/点击都加一次
+   临界区与内核调用 —— 那正是本项目最忌讳的"钩子路径上干重活"。 */
+void ActAutoScrollInterrupt(void) {
+    if (!ACTIVE(&s_asActive)) return;
+    ActAutoScrollStop();
+}
+
+/* 单测用：给个机会把超时缩短（否则测一次要真等 10 分钟）。<=0 回缺省。 */
+void ActAutoScrollTestSetMax(int ms) {
+    InterlockedExchange(&s_asMaxMs, (ms > 0) ? (LONG)ms : (LONG)AUTOSCROLL_MAX_MS);
+}
+
+/* 单测用：距离超时还剩多少毫秒（未启动返回 0）。 */
+int ActAutoScrollRemainMs(void) {
+    if (!ACTIVE(&s_asActive)) return 0;
+    LONG r = (LONG)(s_asDeadline - (LONG)(DWORD)GetTickCount64());
+    return (r > 0) ? (int)r : 0;
+}
+
 /* 主线程调用：增强模式（Caps + 增强修饰键）下的一次滚轮。非阻塞（只更新状态）。
-   第一次滚 -> 从最慢档启动；同向再滚 -> 逐档提速；反向 -> 终止并清零。 */
+   第一次滚 -> 从最慢档启动；同向再滚 -> 逐档提速；反向 -> 终止并清零。
+   每次调用都**续期**超时：用户在调速，说明人还在。 */
 void ActAutoScrollWheel(int delta) {
     if (delta == 0 || !s_asInit) return;
     int dir = (delta > 0) ? 1 : -1;
     EnterCriticalSection(&s_asCs);
+    /* **先续期超时，再动 active**：工作线程是"看到 active 就去看超时"的，
+       顺序反过来的话，它有可能在新 deadline 写下去之前就抢到那一拍 ——
+       读到的是上一次启动留下的陈旧时刻（更早），于是刚启动就自己停掉。
+       窗口很小（两条 Interlocked 之间），但"偶发一次启动即停"最难查。 */
+    InterlockedExchange(&s_asDeadline, (LONG)((DWORD)GetTickCount64() + (DWORD)ATOMIC(&s_asMaxMs)));
     if (!ACTIVE(&s_asActive)) {
         InterlockedExchange(&s_asActive, 1);
         InterlockedExchange(&s_asDir, dir);
@@ -431,8 +487,11 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
         }
 
         if (!ACTIVE(&s_asActive)) { running = FALSE; continue; }
-        /* 兜底：增强模式失效（松开 Alt/D）或松开 C 就停 */
-        if (!g_cMod || !ModeDown(MODE_ENHANCE)) {
+
+        /* 超时兜底：从最后一次调速起算 AUTOSCROLL_MAX_MS。到点自己停 ——
+           这一条不依赖任何输入，是"用户走开 / 钩子被系统摘掉"时的最后一道闸。 */
+        LONG remain = (LONG)(s_asDeadline - (LONG)(DWORD)GetTickCount64());
+        if (remain <= 0) {
             ActAutoScrollStop(); running = FALSE; continue;
         }
         int dir = (int)ATOMIC(&s_asDir);
@@ -445,8 +504,11 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
         /* 等满这一个节拍。**变速不打断本拍**（下一拍才生效）：未选中的唤醒
            （提速）继续等剩下的时间；只有停止/反向（active 被清 0）才提前返回。
            这就是"档位越高越抖"的修法之一。
-           平滑模式下节拍固定为 AUTOSCROLL_SMOOTH_TICK，变速只改 delta。 */
-        ULONGLONG deadline = GetTickCount64() + tick;
+           平滑模式下节拍固定为 AUTOSCROLL_SMOOTH_TICK，变速只改 delta。
+           等待上限同时被"剩余超时"钳住：最慢档一拍 60s，否则超时会被拖过去。 */
+        DWORD wait = tick;
+        if ((DWORD)remain < wait) wait = (DWORD)remain;
+        ULONGLONG deadline = GetTickCount64() + wait;
         BOOL ended = FALSE;
         for (;;) {
             ULONGLONG now = GetTickCount64();
@@ -470,6 +532,7 @@ static void AutoScrollLaneStart(void) {
     InterlockedExchange(&s_asActive, 0);
     InterlockedExchange(&s_asGear, 0);
     InterlockedExchange(&s_asDir, 0);
+    InterlockedExchange(&s_asDeadline, 0);
     InitializeCriticalSection(&s_asCs);
     s_asEvPoke = CreateEventW(NULL, FALSE, FALSE, NULL);
     s_asThread = s_asEvPoke ? CreateThread(NULL, 0, AutoScrollThread, NULL, 0, NULL) : NULL;

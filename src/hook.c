@@ -234,6 +234,15 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         BOOL down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
         int  vk   = (int)p->vkCode;
 
+        /* ---- "按任意键打断持续滚动"（2026-09-11 改版） ----
+           松手不再终止（滚起来就能松手读），所以终止条件改由"用户产生新输入"
+           承担：这里凡是真实按键按下（含修饰键、含被我们吞掉的键）都打断它。
+           位置很关键：放在 paused 判断与所有吞键分支**之前** —— 否则某些路径
+           （暂停、反着按、C 会话内）永远走不到，就会出现"停不下来的滚动"。
+           注入按键在上面已经被放行，所以我们自己的注入不会打断自己。
+           没在滚动时它只是一次内存读，键盘热路径上可以接受。 */
+        if (down) ActAutoScrollInterrupt();
+
         if (g_state.paused) {
             /* 暂停期间完全不处理（连物理表都不更新）—— 但"暂停之前被我们
                吞过 down"的键，它的 up 仍要吞，否则又是"吞 down / 放 up"的
@@ -404,41 +413,68 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 static HHOOK g_mouseHook = NULL;
 
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    /* 最快路径过滤：绝大多数事件（鼠标移动）在第一个条件就返回 */
-    if (nCode == HC_ACTION && wParam == WM_MOUSEWHEEL) {
-        const MSLLHOOKSTRUCT* m = (const MSLLHOOKSTRUCT*)lParam;
-        if (m && !(m->flags & LLMHF_INJECTED) && !g_state.paused && g_cMod) {
+    if (nCode != HC_ACTION) return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
+    const MSLLHOOKSTRUCT* m = (const MSLLHOOKSTRUCT*)lParam;
+    /* 自己注入的事件一律放行：既不能让它们再触发一次逻辑，也不能让它们
+       "打断持续滚动"（放大/持续滚动都在注入滚轮）。 */
+    if (!m || (m->flags & LLMHF_INJECTED))
+        return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
+    /* 移动是这里最热的事件（每次移动都进来）：第一个分支就放行，别为它多花比较。
+       它也算"鼠标动作"，但**不算按键**，不打断持续滚动 —— 否则手一抖就停了。 */
+    if (wParam == WM_MOUSEMOVE)
+        return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
+
+    if (wParam == WM_MOUSEWHEEL || wParam == WM_MOUSEHWHEEL) {
+        if (wParam == WM_MOUSEWHEEL && !g_state.paused && g_cMod) {
             int delta = (int)(short)HIWORD(m->mouseData);   /* 高字是滚轮增量 */
             if (delta != 0) {
                 /* Caps + Shift + 滚轮 = **横向滚动**（Shift 决定轴向）。
                    这一格必须**吞掉**（返回 1）：物理滚轮送出的是纵向事件，
                    放行就会变成"横一下、纵一下"的混滚。吞掉之后横向完全由我们
                    注入，倍数 1 也就恰好等于一次标准横向滚动。
-                   mul = 0（关闭）时不吞，退回下面的纵向语义。 */
+                   mul = 0（关闭）时不吞，按配置承诺"该组合退回原来的纵向语义"
+                   —— 于是它继续往下走，可能落进下面的控制杆分支。 */
                 if (g_shiftMod) {
                     int hmul = ConfigGetWheelHScrollMul();
                     if (hmul > 0) {
                         PostMessageW(g_mainWnd, WM_WHEEL_HACCEL, (WPARAM)delta, (LPARAM)hmul);
+                        /* 横向滚动是"另一个动作"，不是持续滚动的控制杆 -> 打断 */
+                        ActAutoScrollInterrupt();
                         return 1;
                     }
                 }
                 if (ModeDown(MODE_ENHANCE)) {
-                    /* 增强模式（默认 Caps+Alt/D）：滚轮语义是"启动/提速持续滚动"，
-                       由 act.c 的持续滚动通道接管，这一格**吞掉**（完全拦截）——
-                       滚轮此时是控制杆：同向滚只调速、不再多滚一格；反向滚只打断。
-                       吞掉不会没反馈：通道一激活就立刻补发第一格（见 act.c）。 */
+                    /* ★ **唯一的"控制杆"**：Caps + 增强修饰键（默认 Alt/D）+ 滚轮，
+                       且横向没接管这一格（没按 Shift，或横向已被设为 0 关闭）。
+                       滚轮此时不是滚动器而是控制杆：
+                         · 同向滚 = 逐档调速（不再多滚一格）；
+                         · 反向滚 = 终止持续滚动并把速度清零。
+                       这一格**吞掉**（完全拦截，返回 1）—— 不会没反馈：
+                       通道一激活就立刻补发第一格（见 act.c）。
+                       **只有这一支不打断**正在进行的持续滚动：它是控制，不是新输入。 */
                     PostMessageW(g_mainWnd, WM_WHEEL_ENH, (WPARAM)delta, 0);
                     return 1;
-                } else {
-                    /* 普通（只按住 C）：逐格放大 N 倍 —— 见 main.c 的
-                       WM_WHEEL_ACCEL。物理格不吞（它是"加强"）。 */
+                }
+                /* 普通（只按住 C）：逐格放大 N 倍 —— 见 main.c 的
+                   WM_WHEEL_ACCEL。物理格不吞（它是"加强"）。 */
+                {
                     int mul = ConfigGetWheelScrollMul();
                     if (mul > 1)
                         PostMessageW(g_mainWnd, WM_WHEEL_ACCEL, (WPARAM)delta, (LPARAM)mul);
                 }
             }
         }
+        /* 走到这里的滚轮都不是控制杆（横向 / 放大 / 横滚轮 / 没按 Caps 的普通滚轮）
+           -> 按"用户的新输入"打断持续滚动。
+           （用户明确要的："只有在按住 Caps+Alt 时同向滚动才是调速，没按住时直接打断"。） */
+        ActAutoScrollInterrupt();
+    } else if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN ||
+               wParam == WM_MBUTTONDOWN || wParam == WM_XBUTTONDOWN) {
+        /* 鼠标键按下也算"任意键"（用户明确要的"包含鼠标"）。
+           抬起不算 —— 那是按下动作的收尾，不是新动作。 */
+        ActAutoScrollInterrupt();
     }
+
     return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
 }
 
