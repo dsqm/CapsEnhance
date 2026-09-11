@@ -422,7 +422,14 @@ int ComputeSteps(const WCHAR* s, int len, int caret, int dir) {
     return steps;
 }
 
-/* 取当前前台窗口的焦点控件 */
+/* 取当前前台窗口的焦点控件。
+   注意 hwndFocus **可能取不到**：GetGUIThreadInfo 只报告"属于该线程输入队列"
+   的焦点窗口，而多线程 UI 的程序（**实测 WPS**：前台是 OpusApp，但焦点落在
+   另一个线程持有的 _WwG 编辑控件上）会返回 NULL。这时退回**前台窗口本身**：
+   各通道都自带类型判定（经典 Edit 白名单 / Scintilla 类名 / WPS 按进程名），
+   拿错了不会误读；而 WPS 通道判的就是进程名，有前台窗口就够用。
+   退回前要问"会不会把别的程序带偏"：UIA 通道拿到顶层窗口后走的是
+   ElementFromHandle + 子树检索，本来就是它支持的用法。 */
 static HWND GetFocusControl(void) {
     HWND fg = GetForegroundWindow();
     if (!fg) return NULL;
@@ -432,7 +439,7 @@ static HWND GetFocusControl(void) {
     gi.cbSize = sizeof(gi);
     if (tid && GetGUIThreadInfo(tid, &gi) && gi.hwndFocus)
         return gi.hwndFocus;
-    return NULL;
+    return fg;
 }
 
 /* 是否"经典 Edit 协议"控件（可靠支持 WM_GETTEXT + EM_GETSEL）。
