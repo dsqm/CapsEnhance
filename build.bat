@@ -25,6 +25,7 @@ rem selection and CRT code. See README "build artifacts differ" section.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TC ^
    /Fobin\ ^
    src\hook.c src\nav.c src\send.c src\act.c src\config.c src\keymap.c src\main.c ^
+   src\autodisp.c src\bridge.c src\wps.c ^
    /link /OUT:bin/CapsEnhance.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib ^
    /SUBSYSTEM:WINDOWS

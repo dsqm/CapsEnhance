@@ -23,7 +23,8 @@ cl /nologo /W4 /analyze /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
    /Fo"bin\an\\" /c ^
    "%~dp0..\src\hook.c" "%~dp0..\src\nav.c" "%~dp0..\src\send.c" ^
    "%~dp0..\src\act.c" "%~dp0..\src\config.c" "%~dp0..\src\keymap.c" ^
-   "%~dp0..\src\main.c"
+   "%~dp0..\src\main.c" "%~dp0..\src\autodisp.c" "%~dp0..\src\bridge.c" ^
+   "%~dp0..\src\wps.c"
 if errorlevel 1 exit /b 1
 
 echo [OK] static analysis pass finished.

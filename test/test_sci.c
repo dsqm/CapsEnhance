@@ -19,6 +19,7 @@
    ~60ms），所以等待用"等到齐/超时"，不用固定时长。
    ============================================================ */
 #include "cap.h"
+#include "auto.h"
 #include <stdio.h>
 #include <wchar.h>
 #include <stdarg.h>
@@ -29,6 +30,17 @@ HHOOK g_hook = NULL;
 void CapLog(const char* fmt, ...) { (void)fmt; }
 /* 未链接 hook.c：物理按键状态桩 */
 BOOL PhysKeyDown(int vk) { (void)vk; return FALSE; }
+/* 未链接 wps.c：WPS 通道桩（真实现要链接 wps.c + autodisp.c + bridge.c，
+   本测试只测词边界算法/其它通道，这里让它"读不到"即可）。
+   签名从 src/auto.h 抄，改了接口这里要跟着改 —— 编译器会立刻提醒。 */
+BOOL WpsGetTextCaret(HWND focus, WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) {
+    (void)focus; (void)text; (void)lenOut; (void)caretOut; (void)selEndOut;
+    return FALSE;
+}
+int WpsSetSel(HWND focus, int start, int end) {
+    (void)focus; (void)start; (void)end;
+    return WPS_SET_NONE;   /* 什么都没做 -> 调用方可安全退回箭头 */
+}
 
 #include "nav.c"
 #include "send.c"

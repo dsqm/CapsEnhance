@@ -26,6 +26,7 @@ void NavSelTrackReset(void) { /* 选区锚跟踪：本测试桩掉 */ }
 /* WPS 通道桩（真实现要链接 nav.c，本测试不链）：
    WinMain 里那三个入口（--wps-bridge / --wps-read / 退出时关桥）桩掉即可 */
 int  WpsBridgeServe(unsigned long pid, unsigned long seq) { (void)pid; (void)seq; return 0; }
+BOOL BrParseChildSwitch(DWORD* pid, DWORD* seq) { (void)pid; (void)seq; return FALSE; }
 void WpsBridgeShutdown(void) { }
 int  WpsSelfTest(void) { return 0; }
 

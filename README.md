@@ -260,6 +260,17 @@ WPS 文字**完整实现了 Word 的对象模型**（连窗口/控件类名都�
 | ---- | ---- | ---- |
 | 全文 | `Application.ActiveDocument.Range().Text` | 与 `Selection` 同一套字符坐标（实测 32 字符的文档 `Range.End=32`、`Selection.Start=12`）；**不能用 `Document.Content`** —— WPS 上 `Content.Start/End` 取不到（实测 -1） |
 | 光标 | `Application.Selection.Start` | 段落分隔符是 `\r`，与 `Range.Text` 的下标一致 |
+| **直接置位** | `Selection.SetRange(start, end)` | 一步移光标（`start == end`）或建选区，**免逐格发方向键** —— 见下 |
+
+**直接置位实测（三条路都试过，用 `test\wspset.c` 可复现）**：
+
+| 调用 | 结果 | 结论 |
+| ---- | ---- | ---- |
+| `Selection.SetRange(10, 20)` | 成功，且**参数自动有序化**（`SetRange(20,10)` 同样得到 `[10,20]`） | **采用**：绝对定位、语义清晰 |
+| `Document.Range(2,8).Select()` | 成功（选区恰好等于该区间） | 可用（`SetRange` 少一次对象获取，所以没选它） |
+| `Selection.Start = 5` | 成功但**不折叠选区**：原本 `[12,12]` 变成 `[5,12]` | **不能用**："移光标"必须发 `SetRange(t, t)` |
+
+**★ WPS 的"活动端"和我们的模型不一致**（这是踩过的坑）：`SetRange(a,b)` 之后 WPS 认为活动端是 **a**，于是它那里的 `Shift+方向` 会去动另一端 —— 实测选区 `[12,31]` 按一次 Shift+右 得到 `[13,31]`（动了起点）。带选区时普通方向键往哪一端折叠也由它决定。所以只要有 Shift **或**当前已有选区（`caret != selEnd`），就必须走绝对置位，绝不混用箭头；只有"小距离且光标折叠"才发箭头（此时无歧义，行为与真实按键完全一致）。
 
 附着方式用 **ROT（运行对象表）+ `GetActiveObject(CLSIDFromProgID("KWPS.Application"))`**，因为 `CoCreateInstance` 会**另起一个没有文档的 WPS 进程**（实测新进程的 `ActiveDocument` 直接抛异常），读不到用户窗口里那篇文档。
 
@@ -274,14 +285,22 @@ WPS 文字**完整实现了 Word 的对象模型**（连窗口/控件类名都�
 
 所以**管理员运行时**改由一个**普通权限的子进程**代读（"降权桥"）：
 
-- 父进程用 `explorer.exe` 的令牌 `CreateProcessWithTokenW(..., LOGON_WITH_PROFILE, ...)` 拉起 `CapsEnhance.exe --wps-bridge <pid> <seq>`（同一份 exe 的普通权限副本：不装钩子、不建窗口/托盘、不参与单实例检查）。
+- 父进程用 `explorer.exe` 的令牌 `CreateProcessWithTokenW(..., LOGON_WITH_PROFILE, ...)` 拉起 `CapsEnhance.exe --bridge <pid> <seq>`（同一份 exe 的普通权限副本：不装钩子、不建窗口/托盘、不参与单实例检查）。
 - ⚠ **`CreateProcessAsUser` 这里用不了**：它需要默认**未启用**的 `SeAssignPrimaryTokenPrivilege`（实测报 1314），而管理员令牌里该特权是"未分配"，不是"未启用"。
 - ⚠ **不能用句柄继承传管道**：`CreateProcessWithTokenW` **不支持句柄继承**（它没有 `bInheritHandles` 参数，实测子进程拿到的是无效句柄）。
-- **命名管道由子进程创建**（对象带普通权限的完整性标签），管理员父进程再去连 —— 高完整性写低完整性对象是允许的，反向才被拦。协议只有一条命令：`'G'` 取一次（应答 = 12 字节头 + UTF-16 文本）；空闲 120s 自退、管道断开即退、父进程退出时显式发 `'Q'`。
+- **命名管道由子进程创建**（对象带普通权限的完整性标签），管理员父进程再去连 —— 高完整性写低完整性对象是允许的，反向才被拦。管道名带父进程 pid 与递增序号（不与残留的旧子进程撞名）；空闲 120s 自退、管道断开即退、父进程退出时显式发停止帧；子进程另有一个"父进程监视线程"，父进程一没就立刻收工（否则父进程死在"已拉起、还没连上"的窗口里会留下孤儿进程）。
+- **这条桥是通用的**（`src/bridge.c`），不认识 WPS：它只提供"降权拉起 + 长度前缀帧收发 + 生命周期"，协议内容由调用方定义。目前只有一条命令（`'G'` 取文本 / `'S'` 置选区），将来再有"只有普通权限才看得见的对象"，照 `src/wps.c` 再写一个文件即可，桥原样复用。
 - 首次在 WPS 里按键时会**按需拉起**这个子进程（`LOGON_WITH_PROFILE` 要加载用户配置，偶发要几百毫秒，所以等待窗口给到 1.5s）；桥起来后常驻复用，后续跳词只走管道。桥失败会退避 1s 再试，期间该次跳词按"读不到文本"退回原生 `Ctrl+方向`。
-- 子进程的诊断会写进同一个日志文件，行首带 `[WPS桥]` 前缀（父进程侧是 `  WPS `）。
+- 子进程的诊断会写进同一个日志文件，行首带 `[桥WPS]` / `[桥]` 前缀（父进程侧是 `  WPS ` / `  桥 `）。
 
-WPS 通道的落点校验与 UIA/IA2 一致，但**只在"改道"那一次**回读：我们发的是单字符箭头、落点由我们算出的字符位决定；只有超过 `MaxArrowSteps` 改发原生 `Ctrl+方向` 时才依赖 WPS 自己的词切分，那才是必须回读的情境。
+WPS 置位的回读校验和 UIA 一样严（读回 `Selection.Start/End` 必须正好是期望区间），但返回的是**三态**而不是 bool：
+
+| 返回 | 含义 | 调用方怎么做 |
+| ---- | ---- | ---- |
+| `WPS_SET_OK` | 已生效且回读一致 | 本次结束，不再发箭头 |
+| `WPS_SET_NONE` | 光标完全没动 | 可以安全退回逐格箭头 |
+| `WPS_SET_UNSURE` | 读不回来 / 动到了别处 | **绝不再补箭头**（两个错误叠加更糟） |
+
 
 命令行自查：`CapsEnhance.exe --wps-read` 读一次并写日志（含"运行权限 + 走的哪条通路 + 光标附近 ±20 字符"），用于排查"WPS 里为什么不生效"。
 
@@ -295,7 +314,9 @@ WPS 通道的落点校验与 UIA/IA2 一致，但**只在"改道"那一次**回�
 | Scintilla | `SCI_SETSEL(anchor, caret)` | wParam=锚、lParam=活动光标，天然支持选区位移 |
 | **UIA** | `TextRange.Select()` | 官方语义：退化（空）range 上调用 Select 时 *"the text insertion point moves to the starting endpoint"*——即直接移动光标。**Chromium 系对折叠 range 的负向端点移动一律拒绝**（实测 moved=0，"N 不行 M 可以"），因此向左目标用"Start 从文档头正向数 + End 绝对定位回 caret"构造，全程只用正向增量与绝对定位；带 Shift 保留展开区间产生选区 |
 | **IA2** | `setCaretOffset` / `setSelection` | IAccessible2 规范：*"Sets the position of the caret"*，不支持时返回 `E_FAIL` 退回箭头 |
+| **WPS** | `Selection.SetRange(start, end)` | Word 对象模型的"设选区"，`start == end` 即移光标；参数自动有序化（实测）。**带 Shift 或已有选区时必须走它**——WPS 的活动端语义与我们的模型不一致（见"WPS 文字"一节） |
 
+- WPS 的置位**不限无 Shift**：`SetRange` 吃有序区间，位移序列的锚点由我们自己维护（与经典 Edit 同一套），所以 Shift 位移也是瞬跳。
 - UIA/IA2 的直接置位**仅限无 Shift**：带选区时读回的位置是选区起点而非活动端，目标计算不成立，置位会产生错误选区——Shift 位移走箭头（anchor 语义天然正确）。
 - **置位并非对所有 UIA 实现有效**：Chromium 系（QQ/Edge/Electron）支持（但只支持移动 End 端点，向左需全正向构造）；**WPF 系（如 Quicker 的文本框）的 `Select()` 会返回成功但选区不动** —— 它还会让显示光标短暂闪到目标位置却不真正生效，所以连续两次判定无效后，本次会话内不再对该程序尝试置位（消除闪烁，重启程序恢复；日志会写明）——回读校验发现"光标未动"后自动退回箭头，功能正确只是逐格偏慢；嫌慢可把该程序加入 `[NativeWordJump]`。
 - UIA/IA2 置位的回读校验比经典 Edit 更严：置位后重新读文本+光标，**仍是同一页文本且光标恰在目标**才算成功；HRESULT 成功但回读不符时，不叠加箭头（避免双重错误），本次到此为止（诊断日志会记录）。
@@ -469,7 +490,11 @@ FIFO，"先开火、后补齐"的顺序语义与原同步执行完全一致。
 - **keymap.c** —— **键位表**。两张声明式表：动作表（触发键 → 动作 → 目标键 + 属性标志 `ACTF_*`）与**模式表**（修饰模式 ↔ 激活键集合，激活键取自 `cap.h` 的 `MODE_*_KEYS_DEFAULT`，**编译期常量、不读配置**）。hook.c 与 main.c 只做查询，不再各自持有映射表 —— "能不能重复、由谁执行、吃不吃 Shift、是哪个修饰模式"全都变成**数据**。**引擎从不判断按的是哪个键，只问"这个模式生效了吗"**，所以"把 `D` 删掉只留 `Alt`"只改一处常量。启动时由 `KeyMapInit()` 装配。
 - **hook.c** —— 底层输入钩子。键盘钩子识别 C / 触发键 / 模式激活键（固定 增强=Alt/D、位移=F，表在 keymap.c），维护 `volatile` 状态与"模式门闩快照"（应对按键乱序到达），并**无条件跟踪真实 Shift**（横向滚动要用，且必须放在"未按 C 就放行"之前）；屏蔽映射期间的无效按键，把动作需求投递给主线程；修饰键抬起使某模式失效时投 `WM_MODE_UP`。鼠标钩子只做一件事——按住 C 时把滚轮请求投递出去（`Shift` → `WM_WHEEL_HACCEL` 横向；增强模式 → `WM_WHEEL_ENH`；否则 → `WM_WHEEL_ACCEL` 逐格放大）；**横向与持续滚动两路吞掉物理格**，只有放大档放行；回调在最热的路径上，只允许几次比较 + `PostMessage`。
 - **main.c** —— 消息窗口 + 消息循环。和弦引擎（按住稳定期 → 首次开火 → 重复节奏）；路由：词跳动作用 `NavJump`，其余用 `SendActOnce` 发送；滚轮 / 持续滚动 / 模式失效消息只做**投递**，不做注入（`ActWheelPost` / `ActWheelPostH` / `ActAutoScrollWheel` / `ActAutoScrollStop`）；托盘菜单（暂停 / 退出）；日志 `CapLog`；启动时调用 `NavBaseInfo()` 采集环境基线、`KeyMapInit()` 装配激活键（都不落盘）。
-- **nav.c** —— 词跳核心。多通道读取文本与光标（Edit / Scintilla / UIA / IA2）、字符分类算法、代理对处理、直接置光标、诊断 `NavProbe` / `NavBaseInfo`。
+- **nav.c** —— 词跳核心。多通道读取文本与光标（Edit / Scintilla / UIA / IA2 / WPS）、字符分类算法、代理对处理、直接置光标、诊断 `NavProbe` / `NavBaseInfo`。它只把 WPS 当成"又一条通道"（一行分派），WPS 的细节不在这个文件里。
+- **autodisp.c** —— **通用**的 COM 自动化按名调用（`GetIDsOfNames` + `Invoke` 的那套固定套路与坑：参数逆序、`PROPERTYPUT` 的命名参数、`EXCEPINFO` 里三个 BSTR 必须释放）。不认识任何具体程序；Word / WPS / Excel 这类对象模型都能用。
+- **bridge.c** —— **通用**的"降权桥"：管理员进程要访问"只有普通权限才看得见的对象"时的 IPC（借 shell 令牌拉起本 exe 的普通权限副本、命名管道由子进程建、`[长度][负载]` 帧、失败冷却、父进程监视线程）。只做运输，协议内容由调用方定义。
+- **wps.c** —— **专用**的 WPS 文字通道：ProgID / 进程名 / 属性链 / 直接置位，以及跑在桥上的请求-应答协议。界面在 `src/auto.h`。
+  > 分层的意义：以后要支持"另一个只有 COM 才读得到的程序"（比如 WPS 表格 / 别的 Office 类软件），照 `wps.c` 再写一个文件即可，`autodisp.c` 与 `bridge.c` 原样复用 —— 不需要再想一遍"怎么按名字调 IDispatch""管理员怎么附普通权限的对象"。
 - **send.c** —— 模拟按键与滚轮的**唯一出口**。扩展键标志（方向键/Home/End/Del 等必须带 `KEYEVENTF_EXTENDEDKEY`，否则扫描码被当成小键盘键）、逐条发送节奏、Ctrl/Shift 组合键的正确按住与释放、滚轮加速的逐格补发、超限改道的判定（`SendArrows` 把"本次是改道还是逐格"返回给调用方 —— 改道必须由 nav.c 回读校验落点；`SendArrowsStrict` 供补正路径使用，绝不改道）。`SendInput` 的返回值会检查：目标窗口完整性级别更高时（UIPI）整批注入会被拒并返回 0，此前静默丢弃导致"词跳没反应而日志干净无事"，现在只在你按 **C + \`** 记录期间写一条日志。
 - **act.c** —— 执行线程。串行执行会阻塞的发送动作（见上节），是"主线程不被发送过程占住"的保证。**滚轮注入**（`ActWheelPost` 纵向放大 / `ActWheelPostH` 横向，共用一条队列 + 线程，按轴向分流）与**持续滚动**（`ActAutoScrollWheel`）各有一条独立通道，同样是为了让主线程只投递、不阻塞。持续滚动的状态机（active/dir/gear）在锁内维护、由工作线程按拍输出，并且**不受 `ActInFlight()` 门控**（那门控是给和弦重复限速的）；**速度**用"每格之间的间隔"表达（`gear` 是速度档而不是每拍格数，两端取自 `AutoScrollInterval` / `AutoScrollFastMs`）、**粒度**由 `AutoScrollSmooth` 决定（整格 120 或小数刻度），变速只在下一拍生效。两条通道互不拖累。
 
@@ -534,7 +559,8 @@ FIFO，"先开火、后补齐"的顺序语义与原同步执行完全一致。
 
 ```bat
 build.bat                  rem 生成 bin/CapsEnhance.exe
-                           rem （源文件：hook / nav / send / act / config / keymap / main）
+                           rem （源文件：hook / nav / send / act / config / keymap / main
+                           rem            / autodisp / bridge / wps）
 ```
 
 运行测试与诊断工具：
@@ -553,6 +579,7 @@ test\build_keytest.bat     rem 诊断工具：keytest(按键投递实测) + uipr
                            rem            + memtest(UIA 内存压测) + restarttest(重启握手+单实例)
                            rem            + traymemtest(托盘菜单内存定位) + logsmoke(日志轮转)
                            rem            + ilcheck(打印各进程完整性级别) + lowrun(借 shell 令牌以普通权限启动任意程序)
+                           rem            + wspset(WPS 直接置位三招的实测：以普通权限跑 lowrun.exe bin\wspset.exe)
 test\build_wpsjump.bat     rem WPS 通道真机检查：把 WPS 文字窗口置前，直接调 NavJump，
                            rem            逐步核对"选中的是 WPS 通道"且光标落在算出的目标上。
                            rem            机器上没装/没开 WPS 时打印 [SKIP] 并以 0 退出（CI 友好）。
@@ -626,10 +653,18 @@ C + ` 开始/结束日志记录。
 
 ## 六、注意事项
 
+- **不写注册表、不改系统设置**（铁律）：全程序**没有任何一处写注册表**的调用，
+  也不调 `SystemParametersInfo` / `SetWindowsHookEx` 之外的系统级修改 —— 只有
+  *读*（`CLSIDFromProgID` 查 HKCR 拿 CLSID、`GetActiveObject` 查运行对象表）。
+  它落地的东西只有三样：① `bin/CapsEnhance.ini`（配置，与 exe 同目录）；
+  ② `bin/CapsEnhance.log`（只在按 `C + \`` 记录时写）；③ 进程内的低级钩子与
+  运行期的辅助子进程（**进程退出即消失**，不装服务、不开机自启）。
+  卸载 = 删掉目录。托盘"重启程序"与 `--reset-keys` 也只是补发按键抬起，不碰系统状态。
 - 本程序拦截并屏蔽了 `CapsLock` 键本身；需要真实大小写切换时，用映射里的 `C + Tab` 发送 CapsLock，或从托盘"暂停"映射恢复原键。
 - **三种滚轮语义按这个顺序判定**：`Caps+Shift`（真实 Shift）→ 横向滚动（**吞格**）；否则按住 `Caps+Alt/D` → 持续滚动（滚一下就自己一直滚，从最慢档起步、逐档提速到 `AutoScrollFastMs`，**不吞格**）；否则 `Caps+滚轮` → 逐格放大（倍数 `WheelScrollMul`，**不吞格**）。三者的配置项**各自独立**（倍数项与毫秒/格不混用）。想停下：放大档松手即可，持续滚动档反向滚一下或松开 `C`/修饰键（反向停还会把速度清零）。速度与粒度分开：`AutoScrollInterval`/`AutoScrollFastMs` 管快慢、`AutoScrollSmooth` 管"一格一格"还是"连续滑动"。
 - **单实例**：同时只允许一个实例运行。重复启动会直接退出，并让已在运行的实例显示"已在运行中"提示（重启流程内部通过 `--wait-exit` 握手，不受影响）。
-- 现代编辑框（UIA/IA2 通道）无法像经典 Edit 那样一次设置光标，超长距离跳转会逐格发送方向键（上限 256 步）。
+- 现代编辑框（UIA/IA2 通道）无法像经典 Edit 那样一次设置光标，超长距离跳转会逐格发送方向键（上限 256 步）。**WPS 文字不在此列**：它有 `Selection.SetRange` 可以直接置位，所以 WPS 里的跳词（含 Shift 位移）都是瞬跳，不逐格发键。
+- **WPS 文字**：只支持 `wps.exe`（表格/演示的对象模型不同）；`RunAsAdmin=1` 时会自动拉起一个普通权限的小进程代读（"降权桥"，按需启动、空闲自退、父进程退出即退）—— 因为 **COM 的运行对象表按完整性级别隔离，管理员进程根本看不到普通权限 WPS 的自动化对象**。若某次跳词在 WPS 里没生效，先看日志里有没有 `[桥]` / `[桥WPS]` 段：有则对照子进程写出的失败原因；完全没有则多半是降权没成功（日志会写）。
 - **体量上限**：经典 Edit 通道（含 EmEditor）只处理 **64000 字符以内**的文档，超过就一步落到原生 `Ctrl+方向` 兜底 —— 实测经典 Edit 控件同样不提供 UIA/IA2 文本，四路一起失败，不会降级到 UIA 慢跳（逐档实测值与阈值见"二、词跳"里的通道表）。Scintilla 通道上限是 **2 MB**（文档字节数，中文 3 字节/字），WPS 通道上限是 **100000 字符**。
 - **WPS 文字**：只支持 `wps.exe`（表格/演示的对象模型不同）；`RunAsAdmin=1` 时会自动拉起一个普通权限的小进程代读（"降权桥"，按需启动、空闲自退）—— 因为 **COM 的运行对象表按完整性级别隔离，管理员进程根本看不到普通权限 WPS 的自动化对象**。若某次跳词在 WPS 里没生效，先看日志里有没有 `[WPS桥]` 段：有则说明子进程起来了，对照它写出的失败原因；完全没有则多半是降权没成功（日志会写）。
 - 托盘弹出菜单需要可聚焦窗口，CapsEnhance 启动时会创建 1×1 的隐藏顶层窗口用于承载系统菜单。

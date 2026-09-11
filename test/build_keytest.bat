@@ -44,7 +44,15 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
    test\lowrun.c /link /OUT:bin/lowrun.exe userenv.lib advapi32.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 
-echo [OK] keytest + uiprobe + memtest + restarttest + traymemtest + logsmoke + ilcheck + lowrun built.
+rem 以普通权限跑：bin\lowrun.exe bin\wspset.exe bin\wspset.out
+rem 用途：核对 WPS 的"直接置位"三招哪些可用（Selection.SetRange / Range().Select /
+rem       Selection.Start 属性写入）以及回读是否一致。WPS 升级后若跳词落点变了，
+rem       先跑它重新测一遍 —— 这是选型的证据来源，不是猜的。
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
+   test\wspset.c /link /OUT:bin/wspset.exe user32.lib ole32.lib oleaut32.lib advapi32.lib /SUBSYSTEM:CONSOLE
+if errorlevel 1 goto fail
+
+echo [OK] keytest + uiprobe + memtest + restarttest + traymemtest + logsmoke + ilcheck + lowrun + wspset built.
 exit /b 0
 :fail
 echo [ERROR] build failed
