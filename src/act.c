@@ -277,12 +277,15 @@ static void WheelLaneStop(void) {
 
    **终止路径（2026-09-11 改版：松手不再打断）**：
      · 反向滚（主线程置停，并清零档位）；
-     · **用户产生任何新输入** —— 按下任意键、按下鼠标键、或没有带着和弦的滚轮
-       （`ActAutoScrollInterrupt`，由钩子线程调用）；
+     · **用户产生任何新输入** —— 新按下的键（**系统自动重复不算**）、按下鼠标键、
+       或**没按着和弦**的滚轮（`ActAutoScrollInterrupt`，由钩子线程调用）；
      · **超时**：从最后一次调速起算 AUTOSCROLL_MAX_MS（10 分钟），到点自行终止；
      · 暂停映射 / 退出 / 重启（`ActAutoScrollStop` / ActStop）。
    松开 Caps 或增强修饰键 **不再**终止 —— 用户要的是"滚起来就能松手读，
-   想停的时候按一下键"。工作线程也不再自查 g_cMod/ModeDown（那是旧规则）。 */
+   想停的时候按一下键"。工作线程也不再自查 g_cMod/ModeDown（那是旧规则）。
+
+   每一次"终止"都会在日志里留一行（谁停的 + 细节，见 ActAutoScrollInterrupt）。
+   这个功能的终止条件全在钩子侧，症状出现时现场什么都不剩 —— 那一行就是现场。 */
 
 /* 速度档数与节拍下限。档位 i ∈ 1..AUTOSCROLL_SPEED_STEPS：
        i = 1 -> AutoScrollInterval （初始速度，最慢）
@@ -386,6 +389,10 @@ static volatile LONG   s_asDir    = 0;     /* +1 上滚 / -1 下滚 */
    我们的上限是 10 分钟，差得远。（/analyze 会提示 GetTickCount 每 49 天回绕，
    这里正是按那条提示做的：既避开它，又保留单字宽的无锁读写。） */
 static volatile LONG   s_asDeadline = 0;
+/* 本次会话已经注入过多少拍。**只服务日志**：终止那行带上它，就能一眼分开
+   "一拍都没发出去就被停"与"发了一拍就停"（用户报的"滚一下就停"正是后者），
+   也能反过来证明"它其实一直在注入，只是目标程序没反应"。 */
+static volatile LONG   s_asTicks = 0;
 
 /* 最快档速度（毫秒/格）。 */
 int  ActAutoScrollFastMs(void) { return AutoScrollFastMs(); }
@@ -422,10 +429,19 @@ void ActAutoScrollStop(void) {
 
 /* 用户产生了新输入（按键 / 鼠标动作）-> 打断持续滚动。
    **钩子线程（= 主线程）会调它**，所以"没在滚"时必须几乎零成本：先读一次
-   active，只有真在滚才去拿锁 + SetEvent。否则等于给每一次按键/点击都加一次
-   临界区与内核调用 —— 那正是本项目最忌讳的"钩子路径上干重活"。 */
-void ActAutoScrollInterrupt(void) {
+   active，只有真在滚才去拿锁 + SetEvent + 写一行日志。否则等于给每一次按键/点击
+   都加一次临界区与内核调用 —— 那正是本项目最忌讳的"钩子路径上干重活"。
+
+   why / detail 只服务那行日志。**这一行故意不受记录开关控制**：本功能唯一会让
+   人抓瞎的就是"它无故停了"（松手不再打断之后，终止条件全在钩子侧，症状出现时
+   现场什么都不剩）。一次滚动会话最多一行，代价可以忽略；配合"谁停的 + 细节"
+   （键码 / 滚轮增量 / 鼠标消息号），下次再出现就能直接读出原因。
+   why 是调用方给的**字面量**（本函数不负责释放；也不额外做格式化）。 */
+void ActAutoScrollInterrupt(const char* why, int detail) {
     if (!ACTIVE(&s_asActive)) return;
+    CapLog("持续滚动：终止（%s detail=%d/0x%X，已注入 %d 拍）",
+           why ? why : "新输入", detail, (unsigned)(detail & 0xFFFF),
+           (int)ATOMIC(&s_asTicks));
     ActAutoScrollStop();
 }
 
@@ -454,15 +470,24 @@ void ActAutoScrollWheel(int delta) {
        窗口很小（两条 Interlocked 之间），但"偶发一次启动即停"最难查。 */
     InterlockedExchange(&s_asDeadline, (LONG)((DWORD)GetTickCount64() + (DWORD)ATOMIC(&s_asMaxMs)));
     if (!ACTIVE(&s_asActive)) {
-        InterlockedExchange(&s_asActive, 1);
+        /* **顺序**：方向与档位先写，最后才置 active。工作线程是"看到 active 就用
+           dir/gear"，反过来写会让它读到 active=1、dir=0 的中间态 —— 那是"刚启动
+           就自己停"与"空转"两种症状的来源。置 active 之前对工作线程而言都只是
+           "还没在滚"，所以这样写没有任何窗口。 */
         InterlockedExchange(&s_asDir, dir);
         InterlockedExchange(&s_asGear, 1);   /* 第一滚：最慢档启动 */
+        InterlockedExchange(&s_asTicks, 0);  /* 新会话：拍数从头数（日志用） */
+        InterlockedExchange(&s_asActive, 1);
     } else if ((int)ATOMIC(&s_asDir) != dir) {
         /* 反向：立即终止，并**清零档位** —— 下次启动从第 1 档重来，
-           不残留打断前的速度（用户要的"反向打断后重置滚动速度"）。 */
-        InterlockedExchange(&s_asActive, 0);
+           不残留打断前的速度（用户要的"反向打断后重置滚动速度"）。
+           记下行首一行日志（含两边方向与这一格的增量）：反向终止也是"无故停了"
+           的常见来源（滚轮回弹/编码器抖动会发一个极小反向量），有日志才分得清。 */
+        CapLog("持续滚动：终止（反向滚 %+d -> %+d，delta=%d，已注入 %d 拍）",
+               (int)ATOMIC(&s_asDir), dir, delta, (int)ATOMIC(&s_asTicks));
         InterlockedExchange(&s_asDir, 0);
         InterlockedExchange(&s_asGear, 0);
+        InterlockedExchange(&s_asActive, 0);
     } else if ((int)ATOMIC(&s_asGear) < AUTOSCROLL_SPEED_STEPS) {
         InterlockedExchange(&s_asGear, (LONG)ATOMIC(&s_asGear) + 1);  /* 同向：平滑进一档 */
     }
@@ -492,14 +517,23 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
            这一条不依赖任何输入，是"用户走开 / 钩子被系统摘掉"时的最后一道闸。 */
         LONG remain = (LONG)(s_asDeadline - (LONG)(DWORD)GetTickCount64());
         if (remain <= 0) {
+            CapLog("持续滚动：终止（超时 %d ms 未调速，已注入 %d 拍）",
+                   (int)ATOMIC(&s_asMaxMs), (int)ATOMIC(&s_asTicks));
             ActAutoScrollStop(); running = FALSE; continue;
         }
         int dir = (int)ATOMIC(&s_asDir);
-        if (dir == 0) { running = FALSE; continue; }   /* 防御：不该出现 */
+        if (dir == 0) {
+            /* 防御：正常不会出现（dir 在 active 之前写入，见 ActAutoScrollWheel）。
+               真出现说明状态被打乱 —— **必须停下**，不能只把 running 清掉了事：
+               active 还是 1，下一轮会跳过"空闲等待"直接回来，于是这里变成没有
+               任何等待的死循环（CPU 空转、界面照旧，极难查）。 */
+            ActAutoScrollStop(); running = FALSE; continue;
+        }
 
         DWORD tick; int delta;
         AutoScrollPlan((int)ATOMIC(&s_asGear), &tick, &delta);
         SendWheelNotches(dir > 0 ? delta : -delta, 1);
+        InterlockedIncrement(&s_asTicks);   /* 只服务日志（见 s_asTicks 声明） */
 
         /* 等满这一个节拍。**变速不打断本拍**（下一拍才生效）：未选中的唤醒
            （提速）继续等剩下的时间；只有停止/反向（active 被清 0）才提前返回。

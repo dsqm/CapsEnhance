@@ -165,6 +165,16 @@ static LRESULT Wheel(int delta, DWORD flags) {
     ms.flags = flags;
     return LowLevelMouseProc(HC_ACTION, WM_MOUSEWHEEL, (LPARAM)&ms);
 }
+/* 横轴滚轮（WM_MOUSEHWHEEL）：高字同样是增量。
+   为什么单独一个入口：触控板的双指滑动会**两个轴都报**，而横轴事件过去不在
+   控制杆分支里（它会一路落到"新输入 -> 打断"）—— 是"按住 Caps+Alt 滚一下就停"
+   的怀疑来源之一。 */
+static LRESULT WheelH(int delta, DWORD flags) {
+    MSLLHOOKSTRUCT ms; memset(&ms, 0, sizeof(ms));
+    ms.mouseData = (DWORD)(USHORT)(SHORT)delta << 16;
+    ms.flags = flags;
+    return LowLevelMouseProc(HC_ACTION, WM_MOUSEHWHEEL, (LPARAM)&ms);
+}
 /* 模拟鼠标的其它动作（按键按下/抬起、移动、横滚轮）。
    持续滚动的"按任意键（含鼠标）终止"规则要靠它来验。 */
 static LRESULT MouseEv(UINT msg, DWORD flags) {
@@ -811,6 +821,40 @@ int main(void) {
     CHECK(ActAutoScrollActive(), "R: 松手后仍在滚");
     CHECK(Wheel(120, 0) == 0, "R: 不带和弦的滚轮 -> 放行（只剩持续滚动还在跑）");
     CHECK(!ActAutoScrollActive(), "R: 不带和弦的滚轮 -> 终止连续滚动");
+
+    /* ---- 第二版（2026-09-11）补充："滚一下就停"的两个来源 ----
+       ① **横向轴**：触控板双指滑动会同时报纵/横两个轴，倾斜滚轮也报横轴。
+          它们过去不在控制杆分支里，一路落到"新输入 -> 打断"，于是刚启动的
+          持续滚动被同一只手当场掐掉；
+       ② **系统自动重复**：被按住的键（含修饰键）会持续发 keydown，把它当成
+          "新输入"就等于"滚一格就被自己按住的那个键打断"。
+       下面两组都覆盖：和弦按着 -> 整只手势都不打断；真的新按下 -> 打断。 */
+    ActAutoScrollWheel(120);
+    CHECK(ActAutoScrollActive(), "R: 无和弦状态下重新启动");
+    CHECK(WheelH(120, 0) == 0, "R: 不带和弦的横轴滚轮 -> 放行");
+    CHECK(!ActAutoScrollActive(), "R: 不带和弦的横轴滚轮 -> 打断（横向也是新输入）");
+
+    Key(CLI_CAPS, TRUE); Pump(2); KeyAlt(VK_LMENU, TRUE); Pump(2); Sink();
+    ActAutoScrollWheel(120);
+    CHECK(ActAutoScrollActive(), "R: 和弦按上并启动");
+    CHECK(WheelH(30, 0) == 1, "R: 和弦按着时的横轴滚轮也被吞掉（同一个手势）");
+    CHECK(ActAutoScrollActive(), "R: 和弦按着时的横轴滚轮 -> 不打断");
+    CHECK(Wheel(0, 0) == 1, "R: delta=0 的滚轮（占位帧）被吞掉");
+    CHECK(ActAutoScrollActive(),
+          "R: delta=0 的滚轮 -> 不打断（不带输入信息，不该把滚动停掉）");
+
+    /* 先按住一个普通键（**新按下**算新输入 -> 中断），再启动；之后同一个键的
+       keydown 都是系统自动重复（没有抬起），必须**不**打断。 */
+    Key('Q', TRUE); Pump(2); Sink();
+    CHECK(!ActAutoScrollActive(), "R: 新按下一个键 -> 打断（原语义不变）");
+    ActAutoScrollWheel(120);
+    CHECK(ActAutoScrollActive(), "R: 键还按着时也能启动持续滚动");
+    Key('Q', TRUE); Pump(2); Sink();              /* 自动重复：中间没有抬起 */
+    CHECK(ActAutoScrollActive(), "R: 系统自动重复 -> 不打断（重复不是新输入）");
+    Key('Q', FALSE); Pump(2); Sink();
+    Key('Q', TRUE); Pump(2); Sink();              /* 抬起后再按下 = 真的新输入 */
+    CHECK(!ActAutoScrollActive(), "R: 抬起后再按下 -> 打断");
+    Key('Q', FALSE); Pump(2); Sink();
 
     /* 超时 -> 自行终止。这里把上限缩短到 250ms，免得真等 10 分钟；
        注意要**先设上限再启动**，因为超时时刻是在启动/调速时算出来的。 */

@@ -234,14 +234,22 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         BOOL down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
         int  vk   = (int)p->vkCode;
 
-        /* ---- "按任意键打断持续滚动"（2026-09-11 改版） ----
+        /* ---- "按任意键打断持续滚动"（2026-09-11 第二版） ----
            松手不再终止（滚起来就能松手读），所以终止条件改由"用户产生新输入"
-           承担：这里凡是真实按键按下（含修饰键、含被我们吞掉的键）都打断它。
-           位置很关键：放在 paused 判断与所有吞键分支**之前** —— 否则某些路径
-           （暂停、反着按、C 会话内）永远走不到，就会出现"停不下来的滚动"。
+           承担。位置很关键：放在 paused 判断与所有吞键分支**之前** —— 否则某些
+           路径（暂停、反着按、C 会话内）永远走不到，就会出现"停不下来的滚动"。
            注入按键在上面已经被放行，所以我们自己的注入不会打断自己。
-           没在滚动时它只是一次内存读，键盘热路径上可以接受。 */
-        if (down) ActAutoScrollInterrupt();
+
+           ★ 只有**新按下**才算新输入：`g_phys` 在这里还是按下之前的快照（更新在
+           下面），已经按着的键再来的 keydown 就是系统自动重复（typematic）。
+           这一条是必需的，不是防抖 —— 按住 Caps/Alt 滚动时，被按住的键会持续
+           重复，把重复也当成"新输入"，症状就是**滚一下就停**（第一格刚出去就被
+           自己按住的那个键的重复打断）。是用户上报症状后的头号怀疑对象，但
+           尚未在真机上逐事件坐实 —— 所以 act.c 的终止日志把 reason 与 vk 都写下来，
+           下次出现可直接对上。（CapsLock 本身不重复：toggle 键；修饰键与普通键会。）
+           没在滚动时它只是两次内存读，键盘热路径上可以接受。 */
+        if (down && !PhysKeyDown(vk))
+            ActAutoScrollInterrupt("按下按键", vk);
 
         if (g_state.paused) {
             /* 暂停期间完全不处理（连物理表都不更新）—— 但"暂停之前被我们
@@ -425,54 +433,74 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
         return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
 
     if (wParam == WM_MOUSEWHEEL || wParam == WM_MOUSEHWHEEL) {
-        if (wParam == WM_MOUSEWHEEL && !g_state.paused && g_cMod) {
-            int delta = (int)(short)HIWORD(m->mouseData);   /* 高字是滚轮增量 */
-            if (delta != 0) {
-                /* Caps + Shift + 滚轮 = **横向滚动**（Shift 决定轴向）。
-                   这一格必须**吞掉**（返回 1）：物理滚轮送出的是纵向事件，
-                   放行就会变成"横一下、纵一下"的混滚。吞掉之后横向完全由我们
-                   注入，倍数 1 也就恰好等于一次标准横向滚动。
-                   mul = 0（关闭）时不吞，按配置承诺"该组合退回原来的纵向语义"
-                   —— 于是它继续往下走，可能落进下面的控制杆分支。 */
-                if (g_shiftMod) {
-                    int hmul = ConfigGetWheelHScrollMul();
-                    if (hmul > 0) {
-                        PostMessageW(g_mainWnd, WM_WHEEL_HACCEL, (WPARAM)delta, (LPARAM)hmul);
-                        /* 横向滚动是"另一个动作"，不是持续滚动的控制杆 -> 打断 */
-                        ActAutoScrollInterrupt();
-                        return 1;
-                    }
-                }
-                if (ModeDown(MODE_ENHANCE)) {
-                    /* ★ **唯一的"控制杆"**：Caps + 增强修饰键（默认 Alt/D）+ 滚轮，
-                       且横向没接管这一格（没按 Shift，或横向已被设为 0 关闭）。
-                       滚轮此时不是滚动器而是控制杆：
-                         · 同向滚 = 逐档调速（不再多滚一格）；
-                         · 反向滚 = 终止持续滚动并把速度清零。
-                       这一格**吞掉**（完全拦截，返回 1）—— 不会没反馈：
-                       通道一激活就立刻补发第一格（见 act.c）。
-                       **只有这一支不打断**正在进行的持续滚动：它是控制，不是新输入。 */
-                    PostMessageW(g_mainWnd, WM_WHEEL_ENH, (WPARAM)delta, 0);
-                    return 1;
-                }
-                /* 普通（只按住 C）：逐格放大 N 倍 —— 见 main.c 的
-                   WM_WHEEL_ACCEL。物理格不吞（它是"加强"）。 */
-                {
-                    int mul = ConfigGetWheelScrollMul();
-                    if (mul > 1)
-                        PostMessageW(g_mainWnd, WM_WHEEL_ACCEL, (WPARAM)delta, (LPARAM)mul);
-                }
-            }
+        BOOL vert  = (wParam == WM_MOUSEWHEEL);
+        int  delta = (int)(short)HIWORD(m->mouseData);   /* 高字是滚轮增量 */
+        BOOL chord = (!g_state.paused && g_cMod);        /* 和弦（Caps）还按着吗 */
+        /* 横向接管的判据：只有**纵向轴**才谈得上"Shift 把它改成横向"（横向轴本来
+           就是横向，不需要再翻一次）。倍数 0 = 该组合已被配置关闭 -> 不接管，
+           让它退回下面的纵向语义（旧承诺）。 */
+        int  hmul = (chord && vert && g_shiftMod) ? ConfigGetWheelHScrollMul() : 0;
+        BOOL shiftToH = (hmul > 0);
+
+        /* 记录模式下的现场：**只记物理事件**（注入的在上面就放行了），所以不会被
+           持续滚动自己的注入刷屏。排查"滚一下就停"时它与 act.c 的
+           "持续滚动：终止（…）"那行配对看：这一行说明"滚轮送来了什么"（轴 / 增量 /
+           当时的修饰状态），那一行说明"钩子把它判成了什么"。delta=0 的占位帧
+           与横向轴都要记 —— 它们正是最容易被漏掉的两类。 */
+        if (g_recording)
+            CapLog("  滚轮 %s delta=%d paused=%d caps=%d enh=%d shift=%d",
+                   vert ? "纵" : "横", delta, (int)g_state.paused, (int)g_cMod,
+                   (int)ModeDown(MODE_ENHANCE), (int)g_shiftMod);
+
+        /* ★ **唯一的"控制杆"**：Caps + 增强修饰键（默认 Alt/D）按着时的滚轮。
+           滚轮此时不是滚动器而是控制杆：同向滚 = 逐档调速（不再多滚一格）、
+           反向滚 = 终止并把速度清零（都在 act.c 判定）。所以这一段**一律不打断**，
+           并把这一格吞掉（返回 1，滚轮完全由我们接管，不会没反馈：通道一激活就
+           立刻补发第一格，见 act.c）。
+
+           判据必须盖住**整个手势**，不能只看纵向轴：横向轴（触控板双指滑动会同时
+           报两个轴、倾斜滚轮也会）与 delta=0 的占位帧都是"这只手正在做的事"。
+           ★ 它们过去会一路落到最后的"新输入 -> 打断"上，把刚启动的滚动当场掐掉 ——
+           与"按住 Caps+Alt 滚一下就停"的症状完全吻合，是本轮改动的另一个怀疑对象
+           （与"自动重复"并列，两者都靠 act.c 的终止日志才能坐实是哪一个）。 */
+        if (chord && !shiftToH && ModeDown(MODE_ENHANCE)) {
+            if (vert && delta != 0)
+                PostMessageW(g_mainWnd, WM_WHEEL_ENH, (WPARAM)delta, 0);
+            return 1;
         }
+
+        if (shiftToH) {
+            /* Caps + Shift + 滚轮 = **横向滚动**（Shift 决定轴向）。
+               这一格必须**吞掉**：物理滚轮送出的是纵向事件，放行就会变成
+               "横一下、纵一下"的混滚。吞掉之后横向完全由我们注入，倍数 1 也就
+               恰好等于一次标准横向滚动。
+               横向滚动是"另一个动作"，不是持续滚动的控制杆 -> 打断。 */
+            if (delta != 0) {
+                PostMessageW(g_mainWnd, WM_WHEEL_HACCEL, (WPARAM)delta, (LPARAM)hmul);
+                ActAutoScrollInterrupt("横向滚轮", delta);
+            }
+            return 1;
+        }
+
+        /* 普通（只按住 C）：逐格放大 N 倍 —— 见 main.c 的 WM_WHEEL_ACCEL。
+           物理格不吞（它是"加强"，不是"替换"）。 */
+        if (vert && chord && delta != 0) {
+            int mul = ConfigGetWheelScrollMul();
+            if (mul > 1)
+                PostMessageW(g_mainWnd, WM_WHEEL_ACCEL, (WPARAM)delta, (LPARAM)mul);
+        }
+
         /* 走到这里的滚轮都不是控制杆（横向 / 放大 / 横滚轮 / 没按 Caps 的普通滚轮）
-           -> 按"用户的新输入"打断持续滚动。
-           （用户明确要的："只有在按住 Caps+Alt 时同向滚动才是调速，没按住时直接打断"。） */
-        ActAutoScrollInterrupt();
+           -> 按"用户的新输入"打断持续滚动（用户明确要的："只有在按住 Caps+Alt 时
+           同向滚动才是调速，没按住时直接打断"）。
+           delta=0 的滚轮不带任何信息（部分驱动与触控板会发占位帧），不算输入 ——
+           否则它就是个"什么都滚不动、却把滚动停掉"的隐形杀手。 */
+        if (delta != 0) ActAutoScrollInterrupt("滚轮", delta);
     } else if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN ||
                wParam == WM_MBUTTONDOWN || wParam == WM_XBUTTONDOWN) {
         /* 鼠标键按下也算"任意键"（用户明确要的"包含鼠标"）。
            抬起不算 —— 那是按下动作的收尾，不是新动作。 */
-        ActAutoScrollInterrupt();
+        ActAutoScrollInterrupt("鼠标键", (int)wParam);
     }
 
     return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);

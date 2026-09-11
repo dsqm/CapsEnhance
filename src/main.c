@@ -314,6 +314,7 @@ void ApplyPauseState(void) {
        而它是往别的程序里持续注入滚轮，属于最不能留的尾巴。
        这事**不能靠 ResetEngine 代做**：松手不再打断之后，ResetEngine 已经不
        管持续滚动了（见那里的注释）。 */
+    if (ActAutoScrollActive()) CapLog("持续滚动：终止（暂停映射）");
     ActAutoScrollStop();
     if (!g_state.paused) TrayHint(L"正在映射");
     else TrayHint(L"已暂停（CapsLock 恢复原功能）");
