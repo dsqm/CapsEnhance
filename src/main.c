@@ -28,8 +28,11 @@ volatile BOOL g_actEnh = FALSE;
 volatile BOOL g_actShf = FALSE;
 volatile int  g_btnCount = 0;
 
-/* 诊断记录开关：C+` 切换（主线程读写，hook 线程投递 WM_PROBE） */
-volatile BOOL g_recording = FALSE;
+/* 诊断记录开关：C+` 切换（hook 回调只投递 WM_PROBE，实际在这里翻转）。
+   **只由主线程写**，但 act.c / send.c / nav.c 的**工作线程**会读它来决定
+   要不要写日志 —— 真跨线程，所以是 std::atomic 而非 volatile（理由见 cap.h
+   的"atomic / volatile 的分界"）。 */
+std::atomic<bool> g_recording{ false };
 
 static CRITICAL_SECTION g_logcs;
 /* 一次性初始化。此前是手写的双检锁：CAS 抢到 0 的线程还没
@@ -324,7 +327,7 @@ void ApplyPauseState(void) {
        而它是往别的程序里持续注入滚轮，属于最不能留的尾巴。
        这事**不能靠 ResetEngine 代做**：松手不再打断之后，ResetEngine 已经不
        管持续滚动了（见那里的注释）。 */
-    if (g_recording && ActAutoScrollActive())
+    if (g_recording.load() && ActAutoScrollActive())
         CapLog("持续滚动：终止（暂停映射）");
     ActAutoScrollStop();
     if (!g_state.paused) TrayHint(L"正在映射");
@@ -456,8 +459,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
            用 MessageBeep 的两个不同系统事件音（走声卡，无需内置蜂鸣器），
            并同步托盘悬停提示内容。探测结果只写日志（原来会弹一个模态
            对话框，既冻住引擎又难以阅读/复制）。 */
-        g_recording = !g_recording;
-        if (g_recording) {
+        g_recording.store(!g_recording.load());
+        if (g_recording.load()) {
             CapLog("===== REC START =====");
             /* 配置值入日志：排查"配置没生效"类问题时一目了然 */
             CapLog("配置: MaxArrowSteps=%d OverStepCtrl=%d LogMaxKB=%d RunAsAdmin=%d",

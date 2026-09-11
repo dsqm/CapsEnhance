@@ -1,5 +1,7 @@
 #include "cap.h"
 
+#include <atomic>
+
 /* ================= 模拟按键发送 =================
    这一层只关心"把键正确地送出去"，不含任何业务逻辑。三条硬规则都是踩过坑的：
 
@@ -41,12 +43,16 @@ static const int kMods[MOD_COUNT] = {
     VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL,
     VK_LMENU,  VK_RMENU,  VK_LWIN,     VK_RWIN
 };
-/* volatile：SendEvent 由 act.c 的**工作线程**调用写入，而 SendClearStuckModifiers
-   在退出/重启时由主线程读取。两处之间有 ActStop() 的线程 join 建立
-   happens-before，所以理论上不加也算对 —— 但这份正确性完全依赖"调用方记得
-   先 ActStop"，写成 volatile 至少让"没同步就跨线程读"这件事在代码审查时
-   一眼可见，不需要去推理调用顺序。 */
-static volatile BOOL g_injectedDown[MOD_COUNT] = { 0 };
+/* 跨线程标志，所以用 std::atomic 而不是 volatile（volatile 不是同步原语，
+   见 cap.h 的"atomic / volatile 的分界"）。
+
+   写者是 act.c **工作线程**调用的 SendEvent；读者是退出 / 重启时主线程的
+   SendClearStuckModifiers。这两处之间本来靠 ActStop() 的线程 join 建立
+   happens-before —— 那条路本身也是对的（join 确实建立顺序），但它的正确性
+   要求每个读代码的人在脑子里推理"调用方有没有记得先 ActStop"。
+   换成 atomic 之后，这个数组**自身**就是线程安全的，不再把正确性寄托在
+   调用顺序上（顺序仍要保持，只是不再同时兼任"同步手段"）。 */
+static std::atomic<bool> g_injectedDown[MOD_COUNT];
 
 static int ModIndex(int vk) {
     for (int i = 0; i < MOD_COUNT; i++) if (kMods[i] == vk) return i;
@@ -68,7 +74,7 @@ static void SendEvent(int vk, BOOL up) {
        运行而本程序没有），UIPI 会把整批注入拒掉、SendInput 返回 0。此前
        丢弃返回值，于是现象是"按词跳转完全没反应"而日志干净无事 —— 无法诊断。
        只在记录模式写日志：常规模式不打扰用户，也不改变任何行为。 */
-    if (SendInput(1, &i, sizeof(INPUT)) == 0 && g_recording)
+    if (SendInput(1, &i, sizeof(INPUT)) == 0 && g_recording.load())
         CapLog("  !! SendInput 被拒 vk=0x%02X up=%d err=%lu",
                (unsigned)vk, up ? 1 : 0, (unsigned long)GetLastError());
 }
@@ -156,7 +162,7 @@ int SendArrows(int dir, int n, BOOL shift) {
         int want = n;
         if (ConfigGetOverStepCtrl()) {
             SendNativeWordJump(dir, shift);
-            if (g_recording)
+            if (g_recording.load())
                 CapLog("  -> 逐格步数 %d 达到 MaxArrowSteps(%d)，改发 Ctrl+arrow",
                        want, maxSteps);
             /* 改道只是"让目标程序自己跳一格词"，落点由**它的**词切分决定，
@@ -164,7 +170,7 @@ int SendArrows(int dir, int n, BOOL shift) {
                所以必须把"本次是改道"告诉调用方去回读校验。 */
             return ARROW_SEND_HANDOFF;
         }
-        if (g_recording)
+        if (g_recording.load())
             CapLog("  -> 逐格步数 %d 达到 MaxArrowSteps(%d)，只发一格",
                    want, maxSteps);
         ArrowsEmit(dir, 1, shift);
@@ -205,7 +211,7 @@ static void SendWheelAxis(int delta, int n, BOOL horizontal) {
         if (SendInput(1, &in, sizeof(INPUT)) == 0) {
             /* UIPI 等场景会被整体拒绝。只在记录模式写日志、且不重试：
                重试只会继续失败并把日志刷爆 */
-            if (g_recording)
+            if (g_recording.load())
                 CapLog("  !! SendInput 滚轮被拒 %s i=%d delta=%d err=%lu",
                        horizontal ? "横" : "纵", i, delta,
                        (unsigned long)GetLastError());

@@ -60,7 +60,7 @@ BOOL BrIsChild(void) { return InterlockedCompareExchange(&s_brChild, 0, 0) != 0;
    "桥应答异常"，原因全丢。两个进程写同一个日志文件，每条都是"开-追加-关"，
    最坏交错掉一行（与日志轮转的既有取舍一致，见 main.c 的 CapLog）。 */
 static void BrLog(const char* fmt, ...) {
-    if (!g_recording && !BrIsChild()) return;
+    if (!g_recording.load() && !BrIsChild()) return;
     char line[512];
     va_list ap; va_start(ap, fmt);
     _vsnprintf_s(line, sizeof(line), _TRUNCATE, fmt, ap);

@@ -12,7 +12,7 @@
 /* nav.c 内部已改为非 static 供测试调用 */
 int ComputeSteps(const WCHAR* s, int len, int caret, int dir);
 /* 单测未链接 main.c，补若干符号 */
-volatile BOOL g_recording = FALSE;
+std::atomic<bool> g_recording{ false };
 HHOOK g_hook = NULL;   /* NavBaseInfo 会读 g_hook，需提供定义 */
 void CapLog(const char* fmt, ...) { (void)fmt; }
 /* 未链接 hook.c：物理按键状态桩（本测试不涉及卡键清理） */

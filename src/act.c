@@ -440,7 +440,7 @@ void ActAutoScrollStop(void) {
    why 是调用方给的**字面量**（本函数不负责释放；也不额外做格式化）。 */
 void ActAutoScrollInterrupt(const char* why, int detail) {
     if (!ACTIVE(&s_asActive)) return;
-    if (g_recording)
+    if (g_recording.load())
         CapLog("持续滚动：终止（%s detail=%d/0x%X，已注入 %d 拍）",
                why ? why : "新输入", detail, (unsigned)(detail & 0xFFFF),
                (int)ATOMIC(&s_asTicks));
@@ -485,7 +485,7 @@ void ActAutoScrollWheel(int delta) {
            不残留打断前的速度（用户要的"反向打断后重置滚动速度"）。
            记录模式下留一行（含两边方向与这一格的增量）：反向终止也是"无故停了"
            的常见来源（滚轮回弹/编码器抖动会发一个极小反向量），有日志才分得清。 */
-        if (g_recording)
+        if (g_recording.load())
             CapLog("持续滚动：终止（反向滚 %+d -> %+d，delta=%d，已注入 %d 拍）",
                    (int)ATOMIC(&s_asDir), dir, delta, (int)ATOMIC(&s_asTicks));
         InterlockedExchange(&s_asDir, 0);
@@ -520,7 +520,7 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
            这一条不依赖任何输入，是"用户走开 / 钩子被系统摘掉"时的最后一道闸。 */
         LONG remain = (LONG)(s_asDeadline - (LONG)(DWORD)GetTickCount64());
         if (remain <= 0) {
-            if (g_recording)
+            if (g_recording.load())
                 CapLog("持续滚动：终止（超时 %d ms 未调速，已注入 %d 拍）",
                        (int)ATOMIC(&s_asMaxMs), (int)ATOMIC(&s_asTicks));
             ActAutoScrollStop(); running = FALSE; continue;

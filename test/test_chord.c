@@ -873,7 +873,7 @@ int main(void) {
        这里只钉死"没开就不许写"。 */
     {
         LONGLONG before = LogSize();
-        g_recording = FALSE;
+        g_recording.store(false);
         ActAutoScrollWheel(120);
         ActAutoScrollInterrupt("测试_未开记录", 0);
         CHECK(LogSize() == before,

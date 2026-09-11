@@ -17,7 +17,7 @@
 #include <string.h>
 #pragma comment(lib, "psapi.lib")
 
-volatile BOOL g_recording = FALSE;
+std::atomic<bool> g_recording{ false };
 HHOOK g_hook = NULL;
 void CapLog(const char* fmt, ...) { (void)fmt; }
 /* 未链接 hook.c：物理按键状态桩 */

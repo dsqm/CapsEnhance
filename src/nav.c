@@ -210,7 +210,7 @@ static BOOL SciGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut,
        Scintilla 通道直接放弃，退回 UIA / IA2 / 原生 Ctrl+方向（功能降级，
        但不再触碰任何进程内存）。句柄即用即关，不缓存。 */
     if (!ConfigGetAllowScintillaRead()) {
-        if (g_recording)
+        if (g_recording.load())
             CapLog("  Sci 通道已被配置关闭（AllowScintillaRead=0），跳过");
         return FALSE;
     }
@@ -226,7 +226,7 @@ static BOOL SciGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut,
        记录模式下写明对谁申请了什么 —— 排查"权限不足导致按词跳转降级"时一眼可见。 */
     HANDLE hp = OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ, FALSE, pid);
     if (!hp) {
-        if (g_recording)
+        if (g_recording.load())
             CapLog("  Sci 通道：OpenProcess(VM_OPERATION|VM_READ) 被拒 pid=%lu err=%lu",
                    (unsigned long)pid, (unsigned long)GetLastError());
         return FALSE;
@@ -636,7 +636,7 @@ static IUIAutomationElement* FindDocInSubtree(IUIAutomation* ua,
 
 /* UIA 每一步的 HRESULT 只在 C+` 记录期间写日志，便于定位"为什么读不到文本" */
 static void UiaLog(const char* what, HRESULT hr) {
-    if (g_recording)
+    if (g_recording.load())
         CapLog("  UIA %-26s hr=0x%08lX %s", what, (unsigned long)hr,
                SUCCEEDED(hr) ? "OK" : "FAIL");
 }
@@ -645,7 +645,7 @@ static void UiaLog(const char* what, HRESULT hr) {
    用于核对"UIA 读到的文本"与实际显示是否一致（WPF 等实现可能夹带
    不可见字符，词边界在其上计算会错位）。 */
 static void LogTextSample(const WCHAR* s, int start, int count, const char* tag) {
-    if (!g_recording || !s || count <= 0) return;
+    if (!g_recording.load() || !s || count <= 0) return;
     char utf8[1200];
     size_t o = 0;
     for (int i = 0; i < count; i++) {
@@ -762,7 +762,7 @@ static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut)
                所以我们读到的是 1 字符占位。弃用本通道交给原生兜底，
                并在日志里给出开启方法。 */
             if (alen < 2) {
-                if (g_recording)
+                if (g_recording.load())
                     CapLog("  UIA doc text len=%d -> a11y 占位。VSCode 请在 settings.json "
                            "设 \"editor.accessibilitySupport\": \"on\" 后即可用按词跳转引擎", alen);
                 goto done;
@@ -895,12 +895,12 @@ static BOOL UiaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
            （不支持者返回错误码，忽略即可） */
         IUIAutomationTextRange_ScrollIntoView(r, FALSE);
     }
-    if (g_recording)
+    if (g_recording.load())
         CapLog("  UIA Select hr=0x%08lX delta=%d shift=%d",
                (unsigned long)hr, delta, shift ? 1 : 0);
 
 done:
-    if (!ok && g_recording && why[0])
+    if (!ok && g_recording.load() && why[0])
         CapLog("  UIA SetSel 失败于 %s (delta=%d)", why, delta);
     if (r)      IUIAutomationTextRange_Release(r);
     if (doc)    IUIAutomationTextRange_Release(doc);
@@ -961,7 +961,7 @@ static BOOL MsaaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut
     /* 与 UIA 通道同理：短于 2 字符视为占位文本（非真实编辑器内容），弃用 */
     if (len < 2) {
         SysFreeString(b);
-        if (g_recording) CapLog("  IA2 text len=%d -> 占位文本，弃用走原生", len);
+        if (g_recording.load()) CapLog("  IA2 text len=%d -> 占位文本，弃用走原生", len);
         return FALSE;
     }
     WCHAR* copy = (WCHAR*)malloc(((size_t)len + 1) * sizeof(WCHAR));
@@ -1061,7 +1061,7 @@ int NavJump(int dir, BOOL shift) {
 static int NavJumpInner(int dir, BOOL shift) {
     WCHAR* text = NULL;
     int len = 0, caret = 0;
-    if (g_recording) CapLog("NavJump dir=%d shift=%d", dir, shift);
+    if (g_recording.load()) CapLog("NavJump dir=%d shift=%d", dir, shift);
 
     if (!shift) { NAV_LOCK(); g_selAnchor = -1; g_selAnchorLen = -1; NAV_UNLOCK(); }
 
@@ -1073,7 +1073,7 @@ static int NavJumpInner(int dir, BOOL shift) {
     /* 配置名单内的程序（如 VSCode）：跳过全部文本探测，直接原生 Ctrl+方向 */
     if (focus && ConfigIsNativeWordJump(focus)) {
         SendNativeWordJump(dir, shift);
-        if (g_recording)
+        if (g_recording.load())
             CapLog("  -> 进程命中原生按词跳转名单，直接 Ctrl+arrow");
         return -1;
     }
@@ -1097,7 +1097,7 @@ static int NavJumpInner(int dir, BOOL shift) {
         got = WpsGetTextCaret(focus, &text, &len, &caret, &selEnd);
         if (got) path = Chan::WPS;
     }
-    if (!got) { SendNativeWordJump(dir, shift); if (g_recording) CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
+    if (!got) { SendNativeWordJump(dir, shift); if (g_recording.load()) CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
 
     /* Shift 位移的活动端：序列锚未建立时，向左扩活动端=选区 start、向右扩
        活动端=选区 end；锚已建立则活动端固定在锚的另一侧。
@@ -1123,7 +1123,7 @@ static int NavJumpInner(int dir, BOOL shift) {
 
     int steps = 0;
     int tgt = WordJumpTarget(text, len, activeCaret, dir, &steps);
-    if (g_recording) CapLog("  path=%s len=%d caret=%d -> steps=%d tgt=%d",
+    if (g_recording.load()) CapLog("  path=%s len=%d caret=%d -> steps=%d tgt=%d",
                             ChanName(path), len, activeCaret, steps, tgt);
 
     if (steps <= 0) {
@@ -1169,13 +1169,13 @@ static int NavJumpInner(int dir, BOOL shift) {
             LONGLONG dummy;
             SendMsg(focus, 0x00B7 /* EM_SCROLLCARET */, 0, 0, &dummy);
         }
-        if (direct && g_recording) CapLog("  -> 直接 EM_SETSEL [%d,%d] 已校验", ws, we);
+        if (direct && g_recording.load()) CapLog("  -> 直接 EM_SETSEL [%d,%d] 已校验", ws, we);
     } else if (path == Chan::Sci && focus && steps >= DIRECT_JUMP_MIN) {
         LONGLONG tb = Utf16ToDocBytes(text, tgt, sp.cp);
         if (tb >= 0) {
             LONGLONG anchorB = shift ? sp.anchorBytes : tb;
             direct = SciSetSel(focus, tb, anchorB);
-            if (direct && g_recording)
+            if (direct && g_recording.load())
                 CapLog("  -> 直接 SCI_SETSEL caret=%lld anchor=%lld", tb, anchorB);
         }
     } else if (path == Chan::WPS && focus) {
@@ -1198,16 +1198,16 @@ static int NavJumpInner(int dir, BOOL shift) {
             int r = WpsSetSel(focus, ws, we);
             if (r == WPS_SET_OK) {
                 direct = TRUE;
-                if (g_recording)
+                if (g_recording.load())
                     CapLog("  -> 直接 Selection.SetRange [%d,%d] 已校验", ws, we);
             } else if (r == WPS_SET_UNSURE) {
                 skipArrows = TRUE;
-                if (g_recording)
+                if (g_recording.load())
                     CapLog("  -> WPS 置位后回读不符（状态不明），放弃补箭头");
-            } else if (g_recording) {
+            } else if (g_recording.load()) {
                 CapLog("  -> WPS 直接置位未生效（光标未动），退回逐格箭头");
             }
-        } else if (g_recording) {
+        } else if (g_recording.load()) {
             CapLog("  -> WPS 小距离且无选区：走逐格箭头");
         }
     } else if ((path == Chan::UIA || path == Chan::IA2) && focus && !shift
@@ -1229,11 +1229,11 @@ static int NavJumpInner(int dir, BOOL shift) {
                 NAV_LOCK();
                 g_noSetProc[0] = 0; g_noSetCount = 0;
                 NAV_UNLOCK();
-                if (g_recording) CapLog("  -> UIA/IA2 直接置位已校验 (caret=%d)", tgt);
+                if (g_recording.load()) CapLog("  -> UIA/IA2 直接置位已校验 (caret=%d)", tgt);
             } else if (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0 && c2 == caret) {
                 /* Select 返回成功但光标未动（provider 静默忽略）：
                    光标仍在原位，从原 caret 算的 steps 依旧有效，安全退回箭头 */
-                if (g_recording)
+                if (g_recording.load())
                     CapLog("  -> UIA Select 未生效(光标未动 c2=%d)，退回箭头。"
                            "嫌慢可把该程序加入 [NativeWordJump]", c2);
                 /* 连续两次无效 -> 本次会话内不再尝试（WPF 上它会让显示光标
@@ -1245,12 +1245,12 @@ static int NavJumpInner(int dir, BOOL shift) {
                     justDisabled = TRUE;     /* 只在"刚跨过阈值"那一次记日志 */
                 }
                 NAV_UNLOCK();
-                if (justDisabled && g_recording)
+                if (justDisabled && g_recording.load())
                     CapLog("  -> 该程序连续 2 次置位无效，本次会话内不再尝试"
                            "（消除多余闪烁，重启程序恢复）");
             } else {
                 skipArrows = TRUE;
-                if (g_recording)
+                if (g_recording.load())
                     CapLog("  -> UIA/IA2 置位后回读不符(caret=%d 期望 %d)，放弃补箭头",
                            ok2 ? c2 : -1, tgt);
             }
@@ -1280,7 +1280,7 @@ static int NavJumpInner(int dir, BOOL shift) {
     if (!direct && !oneStep && !shift && path == Chan::Edit && focus) {
         LONGLONG now = EditGetCaret(focus);
         if (now >= 0 && now == (LONGLONG)tgt) {
-            if (handedOff && g_recording)
+            if (handedOff && g_recording.load())
                 CapLog("  -> 改道落点与目标一致 (caret=%lld)", now);
         } else if (now >= 0) {
             LONGLONG diff = (LONGLONG)tgt - now;
@@ -1288,7 +1288,7 @@ static int NavJumpInner(int dir, BOOL shift) {
                 SendArrowsStrict(DIR_RIGHT, (int)diff, FALSE);
             else if (diff < 0 && -diff <= steps)
                 SendArrowsStrict(DIR_LEFT, (int)-diff, FALSE);
-            if (g_recording)
+            if (g_recording.load())
                 CapLog("  -> 箭头补正 %lld (caret=%lld -> %d)%s", diff, now, tgt,
                        handedOff ? " [改道落点不符，已补足]" : "");
         }
@@ -1319,7 +1319,7 @@ static int NavJumpInner(int dir, BOOL shift) {
         if (comparable && c2 == tgt) {
             /* 改道的落点跟目标一致：说明这个程序的词切分和我们算的一致，
                不必再动它（只记一行日志，便于确认改道是否可信） */
-            if (handedOff && g_recording)
+            if (handedOff && g_recording.load())
                 CapLog("  -> 改道落点与目标一致 (caret=%d)", c2);
         } else if (comparable) {
             int diff = tgt - c2;
@@ -1328,12 +1328,12 @@ static int NavJumpInner(int dir, BOOL shift) {
             if (diff > steps || diff < -steps) {
                 /* 偏差比整个步长还大：坐标系统性不可靠，补也补不准，
                    放弃本次补正（只提示，不做任何自动切换）。 */
-                if (g_recording)
+                if (g_recording.load())
                     CapLog("  -> 文本坐标与实际光标不符(caret=%d 期望 %d)，差 %d 超出步数 %d，"
                            "放弃补正。建议把该程序加入 [NativeWordJump] 名单%s",
                            c2, tgt, diff, steps,
                            handedOff ? "（或把 MaxArrowSteps 调大）" : "");
-            } else if (g_recording) {
+            } else if (g_recording.load()) {
                 CapLog("  -> 箭头补正 %d (caret=%d -> %d)%s", diff, c2, tgt,
                        handedOff ? " [改道落点不符，已补足]" : "");
             }

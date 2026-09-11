@@ -27,6 +27,7 @@
 #endif
 
 #include <windows.h>
+#include <atomic>   /* g_recording：真跨线程标志，见下 */
 
 /* ---------- 共享常量 ---------- */
 /* 主线程事件消息（均由钩子线程投递，按 FIFO 顺序处理） */
@@ -107,17 +108,45 @@
 #define REPEAT_INTERVAL      35      /* ms：后续重复间隔                      */
 #define CHORD_SETTLE         50      /* ms：和弦稳定期，等增强/选区修饰到位  */
 
-/* ---------- 全局共享状态（钩子线程写，主线程读） ---------- */
+/* ---------- 跨线程状态：atomic / volatile 的分界 ----------
+   **volatile 不是同步原语** —— 在 C/C++ 内存模型里它只阻止编译器把访问优化
+   掉，既不建立 happens-before、也不保证原子性。所以"跨线程用的标志"不能写
+   volatile，要么 std::atomic、要么由一把锁 / 一次 join 建立顺序。
+
+   本项目里**真正跨线程**的用户态标志只有两个：
+
+     · g_recording —— 主线程写（C+` 切换），而 act.c / send.c / nav.c 的
+       **工作线程**读它，决定要不要写诊断日志。→ std::atomic<bool>（本文件）
+     · send.c 的 g_injectedDown —— 方向相反：act.c **工作线程**注入修饰键时写，
+       主线程退出 / 重启时读。→ std::atomic<bool>（定义在 send.c，不在头文件）
+
+   其余在这里声明为 volatile 的标志（g_cMod / g_shiftMod / g_state.paused /
+   g_actEnh / g_actShf / g_btnCount）**其实都不跨线程**：两个低级钩子都由主线程
+   SetWindowsHookEx 安装，于是键盘回调、鼠标回调与窗口消息处理**全在主线程上
+   串行**；而工作线程刻意不读它们（开火快照随 ActJob 传值过去，见 act.c）。
+
+   那这些 volatile 为什么留着 —— 因为低级钩子回调是**异步进入**的，编译器
+   从源码看不出它会在任意时刻被系统调用，于是可能把 `while (x) { ... }` 里的
+   读取提升到循环外。volatile 正是用来禁止这种优化的。
+   **一句话：volatile 在这里防的是"编译器优化"，不是"线程竞争"。** */
+
+/* ---------- 全局共享状态（钩子回调与消息处理同在主线程，串行） ---------- */
 typedef struct {
     volatile LONG paused;      /* 1=暂停映射（CapsLock 恢复正常）         */
 } GlobalState;
 
 extern GlobalState g_state;
 
-/* 诊断记录开关：C+` 触发开始/结束（主线程读写） */
-extern volatile BOOL g_recording;
+/* 诊断记录开关：C+` 触发开始/结束。
+   **只由主线程写**，但工作线程会读（见上面"atomic / volatile 的分界"）——
+   这是本文件里唯一真正跨线程的标志，所以用 std::atomic 而不是 volatile。 */
+extern std::atomic<bool> g_recording;
 
-/* C 键实时状态（volatile，跨线程读：鼠标钩子要据此决定要不要处理滚轮） */
+/* C 键实时状态。写法是 volatile 而非 atomic —— 因为**它们不跨线程**：
+   键盘钩子写、鼠标钩子读，而两个钩子都在主线程上（串行）。volatile 在这里
+   只是防止编译器把读取提出循环（回调异步进入，编译器看不出来）。
+   （cap.h 旧注释曾写"跨线程读：鼠标钩子要据此决定…"，那是误导 —— 鼠标钩子
+   与键盘钩子同线程，不存在竞态。） */
 extern volatile BOOL g_cMod;       /* C 按住 */
 extern volatile BOOL g_shiftMod;   /* 真实 Shift 按住（Caps+Shift+滚轮 = 横向滚动） */
 

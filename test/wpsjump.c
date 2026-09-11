@@ -23,7 +23,7 @@
 #include <stdarg.h>
 
 /* 未链接 main.c / hook.c：补上它们提供的符号 */
-volatile BOOL g_recording = TRUE;    /* 打开记录，nav.c/wps.c 的诊断日志直接打出来 */
+std::atomic<bool> g_recording{ true };    /* 打开记录，nav.c/wps.c 的诊断日志直接打出来 */
 HHOOK g_hook = NULL;
 static int g_lines = 0;
 void CapLog(const char* fmt, ...) {

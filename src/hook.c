@@ -289,7 +289,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 g_capsSkip = FALSE;
                 if (ChordKeyHeldBeforeCaps()) {
                     g_capsSkip = TRUE;      /* 本次会话完全不介入 */
-                    if (g_recording)
+                    if (g_recording.load())
                         CapLog("  Caps 不是和弦的第一个键（已有映射相关键按住），"
                                "本次不介入，CapsLock 保持原功能");
                     return CallNextHookEx(g_hook, nCode, wParam, lParam);
@@ -447,7 +447,7 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
            "持续滚动：终止（…）"那行配对看：这一行说明"滚轮送来了什么"（轴 / 增量 /
            当时的修饰状态），那一行说明"钩子把它判成了什么"。delta=0 的占位帧
            与横向轴都要记 —— 它们正是最容易被漏掉的两类。 */
-        if (g_recording)
+        if (g_recording.load())
             CapLog("  滚轮 %s delta=%d paused=%d caps=%d enh=%d shift=%d",
                    vert ? "纵" : "横", delta, (int)g_state.paused, (int)g_cMod,
                    (int)ModeDown(MODE_ENHANCE), (int)g_shiftMod);

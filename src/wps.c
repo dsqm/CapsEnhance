@@ -57,7 +57,7 @@ typedef struct { LONG status; LONG caret; LONG selEnd; LONG len; } WpsResp;
 /* 子进程没有"记录模式"这条开关可依赖，而它一旦失败，用户看到的只有父进程那句
    "桥应答异常" —— 原因全丢。所以子进程里**无条件**写日志。 */
 static void WpsLog(const char* fmt, ...) {
-    if (!g_recording && !BrIsChild()) return;
+    if (!g_recording.load() && !BrIsChild()) return;
     char line[512];
     va_list ap; va_start(ap, fmt);
     _vsnprintf_s(line, sizeof(line), _TRUNCATE, fmt, ap);
@@ -168,7 +168,7 @@ static BOOL WpsComReadOnce(WCHAR** text, int* lenOut, int* caretOut, int* selEnd
         *caretOut = (int)caret;
         if (selEndOut) *selEndOut = (int)selEnd;
         ok = TRUE;
-        if (g_recording)
+        if (g_recording.load())
             CapLog("  WPS doc len=%d caret=%d selEnd=%d Range=[%ld,%ld]",
                    len, *caretOut, (int)selEnd, rs, re);
     }
