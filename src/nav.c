@@ -1028,6 +1028,25 @@ static int   g_noSetCount = 0;
    以后要支持"另一个只有 COM 才读得到的程序"，照 wps.c 再写一个文件即可，
    前两层直接复用。 */
 
+/* 文本通道标识。以前这里是 `const char* path` 配"首字母判据"
+   （'E' 看 Edit、'W' 看 WPS…）—— 加一个通道得先确认首字母不和已有的撞车，
+   读代码的人还得回头翻字符串表才知道 'I' 是 IA2。改成强类型枚举后，比较处
+   一眼可读，通道名也不再和业务字符串搅在一起。 */
+enum class Chan { Native, Edit, Sci, UIA, IA2, WPS };
+
+/* 日志用的通道名（诊断输出里仍是人读的短名）。 */
+static const char* ChanName(Chan c) {
+    switch (c) {
+    case Chan::Edit: return "Edit";
+    case Chan::Sci:  return "Sci";
+    case Chan::UIA:  return "UIA";
+    case Chan::IA2:  return "IA2";
+    case Chan::WPS:  return "WPS";
+    case Chan::Native:
+    default:         return "native";
+    }
+}
+
 static int NavJumpInner(int dir, BOOL shift);
 
 /* 对外的入口只做一件事：给本次跳转开一个同步 IPC 预算（见 NavIpcBudgetBegin），
@@ -1047,7 +1066,7 @@ static int NavJumpInner(int dir, BOOL shift) {
     if (!shift) { NAV_LOCK(); g_selAnchor = -1; g_selAnchorLen = -1; NAV_UNLOCK(); }
 
     BOOL got = FALSE;
-    const char* path = "native";
+    Chan path = Chan::Native;
     SciPos sp;
     memset(&sp, 0, sizeof(sp));
     HWND focus = GetFocusControl();
@@ -1060,23 +1079,23 @@ static int NavJumpInner(int dir, BOOL shift) {
     }
     int selEnd = caret;          /* 选区另一端（Edit 的 HIWORD / WPS 的 Selection.End），无选区=caret */
     if (focus) got = FastGetTextCaret(focus, &text, &len, &caret, &selEnd);  /* 仅经典 Edit/RichEdit */
-    if (got) path = "Edit";
+    if (got) path = Chan::Edit;
     if (!got) {                                                     /* Scintilla 系 */
         got = SciGetTextCaret(focus, &text, &len, &caret, &sp);
-        if (got) path = "Sci";
+        if (got) path = Chan::Sci;
     }
     if (!got) {
         got = UiaGetTextCaret(focus, &text, &len, &caret);   /* 现代控件 → UIA TextPattern */
-        if (got) path = "UIA";
+        if (got) path = Chan::UIA;
     }
     if (!got) {
         got = MsaaGetTextCaret(focus, &text, &len, &caret);  /* 兜底无障碍 → IAccessible2 */
-        if (got) path = "IA2";
+        if (got) path = Chan::IA2;
     }
     if (!got) {
         /* WPS：既无 UIA/IA2 文本也不响应 WM_GETTEXT，只能走 COM 自动化（见上节说明） */
         got = WpsGetTextCaret(focus, &text, &len, &caret, &selEnd);
-        if (got) path = "WPS";
+        if (got) path = Chan::WPS;
     }
     if (!got) { SendNativeWordJump(dir, shift); if (g_recording) CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
 
@@ -1086,7 +1105,7 @@ static int NavJumpInner(int dir, BOOL shift) {
        (LOWORD,HIGHWORD) 与 WPS 的 (Selection.Start,Selection.End) 都是。
        Sci 通道例外：SCI_GETCURRENTPOS 本身就是活动端，caret 直接可用。 */
     int activeCaret = caret;
-    if (got && shift && (path[0] == 'E' || path[0] == 'W')) {
+    if (got && shift && (path == Chan::Edit || path == Chan::WPS)) {
         NAV_LOCK();
         if (g_selAnchor < 0 || g_selAnchorLen != len) {
             g_selAnchorIsStart = (dir == DIR_RIGHT);
@@ -1105,7 +1124,7 @@ static int NavJumpInner(int dir, BOOL shift) {
     int steps = 0;
     int tgt = WordJumpTarget(text, len, activeCaret, dir, &steps);
     if (g_recording) CapLog("  path=%s len=%d caret=%d -> steps=%d tgt=%d",
-                            path, len, activeCaret, steps, tgt);
+                            ChanName(path), len, activeCaret, steps, tgt);
 
     if (steps <= 0) {
         /* 已到边界，无可跳转；此时读文本已成功，只是边界无可跳。
@@ -1140,7 +1159,7 @@ static int NavJumpInner(int dir, BOOL shift) {
             we = (dir == DIR_LEFT) ? selEnd : tgt;
         }
     }
-    if (path[0] == 'E' && focus && steps >= DIRECT_JUMP_MIN) {
+    if (path == Chan::Edit && focus && steps >= DIRECT_JUMP_MIN) {
         direct = ClassicSetSel(focus, ws, we);
         if (direct) direct = EditVerifySel(focus, ws, we);
         if (direct) {
@@ -1151,7 +1170,7 @@ static int NavJumpInner(int dir, BOOL shift) {
             SendMsg(focus, 0x00B7 /* EM_SCROLLCARET */, 0, 0, &dummy);
         }
         if (direct && g_recording) CapLog("  -> 直接 EM_SETSEL [%d,%d] 已校验", ws, we);
-    } else if (path[0] == 'S' && focus && steps >= DIRECT_JUMP_MIN) {
+    } else if (path == Chan::Sci && focus && steps >= DIRECT_JUMP_MIN) {
         LONGLONG tb = Utf16ToDocBytes(text, tgt, sp.cp);
         if (tb >= 0) {
             LONGLONG anchorB = shift ? sp.anchorBytes : tb;
@@ -1159,7 +1178,7 @@ static int NavJumpInner(int dir, BOOL shift) {
             if (direct && g_recording)
                 CapLog("  -> 直接 SCI_SETSEL caret=%lld anchor=%lld", tb, anchorB);
         }
-    } else if (path[0] == 'W' && focus) {
+    } else if (path == Chan::WPS && focus) {
         /* WPS：Selection.SetRange(start, end) 一步到位（实测可用，且参数会自动
            有序化）。start == end 就是移光标 —— **不能**用 `Selection.Start = n`
            那招：它不折叠选区（实测原本 [12,12]，写 Start=5 之后变成 [5,12]）。
@@ -1191,18 +1210,18 @@ static int NavJumpInner(int dir, BOOL shift) {
         } else if (g_recording) {
             CapLog("  -> WPS 小距离且无选区：走逐格箭头");
         }
-    } else if ((path[0] == 'U' || path[0] == 'I') && focus && !shift
+    } else if ((path == Chan::UIA || path == Chan::IA2) && focus && !shift
                && !skipSetTry && steps >= DIRECT_JUMP_MIN) {
         /* UIA/IA2 直接置位（TextRange.Select / setCaretOffset）仅限无 Shift：
            带选区时读回的 caret 是选区起点而非活动端，目标计算本身就不成立，
            置位会产生错误选区 —— Shift 位移走箭头（anchor 语义天然正确）。
            无 Shift 时试一次并回读校验：HRESULT 失败 -> 退回箭头；置位发生
            但回读不符 -> 不能再叠加箭头（会双重错误），本次到此为止。 */
-        BOOL set = (path[0] == 'U') ? UiaSetSel(focus, caret, tgt, FALSE)
+        BOOL set = (path == Chan::UIA) ? UiaSetSel(focus, caret, tgt, FALSE)
                                     : MsaaSetSel(focus, caret, tgt, FALSE);
         if (set) {
             WCHAR* t2 = NULL; int l2 = 0, c2 = 0;
-            BOOL ok2 = (path[0] == 'U')
+            BOOL ok2 = (path == Chan::UIA)
                      ? UiaGetTextCaret(focus, &t2, &l2, &c2)
                      : MsaaGetTextCaret(focus, &t2, &l2, &c2);
             if (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0 && c2 == tgt) {
@@ -1258,7 +1277,7 @@ static int NavJumpInner(int dir, BOOL shift) {
        就又改道一次、又落不到目标，而改道之后没人再校验。
        Scintilla 通道暂不做补正（SCI_GETCURRENTPOS 是字节域，回读后要反向
        换算成 UTF-16 才能和 tgt 比，现无该方向的换算函数）；记此备查。 */
-    if (!direct && !oneStep && !shift && path[0] == 'E' && focus) {
+    if (!direct && !oneStep && !shift && path == Chan::Edit && focus) {
         LONGLONG now = EditGetCaret(focus);
         if (now >= 0 && now == (LONGLONG)tgt) {
             if (handedOff && g_recording)
@@ -1286,14 +1305,14 @@ static int NavJumpInner(int dir, BOOL shift) {
        我们算出的字符位决定、本身是确定的；只有超过 MaxArrowSteps 改发原生
        Ctrl+方向时才依赖 WPS 自己的词切分 —— 那正是必须回读的情境。别的通道
        每次回读是因为它们的坐标本身不可靠。 */
-    BOOL isUA  = (path[0] == 'U' || path[0] == 'I');
-    BOOL isWps = (path[0] == 'W');
+    BOOL isUA  = (path == Chan::UIA || path == Chan::IA2);
+    BOOL isWps = (path == Chan::WPS);
     if (!direct && !skipArrows && !oneStep && !shift && focus
         && (isUA || (isWps && handedOff))) {
         WCHAR* t2 = NULL; int l2 = 0, c2 = 0;
         BOOL ok2;
         if (isWps)                     ok2 = WpsGetTextCaret(focus, &t2, &l2, &c2, NULL);
-        else if (path[0] == 'U')       ok2 = UiaGetTextCaret(focus, &t2, &l2, &c2);
+        else if (path == Chan::UIA)    ok2 = UiaGetTextCaret(focus, &t2, &l2, &c2);
         else                           ok2 = MsaaGetTextCaret(focus, &t2, &l2, &c2);
         /* 只在"读回的仍是同一页文本"（长度与内容都一致）时才比坐标 */
         BOOL comparable = (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0);
