@@ -1,5 +1,6 @@
 #include "cap.h"
 #include "auto.h"
+#include "comptr.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -73,8 +74,12 @@ static BOOL WpsFocusIsWps(HWND hwnd) {
 }
 
 /* 本线程缓存的 WPS Application。缓存失效（WPS 重启 / 关掉文档再开）时由下面的
-   包装丢掉重试一次。 */
-static __declspec(thread) IDispatch* t_wpsApp = NULL;
+   包装丢掉重试一次。
+
+   用 `thread_local ComPtr` 持有：线程结束时析构会自动 Release（以前是裸指针，
+   那次缓存只能等进程退出才回收）。「线程级」这件事本身是必须的 ——
+   `CoInitialize` 与 COM 套间都是线程级的，跨线程共享接口指针要封送。 */
+static thread_local ComPtr<IDispatch> t_wpsApp;
 
 /* IID_IDispatch 只在 `#include <initguid.h>` 的 TU 里才有定义（否则是 extern
    声明、要靠 uuid.lib）。自带一份常量：值固定、与链接顺序无关。 */
@@ -82,7 +87,7 @@ static const IID kIID_Dispatch =
     {0x00020400, 0x0000, 0x0000, {0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}};
 
 static IDispatch* WpsAppGet(void) {
-    if (t_wpsApp) return t_wpsApp;
+    if (t_wpsApp) return t_wpsApp.get();
     if (!AdCoUp()) return NULL;
     CLSID clsid;
     /* CLSIDFromProgID 收的是 LPCLSID（指针），而下面的 GetActiveObject 收的是
@@ -91,8 +96,8 @@ static IDispatch* WpsAppGet(void) {
         WpsLog("CLSIDFromProgID(%ls) 失败（WPS 未注册 COM 接口？）", WPS_PROGID);
         return NULL;
     }
-    IUnknown* unk = NULL;
-    HRESULT hr = GetActiveObject(clsid, NULL, &unk);
+    ComPtr<IUnknown> unk;                 /* GetActiveObject 给的引用交给它放 */
+    HRESULT hr = GetActiveObject(clsid, NULL, unk.put());
     if (FAILED(hr) || !unk) {
         /* 0x800401E3 = MK_E_UNAVAILABLE：WPS 没在 ROT 里（没开文档 / 没失去过
            焦点），或者**本进程是管理员**（ROT 按完整性级别隔离，永远看不到
@@ -101,19 +106,19 @@ static IDispatch* WpsAppGet(void) {
                (hr == (HRESULT)MK_E_UNAVAILABLE) ? " (MK_E_UNAVAILABLE)" : "");
         return NULL;
     }
-    IDispatch* app = NULL;
-    if (SUCCEEDED(unk->lpVtbl->QueryInterface(unk, kIID_Dispatch, (void**)&app)) && app)
-        t_wpsApp = app;
-    unk->lpVtbl->Release(unk);
-    return t_wpsApp;
+    ComPtr<IDispatch> app;
+    if (SUCCEEDED(unk->lpVtbl->QueryInterface(unk.get(), kIID_Dispatch,
+                                              (void**)app.put())) && app)
+        t_wpsApp = app;                   /* 拷贝赋值会 AddRef，缓存多持一份 */
+    return t_wpsApp.get();
 }
 
 /* 读一次：全文 + 光标 + 选区另一端。text 由调用方 free。 */
 static BOOL WpsComReadOnce(WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) {
     IDispatch* app = WpsAppGet();
-    IDispatch* sel = NULL;
-    IDispatch* doc = NULL;
-    IDispatch* rng = NULL;
+    /* Selection / ActiveDocument / Range 都是我们 AddRef 到手的子对象，
+       全部交给 ComPtr —— 以前每个都在 done: 手动 Release，漏一个就是泄漏。 */
+    ComPtr<IDispatch> sel, doc, rng;
     BOOL ok = FALSE;
     long caret = -1, selEnd = -1, rs = -1, re = -1;
 
@@ -123,13 +128,13 @@ static BOOL WpsComReadOnce(WCHAR** text, int* lenOut, int* caretOut, int* selEnd
     *caretOut = 0;
     if (selEndOut) *selEndOut = 0;
 
-    sel = AdGetDisp(app, L"Selection");
-    if (!sel || !AdGetLong(sel, L"Start", &caret) || caret < 0) {
+    sel = ComPtr<IDispatch>(AdGetDisp(app, L"Selection"));
+    if (!sel || !AdGetLong(sel.get(), L"Start", &caret) || caret < 0) {
         WpsLog("Selection.Start 取不到");
         goto done;
     }
-    if (!AdGetLong(sel, L"End", &selEnd) || selEnd < caret) selEnd = caret;
-    doc = AdGetDisp(app, L"ActiveDocument");
+    if (!AdGetLong(sel.get(), L"End", &selEnd) || selEnd < caret) selEnd = caret;
+    doc = ComPtr<IDispatch>(AdGetDisp(app, L"ActiveDocument"));
     if (!doc) {
         WpsLog("ActiveDocument 取不到（WPS 没打开文档？）");
         goto done;
@@ -137,16 +142,16 @@ static BOOL WpsComReadOnce(WCHAR** text, int* lenOut, int* caretOut, int* selEnd
     /* 整篇文本用 Document.Range()（不带参数 = 全文）。**不能用 Document.Content**：
        WPS 上 Content.Start/End 取不到（实测 -1），而 Range() 与 Selection 是同
        一套字符坐标。 */
-    rng = AdGetDisp(doc, L"Range");
+    rng = ComPtr<IDispatch>(AdGetDisp(doc.get(), L"Range"));
     if (!rng) {
         WpsLog("Document.Range 取不到");
         goto done;
     }
-    AdGetLong(rng, L"Start", &rs);
-    AdGetLong(rng, L"End", &re);
+    AdGetLong(rng.get(), L"Start", &rs);
+    AdGetLong(rng.get(), L"End", &re);
     {
         WCHAR* t = NULL;
-        if (!AdGetText(rng, L"Text", &t)) {
+        if (!AdGetText(rng.get(), L"Text", &t)) {
             WpsLog("Range.Text 取不到");
             goto done;
         }
@@ -169,10 +174,7 @@ static BOOL WpsComReadOnce(WCHAR** text, int* lenOut, int* caretOut, int* selEnd
     }
 
 done:
-    if (rng) rng->lpVtbl->Release(rng);
-    if (doc) doc->lpVtbl->Release(doc);
-    if (sel) sel->lpVtbl->Release(sel);
-    return ok;
+    return ok;          /* 子对象的 Release 全由上面的 ComPtr 负责 */
 }
 
 /* 直接置位一次，并把结果分成三态（见 auto.h 的 WPS_SET_*）。
@@ -181,15 +183,16 @@ done:
 static int WpsComSetSelOnce(long start, long end) {
     IDispatch* app = WpsAppGet();
     if (!app) return WPS_SET_UNSURE;
-    IDispatch* sel = AdGetDisp(app, L"Selection");
+    ComPtr<IDispatch> sel(AdGetDisp(app, L"Selection"));
     if (!sel) return WPS_SET_UNSURE;
 
     long preS = -1, preE = -1;
-    BOOL preOK = AdGetLong(sel, L"Start", &preS) && AdGetLong(sel, L"End", &preE);
-    AdCall2(sel, L"SetRange", start, end);        /* 有序化由 WPS 自己做（实测） */
+    BOOL preOK = AdGetLong(sel.get(), L"Start", &preS) &&
+                 AdGetLong(sel.get(), L"End", &preE);
+    AdCall2(sel.get(), L"SetRange", start, end);  /* 有序化由 WPS 自己做（实测） */
     long postS = -1, postE = -1;
-    BOOL postOK = AdGetLong(sel, L"Start", &postS) && AdGetLong(sel, L"End", &postE);
-    sel->lpVtbl->Release(sel);
+    BOOL postOK = AdGetLong(sel.get(), L"Start", &postS) &&
+                  AdGetLong(sel.get(), L"End", &postE);
 
     if (postOK && postS == start && postE == end) return WPS_SET_OK;
     /* 位置完全没动 -> 安全的"没生效"：调用方可以照原计划退回逐格箭头 */
@@ -200,14 +203,14 @@ static int WpsComSetSelOnce(long start, long end) {
 }
 
 static void WpsAppDrop(void) {
-    if (t_wpsApp) { t_wpsApp->lpVtbl->Release(t_wpsApp); t_wpsApp = NULL; }
+    t_wpsApp.reset();
 }
 
 /* 缓存可能失效（WPS 重启、关掉文档又开）→ 失败就丢掉重试一次。
    只在**曾经拿到过**缓存时重试：首次就没有实例的话再试一次没有意义，
    反而让每次按键都多付一遍 COM 往返。 */
 static BOOL WpsComRead(WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) {
-    BOOL had = (t_wpsApp != NULL);
+    BOOL had = (t_wpsApp ? TRUE : FALSE);
     if (WpsComReadOnce(text, lenOut, caretOut, selEndOut)) return TRUE;
     WpsAppDrop();
     if (had) return WpsComReadOnce(text, lenOut, caretOut, selEndOut);
@@ -215,7 +218,7 @@ static BOOL WpsComRead(WCHAR** text, int* lenOut, int* caretOut, int* selEndOut)
 }
 
 static int WpsComSetSel(long start, long end) {
-    BOOL had = (t_wpsApp != NULL);
+    BOOL had = (t_wpsApp ? TRUE : FALSE);
     int r = WpsComSetSelOnce(start, end);
     if (r == WPS_SET_OK) return r;
     WpsAppDrop();
@@ -336,13 +339,12 @@ static BOOL WpsBridgeCall(const BYTE* req, DWORD reqLen, BYTE** resp, DWORD* res
     if (r.op == WPS_OP_SET) {
         h.status = WpsComSetSel(r.a, r.b);      /* WPS_SET_* 直接透传给父进程 */
         long s = -1, e = -1;
-        IDispatch* app = WpsAppGet();
+        IDispatch* app = WpsAppGet();          /* 借来的（线程缓存），不包 ComPtr */
         if (app) {
-            IDispatch* sel = AdGetDisp(app, L"Selection");
+            ComPtr<IDispatch> sel(AdGetDisp(app, L"Selection"));
             if (sel) {
-                AdGetLong(sel, L"Start", &s);
-                AdGetLong(sel, L"End", &e);
-                sel->lpVtbl->Release(sel);
+                AdGetLong(sel.get(), L"Start", &s);
+                AdGetLong(sel.get(), L"End", &e);
             }
         }
         h.caret = s;
