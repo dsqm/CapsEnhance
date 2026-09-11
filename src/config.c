@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include <string>
+#include <vector>
 
 /* ================= 配置模块（CapsEnhance.ini，与 exe 同目录） =================
    零依赖 INI 风格：分节保存，便于以后继续加值。
@@ -216,24 +218,27 @@ void ConfigLoadFrom(const WCHAR* path) {
     fseek(f, 0, SEEK_SET);
     if (sz <= 0 || sz > 64 * 1024) { fclose(f); return; }   /* 防呆：超大文件忽略 */
 
-    char* raw = (char*)malloc((size_t)sz + 1);
-    if (!raw) { fclose(f); return; }
-    size_t rd = fread(raw, 1, (size_t)sz, f);
+    /* 文件内容与宽字符副本都交给容器持有：以前是两对 malloc/free，每条提前
+       返回路径都得记得 free（漏一处就是泄漏），现在由析构负责。 */
+    std::vector<char> raw((size_t)sz + 1);
+    size_t rd = fread(raw.data(), 1, (size_t)sz, f);
     fclose(f);
     raw[rd] = 0;
 
-    const char* p = raw;
+    const char* p = raw.data();
     if (rd >= 3 && (unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB &&
         (unsigned char)p[2] == 0xBF)
         p += 3;                                              /* 跳过 UTF-8 BOM */
 
-    int wl = MultiByteToWideChar(CP_UTF8, 0, p, (int)(rd - (p - raw)), NULL, 0);
-    if (wl <= 0) { free(raw); return; }
-    WCHAR* wide = (WCHAR*)malloc(((size_t)wl + 1) * sizeof(WCHAR));
-    if (!wide) { free(raw); return; }
-    MultiByteToWideChar(CP_UTF8, 0, p, (int)(rd - (p - raw)), wide, wl);
-    wide[wl] = 0;
-    free(raw);
+    /* 一次性算出源长度：下面两次调用必须用同一个值（以前写成两遍
+       `(int)(rd - (p - raw))`，改一处漏一处的风险白担） */
+    int srcLen = (int)(rd - (size_t)(p - raw.data()));
+    int wl = MultiByteToWideChar(CP_UTF8, 0, p, srcLen, NULL, 0);
+    if (wl <= 0) return;
+    std::vector<WCHAR> widev((size_t)wl + 1);
+    MultiByteToWideChar(CP_UTF8, 0, p, srcLen, widev.data(), wl);
+    widev[wl] = 0;
+    WCHAR* wide = widev.data();
 
     CfgSec sec = SEC_NONE;
     WCHAR* line = wide;
@@ -320,7 +325,6 @@ void ConfigLoadFrom(const WCHAR* path) {
         }
         line = nl ? nl + 1 : NULL;
     }
-    free(wide);
 }
 
 void ConfigLoad(void) {
@@ -479,25 +483,11 @@ const char* ConfigUpgradeKeyName(int i) {
     return kUpgrades[i].key;
 }
 
-/* ---- 带边界检查的输出缓冲 ----
-   本项目已两次栽在"手工计算分配容量"上（见 776f468 与 ConfigUpgradeFile
-   的 BOM 漏算）：容量一旦算错，后面每一次 memcpy 都是堆越界写。这里把
-   "按索引写裸缓冲"换成"追加 + 容量校验"，算错时退化为不写而不是越界。 */
-typedef struct { char* p; size_t n, cap; } OutBuf;
-
-static BOOL OutInit(OutBuf* b, size_t cap) {
-    b->n = 0; b->cap = cap;
-    b->p = (char*)malloc(cap ? cap : 1);
-    return b->p != NULL;
-}
-static BOOL OutAdd(OutBuf* b, const void* src, size_t len) {
-    if (!b->p || b->n + len > b->cap) return FALSE;
-    if (len) memcpy(b->p + b->n, src, len);
-    b->n += len;
-    return TRUE;
-}
-static BOOL OutAddCh(OutBuf* b, char c)          { return OutAdd(b, &c, 1); }
-static void OutFree(OutBuf* b) { free(b->p); b->p = NULL; b->n = b->cap = 0; }
+/* ---- 输出缓冲：已改用 std::string ----
+   以前这里是一个手工算容量的裸缓冲（OutInit / OutAdd / OutAddCh / OutFree）：
+   容量一旦算错，后面每一次 memcpy 都是堆越界写 —— 本项目已两次栽在这上面
+   （见 776f468 与 ConfigUpgradeFile 里的 BOM 漏算）。std::string 自己管增长，
+   "容量算错"这个缺陷类别直接从代码里消失，所以这层包装不再需要。 */
 
 /* 复制一行到定长缓冲（结果保证以 0 结尾）。
    长度同时受**三个**约束：缓冲容量、到缓冲结尾的距离、行内长度。
@@ -518,17 +508,16 @@ void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (sz <= 0 || sz > 64 * 1024) { fclose(f); return; }
-    char* raw = (char*)malloc((size_t)sz + 1);
-    if (!raw) { fclose(f); return; }
-    size_t rd = fread(raw, 1, (size_t)sz, f);
+    std::vector<char> raw((size_t)sz + 1);
+    size_t rd = fread(raw.data(), 1, (size_t)sz, f);
     fclose(f);
     raw[rd] = 0;
 
-    const char* body = raw;
+    const char* body = raw.data();
     size_t bodyLen = rd;
-    int hasBom = (rd >= 3 && (unsigned char)raw[0] == 0xEF &&
-                  (unsigned char)raw[1] == 0xBB && (unsigned char)raw[2] == 0xBF);
-    if (hasBom) { body = raw + 3; bodyLen = rd - 3; }
+    int hasBom = (rd >= 3 && (unsigned char)body[0] == 0xEF &&
+                  (unsigned char)body[1] == 0xBB && (unsigned char)body[2] == 0xBF);
+    if (hasBom) { body += 3; bodyLen = rd - 3; }
 
     /* 定位 [General] 段：genStart=段行，genEnd=段结束（下一个段行或 EOF） */
     const char* genStart = NULL;
@@ -551,10 +540,8 @@ void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
     /* 检查哪些键缺失（只在 [General] 段范围内找） */
     #define KUP_N ((int)(sizeof(kUpgrades)/sizeof(kUpgrades[0])))
     BOOL missing[KUP_N];
-    size_t blockLens[KUP_N];
     int nMiss = 0;
     for (int i = 0; i < KUP_N; i++) {
-        blockLens[i] = strlen(kUpgrades[i].block);
         missing[i] = TRUE;
         for (const char* l = genStart ? genStart : body;
              l < (genStart ? genEnd : body + bodyLen) && missing[i]; ) {
@@ -572,40 +559,29 @@ void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
         }
         if (missing[i]) nMiss++;
     }
-    if (nMiss == 0) { free(raw); return; }   /* 无缺失：不动文件 */
+    if (nMiss == 0) return;   /* 无缺失：不动文件 */
 
     /* 组装新内容：BOM + 头部 + [General] 行(若新建) + 缺失块 + 尾部。
-       容量逐项算清：BOM 只在 hasBom 时占用，且它**不计入 bodyLen**
-       （body 已经跳过 BOM）—— 漏算它就是越界写（Debug CRT 下 abort）。 */
+       **不再逐项算容量**：以前要把 BOM / 段头 / 换行 / 各块长度加成一个
+       total，并记住"BOM 不计入 bodyLen"这条隐含约束 —— 漏算它就是越界写
+       （Debug CRT 下 abort）。std::string 自己增长，那类 bug 不可能再出现。 */
     static const char kGenHdr[] = "[General]\n";
     size_t insOff = genStart ? (size_t)(genEnd - body) : 0;
     int needNl = (genStart && insOff > 0 && body[insOff - 1] != '\n');
-    size_t blockTotal = 0;
+
+    std::string out;
+    if (hasBom)          out.append("\xEF\xBB\xBF", 3);
+    out.append(body, insOff);
+    if (!genStart)       out.append(kGenHdr, sizeof(kGenHdr) - 1);
+    if (needNl)          out.push_back('\n');
     for (int i = 0; i < KUP_N; i++)
-        if (missing[i]) blockTotal += blockLens[i];
+        if (missing[i])  out.append(kUpgrades[i].block);
+    out.append(body + insOff, bodyLen - insOff);
 
-    size_t bomLen = hasBom ? 3 : 0;
-    size_t genHdr = genStart ? 0 : sizeof(kGenHdr) - 1;
-    size_t total  = bomLen + insOff + genHdr + (needNl ? 1u : 0u)
-                  + blockTotal + (bodyLen - insOff);
-
-    OutBuf ob;
-    if (!OutInit(&ob, total)) { free(raw); return; }
-    BOOL ok = TRUE;
-    if (hasBom)              ok = OutAdd(&ob, "\xEF\xBB\xBF", 3);
-    if (ok)                  ok = OutAdd(&ob, body, insOff);
-    if (ok && !genStart)     ok = OutAdd(&ob, kGenHdr, genHdr);
-    if (ok && needNl)        ok = OutAddCh(&ob, '\n');
-    for (int i = 0; ok && i < KUP_N; i++)
-        if (missing[i])      ok = OutAdd(&ob, kUpgrades[i].block, blockLens[i]);
-    if (ok)                  ok = OutAdd(&ob, body + insOff, bodyLen - insOff);
-
-    if (ok && _wfopen_s(&f, path, L"wb") == 0 && f) {
-        fwrite(ob.p, 1, ob.n, f);
+    if (_wfopen_s(&f, path, L"wb") == 0 && f) {
+        fwrite(out.data(), 1, out.size(), f);
         fclose(f);
     }
-    OutFree(&ob);
-    free(raw);
     #undef KUP_N
 }
 
