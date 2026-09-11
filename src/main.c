@@ -314,7 +314,8 @@ void ApplyPauseState(void) {
        而它是往别的程序里持续注入滚轮，属于最不能留的尾巴。
        这事**不能靠 ResetEngine 代做**：松手不再打断之后，ResetEngine 已经不
        管持续滚动了（见那里的注释）。 */
-    if (ActAutoScrollActive()) CapLog("持续滚动：终止（暂停映射）");
+    if (g_recording && ActAutoScrollActive())
+        CapLog("持续滚动：终止（暂停映射）");
     ActAutoScrollStop();
     if (!g_state.paused) TrayHint(L"正在映射");
     else TrayHint(L"已暂停（CapsLock 恢复原功能）");
@@ -480,11 +481,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                是几百毫秒级的阻塞。留在主线程就是同一个根因 —— 期间松开 Caps
                的 keyup 会被系统跳过，g_cMod 卡住，之后按 Tab 冒出大写锁定。 */
             { ActJob j; memset(&j, 0, sizeof(j)); j.act = ACT_PROBE; ActPost(&j); }
-            TrayBalloon(L"焦点探测写入 CapsEnhance.log");
+            /* 开始记录的气泡 = **隐私提示**（原来的文案只说了"焦点探测写入日志"，
+               力度不够）。记录会把焦点控件的文本片段落盘，属于"用户未必意识到
+               的数据外带"，必须在开始那一刻说清；托盘悬停提示只有一行、还要
+               悬停才看得到，承担不了这个提醒。 */
+            TrayBalloon(L"开始记录日志。注意隐私：记录期间会写入焦点控件的文本片段"
+                        L"（前 160 字符）与跳词位置，敏感内容上请勿长时间开启。");
         } else {
             CapLog("===== REC END =====");
             MessageBeep(MB_ICONHAND);       /* 系统"手形"音：结束记录（低而不同） */
             TrayHint(L"正在映射");
+            /* 结束也给一次明确反馈：开始有气泡，结束若只有一声提示音，很容易
+               让人以为"还在记录"，于是继续在敏感内容上操作。 */
+            TrayBalloon(L"日志记录已结束（写入 CapsEnhance.log）");
             /* 诊断期间 UIA/MSAA 等 COM 基础设施已加载，结束记录后压回工作集 */
             TrimWorkingSet();
         }

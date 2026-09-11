@@ -284,8 +284,9 @@ static void WheelLaneStop(void) {
    松开 Caps 或增强修饰键 **不再**终止 —— 用户要的是"滚起来就能松手读，
    想停的时候按一下键"。工作线程也不再自查 g_cMod/ModeDown（那是旧规则）。
 
-   每一次"终止"都会在日志里留一行（谁停的 + 细节，见 ActAutoScrollInterrupt）。
-   这个功能的终止条件全在钩子侧，症状出现时现场什么都不剩 —— 那一行就是现场。 */
+   记录模式下每一次终止都会留一行（谁停的 + 细节 + 已注入拍数，见
+   ActAutoScrollInterrupt）。本功能的终止条件全在钩子侧，症状出现时现场什么都不剩 ——
+   要查它就先按 `C + \`` 开始记录：那一行与记录模式的滚轮现场就是现场。 */
 
 /* 速度档数与节拍下限。档位 i ∈ 1..AUTOSCROLL_SPEED_STEPS：
        i = 1 -> AutoScrollInterval （初始速度，最慢）
@@ -432,16 +433,17 @@ void ActAutoScrollStop(void) {
    active，只有真在滚才去拿锁 + SetEvent + 写一行日志。否则等于给每一次按键/点击
    都加一次临界区与内核调用 —— 那正是本项目最忌讳的"钩子路径上干重活"。
 
-   why / detail 只服务那行日志。**这一行故意不受记录开关控制**：本功能唯一会让
-   人抓瞎的就是"它无故停了"（松手不再打断之后，终止条件全在钩子侧，症状出现时
-   现场什么都不剩）。一次滚动会话最多一行，代价可以忽略；配合"谁停的 + 细节"
-   （键码 / 滚轮增量 / 鼠标消息号），下次再出现就能直接读出原因。
+   why / detail 只服务那行日志，**与其它诊断日志一样只在 `C + \`` 记录模式下写**
+   （本项目的约定：日志文件只在记录期间生成 —— 见 README"日志与诊断"）。
+   排查本功能时请先按 `C + \`` 开始记录再复现：终止条件全在钩子侧，症状出现时
+   现场什么都不剩，那两行（终止原因 + 记录模式下的滚轮现场）就是现场。
    why 是调用方给的**字面量**（本函数不负责释放；也不额外做格式化）。 */
 void ActAutoScrollInterrupt(const char* why, int detail) {
     if (!ACTIVE(&s_asActive)) return;
-    CapLog("持续滚动：终止（%s detail=%d/0x%X，已注入 %d 拍）",
-           why ? why : "新输入", detail, (unsigned)(detail & 0xFFFF),
-           (int)ATOMIC(&s_asTicks));
+    if (g_recording)
+        CapLog("持续滚动：终止（%s detail=%d/0x%X，已注入 %d 拍）",
+               why ? why : "新输入", detail, (unsigned)(detail & 0xFFFF),
+               (int)ATOMIC(&s_asTicks));
     ActAutoScrollStop();
 }
 
@@ -481,10 +483,11 @@ void ActAutoScrollWheel(int delta) {
     } else if ((int)ATOMIC(&s_asDir) != dir) {
         /* 反向：立即终止，并**清零档位** —— 下次启动从第 1 档重来，
            不残留打断前的速度（用户要的"反向打断后重置滚动速度"）。
-           记下行首一行日志（含两边方向与这一格的增量）：反向终止也是"无故停了"
+           记录模式下留一行（含两边方向与这一格的增量）：反向终止也是"无故停了"
            的常见来源（滚轮回弹/编码器抖动会发一个极小反向量），有日志才分得清。 */
-        CapLog("持续滚动：终止（反向滚 %+d -> %+d，delta=%d，已注入 %d 拍）",
-               (int)ATOMIC(&s_asDir), dir, delta, (int)ATOMIC(&s_asTicks));
+        if (g_recording)
+            CapLog("持续滚动：终止（反向滚 %+d -> %+d，delta=%d，已注入 %d 拍）",
+                   (int)ATOMIC(&s_asDir), dir, delta, (int)ATOMIC(&s_asTicks));
         InterlockedExchange(&s_asDir, 0);
         InterlockedExchange(&s_asGear, 0);
         InterlockedExchange(&s_asActive, 0);
@@ -517,8 +520,9 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
            这一条不依赖任何输入，是"用户走开 / 钩子被系统摘掉"时的最后一道闸。 */
         LONG remain = (LONG)(s_asDeadline - (LONG)(DWORD)GetTickCount64());
         if (remain <= 0) {
-            CapLog("持续滚动：终止（超时 %d ms 未调速，已注入 %d 拍）",
-                   (int)ATOMIC(&s_asMaxMs), (int)ATOMIC(&s_asTicks));
+            if (g_recording)
+                CapLog("持续滚动：终止（超时 %d ms 未调速，已注入 %d 拍）",
+                       (int)ATOMIC(&s_asMaxMs), (int)ATOMIC(&s_asTicks));
             ActAutoScrollStop(); running = FALSE; continue;
         }
         int dir = (int)ATOMIC(&s_asDir);

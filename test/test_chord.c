@@ -175,6 +175,16 @@ static LRESULT WheelH(int delta, DWORD flags) {
     ms.flags = flags;
     return LowLevelMouseProc(HC_ACTION, WM_MOUSEHWHEEL, (LPARAM)&ms);
 }
+/* 日志文件的当前大小（不存在返回 -1）。
+   用途：验证"日志只在 C+` 记录模式下生成"这条契约 —— 判定用**文件大小有没有
+   变化**，比读内容简单也更准（读内容还要处理编码与轮转）。 */
+static LONGLONG LogSize(void) {
+    WCHAR p[MAX_PATH];
+    log_path(p, MAX_PATH);                 /* main.c 里的静态函数，本 TU 可见 */
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (!GetFileAttributesExW(p, GetFileExInfoStandard, &d)) return -1;
+    return ((LONGLONG)d.nFileSizeHigh << 32) | (LONGLONG)d.nFileSizeLow;
+}
 /* 模拟鼠标的其它动作（按键按下/抬起、移动、横滚轮）。
    持续滚动的"按任意键（含鼠标）终止"规则要靠它来验。 */
 static LRESULT MouseEv(UINT msg, DWORD flags) {
@@ -855,6 +865,20 @@ int main(void) {
     Key('Q', TRUE); Pump(2); Sink();              /* 抬起后再按下 = 真的新输入 */
     CHECK(!ActAutoScrollActive(), "R: 抬起后再按下 -> 打断");
     Key('Q', FALSE); Pump(2); Sink();
+
+    /* ---- 日志契约：诊断日志**只在 C+` 记录模式下生成**（用户明确要求）----
+       持续滚动的终止原因也走这条约定（它是查"滚一下就停"的唯一现场，但一样
+       不该在没开记录时写文件）。判据用文件大小：不开记录 -> 一个字节都不动。
+       正向（开了记录确实写得进）由 logsmoke 与其它记录模式用例覆盖，
+       这里只钉死"没开就不许写"。 */
+    {
+        LONGLONG before = LogSize();
+        g_recording = FALSE;
+        ActAutoScrollWheel(120);
+        ActAutoScrollInterrupt("测试_未开记录", 0);
+        CHECK(LogSize() == before,
+              "R: 未开记录 -> 终止不写日志（日志只在记录模式生成）");
+    }
 
     /* 超时 -> 自行终止。这里把上限缩短到 250ms，免得真等 10 分钟；
        注意要**先设上限再启动**，因为超时时刻是在启动/调速时算出来的。 */

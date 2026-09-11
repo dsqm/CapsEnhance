@@ -183,9 +183,9 @@ void ActWheelClear(void);                /* 丢弃未补发的滚轮请求（松
    WheelScrollMul（倍数量与时间量是两种量，不混用）。 */
 void ActAutoScrollWheel(int delta);   /* 主线程：增强模式下的一次滚轮 */
 void ActAutoScrollStop(void);         /* 立即终止（暂停 / 退出 / 重启 / 反向滚） */
-/* 钩子线程：用户有新输入 -> 打断。why/detail 只用于**那行日志**：本功能唯一会让人
-   抓瞎的就是"它为什么停了"，所以这一行**不受记录开关控制**（一次会话最多一行）。
-   why 用字面量；detail 放 vk / 滚轮增量 / 鼠标消息号。 */
+/* 钩子线程：用户有新输入 -> 打断。why/detail 只用于**记录模式下的那行日志**
+   （与全项目一致：日志文件只在 `C + \`` 记录期间生成）；要查"它为什么停了"，
+   先开始记录再复现，日志里会写清是谁停的与细节（键码 / 滚轮增量 / 鼠标消息号）。 */
 void ActAutoScrollInterrupt(const char* why, int detail);
 BOOL ActAutoScrollActive(void);       /* 单测用 */
 int  ActAutoScrollGear(void);         /* 单测用：当前速度档（1..总档数，未启动为 0） */
