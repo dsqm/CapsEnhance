@@ -541,7 +541,12 @@ int main(void) {
     EXPECT(ConfigGetRunAsAdmin() && ConfigMatchName(L"foobar"), "CFG: 重载后新配置生效");
     EXPECT(!ConfigMatchName(L"Legacy.exe"), "CFG: 重载后旧名单失效");
 
-    /* 模板：不存在时生成，且不含禁止字样 */
+    /* 模板：不存在时生成，且不含禁止字样。
+       ConfigLoad() 写的是**真实配置路径** bin/CapsEnhance.ini，所以先把用户
+       现有的 ini 挪开、验完再放回去 —— 否则跑一次单测就把用户调过的值冲成
+       默认值（实测踩过：用户的 ini 被整份覆盖成模板）。 */
+    BOOL hadRealIni = (GetFileAttributesW(L"bin/CapsEnhance.ini") != INVALID_FILE_ATTRIBUTES);
+    if (hadRealIni) MoveFileW(L"bin/CapsEnhance.ini", L"bin/__ini_saved__.ini");
     DeleteFileW(L"bin/CapsEnhance.ini");
     ConfigLoad();
     EXPECT(!TemplateHasForbidden(), "CFG: 模板不含禁用字样（VSCode/vsc）");
@@ -563,6 +568,8 @@ int main(void) {
     EXPECT(!TemplateHas("EnhanceKeys"), "CFG: 模板不再含 EnhanceKeys（已改为编译期常量）");
     EXPECT(!TemplateHas("ShiftKeys"),   "CFG: 模板不再含 ShiftKeys（已改为编译期常量）");
     EXPECT(TemplateHas("[NativeWordJump]"),  "CFG: 模板含 NativeWordJump 段");
+    DeleteFileW(L"bin/CapsEnhance.ini");            /* 删掉刚生成的模板 */
+    if (hadRealIni) MoveFileW(L"bin/__ini_saved__.ini", L"bin/CapsEnhance.ini");
 
     /* 真实权限查询：不崩溃即可（是否管理员取决于运行环境） */
     (void)IsRunElevated();
