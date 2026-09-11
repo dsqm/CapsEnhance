@@ -284,11 +284,21 @@ void TrayAddHint(const WCHAR* s) {
    但不该打断操作的结果 —— 之前是用模态 MessageBox 弹在主线程上，
    会把和弦引擎和键盘响应一起冻住。 */
 void TrayBalloon(const WCHAR* s) {
+    /* Windows 通知区对同一个图标"同一时刻只显示一条气泡"，且新的 NIF_INFO
+       请求若赶上当前气泡还在显示，会被排队：Win10/11 下气泡被系统转成 toast，
+       同来源还会被摞进队列，要等当前那条超时（约 10s）才弹 —— 现象就是
+       "开始记录的隐私气泡还挂着，按 C+` 结束的气泡迟迟不出现"。
+       MS 规定的立即替换办法（.NET 的 NotifyIcon 内部也是这么做的）：先发一条
+       空 szInfo 把当前气泡收掉（取消待显示项），再发新内容，explorer 才会
+       立即弹出新的。空 szInfo 那次在"当前没有气泡"时也无害。
+       （注意：NIF_REALTIME 是反方向——"不能立即显示就丢弃"，不能用来做这个。）*/
     NOTIFYICONDATAW n = g_nid;
     n.uFlags = NIF_INFO;
     n.dwInfoFlags = NIIF_INFO;
     wcscpy_s(n.szInfoTitle, 64, APP_NAME);
-    wcscpy_s(n.szInfo, 256, s);
+    n.szInfo[0] = L'\0';                       /* 第一步：收掉当前气泡（取消排队） */
+    Shell_NotifyIconW(NIM_MODIFY, &n);
+    wcscpy_s(n.szInfo, 256, s);                /* 第二步：新内容 → 立即弹出 */
     Shell_NotifyIconW(NIM_MODIFY, &n);
 }
 static void SetMenuPauseText(void) {
