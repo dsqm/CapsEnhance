@@ -76,6 +76,14 @@ jobs:
           bin\logsmoke.exe || exit /b 1
           taskkill /IM CapsEnhance.exe /F 2>nul & exit /b 0
 
+      # WPS 通道：编译 + 真机跑一次（把 WPS 窗口置前，直接调 NavJump，
+      # 看它是否选中 WPS 通道并按算出的步数移动光标）。
+      # runner 上没装 WPS 时该程序打印 [SKIP] 并以 0 退出，不会卡红流水线；
+      # 但它的**编译**照常受 /W4 约束 —— 新通道不该悄悄引入告警。
+      - name: WPS channel (compile + live check, skips without WPS)
+        shell: cmd
+        run: call test\build_wpsjump.bat
+
       - name: Upload CapsEnhance.exe
         uses: actions/upload-artifact@v4
         with:

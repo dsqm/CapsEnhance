@@ -8,6 +8,7 @@
 #include <uiautomationcore.h>
 #include <uiautomationclient.h>
 #include <ole2.h>
+#include <tlhelp32.h>   /* 降权桥：枚举进程找 explorer.exe */
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -17,6 +18,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "oleacc.lib")
+#pragma comment(lib, "advapi32.lib")   /* OpenProcessToken / DuplicateTokenEx */
 
 /* 能直接设光标的通道（经典 Edit / Scintilla）瞬跳的最少步数：小于该值用
    真实箭头（行为一致），等于或大于则一步置到目标(瞬跳)，避免远距离逐格
@@ -59,6 +61,11 @@ struct IAccessibleText { const IAccessibleTextVtbl* lpVtbl; };
 
 static const IID kIID_IAccessibleText =
     {0x24FD2FFB, 0x3AAD, 0x4a08, {0x83,0x35,0xA3,0xAD,0x89,0xC0,0xFB,0x4B}};
+
+/* GetIDsOfNames / Invoke 的第一个参数官方一律传 IID_NULL。SDK 里 IID_NULL 是
+   对 uuid.lib 的 extern 声明，而本 TU 为了给 UIA 的 CLSID/IID 提供定义
+   `#include <initguid.h>`，于是拿不到它 —— 自己定义一份（值就是全 0）。 */
+static const IID kIID_Null = { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
 
 
 /* ---- 一次词跳的同步 IPC 预算 ----
@@ -997,6 +1004,582 @@ void NavSelTrackReset(void) {
     NAV_UNLOCK();
 }
 
+/* ================= WPS 通道：COM 自动化（ROT + IDispatch） =================
+   为什么需要单独一条通道：WPS 文字既不暴露 UIA/IA2 文本（实测焦点元素
+   TextPattern=NO、IAccessibleText=NO），也不响应 WM_GETTEXT（前台焦点控件
+   类名 _WwG 只回 "DocView"）。但它**完整实现了 Word 的对象模型**（窗口类名
+   照抄 Word：OpusApp / _WwG；Application.Name 自报 "Microsoft Word"），
+   所以可以对它做自动化：Application.ActiveDocument.Range().Text 拿全文，
+   Application.Selection.Start 拿光标位置（两者同一坐标系：实测 32 字符的
+   文档 Range.End=32、Selection.Start=12）。
+
+   附着方式是 ROT（运行对象表）+ GetActiveObject(CLSIDFromProgID(
+   "KWPS.Application"))，不新建实例 —— CoCreateInstance 会**另起一个没有文档
+   的 WPS 进程**，读不到用户窗口里那篇文档（实测 ActiveDocument 直接抛异常）。
+
+   ★ 关键限制（实测，决定了下面的降权桥）：**COM 的 ROT 按完整性级别隔离**。
+     以管理员运行的本进程调用 GetActiveObject 恒返回 0x800401E3
+     (MK_E_UNAVAILABLE)，即使 WPS 文档开着、窗口失焦过、甚至用 shell 的普通
+     用户令牌模拟（ImpersonateLoggedOnUser）也一样；而普通权限进程一次就成功。
+     所以：普通权限运行 → 本进程直接读；管理员运行 → 交给一个普通权限的子进程
+     代读（降权桥，见下）。子进程用 explorer.exe 的令牌启动
+     （CreateProcessWithTokenW；CreateProcessAsUser 需要默认未启用的
+     SeAssignPrimaryTokenPrivilege，报 1314）。
+
+   为什么用命名管道而不是匿名管道继承：CreateProcessWithTokenW **不支持句柄
+   继承**（实测子进程拿到的是无效句柄 --- 它没有 bInheritHandles 参数），
+   CreateProcessAsUser 又需要那个没被授予的特权。命名管道里**由子进程建管道**
+   （对象带普通权限的强制完整性标签），管理员父进程再去连：高完整性写低完整性
+   对象是允许的，反向才被拦。 */
+
+#define WPS_PROGID       L"KWPS.Application"      /* WPS 文字（表格/演示对象模型不同，不支持） */
+#define WPS_PROC         L"wps.exe"
+#define WPS_TEXT_MAX     100000                    /* 单次读取上限（UTF-16 字符）；超过就放弃本通道 */
+#define WPS_DOC_MIN      2                         /* 短于此视为占位，弃用（与 UIA/IA2 同理） */
+
+/* 1 = 本进程是降权桥的子进程。子进程没有"记录模式"这条开关可依赖，
+   而它一旦读失败，用户看到的只有父进程那句"桥应答异常"——原因全丢了，
+   所以子进程的诊断**无条件**写日志（行首带 [WPS桥] 前缀，便于区分）。
+   两个进程同时写同一个日志文件：日志每条都是"开-追加-关"，最坏交错掉
+   一行（与日志轮转的既有取舍一致，见 main.c 的 CapLog）。 */
+static volatile LONG s_wpsBridgeMode = 0;
+
+static void WpsLog(const char* fmt, ...) {
+    BOOL bridge = (InterlockedCompareExchange(&s_wpsBridgeMode, 0, 0) != 0);
+    if (!bridge && !g_recording) return;
+    char line[512];
+    va_list ap; va_start(ap, fmt);
+    _vsnprintf_s(line, sizeof(line), _TRUNCATE, fmt, ap);
+    va_end(ap);
+    CapLog("%s%s", bridge ? "[WPS桥] " : "  WPS ", line);
+}
+
+/* 焦点进程是不是 WPS 文字。**必须按进程名判**：WPS 的窗口/控件类名与 Word
+   完全相同（OpusApp / _WwG），按类名判会把真正的 Word 也卷进来。 */
+static BOOL WpsFocusIsWps(HWND hwnd) {
+    if (!hwnd) return FALSE;
+    WCHAR name[64] = {0};
+    if (!ConfigGetProcessName(hwnd, name, 64)) return FALSE;
+    return _wcsicmp(name, WPS_PROC) == 0;
+}
+
+/* GetIDsOfNames 要的是可写 LPOLESTR，而字面量是 const —— 拷一份避免丢 const */
+static DISPID WpsId(IDispatch* d, const WCHAR* name) {
+    if (!d || !name) return DISPID_UNKNOWN;
+    size_t n = wcslen(name);
+    if (n == 0 || n >= 64) return DISPID_UNKNOWN;
+    WCHAR buf[64];
+    wcscpy_s(buf, 64, name);
+    LPOLESTR p = buf;
+    DISPID id = DISPID_UNKNOWN;
+    if (FAILED(d->lpVtbl->GetIDsOfNames(d, &kIID_Null, &p, 1, LOCALE_USER_DEFAULT, &id)))
+        return DISPID_UNKNOWN;
+    return id;
+}
+
+/* 取属性（PROPERTYGET、无参）。失败要把 EXCEPINFO 里的 BSTR 放掉，否则每次
+   失败都漏一小块 —— 这条路径按设计会反复失败（没打开文档时）。 */
+static BOOL WpsProp(IDispatch* d, const WCHAR* name, VARIANT* out) {
+    VariantInit(out);
+    DISPID id = WpsId(d, name);
+    if (id == DISPID_UNKNOWN) return FALSE;
+    DISPPARAMS dp; memset(&dp, 0, sizeof(dp));
+    EXCEPINFO ei; memset(&ei, 0, sizeof(ei));
+    UINT ec = 0;
+    HRESULT hr = d->lpVtbl->Invoke(d, id, &kIID_Null, LOCALE_USER_DEFAULT,
+                                   DISPATCH_PROPERTYGET, &dp, out, &ei, &ec);
+    if (FAILED(hr)) {
+        if (out->vt != VT_EMPTY) VariantClear(out);
+        VariantInit(out);
+        if (ei.bstrDescription) SysFreeString(ei.bstrDescription);
+        if (ei.bstrSource)      SysFreeString(ei.bstrSource);
+        if (ei.bstrHelpFile)    SysFreeString(ei.bstrHelpFile);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL WpsPropLong(IDispatch* d, const WCHAR* name, long* out) {
+    VARIANT v;
+    if (!WpsProp(d, name, &v)) return FALSE;
+    BOOL ok = FALSE;
+    if (v.vt == VT_I4)        { *out = (long)v.lVal; ok = TRUE; }
+    else if (v.vt == VT_I2)   { *out = (long)v.iVal; ok = TRUE; }
+    else if (v.vt == VT_UI4)  { *out = (long)v.lVal; ok = TRUE; }
+    VariantClear(&v);
+    return ok;
+}
+
+/* 取子对象（AddRef 后交给调用者；未命中返回 NULL） */
+static IDispatch* WpsPropDisp(IDispatch* d, const WCHAR* name) {
+    VARIANT v;
+    if (!WpsProp(d, name, &v)) return NULL;
+    IDispatch* r = NULL;
+    if (v.vt == VT_DISPATCH && v.pdispVal) {
+        r = v.pdispVal;
+        r->lpVtbl->AddRef(r);
+    }
+    VariantClear(&v);
+    return r;
+}
+
+/* 本线程缓存的 WPS Application。缓存失效（WPS 重启 / 关掉文档再开）时由
+   WpsComRead 丢掉重试一次。 */
+static __declspec(thread) IDispatch* t_wpsApp = NULL;
+
+static IDispatch* WpsAppGet(void) {
+    if (t_wpsApp) return t_wpsApp;
+    if (!CoUp()) return NULL;
+    CLSID clsid;
+    if (FAILED(CLSIDFromProgID(WPS_PROGID, &clsid))) {
+        WpsLog("CLSIDFromProgID(%ls) 失败（WPS 未注册 COM 接口？）", WPS_PROGID);
+        return NULL;
+    }
+    IUnknown* unk = NULL;
+    HRESULT hr = GetActiveObject(&clsid, NULL, &unk);
+    if (FAILED(hr) || !unk) {
+        /* 0x800401E3 = MK_E_UNAVAILABLE：WPS 没在 ROT 里（没开文档 / 没失去过焦点），
+           或者**本进程是管理员**（ROT 按完整性级别隔离，永远看不到普通权限的 WPS） */
+        WpsLog("GetActiveObject 失败 hr=0x%08X%s", (unsigned)hr,
+               (hr == (HRESULT)MK_E_UNAVAILABLE) ? " (MK_E_UNAVAILABLE)" : "");
+        return NULL;
+    }
+    IDispatch* app = NULL;
+    if (SUCCEEDED(unk->lpVtbl->QueryInterface(unk, &IID_IDispatch, (void**)&app)) && app)
+        t_wpsApp = app;
+    unk->lpVtbl->Release(unk);
+    return t_wpsApp;
+}
+
+/* 读一次：全文 + 光标偏移（UTF-16 下标）。text 由调用方 free。 */
+static BOOL WpsComReadOnce(WCHAR** text, int* lenOut, int* caretOut) {
+    IDispatch* app = WpsAppGet();      /* 本线程缓存，不 Release */
+    IDispatch* sel = NULL;
+    IDispatch* doc = NULL;
+    IDispatch* rng = NULL;
+    BOOL ok = FALSE;
+    long caret = -1, rs = -1, re = -1;
+
+    if (!app) return FALSE;
+
+    sel = WpsPropDisp(app, L"Selection");
+    if (!sel || !WpsPropLong(sel, L"Start", &caret) || caret < 0) {
+        WpsLog("Selection.Start 取不到");
+        goto done;
+    }
+    doc = WpsPropDisp(app, L"ActiveDocument");
+    if (!doc) {
+        WpsLog("ActiveDocument 取不到（WPS 没打开文档？）");
+        goto done;
+    }
+    /* 整篇文本用 Document.Range()（不带参数 = 全文）。**不能用 Document.Content**：
+       WPS 上 Content.Start/End 取不到（实测 -1），而 Range() 与 Selection
+       是同一套字符坐标（实测 Range.End 与 Selection.Start 可交叉验证）。 */
+    rng = WpsPropDisp(doc, L"Range");
+    if (!rng) {
+        WpsLog("Document.Range 取不到");
+        goto done;
+    }
+    WpsPropLong(rng, L"Start", &rs);
+    WpsPropLong(rng, L"End", &re);
+    {
+        VARIANT v;
+        if (!WpsProp(rng, L"Text", &v) || v.vt != VT_BSTR || !v.bstrVal) {
+            WpsLog("Range.Text 取不到");
+            if (v.vt != VT_EMPTY) VariantClear(&v);
+            goto done;
+        }
+        int len = (int)SysStringLen(v.bstrVal);
+        WCHAR* copy = NULL;
+        if (len >= WPS_DOC_MIN && len <= WPS_TEXT_MAX) {
+            copy = (WCHAR*)malloc(((size_t)len + 1) * sizeof(WCHAR));
+            if (copy) {
+                memcpy(copy, v.bstrVal, (size_t)len * sizeof(WCHAR));
+                copy[len] = 0;
+            }
+        } else {
+            WpsLog("文档长度 %d 不适合本通道（范围 %d..%d）", len, WPS_DOC_MIN, WPS_TEXT_MAX);
+        }
+        VariantClear(&v);
+        if (!copy) goto done;
+        if (caret > len) caret = len;
+        *text = copy;
+        *lenOut = len;
+        *caretOut = (int)caret;
+        ok = TRUE;
+    }
+    if (ok && g_recording)
+        CapLog("  WPS doc len=%d caret=%d Range=[%ld,%ld]", *lenOut, *caretOut, rs, re);
+
+done:
+    if (rng) rng->lpVtbl->Release(rng);
+    if (doc) doc->lpVtbl->Release(doc);
+    if (sel) sel->lpVtbl->Release(sel);
+    return ok;
+}
+
+static void WpsAppDrop(void) {
+    if (t_wpsApp) { t_wpsApp->lpVtbl->Release(t_wpsApp); t_wpsApp = NULL; }
+}
+
+/* 缓存可能失效（WPS 重启、关掉文档又开）→ 失败就丢掉重试一次。
+   只在**曾经用过缓存**时重试：首次就没有实例的话再试一次没有意义，
+   反而让每次按键都多付一遍 COM 往返。 */
+static BOOL WpsComRead(WCHAR** text, int* lenOut, int* caretOut) {
+    BOOL hadCache = (t_wpsApp != NULL);
+    if (WpsComReadOnce(text, lenOut, caretOut)) return TRUE;
+    WpsAppDrop();
+    if (hadCache) return WpsComReadOnce(text, lenOut, caretOut);
+    return FALSE;
+}
+
+/* ---- 降权桥：普通权限的子进程代读（管理员运行时的唯一通路） ---- */
+#define WPS_BR_IDLE_MS   120000   /* 子进程空闲多久自退（没人用 WPS 时不占内存） */
+#define WPS_BR_WAIT_MS   400      /* 父进程等一次应答的上限 */
+/* 等子进程把管道建起来的上限。降权启动要借 shell 令牌（LOGON_WITH_PROFILE，
+   涉及加载用户配置），实测偶发要几百毫秒 —— 500ms 会漏，给到 1.5s。
+   这一跳慢一点没关系：桥一起来就常驻了，后续跳词只走管道。 */
+#define WPS_BR_SPAWN_MS  1500
+/* 失败后的冷却。取 1s 而不是 5s：首次偶发失败后，用户再按一下就该成功，
+   不必等好几秒；同时又足够挡住"长按触发键"造成的每秒多次拉进程。 */
+#define WPS_BR_RETRY_MS  1000
+#define WPS_BR_BUF       65536    /* 管道缓冲 */
+
+typedef struct { LONG status; LONG caret; LONG len; } WpsBrHdr;   /* status: 0=OK */
+#define WPS_BR_OK 0
+
+/* 桥的状态（只在工作线程上被读写；父进程侧另有 g_navCs 之外的独占性 ——
+   NavJump 同一时刻只有一发在飞，见 act.c 的 ActInFlight） */
+static volatile LONG s_brSeq = 0;                  /* 管道名序号，避免旧子进程占名 */
+static HANDLE        s_brPipe = INVALID_HANDLE_VALUE;
+static HANDLE        s_brProc = NULL;
+static ULONGLONG     s_brRetryAt = 0;
+
+/* 阻塞写全部（父进程在对面排空；父进程关了管道就返回失败 → 子进程退出） */
+static BOOL WpsPipeWriteFull(HANDLE h, const void* buf, DWORD want) {
+    const BYTE* p = (const BYTE*)buf;
+    DWORD done = 0;
+    while (done < want) {
+        DWORD w = 0;
+        if (!WriteFile(h, p + done, want - done, &w, NULL) || w == 0) return FALSE;
+        done += w;
+    }
+    return TRUE;
+}
+
+/* 带截止时间的读满：先 PeekNamedPipe 看有多少，只读"确实有的" —— 管道是阻塞
+   的，直接 ReadFile 会一直等下去，超时就成了空话。 */
+static BOOL WpsPipeReadFull(HANDLE h, void* buf, DWORD want, ULONGLONG deadline) {
+    BYTE* p = (BYTE*)buf;
+    DWORD done = 0;
+    while (done < want) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) return FALSE;   /* 断了 */
+        if (avail == 0) {
+            if (GetTickCount64() >= deadline) return FALSE;
+            Sleep(2);
+            continue;
+        }
+        DWORD chunk = want - done;
+        if (chunk > avail) chunk = avail;
+        DWORD got = 0;
+        if (!ReadFile(h, p + done, chunk, &got, NULL) || got == 0) return FALSE;
+        done += got;
+    }
+    return TRUE;
+}
+
+static void WpsBrName(unsigned long pid, unsigned long seq, WCHAR* out, size_t cap) {
+    _snwprintf_s(out, cap, _TRUNCATE, L"\\\\.\\pipe\\CapsEnhanceWps.%lu.%lu", pid, seq);
+}
+
+/* 拿当前用户 shell（explorer.exe）的普通权限主令牌 —— 降权启动子进程要用它。
+   调用方负责 CloseHandle。拿不到就返回 NULL（那时子进程也是管理员、桥无效）。 */
+static HANDLE WpsShellToken(void) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return NULL;
+    PROCESSENTRY32W pe; memset(&pe, 0, sizeof(pe)); pe.dwSize = sizeof(pe);
+    DWORD pid = 0;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, L"explorer.exe") != 0) continue;
+            DWORD sid = 0;
+            if (ProcessIdToSessionId(pe.th32ProcessID, &sid) && sid != 0) {
+                pid = pe.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    if (!pid) return NULL;
+
+    HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hp) return NULL;
+    HANDLE tok = NULL, dup = NULL;
+    if (OpenProcessToken(hp, TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, &tok)) {
+        if (!DuplicateTokenEx(tok, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation,
+                              TokenPrimary, &dup))
+            dup = NULL;
+    }
+    if (tok) CloseHandle(tok);
+    CloseHandle(hp);
+    return dup;
+}
+
+/* 拉起桥子进程。管理员运行时必须借 shell 令牌（否则子进程也是管理员，COM 照样附不上）。 */
+static BOOL WpsBrSpawn(unsigned long pid, unsigned long seq) {
+    WCHAR exe[MAX_PATH] = L"";
+    if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return FALSE;
+    WCHAR cmd[MAX_PATH + 128];
+    _snwprintf_s(cmd, MAX_PATH + 128, _TRUNCATE, L"\"%s\" --wps-bridge %lu %lu", exe, pid, seq);
+
+    STARTUPINFOW si; PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+
+    BOOL ok = FALSE;
+    if (IsRunElevated()) {
+        HANDLE tok = WpsShellToken();
+        if (tok) {
+            ok = CreateProcessWithTokenW(tok, LOGON_WITH_PROFILE, NULL, cmd,
+                                         CREATE_UNICODE_ENVIRONMENT, NULL, NULL, &si, &pi);
+            CloseHandle(tok);
+        }
+        if (!ok) WpsLog("借 shell 令牌启动降权桥失败 err=%lu", (unsigned long)GetLastError());
+    }
+    if (!ok) {
+        /* 本来就是普通权限：直接起，子进程同样是普通权限 */
+        ok = CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    }
+    if (!ok) {
+        WpsLog("降权桥启动失败 err=%lu", (unsigned long)GetLastError());
+        return FALSE;
+    }
+    CloseHandle(pi.hThread);
+    if (s_brProc) CloseHandle(s_brProc);      /* 上一个僵尸进程句柄 */
+    s_brProc = pi.hProcess;
+    WpsLog("降权桥已拉起 pid=%lu", (unsigned long)pi.dwProcessId);
+    return TRUE;
+}
+
+/* 连子进程建的管道（子进程要先 CreateNamedPipe 完，故此处带重试） */
+static BOOL WpsBrConnect(unsigned long pid, unsigned long seq, HANDLE* out) {
+    WCHAR name[128];
+    WpsBrName(pid, seq, name, 128);
+    ULONGLONG deadline = GetTickCount64() + WPS_BR_SPAWN_MS;
+    DWORD lastErr = 0;
+    for (;;) {
+        HANDLE h = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                               OPEN_EXISTING, 0, NULL);
+        if (h != INVALID_HANDLE_VALUE) { *out = h; return TRUE; }
+        lastErr = GetLastError();
+        if (GetTickCount64() >= deadline) break;
+        Sleep(5);
+    }
+    WpsLog("连不上桥管道 %ls (err=%lu)", name, (unsigned long)lastErr);
+    return FALSE;
+}
+
+static void WpsBrDrop(void) {
+    if (s_brPipe != INVALID_HANDLE_VALUE) {
+        CloseHandle(s_brPipe);
+        s_brPipe = INVALID_HANDLE_VALUE;
+    }
+    if (s_brProc) {
+        /* 不 Terminate：子进程读到管道断开会自己退（也在它自己的空闲超时里） */
+        CloseHandle(s_brProc);
+        s_brProc = NULL;
+    }
+    s_brRetryAt = GetTickCount64() + WPS_BR_RETRY_MS;
+}
+
+static BOOL WpsBrEnsure(void) {
+    if (s_brPipe != INVALID_HANDLE_VALUE) return TRUE;
+    if (GetTickCount64() < s_brRetryAt) return FALSE;
+
+    unsigned long pid = (unsigned long)GetCurrentProcessId();
+    unsigned long seq = (unsigned long)InterlockedIncrement(&s_brSeq);
+    if (!WpsBrSpawn(pid, seq)) { s_brRetryAt = GetTickCount64() + WPS_BR_RETRY_MS; return FALSE; }
+    HANDLE h = INVALID_HANDLE_VALUE;
+    if (!WpsBrConnect(pid, seq, &h)) {
+        /* 子进程起来了却没建管道？把它的退出码写出来 —— 否则只剩"连不上"
+           三个字，下次再遇到只能重头猜。 */
+        if (s_brProc) {
+            DWORD code = 0;
+            if (GetExitCodeProcess(s_brProc, &code) && code != STILL_ACTIVE)
+                WpsLog("桥子进程已退出，退出码=%lu", (unsigned long)code);
+            else
+                WpsLog("桥子进程还活着但没建管道（卡在启动？）");
+            TerminateProcess(s_brProc, 0);
+            CloseHandle(s_brProc);
+            s_brProc = NULL;
+        }
+        s_brRetryAt = GetTickCount64() + WPS_BR_RETRY_MS;
+        return FALSE;
+    }
+    s_brPipe = h;
+    return TRUE;
+}
+
+static BOOL WpsBrRead(WCHAR** text, int* lenOut, int* caretOut) {
+    if (!WpsBrEnsure()) return FALSE;
+
+    char cmd = 'G';
+    DWORD w = 0;
+    ULONGLONG deadline = GetTickCount64() + WPS_BR_WAIT_MS;
+    if (!WriteFile(s_brPipe, &cmd, 1, &w, NULL) || w != 1) { WpsBrDrop(); return FALSE; }
+
+    WpsBrHdr hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    if (!WpsPipeReadFull(s_brPipe, &hdr, sizeof(hdr), deadline)) { WpsBrDrop(); return FALSE; }
+    if (hdr.status != WPS_BR_OK || hdr.len < 0 || hdr.len > WPS_TEXT_MAX) {
+        WpsLog("桥应答异常 status=%ld len=%ld", (long)hdr.status, (long)hdr.len);
+        if (hdr.status != WPS_BR_OK) return FALSE;   /* 服务端读失败：桥本身是好的 */
+        WpsBrDrop();
+        return FALSE;
+    }
+    WCHAR* buf = (WCHAR*)malloc(((size_t)hdr.len + 1) * sizeof(WCHAR));
+    if (!buf) { WpsBrDrop(); return FALSE; }
+    if (hdr.len > 0 && !WpsPipeReadFull(s_brPipe, buf, (DWORD)hdr.len * 2, deadline)) {
+        free(buf);
+        WpsBrDrop();
+        return FALSE;
+    }
+    buf[hdr.len] = 0;
+    *text = buf;
+    *lenOut = (int)hdr.len;
+    *caretOut = (int)hdr.caret;
+    return TRUE;
+}
+
+/* --------- 通道入口 --------- */
+/* 按运行权限选通路（不含"是不是 WPS"的判定，自检也用这一条） */
+static BOOL WpsReadAny(WCHAR** text, int* lenOut, int* caretOut) {
+    if (!IsRunElevated()) return WpsComRead(text, lenOut, caretOut);   /* 同权限：本进程直读 */
+    return WpsBrRead(text, lenOut, caretOut);                          /* 管理员：走降权桥 */
+}
+
+static BOOL WpsGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
+    if (!text || !lenOut || !caretOut) return FALSE;
+    if (!WpsFocusIsWps(hwnd)) return FALSE;
+    return WpsReadAny(text, lenOut, caretOut);
+}
+
+/* 外部（--wps-read / 集成测试）用的读取入口 */
+BOOL WpsReadText(WCHAR** text, int* lenOut, int* caretOut) {
+    if (!text || !lenOut || !caretOut) return FALSE;
+    return WpsReadAny(text, lenOut, caretOut);
+}
+
+/* --------- 桥的子进程侧 --------- */
+int WpsBridgeServe(unsigned long pid, unsigned long seq) {
+    WCHAR name[128];
+    WpsBrName(pid, seq, name, 128);
+    InterlockedExchange(&s_wpsBridgeMode, 1);
+    WpsLog("启动 pid=%lu seq=%lu name=%ls", pid, seq, name);
+    /* 子进程本就该是普通权限；若还是管理员，说明降权没成功，桥毫无意义 */
+    if (IsRunElevated()) {
+        WpsLog("子进程仍是管理员权限，放弃（降权没生效）");
+        return 3;
+    }
+
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        WpsLog("CoInitializeEx 失败 hr=0x%08X", (unsigned)hr);
+        return 1;
+    }
+
+    HANDLE np = CreateNamedPipeW(name, PIPE_ACCESS_DUPLEX,
+                                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                                 1, WPS_BR_BUF, WPS_BR_BUF, 0, NULL);
+    if (np == INVALID_HANDLE_VALUE) {
+        WpsLog("CreateNamedPipe 失败 err=%lu", (unsigned long)GetLastError());
+        return 2;
+    }
+    if (!ConnectNamedPipe(np, NULL) && GetLastError() != ERROR_PIPE_CONNECTED) {
+        WpsLog("ConnectNamedPipe 失败 err=%lu", (unsigned long)GetLastError());
+        CloseHandle(np);
+        return 4;
+    }
+    WpsLog("已连接，开始服务");
+
+    ULONGLONG idle = GetTickCount64() + WPS_BR_IDLE_MS;
+    for (;;) {
+        BYTE cmd = 0;
+        DWORD avail = 0;
+        if (!PeekNamedPipe(np, NULL, 0, NULL, &avail, NULL)) break;   /* 父进程没了 */
+        if (avail == 0) {
+            if (GetTickCount64() >= idle) break;                      /* 空闲自退 */
+            Sleep(50);
+            continue;
+        }
+        DWORD got = 0;
+        if (!ReadFile(np, &cmd, 1, &got, NULL) || got != 1) break;
+        if (cmd == 'Q') break;
+        if (cmd != 'G') continue;
+
+        WCHAR* text = NULL; int len = 0, caret = 0;
+        BOOL ok = WpsComRead(&text, &len, &caret);
+        WpsBrHdr hdr;
+        hdr.status = ok ? WPS_BR_OK : 1;
+        hdr.caret  = ok ? (LONG)caret : -1;
+        hdr.len    = ok ? (LONG)len : 0;
+        BOOL wrote = WpsPipeWriteFull(np, &hdr, sizeof(hdr));
+        if (wrote && ok && len > 0)
+            wrote = WpsPipeWriteFull(np, text, (DWORD)len * sizeof(WCHAR));
+        free(text);
+        if (!wrote) break;
+        idle = GetTickCount64() + WPS_BR_IDLE_MS;
+    }
+    FlushFileBuffers(np);
+    DisconnectNamedPipe(np);
+    CloseHandle(np);
+    WpsAppDrop();
+    CoUninitialize();
+    return 0;
+}
+
+void WpsBridgeShutdown(void) {
+    if (s_brPipe != INVALID_HANDLE_VALUE) {
+        char q = 'Q';
+        DWORD w = 0;
+        WriteFile(s_brPipe, &q, 1, &w, NULL);    /* 让子进程立刻退，不必等空闲超时 */
+        CloseHandle(s_brPipe);
+        s_brPipe = INVALID_HANDLE_VALUE;
+    }
+    if (s_brProc) { CloseHandle(s_brProc); s_brProc = NULL; }
+}
+
+/* --wps-read：读一次并写日志（用户自查"WPS 里为什么不生效"用） */
+int WpsSelfTest(void) {
+    WCHAR* text = NULL; int len = 0, caret = 0;
+    CapLog("===== WPS 自检 =====");
+    CapLog("运行权限: %s", IsRunElevated() ? "管理员（走降权桥）" : "普通用户（本进程直读）");
+    BOOL ok = WpsReadAny(&text, &len, &caret);
+    if (!ok) {
+        CapLog("读不到：WPS 没运行 / 没打开文档 / 接口未注册。详见上面的失败原因。");
+        WpsBridgeShutdown();       /* 自检是一次性的，别把桥子进程留着 */
+        return 1;
+    }
+    CapLog("成功: 文档长度=%d 光标=%d", len, caret);
+    {
+        int a = caret - 20; if (a < 0) a = 0;
+        int b = caret + 20; if (b > len) b = len;
+        WCHAR* seg = (WCHAR*)malloc((size_t)(b - a + 1) * sizeof(WCHAR));
+        if (seg) {
+            memcpy(seg, text + a, (size_t)(b - a) * sizeof(WCHAR));
+            seg[b - a] = 0;
+            char utf[512];
+            if (WideCharToMultiByte(CP_UTF8, 0, seg, -1, utf, (int)sizeof(utf), NULL, NULL) > 0)
+                CapLog("光标附近[-20,+20] = [%s]", utf);
+            free(seg);
+        }
+    }
+    free(text);
+    WpsBridgeShutdown();
+    return 0;
+}
+
 /* 置位"无效"程序的会话内记忆：
    部分实现（Quicker 等 WPF 控件）的 TextRange.Select 会短暂改变显示光标
    （屏幕上看到"闪一下"到目标位置）却并不真正生效——回读校验已能拦住，
@@ -1050,6 +1633,11 @@ static int NavJumpInner(int dir, BOOL shift) {
     if (!got) {
         got = MsaaGetTextCaret(focus, &text, &len, &caret);  /* 兜底无障碍 → IAccessible2 */
         if (got) path = "IA2";
+    }
+    if (!got) {
+        /* WPS：既无 UIA/IA2 文本也不响应 WM_GETTEXT，只能走 COM 自动化（见本节说明） */
+        got = WpsGetTextCaret(focus, &text, &len, &caret);
+        if (got) path = "WPS";
     }
     if (!got) { SendNativeWordJump(dir, shift); if (g_recording) CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
 
@@ -1211,18 +1799,27 @@ static int NavJumpInner(int dir, BOOL shift) {
                        handedOff ? " [改道落点不符，已补足]" : "");
         }
     }
-    /* 自校验补正（UIA / IA2）：部分自定义编辑器（Electron 里带渲染装饰的
+    /* 自校验补正（UIA / IA2 / WPS）：部分自定义编辑器（Electron 里带渲染装饰的
        编辑器，如实时预览下把语法/装饰渲染成整块 widget 的编辑器）的无障碍
        文本含"光标不可停靠"的字符——按文本算出的步数发完箭头会整块跳过而
        超调（日志表现：短跳准、长跳偏）。跳完重读一次：
        仅当读回的仍是同一页文本（长度与内容都一致，坐标可比）才按差值补一轮；
        差值超过原步数说明坐标系统性不可靠，放弃补正（不做任何自动切换，
-       只提示）—— 这类程序请把进程名写进配置文件的 [NativeWordJump] 名单。 */
-    if (!direct && !skipArrows && !oneStep && !shift
-        && (path[0] == 'U' || path[0] == 'I') && focus) {
+       只提示）—— 这类程序请把进程名写进配置文件的 [NativeWordJump] 名单。
+
+       WPS 也走这一套，但**只在"改道"那一次**：我们发的是单字符箭头，落点由
+       我们算出的字符位决定、本身是确定的；只有超过 MaxArrowSteps 改发原生
+       Ctrl+方向时才依赖 WPS 自己的词切分 —— 那正是必须回读的情境。别的通道
+       每次回读是因为它们的坐标本身不可靠。 */
+    BOOL isUA  = (path[0] == 'U' || path[0] == 'I');
+    BOOL isWps = (path[0] == 'W');
+    if (!direct && !skipArrows && !oneStep && !shift && focus
+        && (isUA || (isWps && handedOff))) {
         WCHAR* t2 = NULL; int l2 = 0, c2 = 0;
-        BOOL ok2 = (path[0] == 'U') ? UiaGetTextCaret(focus, &t2, &l2, &c2)
-                                    : MsaaGetTextCaret(focus, &t2, &l2, &c2);
+        BOOL ok2;
+        if (isWps)                     ok2 = WpsGetTextCaret(focus, &t2, &l2, &c2);
+        else if (path[0] == 'U')       ok2 = UiaGetTextCaret(focus, &t2, &l2, &c2);
+        else                           ok2 = MsaaGetTextCaret(focus, &t2, &l2, &c2);
         /* 只在"读回的仍是同一页文本"（长度与内容都一致）时才比坐标 */
         BOOL comparable = (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0);
         if (comparable && c2 == tgt) {

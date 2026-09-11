@@ -33,7 +33,18 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
    test\logsmoke.c /link /OUT:bin/logsmoke.exe user32.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 
-echo [OK] keytest + uiprobe + memtest + restarttest + traymemtest + logsmoke built.
+rem 权限/COM 附着类排障（只编译；运行要看机器上有没有 WPS / explorer）：
+rem   ilcheck  打印各进程的完整性级别（"管理员运行附不上普通权限的 WPS"就是它证的）
+rem   lowrun   借 shell 令牌以普通权限启动任意程序（复现"普通权限能、管理员不能"）
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
+   test\ilcheck.c /link /OUT:bin/ilcheck.exe advapi32.lib /SUBSYSTEM:CONSOLE
+if errorlevel 1 goto fail
+
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TC /Fobin\ ^
+   test\lowrun.c /link /OUT:bin/lowrun.exe userenv.lib advapi32.lib /SUBSYSTEM:CONSOLE
+if errorlevel 1 goto fail
+
+echo [OK] keytest + uiprobe + memtest + restarttest + traymemtest + logsmoke + ilcheck + lowrun built.
 exit /b 0
 :fail
 echo [ERROR] build failed

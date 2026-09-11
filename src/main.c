@@ -375,6 +375,31 @@ static BOOL HasSwitch(const WCHAR* flag, DWORD* argOut) {
     return FALSE;
 }
 
+/* 同上，但取**两个**十进制参数（降权桥要 pid + 序号拼管道名）。
+   两个参数都必须存在且能解析，否则返回 FALSE。 */
+static BOOL HasSwitch2(const WCHAR* flag, DWORD* a, DWORD* b) {
+    const WCHAR* cmd = GetCommandLineW();
+    if (!cmd || !flag) return FALSE;
+    size_t fl = wcslen(flag);
+    for (const WCHAR* p = cmd; (p = wcsstr(p, flag)) != NULL; p += fl) {
+        BOOL lb = (p == cmd) || (p[-1] == L' ' || p[-1] == L'\t');
+        WCHAR c = p[fl];
+        if (!lb || (c != 0 && c != L' ' && c != L'\t')) continue;
+        const WCHAR* q = p + fl;
+        while (*q == L' ' || *q == L'\t') q++;
+        WCHAR* end = NULL;
+        DWORD x = (DWORD)wcstoul(q, &end, 10);
+        if (end == q) continue;                       /* 第一个参数缺失 */
+        while (*end == L' ' || *end == L'\t') end++;
+        WCHAR* end2 = NULL;
+        DWORD y = (DWORD)wcstoul(end, &end2, 10);
+        if (end2 == end) continue;                    /* 第二个参数缺失 */
+        *a = x; *b = y;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 /* 重启流程：新实例带 --wait-exit <pid>，等旧实例退出（最多 5 秒）后再
    创建窗口/安装钩子，避免两个实例的钩子与托盘图标短暂并存。 */
 static void WaitOldInstanceExit(void) {
@@ -649,6 +674,20 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         return 0;
     }
 
+    /* --wps-read：读一次 WPS 光标处文本并写日志（自查"WPS 里为什么不生效"）。
+       放在单实例检查之前：它不该被已经在跑的实例挡住。 */
+    if (HasSwitch(L"--wps-read", NULL))
+        return WpsSelfTest();
+
+    /* --wps-bridge <父pid> <序号>：降权桥的子进程模式。
+       它是本 exe 的"普通权限副本"，只做 WPS 的 COM 读取、靠命名管道收发，
+       不装钩子、不建窗口、不建托盘 —— 必须抢在单实例检查之前返回。 */
+    {
+        DWORD bpid = 0, bseq = 0;
+        if (HasSwitch2(L"--wps-bridge", &bpid, &bseq))
+            return WpsBridgeServe((unsigned long)bpid, (unsigned long)bseq);
+    }
+
     WaitOldInstanceExit();   /* 重启场景：等旧实例完全退出再初始化 */
     if (!EnsureSingleInstance()) return 0;   /* 已有实例在跑：提示后退出 */
 
@@ -755,6 +794,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     /* ---- 统一收尾：所有启动失败路径都汇到这里 ---- */
     StopEngine();
     ActStop();                   /* 停执行线程并等它收尾，再清卡键 */
+    WpsBridgeShutdown();         /* 让 WPS 降权桥立刻退出（否则要等它的空闲超时） */
     HookUninstall();
     SendClearStuckModifiers();   /* 退出前清掉可能卡住的注入修饰键 */
     TrayRemove();

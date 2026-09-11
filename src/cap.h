@@ -259,4 +259,17 @@ int NavJump(int dir, BOOL shift);      /* 前台控件 + dir + shift(位移=F) -
 void NavSelTrackReset(void);           /* 清除 Shift 位移序列的锚点跟踪（引擎复位时） */
 int  ComputeSteps(const WCHAR* s, int len, int caret, int dir); /* 词边界算法，仅供单测 */
 
+/* ---------- WPS 通道（COM 自动化，见 nav.c 顶部说明） ----------
+   降权桥：CapsEnhance 以管理员运行时，本进程**无法**附着 WPS 的自动化实例
+   （COM 的 ROT 按完整性级别隔离：管理员进程 GetActiveObject 恒返回
+   0x800401E3，模拟普通令牌也无效）。所以由本 exe 再拉一个"普通权限"的
+   自己（--wps-bridge <pid> <seq>）代跑 COM，双方靠命名管道通信。
+   子进程模式：WpsBridgeServe 由 main.c 在解析到 --wps-bridge 时调用。 */
+int  WpsBridgeServe(unsigned long pid, unsigned long seq);  /* 子进程侧：建管道并服务 */
+void WpsBridgeShutdown(void);                               /* 父进程退出前：关掉桥 */
+int  WpsSelfTest(void);                                     /* --wps-read：读一次并写日志 */
+/* 读一次 WPS 光标处文本（按运行权限自动选本进程直读 / 降权桥）。
+   供 --wps-read 与集成测试用；成对 free(*text)。 */
+BOOL WpsReadText(WCHAR** text, int* lenOut, int* caretOut);
+
 #endif

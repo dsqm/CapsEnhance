@@ -23,6 +23,11 @@ int NavJump(int dir, BOOL shift) { (void)dir; (void)shift; return 0; }
 void NavProbe(void) { /* 诊断探测：本测试桩掉 */ }
 void NavBaseInfo(void) { /* 启动基线采集：本测试桩掉 */ }
 void NavSelTrackReset(void) { /* 选区锚跟踪：本测试桩掉 */ }
+/* WPS 通道桩（真实现要链接 nav.c，本测试不链）：
+   WinMain 里那三个入口（--wps-bridge / --wps-read / 退出时关桥）桩掉即可 */
+int  WpsBridgeServe(unsigned long pid, unsigned long seq) { (void)pid; (void)seq; return 0; }
+void WpsBridgeShutdown(void) { }
+int  WpsSelfTest(void) { return 0; }
 
 /* ---- 捕获钩子：记录注入的完整事件序列（按下/抬起），并可统计次数 ---- */
 typedef struct { int vk; int n; } Rec;
