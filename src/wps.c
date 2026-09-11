@@ -85,12 +85,14 @@ static IDispatch* WpsAppGet(void) {
     if (t_wpsApp) return t_wpsApp;
     if (!AdCoUp()) return NULL;
     CLSID clsid;
+    /* CLSIDFromProgID 收的是 LPCLSID（指针），而下面的 GetActiveObject 收的是
+       REFCLSID（C++ 下是引用）—— 同一个变量，两处写法不同，别统一 */
     if (FAILED(CLSIDFromProgID(WPS_PROGID, &clsid))) {
         WpsLog("CLSIDFromProgID(%ls) 失败（WPS 未注册 COM 接口？）", WPS_PROGID);
         return NULL;
     }
     IUnknown* unk = NULL;
-    HRESULT hr = GetActiveObject(&clsid, NULL, &unk);
+    HRESULT hr = GetActiveObject(clsid, NULL, &unk);
     if (FAILED(hr) || !unk) {
         /* 0x800401E3 = MK_E_UNAVAILABLE：WPS 没在 ROT 里（没开文档 / 没失去过
            焦点），或者**本进程是管理员**（ROT 按完整性级别隔离，永远看不到
@@ -100,7 +102,7 @@ static IDispatch* WpsAppGet(void) {
         return NULL;
     }
     IDispatch* app = NULL;
-    if (SUCCEEDED(unk->lpVtbl->QueryInterface(unk, &kIID_Dispatch, (void**)&app)) && app)
+    if (SUCCEEDED(unk->lpVtbl->QueryInterface(unk, kIID_Dispatch, (void**)&app)) && app)
         t_wpsApp = app;
     unk->lpVtbl->Release(unk);
     return t_wpsApp;

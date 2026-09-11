@@ -19,7 +19,7 @@ if errorlevel 1 exit /b 1
 
 if not exist "bin\an" mkdir "bin\an"
 
-cl /nologo /W4 /analyze /MT /utf-8 /DUNICODE /D_UNICODE /TC ^
+cl /nologo /W4 /analyze /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Fo"bin\an\\" /c ^
    "%~dp0..\src\hook.c" "%~dp0..\src\nav.c" "%~dp0..\src\send.c" ^
    "%~dp0..\src\act.c" "%~dp0..\src\config.c" "%~dp0..\src\keymap.c" ^

@@ -518,7 +518,7 @@ static IUIAutomationElement* FindDocElement(IUIAutomation* ua, IUIAutomationElem
         chain[n++] = cur;
         IUIAutomationTextPattern* t = NULL;
         if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(cur, UIA_TextPatternId,
-                            &IID_IUIAutomationTextPattern, (void**)&t)) && t) {
+                            IID_IUIAutomationTextPattern, (void**)&t)) && t) {
             IUIAutomationTextRange* d = NULL;
             if (SUCCEEDED(IUIAutomationTextPattern_get_DocumentRange(t, &d)) && d) {
                 IUIAutomationTextRange_Release(d);
@@ -578,8 +578,8 @@ static IUIAutomation* UiaGet(void) {
     if (t_uia) return t_uia;
     if (!CoUp()) return NULL;
     IUIAutomation* ua = NULL;
-    if (SUCCEEDED(CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
-                                   &IID_IUIAutomation, (void**)&ua)) && ua)
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
+                                   IID_IUIAutomation, (void**)&ua)) && ua)
         t_uia = ua;
     return t_uia;
 }
@@ -616,7 +616,7 @@ static IUIAutomationElement* FindDocInSubtree(IUIAutomation* ua,
             if (FAILED(arr->lpVtbl->GetElement(arr, i, &e)) || !e) continue;
             IUIAutomationTextPattern* t = NULL;
             if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(e, UIA_TextPatternId,
-                    &IID_IUIAutomationTextPattern, (void**)&t)) && t) {
+                    IID_IUIAutomationTextPattern, (void**)&t)) && t) {
                 IUIAutomationTextRange* d = NULL;
                 if (SUCCEEDED(IUIAutomationTextPattern_get_DocumentRange(t, &d)) && d) {
                     IUIAutomationTextRange_Release(d);
@@ -711,7 +711,7 @@ static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut)
 
     /* owner 上应有 TextPattern；取其 DocumentRange 与 selection 兜底 */
     hr = IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPatternId,
-                    &IID_IUIAutomationTextPattern, (void**)&tp);
+                    IID_IUIAutomationTextPattern, (void**)&tp);
     UiaLog("TextPattern", hr);
     if (SUCCEEDED(hr) && tp) {
         hr = IUIAutomationTextPattern_get_DocumentRange(tp, &doc);
@@ -723,7 +723,7 @@ static BOOL UiaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut)
     {
         IUIAutomationTextPattern2* tp2 = NULL;
         if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPattern2Id,
-                            &IID_IUIAutomationTextPattern2, (void**)&tp2)) && tp2) {
+                            IID_IUIAutomationTextPattern2, (void**)&tp2)) && tp2) {
             BOOL active = FALSE;
             hr = IUIAutomationTextPattern2_GetCaretRange(tp2, &active, &caret);
             if (FAILED(hr) || !caret) caret = NULL;
@@ -835,7 +835,7 @@ static BOOL UiaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
     el = owner;
 
     hr = IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPatternId,
-                    &IID_IUIAutomationTextPattern, (void**)&tp);
+                    IID_IUIAutomationTextPattern, (void**)&tp);
     if (FAILED(hr) || !tp) goto done;
     hr = IUIAutomationTextPattern_get_DocumentRange(tp, &doc);
     if (FAILED(hr) || !doc) goto done;
@@ -921,10 +921,10 @@ static BOOL MsaaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
        警告不会被这三条"已知无害"的噪音淹掉。 */
     IAccessible* acc = NULL;
     HRESULT hr = AccessibleObjectFromWindow(hwnd, (DWORD)OBJID_CLIENT,
-                                            &IID_IAccessible, (void**)&acc);
+                                            IID_IAccessible, (void**)&acc);
     if (FAILED(hr) || !acc) return FALSE;
     IAccessibleText* at = NULL;
-    hr = acc->lpVtbl->QueryInterface(acc, &kIID_IAccessibleText, (void**)&at);
+    hr = acc->lpVtbl->QueryInterface(acc, kIID_IAccessibleText, (void**)&at);
     acc->lpVtbl->Release(acc);
     if (FAILED(hr) || !at) return FALSE;
     hr = shift ? at->lpVtbl->setSelection(at, 0, caret, target)
@@ -940,11 +940,11 @@ static BOOL MsaaSetSel(HWND hwnd, int caret, int target, BOOL shift) {
 static BOOL MsaaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut) {
     if (!hwnd) return FALSE;
     IAccessible* acc = NULL;
-    HRESULT hr = AccessibleObjectFromWindow(hwnd, (DWORD)OBJID_CLIENT, &IID_IAccessible, (void**)&acc);
+    HRESULT hr = AccessibleObjectFromWindow(hwnd, (DWORD)OBJID_CLIENT, IID_IAccessible, (void**)&acc);
     if (FAILED(hr) || !acc) return FALSE;
 
     IAccessibleText* at = NULL;
-    hr = acc->lpVtbl->QueryInterface(acc, &kIID_IAccessibleText, (void**)&at);
+    hr = acc->lpVtbl->QueryInterface(acc, kIID_IAccessibleText, (void**)&at);
     acc->lpVtbl->Release(acc);
     if (FAILED(hr) || !at) return FALSE;
 
@@ -1455,7 +1455,7 @@ void NavProbe(void) {
             if (SUCCEEDED(IUIAutomation_GetFocusedElement(ua, &el)) && el) {
                 IUIAutomationTextPattern* tp = NULL;
                 BOOL txt = SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPatternId,
-                              &IID_IUIAutomationTextPattern, (void**)&tp)) && tp;
+                              IID_IUIAutomationTextPattern, (void**)&tp)) && tp;
                 if (tp) IUIAutomationTextPattern_Release(tp);
                 RepAppend(rep, 2800, &o,
                     L"UIA 焦点元素支持 TextPattern = %s\n", txt ? L"YES" : L"NO");
@@ -1471,9 +1471,9 @@ void NavProbe(void) {
     /* IA2 (IAccessibleText) 是否可用 —— Scintilla 系编辑器的通道 */
     if (focus) {
         IAccessible* acc = NULL;
-        if (SUCCEEDED(AccessibleObjectFromWindow(focus, (DWORD)OBJID_CLIENT, &IID_IAccessible, (void**)&acc)) && acc) {
+        if (SUCCEEDED(AccessibleObjectFromWindow(focus, (DWORD)OBJID_CLIENT, IID_IAccessible, (void**)&acc)) && acc) {
             IAccessibleText* at = NULL;
-            if (SUCCEEDED(acc->lpVtbl->QueryInterface(acc, &kIID_IAccessibleText, (void**)&at)) && at) {
+            if (SUCCEEDED(acc->lpVtbl->QueryInterface(acc, kIID_IAccessibleText, (void**)&at)) && at) {
                 long co = -1;
                 BOOL ok2 = SUCCEEDED(at->lpVtbl->caretOffset(at, &co)) && co >= 0;
                 RepAppend(rep, 2800, &o,

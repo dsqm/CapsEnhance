@@ -378,7 +378,17 @@ WPS 置位的回读校验返回**三态**：
 
 ## 构建 / 测试 / CI
 
-依赖 **MSVC x64**（Windows 10/11），工具链由 `build_env.bat` 统一定位：用 vswhere 探测 VS/MSVC/SDK 并显式设置 `PATH/INCLUDE/LIB`（不走 vcvars64，避开它的注册表探测；批处理里含 `(x86)` 的路径不能内联展开，也无法出现在 `( )` 块 / FOR 集合里）。
+依赖 **MSVC x64**（Windows 10/11），工具链由 `build_env.bat` 统一定位：用 vswhere 探测 VS/MSVC/SDK 并显式设置 `PATH/INCLUDE/LIB`（不走 vvcvars64，避开它的注册表探测；批处理里含 `(x86)` 的路径不能内联展开，也无法出现在 `( )` 块 / FOR 集合里）。
+
+### 源码按 C++ 编译（`/TP`）
+
+所有 TU（含 `test\` 下的测试与诊断工具）都按 **C++** 编译，但**代码风格仍以 C 为主**，这是刻意的过渡态：
+
+- **为什么切**：C++ 能逐文件带来这个项目真正需要的东西 —— 强类型（动作 / 模式 / 方向不再是一堆裸 `int`）、资源生命周期（COM 引用计数、句柄、临界区）、`std::string` / `std::vector` 替掉"手工算分配容量"（本项目已两次栽在这上面，见 `config.c` 的 `OutBuf` 注释）。一次重写风险太高，所以先把编译面切过去，再按模块换写法。
+- **COM 的 C 接口桥**：`nav.c` / `autodisp.c` / `wps.c` 的 COM 代码是按 `p->lpVtbl->Method(p, ...)` 写的，而 C++ 下 SDK 默认给的是"带虚函数的 C++ 接口"。`src/cap.h` 顶部因此定义了 **`CINTERFACE` + `COBJMACROS`**，让 SDK 继续给出 C 形态的 vtable 结构体 —— 同一份源码在 C 与 C++ 下都能编过。独立诊断工具（`uiprobe.c` / `wspset.c`）不包含 `cap.h`，各自带一份同样的定义。**换完 COM 写法后这个块即可删除。**
+- **`REFIID` / `REFCLSID` / `REFGUID` 在 C++ 下恒为引用类型**（与 `CINTERFACE` 无关，见 `guiddef.h`），所以传 IID 时写 `IID_XXX` 而不是 `&IID_XXX`；但 `CLSIDFromProgID(LPCLSID)` 这类**指针**参数的 API 仍要写 `&clsid` —— 同一个变量两处写法不同，别去"统一"（`wps.c` / `wspset.c` 各有一处对照）。
+- **切到 C++ 会顺带暴露 C 前端不报的告警**：实测 `C4505`（内部链接的静态函数未被引用）会浮出来，那些是真正的死代码，按零告警基线删掉即可。
+- **产物会变大**（实测 `245760` → `264192` 字节，同 toolchain 同源码）：C++ 前端会带进异常 / RTTI 相关的 CRT 代码。要判断"是不是同一份产物"看 SHA256，不要看体积。
 
 | 脚本 | 内容 |
 | --- | --- |

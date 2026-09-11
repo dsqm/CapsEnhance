@@ -31,11 +31,6 @@ static int    g_nMods = 0;
 static Mod    g_base[512];
 static int    g_nBase = 0;
 
-static void SaveBase(void) {
-    memcpy(g_base, g_mods, sizeof(Mod) * (size_t)g_nMods);
-    g_nBase = g_nMods;
-}
-
 static SIZE_T Snapshot(DWORD pid) {
     g_nMods = 0;
     PROCESS_MEMORY_COUNTERS pmc;

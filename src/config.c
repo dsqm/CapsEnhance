@@ -496,7 +496,6 @@ static BOOL OutAdd(OutBuf* b, const void* src, size_t len) {
     b->n += len;
     return TRUE;
 }
-static BOOL OutAddStr(OutBuf* b, const char* s) { return OutAdd(b, s, strlen(s)); }
 static BOOL OutAddCh(OutBuf* b, char c)          { return OutAdd(b, &c, 1); }
 static void OutFree(OutBuf* b) { free(b->p); b->p = NULL; b->n = b->cap = 0; }
 
@@ -536,7 +535,7 @@ void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
     const char* genEnd = body + bodyLen;
     const char* line = body;
     while (line < body + bodyLen) {
-        const char* nl = memchr(line, '\n', (size_t)(body + bodyLen - line));
+        const char* nl = (const char*)memchr(line, '\n', (size_t)(body + bodyLen - line));
         char tmp[160];
         CopyLine(line, body + bodyLen, tmp, sizeof(tmp));
         char* s = tmp;
@@ -559,7 +558,7 @@ void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
         missing[i] = TRUE;
         for (const char* l = genStart ? genStart : body;
              l < (genStart ? genEnd : body + bodyLen) && missing[i]; ) {
-            const char* nl = memchr(l, '\n', (size_t)(body + bodyLen - l));
+            const char* nl = (const char*)memchr(l, '\n', (size_t)(body + bodyLen - l));
             char tmp[160];
             CopyLine(l, body + bodyLen, tmp, sizeof(tmp));
             char* s = tmp;

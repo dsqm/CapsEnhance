@@ -52,7 +52,7 @@ DISPID AdId(IDispatch* d, const WCHAR* name) {
     wcscpy_s(buf, 64, name);
     LPOLESTR p = buf;                      /* 见文件头坑 4 */
     DISPID id = DISPID_UNKNOWN;
-    if (FAILED(d->lpVtbl->GetIDsOfNames(d, &kNull, &p, 1, LOCALE_USER_DEFAULT, &id)))
+    if (FAILED(d->lpVtbl->GetIDsOfNames(d, kNull, &p, 1, LOCALE_USER_DEFAULT, &id)))
         return DISPID_UNKNOWN;
     return id;
 }
@@ -78,7 +78,7 @@ BOOL AdGet(IDispatch* d, const WCHAR* name, VARIANT* out) {
     DISPPARAMS dp; memset(&dp, 0, sizeof(dp));
     EXCEPINFO ei;  memset(&ei, 0, sizeof(ei));
     UINT ec = 0;
-    HRESULT hr = d->lpVtbl->Invoke(d, id, &kNull, LOCALE_USER_DEFAULT,
+    HRESULT hr = d->lpVtbl->Invoke(d, id, kNull, LOCALE_USER_DEFAULT,
                                    DISPATCH_PROPERTYGET, &dp, out, &ei, &ec);
     return EiDone(hr, out, &ei);
 }
@@ -147,7 +147,7 @@ BOOL AdPutLong(IDispatch* d, const WCHAR* name, long val) {
     dp.rgdispidNamedArgs = &putid; dp.cNamedArgs = 1;
     EXCEPINFO ei; memset(&ei, 0, sizeof(ei));
     UINT ec = 0;
-    HRESULT hr = d->lpVtbl->Invoke(d, id, &kNull, LOCALE_USER_DEFAULT,
+    HRESULT hr = d->lpVtbl->Invoke(d, id, kNull, LOCALE_USER_DEFAULT,
                                    DISPATCH_PROPERTYPUT, &dp, NULL, &ei, &ec);
     return EiDone(hr, NULL, &ei);
 }
@@ -170,7 +170,7 @@ BOOL AdCall2(IDispatch* d, const WCHAR* name, long a1, long a2) {
     Args2(av, &dp, a1, a2);
     EXCEPINFO ei; memset(&ei, 0, sizeof(ei));
     UINT ec = 0;
-    HRESULT hr = d->lpVtbl->Invoke(d, id, &kNull, LOCALE_USER_DEFAULT,
+    HRESULT hr = d->lpVtbl->Invoke(d, id, kNull, LOCALE_USER_DEFAULT,
                                    DISPATCH_METHOD, &dp, NULL, &ei, &ec);
     return EiDone(hr, NULL, &ei);
 }
@@ -181,7 +181,7 @@ BOOL AdCall0(IDispatch* d, const WCHAR* name) {
     DISPPARAMS dp; memset(&dp, 0, sizeof(dp));
     EXCEPINFO ei;  memset(&ei, 0, sizeof(ei));
     UINT ec = 0;
-    HRESULT hr = d->lpVtbl->Invoke(d, id, &kNull, LOCALE_USER_DEFAULT,
+    HRESULT hr = d->lpVtbl->Invoke(d, id, kNull, LOCALE_USER_DEFAULT,
                                    DISPATCH_METHOD, &dp, NULL, &ei, &ec);
     return EiDone(hr, NULL, &ei);
 }
@@ -197,7 +197,7 @@ BOOL AdGetProp2(IDispatch* d, const WCHAR* name, long a1, long a2, IDispatch** o
     VariantInit(&v);
     EXCEPINFO ei; memset(&ei, 0, sizeof(ei));
     UINT ec = 0;
-    HRESULT hr = d->lpVtbl->Invoke(d, id, &kNull, LOCALE_USER_DEFAULT,
+    HRESULT hr = d->lpVtbl->Invoke(d, id, kNull, LOCALE_USER_DEFAULT,
                                    DISPATCH_PROPERTYGET, &dp, &v, &ei, &ec);
     if (!EiDone(hr, &v, &ei)) return FALSE;
     BOOL ok = FALSE;

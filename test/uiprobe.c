@@ -10,6 +10,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+/* Standalone probe: it does not include cap.h, so the C-interface bridge
+   (see src/cap.h) has to be repeated here. CINTERFACE keeps the SDK C
+   vtable layout so the p->lpVtbl->Method(p, ...) calls below compile as
+   C++ too. REFIID/REFCLSID are references in C++ -> pass IID_X, not &IID_X. */
+#define CINTERFACE
 #define COBJMACROS
 #include <initguid.h>
 #include <oleauto.h>
@@ -57,8 +62,8 @@ int main(void) {
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return 1;
 
     IUIAutomation* ua = NULL;
-    hr = CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
-                          &IID_IUIAutomation, (void**)&ua);
+    hr = CoCreateInstance(CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
+                          IID_IUIAutomation, (void**)&ua);
     Hr("CoCreateInstance CUIAutomation", hr);
     if (!ua) { CoUninitialize(); return 1; }
 
@@ -77,7 +82,7 @@ int main(void) {
 
         IUIAutomationTextPattern* tp = NULL;
         hr = IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPatternId,
-                 &IID_IUIAutomationTextPattern, (void**)&tp);
+                 IID_IUIAutomationTextPattern, (void**)&tp);
         Hr("focused -> TextPattern", hr);
         printf("    tp=%p\n", (void*)tp);
         fflush(stdout);
@@ -99,7 +104,7 @@ int main(void) {
                 /* caret via TextPattern2 */
                 IUIAutomationTextPattern2* tp2 = NULL;
                 hr = IUIAutomationElement_GetCurrentPatternAs(el, UIA_TextPattern2Id,
-                         &IID_IUIAutomationTextPattern2, (void**)&tp2);
+                         IID_IUIAutomationTextPattern2, (void**)&tp2);
                 Hr("  TextPattern2", hr);
                 if (tp2) {
                     IUIAutomationTextRange* cr = NULL;
@@ -192,7 +197,7 @@ int main(void) {
         if (eh) {
             IUIAutomationTextPattern* tp = NULL;
             hr = IUIAutomationElement_GetCurrentPatternAs(eh, UIA_TextPatternId,
-                     &IID_IUIAutomationTextPattern, (void**)&tp);
+                     IID_IUIAutomationTextPattern, (void**)&tp);
             Hr("  handle -> TextPattern", hr);
             if (tp) IUIAutomationTextPattern_Release(tp);
             IUIAutomationElement_Release(eh);

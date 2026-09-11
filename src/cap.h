@@ -2,6 +2,30 @@
 #define CAP_H
 
 #define WIN32_LEAN_AND_MEAN
+
+/* ---------- C++ 迁移桥：CINTERFACE + COBJMACROS ----------
+   本项目现在**按 C++ 编译**（构建脚本用 /TP）。但 COM 代码（nav.c 的 UIA/IA2、
+   autodisp.c 的 IDispatch、wps.c 的附着）是按 C 的 `p->lpVtbl->Method(p, ...)`
+   习惯写的，而 C++ 下 SDK 默认给的是"带虚函数的 C++ 接口"——`->lpVtbl->` 与
+   `IUIAutomationXxx_Release(p)` 这类宏在那边都不存在（约 70 处调用会一起报错）。
+
+   定义 CINTERFACE 让 SDK 继续给出 C 形态的 vtable 结构体，COBJMACROS 提供
+   `Xxx_Method(p, ...)` 宏包装 —— 同一份源码在 C 与 C++ 下都能编过。这是"先把
+   编译面切到 C++，再逐模块换成 C++ 写法"的过渡层；换完之后本块即可删除。
+   （要不要换成 `p->Method(...)` + ComPtr 那套 C++ COM 写法，是独立的一步，
+   与"按 C++ 编译"无关 —— 后者只要求能编过，前者才是风格统一。）
+
+   **必须出现在任何 SDK 头之前**，所以放在这里：cap.h 是所有 TU 的第一个包含
+   （包括直接 `#include "nav.c"` 的 test_sci.c / memtest.c）。不写成
+   `/DCINTERFACE` 编译开关，是为了让"为什么需要它"留在源码里、而不是散在构建脚本。
+
+   注意 REFIID / REFCLSID / REFGUID 在 C++ 下**恒为引用类型**（与 CINTERFACE
+   无关，见 guiddef.h），所以传 IID 时直接写 `IID_XXX`，不能写 `&IID_XXX`。 */
+#ifdef __cplusplus
+#define CINTERFACE
+#define COBJMACROS
+#endif
+
 #include <windows.h>
 
 /* ---------- 共享常量 ---------- */

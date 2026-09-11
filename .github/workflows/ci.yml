@@ -56,7 +56,7 @@ jobs:
             echo   VS   = %VS%
             echo   MSVC = %MSVCDIR%
             echo   SDK  = %SDKVER%
-            echo   flags = see build.bat ^(/O2 /W4 /MT /Brepro^)
+            echo   flags = see build.bat ^(/O2 /W4 /MT /Brepro /TP^)
             echo artifact:
             for %%F in (bin\CapsEnhance.exe) do echo   size   = %%~zF bytes
             certutil -hashfile bin\CapsEnhance.exe SHA256

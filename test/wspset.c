@@ -8,6 +8,11 @@
      B. Selection.SetRange(start,end)  （方法；Word 文档语义为有序区间）
      C. Document.Range(a,b).Select()   （方法；让选区等于该 Range）
    另外测：参数倒序时是否有序化；置成非折叠区间后 Selection.Type 是多少。 */
+/* Standalone probe: it does not include cap.h, so the C-interface bridge
+   (see src/cap.h) has to be repeated here. CINTERFACE keeps the SDK's C
+   vtable layout so the `p->lpVtbl->Method(p, ...)` calls below compile as
+   C++ too. REFIID/REFCLSID are references in C++ -> pass IID_X, not &IID_X. */
+#define CINTERFACE
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <ole2.h>
@@ -47,7 +52,7 @@ static DISPID Id(IDispatch* d, const wchar_t* n) {
     WCHAR buf[64]; wcscpy_s(buf, 64, n);
     LPOLESTR p = buf;
     DISPID id = DISPID_UNKNOWN;
-    if (FAILED(d->lpVtbl->GetIDsOfNames(d, &kNull, &p, 1, LOCALE_USER_DEFAULT, &id)))
+    if (FAILED(d->lpVtbl->GetIDsOfNames(d, kNull, &p, 1, LOCALE_USER_DEFAULT, &id)))
         return DISPID_UNKNOWN;
     return id;
 }
@@ -58,7 +63,7 @@ static BOOL Get(IDispatch* d, const wchar_t* n, VARIANT* out) {
     if (id == DISPID_UNKNOWN) return FALSE;
     DISPPARAMS dp; memset(&dp, 0, sizeof(dp));
     EXCEPINFO ei; memset(&ei, 0, sizeof(ei)); UINT ec = 0;
-    HRESULT hr = d->lpVtbl->Invoke(d, id, &kNull, LOCALE_USER_DEFAULT,
+    HRESULT hr = d->lpVtbl->Invoke(d, id, kNull, LOCALE_USER_DEFAULT,
                                    DISPATCH_PROPERTYGET, &dp, out, &ei, &ec);
     EiClear(&ei);
     if (FAILED(hr)) { if (out->vt != VT_EMPTY) VariantClear(out); VariantInit(out); return FALSE; }
@@ -92,7 +97,7 @@ static HRESULT PutLong(IDispatch* d, const wchar_t* n, long val) {
     dp.rgvarg = &v; dp.cArgs = 1;
     dp.rgdispidNamedArgs = &putid; dp.cNamedArgs = 1;
     EXCEPINFO ei; memset(&ei, 0, sizeof(ei)); UINT ec = 0;
-    HRESULT hr = d->lpVtbl->Invoke(d, id, &kNull, LOCALE_USER_DEFAULT,
+    HRESULT hr = d->lpVtbl->Invoke(d, id, kNull, LOCALE_USER_DEFAULT,
                                    DISPATCH_PROPERTYPUT, &dp, NULL, &ei, &ec);
     EiShow(&ei); EiClear(&ei);
     return hr;
@@ -110,7 +115,7 @@ static HRESULT Call2Long(IDispatch* d, const wchar_t* n, long a1, long a2, VARIA
     dp.rgvarg = args; dp.cArgs = 2;
     EXCEPINFO ei; memset(&ei, 0, sizeof(ei)); UINT ec = 0;
     if (out) VariantInit(out);
-    HRESULT hr = d->lpVtbl->Invoke(d, id, &kNull, LOCALE_USER_DEFAULT,
+    HRESULT hr = d->lpVtbl->Invoke(d, id, kNull, LOCALE_USER_DEFAULT,
                                    DISPATCH_METHOD, &dp, out, &ei, &ec);
     EiShow(&ei); EiClear(&ei);
     return hr;
@@ -123,7 +128,7 @@ static HRESULT Call0(IDispatch* d, const wchar_t* n, VARIANT* out) {
     DISPPARAMS dp; memset(&dp, 0, sizeof(dp));
     EXCEPINFO ei; memset(&ei, 0, sizeof(ei)); UINT ec = 0;
     if (out) VariantInit(out);
-    HRESULT hr = d->lpVtbl->Invoke(d, id, &kNull, LOCALE_USER_DEFAULT,
+    HRESULT hr = d->lpVtbl->Invoke(d, id, kNull, LOCALE_USER_DEFAULT,
                                    DISPATCH_METHOD, &dp, out, &ei, &ec);
     EiShow(&ei); EiClear(&ei);
     return hr;
@@ -140,7 +145,7 @@ static IDispatch* DocRange(IDispatch* doc, long a, long b) {
     dp.rgvarg = args; dp.cArgs = 2;
     EXCEPINFO ei; memset(&ei, 0, sizeof(ei)); UINT ec = 0;
     VARIANT v; VariantInit(&v);
-    HRESULT hr = doc->lpVtbl->Invoke(doc, id, &kNull, LOCALE_USER_DEFAULT,
+    HRESULT hr = doc->lpVtbl->Invoke(doc, id, kNull, LOCALE_USER_DEFAULT,
                                      DISPATCH_PROPERTYGET, &dp, &v, &ei, &ec);
     EiShow(&ei); EiClear(&ei);
     if (FAILED(hr)) { VariantClear(&v); return NULL; }
@@ -189,11 +194,11 @@ int main(int argc, char** argv) {
     hr = CLSIDFromProgID(L"KWPS.Application", &clsid);
     if (FAILED(hr)) { P("CLSIDFromProgID FAIL 0x%08X\n", (unsigned)hr); return 1; }
     IUnknown* unk = NULL;
-    hr = GetActiveObject(&clsid, NULL, &unk);
+    hr = GetActiveObject(clsid, NULL, &unk);   /* REFCLSID：C++ 下是引用，不收 & */
     P("GetActiveObject hr=0x%08X\n", (unsigned)hr);
     if (FAILED(hr) || !unk) { P("附不上（要用普通权限跑）\n"); return 2; }
     IDispatch* app = NULL;
-    if (FAILED(unk->lpVtbl->QueryInterface(unk, &IID_IDispatch, (void**)&app)) || !app) {
+    if (FAILED(unk->lpVtbl->QueryInterface(unk, IID_IDispatch, (void**)&app)) || !app) {
         P("QI(IDispatch) FAIL\n");
         unk->lpVtbl->Release(unk);
         return 3;

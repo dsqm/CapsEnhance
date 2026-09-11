@@ -15,7 +15,7 @@ if errorlevel 1 exit /b 1
 
 if not exist "bin" mkdir bin
 
-cl /nologo /Od /W4 /MTd /utf-8 /DUNICODE /D_UNICODE /TC /Isrc /Fobin\ ^
+cl /nologo /Od /W4 /MTd /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /Fobin\ ^
    src\config.c src\keymap.c test\test_config.c ^
    /link /OUT:bin\test_config_dbg.exe ^
    user32.lib advapi32.lib /SUBSYSTEM:CONSOLE

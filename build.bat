@@ -22,7 +22,13 @@ rem
 rem NOTE: identical *size* across two machines still requires the same MSVC
 rem toolset and Windows SDK version -- those two embed different instruction
 rem selection and CRT code. See README "build artifacts differ" section.
-cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TC ^
+rem
+rem /TP = compile every TU as C++. The sources are still written in C style
+rem (see src/cap.h's CINTERFACE bridge); the switch exists so the codebase can
+rem adopt C++ where it pays off (type safety / RAII / std::string) file by
+rem file, instead of in one big-bang rewrite. Cross-checked in CI by the same
+rem /W4 + /analyze steps, which must stay at zero warnings.
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP ^
    /Fobin\ ^
    src\hook.c src\nav.c src\send.c src\act.c src\config.c src\keymap.c src\main.c ^
    src\autodisp.c src\bridge.c src\wps.c ^
