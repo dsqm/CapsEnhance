@@ -331,6 +331,13 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             ModeKeyEvent(mode, vk, down);
             if (was && !ModeDown(mode))          /* 最后一个激活键也抬起了 */
                 PostMessageW(g_mainWnd, WM_MODE_UP, (WPARAM)mode, 0);
+            /* 记录模式下把模式键自己的按下/抬起也打出来：排查"没按 F 却带选区"
+               （= 按住位图残留）时，这是唯一能证明"F 到底按没按"的证据 —— 否则
+               只能从触发键的 enh/shf 字段反推，而那一层看到的正是被怀疑的东西。 */
+            if (g_cMod && g_recording.load())
+                CapLog("  [模式] %s vk=0x%02X %s -> 生效=%d",
+                       (mode == MODE_ENHANCE) ? "增强(Alt/D)" : "选区(F)",
+                       vk, down ? "按下" : "抬起", (int)ModeDown(mode));
             if (!g_cMod) return PASS_OR_SWALLOW(vk, down);
             if (down) SwallowNote(vk);           /* 记下：它的 up 也要吞 */
             else      SwallowTake(vk);           /* 这次 up 已吞，出表 */
