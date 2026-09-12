@@ -104,6 +104,7 @@ static LRESULT CALLBACK EmProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return (LRESULT)((DWORD)g_emPos | ((DWORD)g_emPos << 16));
     case EM_SETSEL:
         g_emSetSel++;
+        g_emPos = (int)l;      /* 真的移动光标：置位后的回读校验才会通过 */
         return 0;
     case WM_KEYDOWN:
         g_emKd++;
@@ -330,16 +331,16 @@ int main(void) {
                    "EM1: 单位不一致 -> 完全不调用 EM_SETSEL（整条通道放弃）");
             EXPECT(g_emKd > 0, "EM1: 退回原生 Ctrl+方向（功能不丢）");
 
-            /* H2. 位置单位一致（UTF-16 文档）-> 文本读得到、steps 算得出，
-               但**仍然不许外部置位**：外部改它的选区后，它会把紧接着的第一次
-               按键吞掉（用户："跳词后按 J 要按两下"）。所以只读不写，
-               改走逐格箭头 / 改道（发原生 Ctrl+方向）。 */
-            g_emPos = 4;
+            /* H2. 位置单位一致（UTF-16 文档）-> 正常走外部置位，但置位后要
+               **补一支探针方向键**：EmEditor 外部置位后会吞掉下一次输入（用户：
+               "跳词后按 J 要按两下"），而那一次额度可以由我们主动喂掉
+               （test/emprobe.c 实测 3/3 稳定），这样既保住瞬跳、用户也不用按两下。 */
+            g_emPos = 21;                         /* 末尾：左跳 steps=7 >= DIRECT_JUMP_MIN */
             g_emSetSel = 0; g_emKd = 0;
             NavJump(DIR_LEFT, FALSE);
             Pump(400);
-            EXPECT(g_emSetSel == 0, "EM2: 单位一致也不外部置位（只读不写）");
-            EXPECT(g_emKd > 0, "EM2: 改走箭头/改道，跳转功能不丢");
+            EXPECT(g_emSetSel == 1, "EM2: 单位一致 -> 正常外部置位");
+            EXPECT(g_emKd >= 1, "EM2: 置位后补发探针方向键（喂掉被吞的那次输入）");
 
             DestroyWindow(em);
             SetFocus(h);

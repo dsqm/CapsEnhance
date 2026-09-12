@@ -442,22 +442,24 @@ static HWND GetFocusControl(void) {
     return fg;
 }
 
-/* 该控件能否用 EM_SETSEL **外部置位**。
-   能读文本不代表能写：EmEditor 的 EmEditorView 接受 EM_SETSEL（光标确实会动，
-   EM_GETSEL 读回也对），但它是**外部**改的选区，它的内部状态没跟着走 ——
-   紧接着的第一次注入按键会被它吞掉（用户看到的就是"跳词后按 J 要按两下才
-   有反应"）。日志实证：
-     · 走过 EM_SETSEL 的那次跳词 -> 之后 `[注入] ←(J) 光标 51 -> 51`（无效），
-       再按一次才 51 -> 50
-     · 走改道（发原生 Ctrl+arrow，没碰 EM_SETSEL）的那次 -> 之后 `69 -> 68`
-       一次就动
-   所以对它**只读不写**：跳转改走逐格箭头 / 改道（发原生 Ctrl+方向），
-   落点照样精确（有回读补正），只是不再"一步置位"。 */
-static BOOL AllowDirectSet(HWND hwnd) {
+/* 该控件在**外部置位之后，会吞掉紧接着的第一次输入**，需要主动喂一支探针键。
+   EmEditor 实测（test/emprobe.c 一次性探测，3/3 轮稳定）：
+     · 外部 EM_SETSEL 后，下一次按键被它吃掉（光标纹丝不动）——这就是用户看到的
+       "跳词后按 J 要按两下"；而且与时间无关（日志里隔 1.2s 按的那次照样被吞），
+       因此是"次数"不是"时间窗口"。
+     · 既然是必然的，就主动发一支方向键把这次额度用掉，再回读校准：光标没动
+       = 确实被吞（探针无痕）；动了 = 这次没被吞（或被用户抢先按掉），反向补一格
+       回到目标。两种结果都能回到正确位置，所以是安全的。
+     · 探针必须走 SendInput（send.c 的 SendKeyOnce）：PostMessage 的 WM_KEYDOWN
+       它不认（实测无反应）。
+   同一次探测里还确认了：EmEditor **没有** COM 自动化（ProgID 未注册）、
+   **不支持** EM_POSFROMINDEX / EM_LINEFROMCHAR / EM_LINEINDEX / EM_GETRECT
+   （恒返回 0）——所以"算坐标 + 后台点击"那条路在它身上不成立（点击本身它有
+   反应，但没有"字符→坐标"的来源就没法知道该点哪儿）。 */
+static BOOL NeedsInputProbe(HWND hwnd) {
     WCHAR c[96];
     if (!GetClassNameW(hwnd, c, 96)) return FALSE;
-    if (_wcsicmp(c, L"EmEditorView") == 0) return FALSE;   /* EmEditor：只读不写 */
-    return TRUE;
+    return _wcsicmp(c, L"EmEditorView") == 0;
 }
 
 /* 是否"经典 Edit 协议"控件（可靠支持 WM_GETTEXT + EM_GETSEL）。
@@ -1226,11 +1228,7 @@ static int NavJumpInner(int dir, BOOL shift) {
             we = (dir == DIR_LEFT) ? selEnd : tgt;
         }
     }
-    if (path == Chan::Edit && focus && steps >= DIRECT_JUMP_MIN && !AllowDirectSet(focus)
-        && g_recording.load())
-        CapLog("  -> 该控件禁用外部置位（只读不写：外部改选区会让它吞掉一次按键）"
-               "，改走箭头/改道");
-    if (path == Chan::Edit && focus && steps >= DIRECT_JUMP_MIN && AllowDirectSet(focus)) {
+    if (path == Chan::Edit && focus && steps >= DIRECT_JUMP_MIN) {
         direct = ClassicSetSel(focus, ws, we);
         if (direct) direct = EditVerifySel(focus, ws, we);
         if (direct) {
@@ -1239,6 +1237,21 @@ static int NavJumpInner(int dir, BOOL shift) {
                已在视图内时无操作；不实现该消息的控件会忽略它。 */
             LONGLONG dummy;
             SendMsg(focus, 0x00B7 /* EM_SCROLLCARET */, 0, 0, &dummy);
+            /* 有的控件（EmEditor）外部置位后会吞掉下一次输入：主动喂掉这次
+               额度，见 NeedsInputProbe 的说明。探针只可能"白吞"或"真走一格"，
+               后者立刻反向补回，所以任何情况下光标都停在 tgt。
+               **带 Shift 时不发**：探针是无 Shift 的方向键，会把刚设好的选区
+               折叠掉（那种情况下宁可让用户按第一下"不生效"）。 */
+            if (!shift && NeedsInputProbe(focus)) {
+                SendKeyOnce(VK_LEFT, FALSE);
+                LONGLONG after = EditGetCaret(focus);
+                if (after >= 0 && after == (LONGLONG)tgt - 1) {
+                    SendKeyOnce(VK_RIGHT, FALSE);
+                    if (g_recording.load()) CapLog("  -> 探针未被吞（真走了一格），已补回 %d", tgt);
+                } else if (g_recording.load()) {
+                    CapLog("  -> 探针已被吞（\"吞一次输入\"的额度已用掉），光标停在 %d", tgt);
+                }
+            }
         }
         if (direct && g_recording.load()) CapLog("  -> 直接 EM_SETSEL [%d,%d] 已校验", ws, we);
     } else if (path == Chan::Sci && focus && steps >= DIRECT_JUMP_MIN) {

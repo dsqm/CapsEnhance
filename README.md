@@ -56,7 +56,7 @@ Windows **CapsLock** 快捷键增强程序。按住 `CapsLock` 当作修饰键�
 - 跳转距离小、或程序不支持"直接置位"时，改为**逐格发送方向键**，期间可随时松开 C 或改道打断。
 - 程序读不到文本时自动退回原生 `Ctrl(+Shift)+方向键` 兜底。
 
-已支持读取文本的程序类型：经典 Edit / RichEdit、**EmEditor**（只读不写：跳转走原生 `Ctrl+方向`，因为外部改它的选区会让它吞掉下一次按键）、Scintilla 系（Notepad3 / Notepad++ / SciTE）、UIA（QQ、Edge 等 Chromium/WinUI 控件）、IAccessible2、以及 **WPS 文字**（走 COM 自动化）。
+已支持读取文本的程序类型：经典 Edit / RichEdit / **EmEditor**、Scintilla 系（Notepad3 / Notepad++ / SciTE）、UIA（QQ、Edge 等 Chromium/WinUI 控件）、IAccessible2、以及 **WPS 文字**（走 COM 自动化）。
 
 ---
 
