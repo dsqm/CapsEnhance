@@ -16,11 +16,16 @@ static long long file_size(const WCHAR* p) {
 
 /* 删掉 log\ 里上一次冒烟留下的日志：本次要能分辨"是不是新建的文件"，
    目录必须起始为空（会话文件名带秒级时间戳，残留会让"最新的那份"判断失真）。 */
-static void clear_logs(void) {
+/* 删掉本次冒烟**自己产生的**日志（写入时间晚于 startedFt 的那些）。
+   不要写成"删光 log\ 下所有 CapsEnhance*.log"：那里面还有用户自己的记录
+   ——跑一次 CI 就把人家的历史诊断记录清空，实测踩过（本次开发中就删掉过
+   一份用户刚录的会话日志）。 */
+static void clear_new_logs(const FILETIME* startedFt) {
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(L"bin\\log\\CapsEnhance*.log", &fd);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
+        if (CompareFileTime(&fd.ftLastWriteTime, startedFt) <= 0) continue;
         WCHAR p[MAX_PATH];
         _snwprintf_s(p, MAX_PATH, _TRUNCATE, L"bin\\log\\%s", fd.cFileName);
         DeleteFileW(p);
@@ -53,8 +58,10 @@ int main(void) {
     if (slash) *(slash + 1) = 0;
     wcscat_s(exe, MAX_PATH, L"CapsEnhance.exe");
 
-    /* 每次都从干净的 log\ 开始 */
-    clear_logs();
+    /* 本次冒烟的时间起点：结束时只删比它新的日志（= 本次产生的），
+       用户自己的记录一律不动。 */
+    FILETIME startedFt;
+    GetSystemTimeAsFileTime(&startedFt);
 
     STARTUPINFOW si; PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
@@ -146,6 +153,6 @@ int main(void) {
     /* NavProbe 会弹 MessageBox 阻塞主线程，直接结束进程即可 */
     TerminateProcess(pi.hProcess, 0);
     CloseHandle(pi.hProcess);
-    clear_logs();                   /* 清掉冒烟日志 */
+    clear_new_logs(&startedFt);     /* 只清本次冒烟产生的日志 */
     return ok ? 0 : 1;
 }
