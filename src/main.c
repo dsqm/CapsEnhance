@@ -50,15 +50,73 @@ static BOOL CALLBACK LogCsInit(PINIT_ONCE o, PVOID p, PVOID* c) {
     return TRUE;
 }
 
-/* ============ 日志（追加写 CapsEnhance.log，exe 同目录） ============ */
-static void log_path(WCHAR* out, size_t cap) {
+/* ============ 日志（exe 同目录的 log\ 子目录，一次记录一个文件） ============
+   为什么要单独一个子目录：记录一开就往 exe 旁边堆好几个 MB 级的日志，
+   bin\ 里全是 .obj / .exe，混在一起看不出哪些是日志、也不好整份清理。
+
+   为什么每次开始记录都新建文件：日志是"判断这一次操作"的唯一依据，而它是
+   追加写的 —— 新内容永远落在旧内容后面，翻找本次会话的头部要看心情
+   （此前 REC START 会被追加到上一次、甚至轮转过一半的旧文件里）。
+   一次记录 = 一个 CapsEnhance-<YYYYMMDD>-<HHMMSS>.log，开记录那一刻就是
+   文件第一行，不存在"不知道从哪儿读起"的问题。
+   还没开始记录时写的零星日志（降权桥子进程等）落在兜底的
+   CapsEnhance.log 里，不至于把文件散得完全找不着。 */
+#define LOG_SUBDIR       L"log"
+#define LOG_FALLBACK     L"CapsEnhance.log"
+#define LOG_SESSION_ENV  L"CAPSENHANCE_LOG"   /* 传给降权桥子进程：写哪个文件 */
+
+static WCHAR g_logPath[MAX_PATH] = { 0 };   /* 当前会话日志（绝对路径，空=未开始） */
+
+/* exe 同目录的 log\，并保证它存在；目录建不出来（只读等）就退回 exe 目录 ——
+   宁肯少一层目录，也不能让日志功能整个失效。 */
+static void log_dir(WCHAR* out, size_t cap) {
     WCHAR wexe[MAX_PATH]; DWORD n = GetModuleFileNameW(NULL, wexe, MAX_PATH);
     /* 找到最后一个 '\'，截成目录 */
     WCHAR* slash = NULL;
     for (DWORD i = 0; i < n; i++) if (wexe[i] == L'\\') slash = &wexe[i];
     if (slash) *slash = 0;
     /* 全程用宽字符拼路径：经 ANSI 转换会在安装路径含非 ACP 字符时写错文件 */
-    _snwprintf_s(out, cap, _TRUNCATE, L"%s\\CapsEnhance.log", wexe);
+    _snwprintf_s(out, cap, _TRUNCATE, L"%s\\%s", wexe, LOG_SUBDIR);
+    if (!CreateDirectoryW(out, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        _snwprintf_s(out, cap, _TRUNCATE, L"%s", wexe);
+}
+
+/* 当前该往哪个文件写。g_logPath 由主线程在 LogNewSession 里写、写日志的
+   线程在这里读，所以两边都进 g_logcs —— 光看这段代码很容易以为它是"只主线程
+   访问"，但 CapLog 在任何线程都可能被调到。 */
+static void log_path(WCHAR* out, size_t cap) {
+    if (g_logPath[0]) { _snwprintf_s(out, cap, _TRUNCATE, L"%s", g_logPath); return; }
+    WCHAR dir[MAX_PATH]; log_dir(dir, MAX_PATH);
+    _snwprintf_s(out, cap, _TRUNCATE, L"%s\\%s", dir, LOG_FALLBACK);
+}
+
+/* 开始记录时调用一次：新建一个以本地时间命名的会话日志文件。
+   同一秒里再开一次会追加序号，不会盖掉刚才那份（松开手就忘的记录是靠
+   文件回访的，被覆盖就等于没发生过）。 */
+void LogNewSession(void) {
+    InitOnceExecuteOnce(&g_logOnce, LogCsInit, NULL, NULL);
+    WCHAR dir[MAX_PATH]; log_dir(dir, MAX_PATH);
+    SYSTEMTIME st; GetLocalTime(&st);
+    WCHAR cand[MAX_PATH];
+    for (int seq = 0; seq < 100; seq++) {
+        if (seq == 0)
+            _snwprintf_s(cand, MAX_PATH, _TRUNCATE,
+                         L"%s\\CapsEnhance-%04d%02d%02d-%02d%02d%02d.log",
+                         dir, st.wYear, st.wMonth, st.wDay,
+                         st.wHour, st.wMinute, st.wSecond);
+        else
+            _snwprintf_s(cand, MAX_PATH, _TRUNCATE,
+                         L"%s\\CapsEnhance-%04d%02d%02d-%02d%02d%02d-%d.log",
+                         dir, st.wYear, st.wMonth, st.wDay,
+                         st.wHour, st.wMinute, st.wSecond, seq);
+        if (GetFileAttributesW(cand) == INVALID_FILE_ATTRIBUTES) break;   /* 没人占用 */
+    }
+    EnterCriticalSection(&g_logcs);
+    wcscpy_s(g_logPath, MAX_PATH, cand);
+    LeaveCriticalSection(&g_logcs);
+    /* 降权桥是独立进程，读不到主进程的 g_logPath —— 用环境变量告诉它写哪，
+       它继承主进程的环境（CreateProcessWithTokenW 传 lpEnvironment=NULL）。 */
+    SetEnvironmentVariableW(LOG_SESSION_ENV, cand);
 }
 /* 是否已达上限（只做一次 stat，非常便宜，可以放在写日志的路径上）。
    上限由配置 [General] LogMaxKB 控制，0 = 不限制。 */
@@ -115,7 +173,10 @@ static void log_rotate(const WCHAR* path) {
    （见 act.c），不再压在主线程上 —— 不值得为它换掉可读性。 */
 void CapLog(const char* fmt, ...) {
     InitOnceExecuteOnce(&g_logOnce, LogCsInit, NULL, NULL);
-    WCHAR wpath[MAX_PATH]; log_path(wpath, MAX_PATH);
+    WCHAR wpath[MAX_PATH];
+    EnterCriticalSection(&g_logcs);
+    log_path(wpath, MAX_PATH);      /* 取路径也在锁内：LogNewSession 会改写目标文件 */
+    LeaveCriticalSection(&g_logcs);
 
     /* 日志轮转**放在写锁之外**：它要读回半个文件再整写一遍，是几十毫秒级的
        I/O。放在锁里会把其它写日志的线程（含 act.c 的工作线程）一起拖住 ——
@@ -461,6 +522,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
            对话框，既冻住引擎又难以阅读/复制）。 */
         g_recording.store(!g_recording.load());
         if (g_recording.load()) {
+            /* 先开新文件，再写第一行：本次记录的日志从空文件开始 */
+            LogNewSession();
             CapLog("===== REC START =====");
             /* 配置值入日志：排查"配置没生效"类问题时一目了然 */
             CapLog("配置: MaxArrowSteps=%d OverStepCtrl=%d LogMaxKB=%d RunAsAdmin=%d",
@@ -506,7 +569,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             TrayHint(L"正在映射");
             /* 结束也给一次明确反馈：开始有气泡，结束若只有一声提示音，很容易
                让人以为"还在记录"，于是继续在敏感内容上操作。 */
-            TrayBalloon(L"日志记录已结束（写入 CapsEnhance.log）");
+            {   /* 结束气泡里带上实际文件名：一次记录一个文件，不给名字等于
+                   让人去 log\ 里猜哪份是刚录的。 */
+                WCHAR tip[160];
+                const WCHAR* slash = wcsrchr(g_logPath, L'\\');
+                _snwprintf_s(tip, 160, _TRUNCATE, L"日志记录已结束（写入 log\\%s）",
+                             slash ? (slash + 1) : g_logPath);
+                TrayBalloon(tip);
+            }
             /* 诊断期间 UIA/MSAA 等 COM 基础设施已加载，结束记录后压回工作集 */
             TrimWorkingSet();
         }

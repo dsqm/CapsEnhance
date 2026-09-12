@@ -320,7 +320,12 @@ BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口�
 BOOL IsRunElevated(void);                   /* 真实运行权限（查进程令牌） */
 
 /* ---------- 诊断/日志 ---------- */
-void CapLog(const char* fmt, ...);   /* 追加写 CapsEnhance.log（可多线程调用） */
+/* 日志写在 exe 同目录的 log\ 子目录里：一次记录一个文件
+   （CapsEnhance-<YYYYMMDD>-<HHMMSS>.log），开始记录时由 LogNewSession 新建，
+   所以 REC START 一定是该文件的第一行；还没开始记录时的零星日志落在
+   兜底的 log\CapsEnhance.log。细节见 main.c 日志一节。 */
+void CapLog(const char* fmt, ...);   /* 追加写当前会话日志（可多线程调用） */
+void LogNewSession(void);            /* 开始记录时调用：新建一个以时间命名的日志文件 */
 void NavProbe(void);                 /* 探测当前焦点控件并写入日志 + 弹窗 */
 void NavBaseInfo(void);              /* 启动时采集系统/环境基线（不落盘，C+` 诊断时输出） */
 
