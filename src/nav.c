@@ -442,6 +442,24 @@ static HWND GetFocusControl(void) {
     return fg;
 }
 
+/* 该控件能否用 EM_SETSEL **外部置位**。
+   能读文本不代表能写：EmEditor 的 EmEditorView 接受 EM_SETSEL（光标确实会动，
+   EM_GETSEL 读回也对），但它是**外部**改的选区，它的内部状态没跟着走 ——
+   紧接着的第一次注入按键会被它吞掉（用户看到的就是"跳词后按 J 要按两下才
+   有反应"）。日志实证：
+     · 走过 EM_SETSEL 的那次跳词 -> 之后 `[注入] ←(J) 光标 51 -> 51`（无效），
+       再按一次才 51 -> 50
+     · 走改道（发原生 Ctrl+arrow，没碰 EM_SETSEL）的那次 -> 之后 `69 -> 68`
+       一次就动
+   所以对它**只读不写**：跳转改走逐格箭头 / 改道（发原生 Ctrl+方向），
+   落点照样精确（有回读补正），只是不再"一步置位"。 */
+static BOOL AllowDirectSet(HWND hwnd) {
+    WCHAR c[96];
+    if (!GetClassNameW(hwnd, c, 96)) return FALSE;
+    if (_wcsicmp(c, L"EmEditorView") == 0) return FALSE;   /* EmEditor：只读不写 */
+    return TRUE;
+}
+
 /* 是否"经典 Edit 协议"控件（可靠支持 WM_GETTEXT + EM_GETSEL）。
    白名单外不放行：Chromium 系窗口对 WM_GETTEXT 回的是标题、EM_GETSEL 是
    垃圾值，混进来会把按词跳转带偏。
@@ -1208,7 +1226,11 @@ static int NavJumpInner(int dir, BOOL shift) {
             we = (dir == DIR_LEFT) ? selEnd : tgt;
         }
     }
-    if (path == Chan::Edit && focus && steps >= DIRECT_JUMP_MIN) {
+    if (path == Chan::Edit && focus && steps >= DIRECT_JUMP_MIN && !AllowDirectSet(focus)
+        && g_recording.load())
+        CapLog("  -> 该控件禁用外部置位（只读不写：外部改选区会让它吞掉一次按键）"
+               "，改走箭头/改道");
+    if (path == Chan::Edit && focus && steps >= DIRECT_JUMP_MIN && AllowDirectSet(focus)) {
         direct = ClassicSetSel(focus, ws, we);
         if (direct) direct = EditVerifySel(focus, ws, we);
         if (direct) {

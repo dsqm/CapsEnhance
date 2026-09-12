@@ -172,7 +172,7 @@
 
 各通道要点：
 
-1. **经典 Edit / RichEdit / EmEditorView**：`WM_GETTEXT` + `EM_GETSEL`。白名单外不放行（Chromium 系窗口对这两条消息回的是标题和垃圾值）；直接置位后回读校验，控件只实现半套协议时自动退回逐格箭头。
+1. **经典 Edit / RichEdit / EmEditorView**：`WM_GETTEXT` + `EM_GETSEL`。白名单外不放行（Chromium 系窗口对这两条消息回的是标题和垃圾值）；直接置位后回读校验，控件只实现半套协议时自动退回逐格箭头。两条防线：`EM_GETSEL` 的值超出文本长度 ⇒ 单位不一致（该控件按字节计位置）⇒ **整条通道放弃**；`AllowDirectSet()` 为假的控件（EmEditor）**只读不写**。
 2. **Scintilla 系**（Notepad3 / Notepad++ / SciTE）：`SCI_*` 窗口消息。文档以字节为单位（UTF-8 下中文 3 字节/字），整条通道在字节域取原始文本再转 UTF-16 交给词边界算法；`SCI_GETTEXT` 的缓冲区指针属于对方进程，必须先 `VirtualAllocEx` 再读回。跳距 ≥ 6 用 `SCI_SETSEL` 瞬跳。
 3. **UIA** `TextPattern`/`TextPattern2`：支持 QQ、Edge 等 Chromium/WinUI 控件。锚定顺序：焦点元素沿祖先链 → 焦点 HWND 沿祖先链 → 焦点 HWND 子树检索；读回文本短于 2 字符视为占位弃用。
    - **Electron 编辑器**：无障碍节点（`role=textbox` 的 div）只有在开启无障碍模式（或系统检测到读屏器）时才写入光标附近的真实文本并同步选区——否则外部读到的是 1 字符占位。**开启后按词跳转引擎（含中文混排、不跨行）可完整工作**，未开启则走原生 `Ctrl+方向` 兜底（或加入 `[NativeWordJump]`）。平滑光标等纯视觉动画无关。
@@ -190,7 +190,7 @@
 
 | 通道 | API | 备注 |
 | --- | --- | --- |
-| 经典 Edit / EmEditorView | `EM_SETSEL` | 无 anchor 概念，Shift 位移按"向左锚右端 / 向右锚左端"给出有序选区 |
+| 经典 Edit | `EM_SETSEL` | 无 anchor 概念，Shift 位移按"向左锚右端 / 向右锚左端"给出有序选区。**EmEditorView 不用它**（外部置位会吞掉下一次按键，见下方实测坑）|
 | Scintilla | `SCI_SETSEL(anchor, caret)` | 天然支持选区位移 |
 | UIA | `TextRange.Select()` | 退化（空）range 上调用 Select 即移动光标。**仅限无 Shift**；Chromium 系对折叠 range 的负向端点移动一律拒绝，向左目标用正向增量 + 绝对定位构造 |
 | IA2 | `setCaretOffset` / `setSelection` | 不支持时返回 `E_FAIL` 退回箭头；**仅限无 Shift** |
@@ -201,7 +201,8 @@
 - UIA / IA2 置位回读比经典 Edit 更严：仍同一页文本且光标恰在目标才算成功；HRESULT 成功但回读不符时不叠加箭头（避免双重错误）。
 - 三个通道置位后都让视口跟随：Edit `EM_SCROLLCARET`、Scintilla `SCI_SCROLLCARET`、UIA `ScrollIntoView`。
 
-两个实测坑：EmEditor 的 `WM_GETTEXT` 返回计数把结尾 NUL 算进去 → 已剥掉；EmEditor 置位后会吞掉第一支方向键 → 经典 Edit 通道能回读光标，跳完按差值**自校验补发**（只补一轮，带 Shift 的选区不补）。
+两个实测坑：EmEditor 的 `WM_GETTEXT` 返回计数把结尾 NUL 算进去 → 已剥掉；**EmEditor 被外部 `EM_SETSEL` 置位后会把紧接着的第一次按键吞掉**（用户看到的"跳词后按 J 要按两下才动"）——而且它的位置单位随文档编码变（UTF-16 文档给字符下标、UTF-8 文档给**字节偏移**，73 字符的文档回 181）。所以现在对它**只读不写**（`AllowDirectSet()` 返回 FALSE）：文本照样读、steps 照样算，跳转改走逐格箭头 / 改道（发原生 `Ctrl+方向`）＋回读补正，落点依旧准确，只是不再"一步置位"。
+早先这里写的是"跳完按差值自校验补发"，但补正代码的条件是 `!direct` —— 恰好把"置位之后"这条路径排除在外，所以那个坑当时只被记录、没有被真正解决；单位不一致的问题则更隐蔽：`EM_GETSEL` 的越界值被**钳到文本末尾**，把"我的模型假设被打破"这个信号抹掉了，最后拿错位的字节值去置位，把 EmEditor 的光标写到多字节字符中间。现在的判据是"值超出文本长度 ⇒ 单位不一致 ⇒ 整条通道放弃"。
 
 第三个坑（`OverStepMode=1` 的改道）：**改道之后必须回读落点**。改道只是把这一跳交给目标程序自己的词导航，而**它的词切分跟我们的算法不一定一致**——实测 QQ（Chromium）的 `Ctrl+←` 按 ICU 词典切、一次只走 1 个字，而我们按"连续汉字段"整段算（一次十几字），结果光标落在整段中间、左右还不对称。所以改道后一律回读光标：与目标不符就按差额逐格补足（`SendArrowsStrict`，**不再判一次超限**，否则补正自己又被改道）；`OverStepMode=0` 的"只发一格"是用户明确要的，不补。
 

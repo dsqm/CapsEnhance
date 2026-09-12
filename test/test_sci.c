@@ -80,7 +80,7 @@ static void CaretLeft(void) {
    这条防线：Edit 通道必须整体放弃，而不是把越界值钳一下继续用。 */
 static const wchar_t* g_emText = L"马趁香微路远，沙笼月淡烟斜。渡波清彻映妍华。";
 static int g_emLen = 0;        /* 字符数（WM_GETTEXTLENGTH / WM_GETTEXT 的单位） */
-static int g_emByteCaret = 0;  /* 光标：**字节**偏移（EmEditor UTF-8 文档的行为） */
+static int g_emPos = 0;        /* EM_GETSEL 回报的值（不同场景切不同单位） */
 static int g_emSetSel = 0;     /* EM_SETSEL 被调用次数：必须保持 0 */
 static int g_emKd = 0;         /* 收到的 WM_KEYDOWN 数：退回原生兜底时会 >0 */
 
@@ -100,8 +100,8 @@ static LRESULT CALLBACK EmProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         /* EmEditor 风格：把结尾 NUL 也算进计数（nav.c 会剥掉多余的 NUL） */
         return g_emLen + 1;
     }
-    case EM_GETSEL:                 /* 打包 (start, end)，这里按**字节**给 */
-        return (LRESULT)((DWORD)g_emByteCaret | ((DWORD)g_emByteCaret << 16));
+    case EM_GETSEL:                 /* 打包 (start, end) */
+        return (LRESULT)((DWORD)g_emPos | ((DWORD)g_emPos << 16));
     case EM_SETSEL:
         g_emSetSel++;
         return 0;
@@ -319,13 +319,28 @@ int main(void) {
             SetFocus(em);
             Pump(150);
             g_emLen = (int)wcslen(g_emText);      /* 22 个字符 */
-            g_emByteCaret = g_emLen * 3;          /* 66 字节：单位不一致的典型值 */
+
+            /* H1. 位置按**字节**给（EmEditor 的 UTF-8 文档）-> 单位不一致 ->
+               整条 Edit 通道放弃 */
+            g_emPos = g_emLen * 3;                /* 66：远大于字符数 */
             g_emSetSel = 0; g_emKd = 0;
             NavJump(DIR_LEFT, FALSE);
             Pump(400);
             EXPECT(g_emSetSel == 0,
-                   "EM: 单位不一致 -> 完全不调用 EM_SETSEL（整条通道放弃）");
-            EXPECT(g_emKd > 0, "EM: 退回原生 Ctrl+方向（功能不丢）");
+                   "EM1: 单位不一致 -> 完全不调用 EM_SETSEL（整条通道放弃）");
+            EXPECT(g_emKd > 0, "EM1: 退回原生 Ctrl+方向（功能不丢）");
+
+            /* H2. 位置单位一致（UTF-16 文档）-> 文本读得到、steps 算得出，
+               但**仍然不许外部置位**：外部改它的选区后，它会把紧接着的第一次
+               按键吞掉（用户："跳词后按 J 要按两下"）。所以只读不写，
+               改走逐格箭头 / 改道（发原生 Ctrl+方向）。 */
+            g_emPos = 4;
+            g_emSetSel = 0; g_emKd = 0;
+            NavJump(DIR_LEFT, FALSE);
+            Pump(400);
+            EXPECT(g_emSetSel == 0, "EM2: 单位一致也不外部置位（只读不写）");
+            EXPECT(g_emKd > 0, "EM2: 改走箭头/改道，跳转功能不丢");
+
             DestroyWindow(em);
             SetFocus(h);
             Pump(100);
