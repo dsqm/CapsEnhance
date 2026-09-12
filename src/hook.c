@@ -205,14 +205,12 @@ void ReleaseFill(int act, BOOL enh, BOOL shift, int count) {
 }
 
 /* ---------- 触发键抬起时随消息带走"这一刻"的修饰快照 ----------
-   钩子回调与主线程的消息处理是**异步**的：用户在钩子里"点按 J"之后立刻松开
-   Alt 时，Alt 的抬起**已经在钩子里**清掉了按住位图（同步执行），而这条
-   WM_TRIG_UP 还排在消息队列里等主线程处理。主线程那时再读"修饰键按住了吗"
-   就会读到"Alt 已松"，点按补齐于是**时有时无** —— 正是本项目最忌讳的那类
-   "玄学现象"。
-   所以在**事件发生的那一刻**取快照并随消息带走（lParam = TRIGF_*）。
-   注意：WM_TIMER 的稳定期开火路径**不能**这么做 —— 它要的正是"等到稳定期
-   结束再看修饰是否到位"（"J 先于 D 到达"的乱序和弦靠它生效，见 main.c）。 */
+   **只用于诊断日志**：引擎在按下那一刻就开火并冻结修饰快照了（见 main.c 的
+   SnapMods），抬起时的处理只做"停重复 + 按增强模式补齐"，不再读修饰。
+   留着它是为了让日志能显示"抬起时修饰还在不在"（排查点按补齐是否按预期
+   触发时有用），所以它必须取**事件发生那一刻**的值：钩子回调与主线程的
+   消息处理是异步的，用户在钩子里"点按 J"之后立刻松开 Alt 时，Alt 的抬起
+   已经在钩子里清掉了按住位图，主线程现读会读到"Alt 已松"。 */
 static LPARAM ModeSnapFlags(void) {
     LPARAM f = 0;
     if (ModeDown(MODE_ENHANCE)) f |= TRIGF_ENH;
@@ -366,7 +364,13 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                     /* 正在逐格输出且按下了不同触发键（改道）：立即打断 */
                     if (SendArrowsConflicts(act))
                         SendArrowsRequestInterrupt();
-                    PostMessageW(g_mainWnd, WM_TRIG_DOWN, (WPARAM)act, 0);
+                    /* 修饰快照随消息带走（= **按下那一刻**的状态）。引擎在
+                       处理这条消息时就开火，不能再现读 ModeDown：钩子回调与
+                       主线程是异步的，"点按 J 后立刻松 Alt"时按住位图早已在
+                       钩子里被清掉，现读会读到"Alt 已松"，点按补齐于是
+                       时有时无。 */
+                    PostMessageW(g_mainWnd, WM_TRIG_DOWN, (WPARAM)act,
+                                 ModeSnapFlags());
                 }
             } else {
                 SwallowTake(vk);                 /* 这次 up 已吞，出表 */

@@ -207,8 +207,6 @@ void CapLog(const char* fmt, ...) {
 
 /* ============ 和弦引擎（仅主线程访问） ============ */
 static UINT_PTR      g_timer = 0;
-static int           g_pendingAct = ACT_NONE;   /* 待开火（和弦稳定期） */
-static ULONGLONG     g_pendingTick = 0;
 static int           g_activeAct  = ACT_NONE;   /* 已开火（正在重复） */
 static ULONGLONG     g_activeNext = 0;
 
@@ -247,30 +245,39 @@ static void EnsEngine(void) {
    主线程不再自己发送：逐格方向键 / 跨进程同步 IPC / COM 往返会阻塞数百
    毫秒，而 WH_KEYBOARD_LL 回调正跑在主线程上 —— 期间系统键盘输入得不到
    处理（卡顿），超时还会被系统静默摘钩。
-   开火快照（g_actEnh/g_actShf/g_btnCount）在此刻采集并随请求带走。 */
-static void PostAct(int act, int fillAct, int count) {
+   开火快照（g_actEnh/g_actShf/g_btnCount）在此刻采集并随请求带走。
+   keep = 引擎复位（松开 C）时是否保留这条请求：用户按下的那一发与它的松手
+   补齐要留（见 act.c 的 ActClearKeepFill），自动重复的尾流要丢。 */
+static void PostAct(int act, int fillAct, int count, BOOL keep) {
     ActJob j;
     j.act     = act;
     j.fillAct = fillAct;
     j.enh     = g_actEnh;
     j.shf     = g_actShf;
     j.count   = count;
+    j.keep    = keep;
     ActPost(&j);
 }
 
 /* 采集本次开火的模式快照：增强（点按补齐到 3 次）与选区（带 Shift）。
    判据是"激活键此刻是否按住"（ModeDown）—— 与鼠标钩子判断滚轮语义用的是
    同一个查询，不会分叉成两种修饰判定。
-   "动作先按、修饰后到"的乱序由 CHORD_SETTLE（50ms 稳定期）cover：开火前
-   修饰到位即可，开火之后的修饰变化不影响本次动作（快照随 ActJob 带走，
-   工作线程不读主线程状态）。 */
+   在**按下触发键的那一刻**采集：一旦开火，之后修饰键的按/松都不影响本次动作
+   （快照随 ActJob 带走，工作线程不读主线程状态）。
+   由此确定的顺序语义：**修饰键必须先按住，再按触发键**。反向顺序（先按 J、
+   再按 Alt）就是一次没有增强/选区的普通动作 —— 不补正、也不"过一会儿才生效"。
+   这里曾经是"按下触发键后等 50ms（CHORD_SETTLE 稳定期）再开火"，用来兜住
+   "动作先到、修饰后到"的乱序；代价是**每一个**触发键都要白等 50ms 才响应
+   （实测按下到开火 57~71ms），用户明确要求改成严格要求顺序。 */
 static void SnapMods(void) {
     g_actEnh = ModeDown(MODE_ENHANCE);
     g_actShf = ModeDown(MODE_SHIFT);
 }
 
-/* 开火一次动作（按词跳转走文本解析；其余走按键发送，都用开火快照修饰） */
-static void DoFireOnce(int act) { PostAct(act, ACT_NONE, 0); }
+/* 开火一次动作（按词跳转走文本解析；其余走按键发送，都用开火快照修饰）。
+   keep：这一发是"用户按下产生的"（TRUE，复位时要保留）还是"自动重复的尾流"
+   （FALSE，松手/复位时丢弃）—— 两者都是同一个 act，只能由调用点说明身份。 */
+static void DoFireOnce(int act, BOOL keep) { PostAct(act, ACT_NONE, 0, keep); }
 
 /* 翻转类动作（开关键：按一次只该切换一次）。属性现在写在键位表里
    （ACTF_SINGLE_SHOT），这里只是给引擎内部一个好读的名字 —— 以前是
@@ -409,7 +416,6 @@ static void ResetEngine(void) {
        松手读，想停的时候按一下键"，所以松开 C / 松开修饰键都不该打断它。
        它的终止条件见 cap.h 的持续滚动一节：反向滚、用户新输入、超时、
        以及暂停/退出/重启（后两者在各自的路径上显式调 ActAutoScrollStop）。 */
-    g_pendingAct = ACT_NONE;
     g_activeAct  = ACT_NONE;
     g_actEnh = FALSE; g_actShf = FALSE;
     /* 刻意不动修饰键的按住状态：Alt 还按着时，本次 C 会话内的增强模式
@@ -581,19 +587,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             TrimWorkingSet();
         }
         return 0;
-    case WM_TRIG_DOWN: {             /* 触发键按下：进入稳定期待开火 */
+    case WM_TRIG_DOWN: {             /* 触发键按下：立即开火 */
         int act = (int)wp;
         StackPush(act);
         if (g_recording.load())
-            CapLog("  [和弦] %s 按下 (active=%s pending=%s inflight=%d)",
-                   ActName(act), ActName(g_activeAct), ActName(g_pendingAct),
-                   ActInFlight());
-        if (g_activeAct != ACT_NONE && g_activeAct != act) {
-            /* 已在重复时又按下另一个键：立刻切到新键（最后按下优先），
-               重新走重复节奏。此前这里直接忽略，导致第二个键完全失灵。 */
-            SnapMods();
+            CapLog("  [和弦] %s 按下 (active=%s inflight=%d)",
+                   ActName(act), ActName(g_activeAct), ActInFlight());
+        /* 已在重复时按下另一个键、或当前没动作：都走这里 —— 按下即开火，
+           不等稳定期（见 SnapMods 的说明）。短点（按下就抬手）同样从这条路
+           开火，抬起时只补"还差的次数"（见 WM_TRIG_UP）。 */
+        if (g_activeAct != act) {
+            /* 开火快照取**钩子随消息带来的那份**（按下事件发生的那一刻），
+               不是现在现读 ModeDown —— 钩子回调与本处理是异步的，详见 hook.c
+               的 ModeSnapFlags。这也是"修饰键必须先按住、再按触发键"这条顺序
+               语义的落地：J 按下那一刻 Alt 有没有按住，就决定这一发带不带增强。 */
+            g_actEnh = (lp & TRIGF_ENH) != 0;
+            g_actShf = (lp & TRIGF_SHF) != 0;
             g_btnCount = 1;
-            DoFireOnce(act);
+            DoFireOnce(act, TRUE);
             if (!IsSingleShotAct(act)) {
                 /* 开关键只切一次、也不接管重复节奏（原来那个动作继续重复） */
                 g_activeAct = act;
@@ -603,10 +614,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                    "退回上一个"会把它再切一次（两次切换 = 又切回原状态） */
                 StackRemove(act);
             }
-        } else if (g_pendingAct != act) {
-            /* 稳定期内后按下的键优先 */
-            g_pendingAct = act;
-            g_pendingTick = GetTickCount64();
         }
         EnsEngine();
         return 0;
@@ -615,45 +622,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int act = (int)wp;
         StackRemove(act);
         if (g_recording.load())
-            CapLog("  [和弦] %s 抬起 (pending=%s active=%s) -> %s",
-                   ActName(act), ActName(g_pendingAct), ActName(g_activeAct),
-                   (g_pendingAct == act) ? "稳定期内点按：开火+补齐"
-                                         : (g_activeAct == act ? "长按结束：停重复+补齐"
-                                                               : "与本动作无关"));
-        if (g_pendingAct == act) {
-            /* 短点：稳定期内即抬起，立即开火一次并补齐。
-               修饰快照**取钩子随这条消息带来的那份**（事件发生的那一刻），
-               不是现在现读 —— 钩子回调与本处理是异步的，用户"点按 J 之后
-               立刻松开 Alt"时，按住位图早已在钩子里被清掉，现读会丢掉补齐
-               （时有时无）。见 hook.c 的 ModeSnapFlags。
-               开火 + 补齐合成一条请求：中间不会被别的动作插队，也用同一份快照。 */
-            g_pendingAct = ACT_NONE;
-            g_actEnh = (lp & TRIGF_ENH) != 0;
-            g_actShf = (lp & TRIGF_SHF) != 0;
-            g_btnCount = 1;
-            /* 开关键不做松手补齐（补齐会把一次点按变成 3 次切换，等于又切回去） */
-            PostAct(act, IsSingleShotAct(act) ? ACT_NONE : act, g_btnCount);
-            g_actEnh = FALSE; g_actShf = FALSE;
-            /* 还有别的键按着就继续（退回上一个），否则停 */
-            int top = StackTop();
-            if (top != ACT_NONE) {
-                g_pendingAct = top;
-                g_pendingTick = GetTickCount64();
-                EnsEngine();
-            } else StopEngine();
-        } else if (g_activeAct == act) {
-            /* 长按之后抬起：停止重复，若有增益短板则补齐（快照要在清空
-               g_actEnh/g_actShf 之前采集，故先投递） */
+            CapLog("  [和弦] %s 抬起 (active=%s) -> %s", ActName(act),
+                   ActName(g_activeAct),
+                   (g_activeAct == act) ? "停重复+按增强模式补齐" : "与本动作无关");
+        if (g_activeAct == act) {
+            /* 抬起 = 停重复 + 按增强模式补齐。
+               "点按"与"长按"走的是同一条路：开火都发生在按下那一刻，这里只
+               补"还差的次数"（增强模式补到 3 次）。原来点按走的是另一条分支
+               （稳定期内抬起才开火+补齐），那条分支随稳定期一起去掉了。
+               快照要在清空 g_actEnh/g_actShf 之前用，故先投递。 */
             g_activeAct = ACT_NONE;
-            PostAct(ACT_NONE, act, g_btnCount);
+            PostAct(ACT_NONE, act, g_btnCount, TRUE);
             g_actEnh = FALSE; g_actShf = FALSE;
             int top = StackTop();
             if (top != ACT_NONE) {
-                /* 别的键还按着：切回它并继续重复 */
+                /* 别的键还按着：切回它并继续重复（同样按下即开火，不等稳定期） */
                 SnapMods();
                 g_activeAct = top;
                 g_btnCount = 1;
-                DoFireOnce(top);
+                DoFireOnce(top, TRUE);
                 g_activeNext = GetTickCount64() + REPEAT_FIRST_DELAY;
                 EnsEngine();
             } else StopEngine();
@@ -668,44 +655,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         /* ActInFlight() 门控：同一时刻只让一发动作在飞，等价于原来"主线程
            被发送过程占住、定时器跑不了"的自然限速。没有它，长按按词跳转键会
            在队列里堆出一串尾流。 */
-        if (g_pendingAct != ACT_NONE && now >= g_pendingTick + CHORD_SETTLE
+        if (g_activeAct != ACT_NONE && now >= g_activeNext
             && ActInFlight() == 0) {
-            /* 稳定期到：用门闩快照修饰，开火 */
-            int act = g_pendingAct; g_pendingAct = ACT_NONE;
-            SnapMods();
-            g_btnCount = 1;
-            if (g_recording.load())
-                CapLog("  [和弦] %s 稳定期到(%dms) -> 开火 (enh=%d shf=%d)",
-                       ActName(act), CHORD_SETTLE, g_actEnh ? 1 : 0, g_actShf ? 1 : 0);
-            DoFireOnce(act);
-            if (IsSingleShotAct(act)) {
-                /* 开关键：切一次就结束，不进重复节奏。
-                   同时把它从"仍按着"的栈里摘掉 —— 否则之后松开别的键时会
-                   "退回上一个"又把它补切一次。 */
-                StackRemove(act);
-                g_actEnh = FALSE; g_actShf = FALSE;
-                int top = StackTop();
-                if (top != ACT_NONE) {          /* 还按着别的键：接着它走 */
-                    g_pendingAct = top;
-                    g_pendingTick = now;
-                } else StopEngine();
-            } else {
-                g_activeAct = act;
-                g_activeNext = now + REPEAT_FIRST_DELAY;
-            }
-        } else if (g_activeAct != ACT_NONE && now >= g_activeNext
-                   && ActInFlight() == 0) {
             if (IsSingleShotAct(g_activeAct)) {
                 /* 防御：开关键永远不重复（正常路径到不了这里） */
                 g_activeAct = ACT_NONE;
                 StopEngine();
             } else {
-                DoFireOnce(g_activeAct);
+                DoFireOnce(g_activeAct, FALSE);
                 g_btnCount++;
                 g_activeNext = now + REPEAT_INTERVAL;
             }
-        } else if (g_pendingAct == ACT_NONE && g_activeAct == ACT_NONE
-                   && ActInFlight() == 0) {
+        } else if (g_activeAct == ACT_NONE && ActInFlight() == 0) {
             StopEngine();
         }
         return 0;

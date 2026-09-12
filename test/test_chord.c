@@ -18,8 +18,17 @@
 #include "act.c"       /* 动作实际由执行线程完成：本测试要能起/停/等它 */
 #include <stdio.h>
 
-/* 按词跳转桩：本测试只验证模式修饰/补齐/自动滚动，不测文本解析 */
-int NavJump(int dir, BOOL shift) { (void)dir; (void)shift; return 0; }
+/* 按词跳转桩：本测试只验证模式修饰/补齐/自动滚动，不测文本解析。
+   g_slowJumpMs != 0 时模拟"真按词跳转要几百毫秒"（同步 IPC + COM 往返），
+   供场景AC构造"跳词占住执行线程时又按键"的确定性时序。
+   直接 Sleep（不泵消息）：它跑在工作线程上，要模拟的正是"这条请求占住
+   执行线程"，主线程在别的线程上照常泵消息、投递请求。 */
+static LONGLONG g_slowJumpMs = 0;
+int NavJump(int dir, BOOL shift) {
+    (void)dir; (void)shift;
+    if (g_slowJumpMs > 0) Sleep((DWORD)g_slowJumpMs);
+    return 0;
+}
 void NavProbe(void) { /* 诊断探测：本测试桩掉 */ }
 void NavBaseInfo(void) { /* 启动基线采集：本测试桩掉 */ }
 void NavSelTrackReset(void) { /* 选区锚跟踪：本测试桩掉 */ }
@@ -210,9 +219,8 @@ static void SinkWait(int ms) {
     while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE))
         DispatchMessageW(&m);
 }
-/* 只泵消息，不等待执行线程。
-   时序敏感的场景（"稳定期内抬手"）靠它 —— 一旦在这里等执行线程，
-   CHORD_SETTLE 的 50ms 稳定期就在场景中途被绕过，测的东西就变了。
+/* 只泵消息，不等待执行线程：时序敏感的场景（"按下后马上抬手"）靠它 ——
+   一旦在这里等执行线程，异步发送的完成时刻就被改了，测的东西也变了。
    需要等发送做完时，在断言前单独调 Drain()。
    用 SinkWait 而不是 Sleep：要一直在"等消息"状态，钩子才不会漏记注入事件。 */
 static void Pump(int ms) {
@@ -245,7 +253,7 @@ static void Reset(void) {
     ActAutoScrollStop();     /* 上一场景可能还在自动滚动：先停，避免尾流串到下一场景 */
     memset((void*)g_phys, 0, sizeof(g_phys));   /* 物理按键表也归零 */
     memset(t_sys, 0, sizeof(t_sys));            /* 模拟的"系统状态"也归零 */
-    PostMessageW(g_mainWnd, WM_CAPS_DOWN, 0, 0);  /* → ResetEngine：清 pending/active + 停表 */
+    PostMessageW(g_mainWnd, WM_CAPS_DOWN, 0, 0);  /* → ResetEngine：清 active + 停表 + 丢尾流 */
     Sink();
     Drain();   /* 等上一场景的尾巴收干净，否则残留注入会被算进下一场景 */
     ResetRec();
@@ -297,20 +305,24 @@ int main(void) {
                               CW_USEDEFAULT, CW_USEDEFAULT, 1, 1,
                               NULL, NULL, GetModuleHandleW(NULL), NULL);
 
-    /* ---- 场景A：J 先于 D 到达（乱序和弦），点按 -= 3 左键 ---- */
+    /* ---- 场景A：严格要求顺序 —— J 先按、D 后到 = 无增强的一次左键 ----
+       这里原先测的是"乱序和弦"：按下触发键后等 50ms 稳定期再开火，好让迟到的
+       Alt/D 也能生效。用户明确要求改成**严格要求顺序**（修饰键必须先按住，
+       再按触发键）—— 稳定期已删除，按下即开火，反向顺序就是一次普通动作，
+       不再补正。这个场景就此反过来：D 迟到**不该**改变本次的发送。 */
     Reset();
     Key(CLI_CAPS, TRUE); Pump(2);
-    Key('J', TRUE);  Pump(2);     /* J 先到 -> 进待发 */
-    Key('D', TRUE);  Pump(2);     /* D 迟到 (乱序) -> 门闩 D */
-    Key('J', FALSE); Pump(2);     /* 未到稳定期即抬手 -> 短点开火+补齐到3 */
+    Key('J', TRUE);  Pump(2);     /* 此刻 D 还没按住：本次就是无增强的左键 */
+    Key('D', TRUE);  Pump(2);     /* D 迟到：不补正 */
+    Key('J', FALSE); Pump(2);
     Key('D', FALSE); Pump(2);
     END_SCENE();
-    CHECK(CountVk(VK_LEFT) == 3, "A: 乱序 C+J+D 点按 = 恰好 3 次左键");
+    CHECK(CountVk(VK_LEFT) == 1, "A: 严格要求顺序 C+J+D -> 只发 1 次左键（不补正）");
 
     /* ---- 场景B：F 使 Shift 生效（严格序 C F J） ---- */
     Reset();
     Key(CLI_CAPS, TRUE); Pump(2);
-    Key('F', TRUE); Pump(2);     /* 门闩 F */
+    Key('F', TRUE); Pump(2);     /* 先按住选区修饰 */
     Key('J', TRUE);  Pump(2);
     Key('J', FALSE); Pump(2);    /* 短点：Shift 生效 */
     Key('F', FALSE); Pump(2);
@@ -318,36 +330,69 @@ int main(void) {
     CHECK(CountVk(VK_LEFT) == 1 && CountVk(VK_LSHIFT) >= 1,
           "B: C+F+J = Shift+左键 (1次)");
 
-    /* ---- 场景C：F 乱序（J 先于 F）---- */
+    /* ---- 场景C：F 后到（J 先于 F）-> 本次不带 Shift，不补正 ---- */
     Reset();
     Key(CLI_CAPS, TRUE); Pump(2);
     Key('J', TRUE);  Pump(2);
-    Key('F', TRUE);  Pump(2);    /* F 迟到仍未生效于本次短点 */
+    Key('F', TRUE);  Pump(2);    /* F 迟到：不补正 */
     Key('J', FALSE); Pump(2);
     Key('F', FALSE); Pump(2);
     END_SCENE();
-    CHECK(CountVk(VK_LEFT) == 1 && CountVk(VK_LSHIFT) >= 1,
-          "C: 乱序 C+F+J 仍 = Shift+左键 (1次)");
+    CHECK(CountVk(VK_LEFT) == 1 && CountVk(VK_LSHIFT) == 0,
+          "C: 先 J 后 F -> 裸左键 1 次（不补 Shift）");
 
-    /* ---- 场景D：C+D+F+J 乱序 = Shift+左键 x3 ---- */
+    /* ---- 场景D：C+J 之后 D/F 才到 -> 仍是 1 次裸左键 ---- */
     Reset();
     Key(CLI_CAPS, TRUE); Pump(2);
     Key('J', TRUE);  Pump(2);
     Key('D', TRUE);  Pump(2);
     Key('F', TRUE);  Pump(2);
-    Key('J', FALSE); Pump(2);    /* 短点：D/F 门闩均生效 -> 3 次 Shift+左键 */
+    Key('J', FALSE); Pump(2);    /* D/F 门闩均生效 -> 不再补齐、也不加 Shift */
     Key('D', FALSE); Pump(2);
     Key('F', FALSE); Pump(2);
     END_SCENE();
-    CHECK(CountVk(VK_LEFT) == 3 && CountVk(VK_LSHIFT) >= 3,
-          "D: 乱序 C+D+F+J = Shift+左键 x3");
+    CHECK(CountVk(VK_LEFT) == 1 && CountVk(VK_LSHIFT) == 0,
+          "D: 先 J、后 D/F -> 1 次裸左键（序严格要求）");
+
+    /* ---- 场景AB：按下触发键立即开火，不再等 50ms 稳定期 ----
+       旧实现：按下后只置 pending，等 CHORD_SETTLE(50ms) 由 WM_TIMER 开火，
+       实测"按下 -> 开始执行"57~71ms（用户反馈的"不跟手"就是这个）。
+       现在按下即开火。
+       断言用主线程状态（g_activeAct/g_btnCount）而不是注入计数：注入事件
+       到达本进程的捕获钩子有延迟（实测可达 ~60ms），拿它测"立即"会飘。 */
+    Reset();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Key('J', TRUE);
+    Sink();                        /* 只把 WM_TRIG_DOWN 派发掉，不做任何等待 */
+    CHECK(g_activeAct == ACT_LEFT && g_btnCount == 1,
+          "AB: 按下触发键立即开火（无稳定期等待）");
+    Key('J', FALSE); Pump(2);
+    END_SCENE();
+
+    /* ---- 场景AC：跳词在飞时按下的键不能被丢掉 ----
+       一次点按现在是两条请求（按下开火 + 抬起补齐），两者的 act/fillAct 互补。
+       ResetEngine 的 ActClearKeepFill 曾经按"fillAct != NONE"判"这条属于本次
+       点按"，于是**开火那条**（fillAct 为空）被当成重复尾流丢掉 —— 用户按了键
+       却没有输出。改成显式 keep 标志后，开火与补齐都保留。
+       这里用慢 NavJump 桩把跳词拉长，让按键请求确实排在跳词后面。 */
+    Reset();
+    g_slowJumpMs = 400;
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Key('N', TRUE); Pump(2);        /* 跳词：立即开火，占住执行线程 400ms */
+    Pump(60);                       /* 等它确实在跑 */
+    Key('J', TRUE); Pump(2);        /* 跳词期间点按：请求排在跳词后面 */
+    Key('J', FALSE); Pump(2);
+    Key(CLI_CAPS, FALSE);           /* 松 C：ResetEngine（清重复尾流） */
+    Pump(600); Drain();
+    g_slowJumpMs = 0;
+    CHECK(CountVk(VK_LEFT) >= 1, "AC: 跳词期间点按的方向键不被复位清掉");
 
     /* ---- 场景E：长按 C+J（无 D）连续重复，松手后不再输出 ----
        发送是异步的：读计数前先 Drain，比较点都取在"松手之后"，
        这样断言的是"松手之后不再产生新的输出"，而不是跟异步时序赛跑。 */
     Reset();
     Key(CLI_CAPS, TRUE); Pump(2);
-    Key('J', TRUE); Pump(300);   /* 稳定期开火 + 首次150ms重复 + 若干 */
+    Key('J', TRUE); Pump(300);   /* 按下即开火 + 首次150ms重复 + 若干 */
     Drain();
     int duringHold = CountVk(VK_LEFT);
     Key('J', FALSE); Pump(2);    /* 抬手：不应再补(无D) */
@@ -362,7 +407,7 @@ int main(void) {
     Reset();
     Key(CLI_CAPS, TRUE); Pump(2);
     Key('J', TRUE);  Pump(2);
-    Key('J', FALSE); Pump(2);    /* 未到稳定期 -> 短点 */
+    Key('J', FALSE); Pump(2);    /* 按下即开火、抬起只补齐：无增强 -> 1 次 */
     END_SCENE();
     CHECK(CountVk(VK_LEFT) == 1, "F: 单点 C+J = 1 左键");
 
@@ -536,7 +581,7 @@ int main(void) {
 
     Reset();
     Key(CLI_CAPS, TRUE); Pump(2);
-    Key(VK_TAB, TRUE); Pump(250);        /* 远长于稳定期 50ms + 多个重复周期 */
+    Key(VK_TAB, TRUE); Pump(250);        /* 远长于首次重复延迟 + 多个重复周期 */
     Key(VK_TAB, FALSE); Pump(2);
     END_SCENE();
     CHECK(CountVk(VK_CAPITAL) == 1, "P: 长按 C+Tab 只切换一次（不重复）");

@@ -705,9 +705,13 @@ void ActClear(void) {
     LeaveCriticalSection(&s_cs);
 }
 
-/* 丢请求但保留"松手补齐"（fillAct != NONE）：
-   补齐是本次点按的一部分，用户紧接着松开 C 也不能丢；
-   而重复开火是映射结束后不该再产生的尾流，必须清掉。 */
+/* 丢请求但保留"本次按键本身"（keep 为真的那些）：
+   用户已经按下并按着的动作（开火）与它的松手补齐，都是本次点按的一部分，
+   不能因为紧接着松开 C 就被清掉；而**重复开火**是映射结束后不该再产生的
+   尾流，必须丢。
+   为什么要显式标 keep 而不是"看 fillAct 是否为空"：按下即开火之后，一次点按
+   变成两条请求（按下开火 fillAct=空、抬起补齐 act=空），按住 fillAct 判据会把
+   开火那条当尾流丢掉 —— 用户按了键却没有输出，实测就是这么丢的。 */
 void ActClearKeepFill(void) {
     if (!s_init) return;
     ActJob keep[ACT_QUEUE_MAX];
@@ -715,7 +719,7 @@ void ActClearKeepFill(void) {
     EnterCriticalSection(&s_cs);
     for (int i = 0; i < s_n; i++) {
         ActJob* j = &s_q[(s_head + i) % ACT_QUEUE_MAX];
-        if (j->fillAct != ACT_NONE && kn < ACT_QUEUE_MAX) keep[kn++] = *j;
+        if (j->keep && kn < ACT_QUEUE_MAX) keep[kn++] = *j;
     }
     s_head = 0; s_tail = 0; s_n = 0;
     for (int i = 0; i < kn; i++) {

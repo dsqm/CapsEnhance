@@ -33,7 +33,7 @@
 /* 主线程事件消息（均由钩子线程投递，按 FIFO 顺序处理） */
 #define WM_CAPS_DOWN  (WM_APP + 1)  /* C 按下 */
 #define WM_CAPS_UP    (WM_APP + 2)  /* C 抬起 */
-#define WM_TRIG_DOWN  (WM_APP + 3)  /* 触发键按下   wParam=act */
+#define WM_TRIG_DOWN  (WM_APP + 3)  /* 触发键按下   wParam=act，lParam=TRIGF_* 快照 */
 #define WM_TRIG_UP    (WM_APP + 4)  /* 触发键抬起   wParam=act，lParam=TRIGF_* 快照 */
 #define WM_TOGGLE_TRAY (WM_APP + 5) /* 托盘自定义回调消息 */
 #define WM_ALREADY_RUNNING (WM_APP + 7) /* 已有实例在跑：新实例通知它提示后退出 */
@@ -46,13 +46,14 @@
 
 #define PROBE_KEY      VK_OEM_3    /* 按住 C 时按 ` 触发焦点探测 */
 
-/* WM_TRIG_UP 的 lParam 快照位（钩子在**抬起事件发生的那一刻**取的修饰状态）。
+/* WM_TRIG_DOWN / WM_TRIG_UP 的 lParam 快照位（钩子在**事件发生的那一刻**取的
+   修饰状态；按下那条决定本次动作带不带增强/选区）。
    为什么必须随消息带过来、而不能等主线程处理消息时现读：钩子回调与消息
    处理是**异步**的 —— 用户"点按 J 之后立刻松开 Alt"时，Alt 的抬起已经在
-   钩子里清掉了按住位图，而这条 WM_TRIG_UP 还排在队列里；主线程现读就会
-   读到"Alt 已松"，点按补齐于是时有时无。详见 hook.c 的 ModeSnapFlags。 */
-#define TRIGF_ENH     0x1           /* 抬起那一刻 增强模式生效 */
-#define TRIGF_SHF     0x2           /* 抬起那一刻 选区模式生效 */
+   钩子里清掉了按住位图，而这条消息还排在队列里；主线程现读就会读到
+   "Alt 已松"，该带增强的那一发变成裸动作。详见 hook.c 的 ModeSnapFlags。 */
+#define TRIGF_ENH     0x1           /* 事件那一刻 增强模式生效 */
+#define TRIGF_SHF     0x2           /* 事件那一刻 选区模式生效 */
 
 #define CLI_CAPS  VK_CAPITAL         /* 主映射键 C                          */
 
@@ -106,7 +107,10 @@
 /* 长按重复节奏 */
 #define REPEAT_FIRST_DELAY   150     /* ms：开火到第一次重复                 */
 #define REPEAT_INTERVAL      35      /* ms：后续重复间隔                      */
-#define CHORD_SETTLE         50      /* ms：和弦稳定期，等增强/选区修饰到位  */
+/* 这里原来有一个 CHORD_SETTLE(50ms) 和弦稳定期：按下触发键后先等 50ms 再开火，
+   用来兜住"触发键先到、修饰键后到"的乱序（J 和 Alt 几乎同时按）。代价是**每个**
+   触发键都白等 50ms 才响应（实测按下到开火 57~71ms）。现已删除：顺序语义明确为
+   **修饰键必须先按住，再按触发键**，按下即开火，见 main.c 的 SnapMods。 */
 
 /* ---------- 跨线程状态：atomic / volatile 的分界 ----------
    **volatile 不是同步原语** —— 在 C/C++ 内存模型里它只阻止编译器把访问优化
@@ -190,6 +194,7 @@ typedef struct {
     BOOL enh;       /* 开火快照：增强模式（点按补齐到 3 次）      */
     BOOL shf;       /* 开火快照：选区模式（带 Shift）             */
     int  count;     /* fillAct 的已发送次数（补齐时用）           */
+    BOOL keep;      /* 引擎复位（松开 C）时是否保留，见 act.c 的 ActClearKeepFill */
     ULONGLONG postTick; /* 投递时刻（GetTickCount64）：诊断打点用，不参与判定 */
 } ActJob;
 
