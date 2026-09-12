@@ -86,8 +86,11 @@ BOOL ActHasFlag(int act, unsigned flag) {
 }
 
 /* 动作的可读名，只给诊断日志用（"为什么这次没发出去"时一眼能对上按的是哪个键）。
-   未知动作返回 "?"，不做任何判定。 */
+   ACT_NONE 是"这一步没有动作"（例如只补齐不开火的那条请求），显示成 "-" 而不是
+   "?" —— 日志里 "fill=-" 与 "fill=?" 一个表示"本来就没有"，一个是"认不出来的
+   动作"，混用会把人引到错方向。未知动作仍返回 "?"，不做任何判定。 */
 const char* ActName(int act) {
+    if (act == ACT_NONE) return "-";
     const ActionDef* d = FindAct(act);
     return (d && d->name) ? d->name : "?";
 }

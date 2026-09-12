@@ -585,8 +585,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int act = (int)wp;
         StackPush(act);
         if (g_recording.load())
-            CapLog("  [和弦] %s 按下 (active=%d pending=%d inflight=%d)",
-                   ActName(act), g_activeAct, g_pendingAct, ActInFlight());
+            CapLog("  [和弦] %s 按下 (active=%s pending=%s inflight=%d)",
+                   ActName(act), ActName(g_activeAct), ActName(g_pendingAct),
+                   ActInFlight());
         if (g_activeAct != ACT_NONE && g_activeAct != act) {
             /* 已在重复时又按下另一个键：立刻切到新键（最后按下优先），
                重新走重复节奏。此前这里直接忽略，导致第二个键完全失灵。 */
@@ -613,6 +614,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TRIG_UP: {               /* 触发键抬起 */
         int act = (int)wp;
         StackRemove(act);
+        if (g_recording.load())
+            CapLog("  [和弦] %s 抬起 (pending=%s active=%s) -> %s",
+                   ActName(act), ActName(g_pendingAct), ActName(g_activeAct),
+                   (g_pendingAct == act) ? "稳定期内点按：开火+补齐"
+                                         : (g_activeAct == act ? "长按结束：停重复+补齐"
+                                                               : "与本动作无关"));
         if (g_pendingAct == act) {
             /* 短点：稳定期内即抬起，立即开火一次并补齐。
                修饰快照**取钩子随这条消息带来的那份**（事件发生的那一刻），
@@ -667,6 +674,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int act = g_pendingAct; g_pendingAct = ACT_NONE;
             SnapMods();
             g_btnCount = 1;
+            if (g_recording.load())
+                CapLog("  [和弦] %s 稳定期到(%dms) -> 开火 (enh=%d shf=%d)",
+                       ActName(act), CHORD_SETTLE, g_actEnh ? 1 : 0, g_actShf ? 1 : 0);
             DoFireOnce(act);
             if (IsSingleShotAct(act)) {
                 /* 开关键：切一次就结束，不进重复节奏。
