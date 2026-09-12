@@ -62,7 +62,18 @@ static void RunJob(const ActJob* j) {
                大写锁定。 */
             NavProbe();
         } else {
+            /* 诊断：按键动作"发了"与"目标程序认了"是两件事 —— 用户看到
+               "按了没反应"时，只有回读光标才能区分。只在记录模式下读，
+               且读的是同一个焦点控件（不做任何缓存/状态改动）。 */
+            BOOL dbg = g_recording.load();
+            long long c0 = dbg ? NavFocusCaret() : -1;
             SendActOnce(act, j->shf);
+            if (dbg) {
+                long long c1 = NavFocusCaret();
+                CapLog("  [注入] %s -> vk=0x%02X shift=%d  光标 %lld -> %lld%s",
+                       ActName(act), ActOutVk(act), j->shf ? 1 : 0, c0, c1,
+                       (c0 >= 0 && c1 == c0) ? "   <<< 发了但光标没动" : "");
+            }
         }
     }
     if (j->fillAct != ACT_NONE) ReleaseFill(j->fillAct, j->enh, j->shf, j->count);

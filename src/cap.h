@@ -338,6 +338,7 @@ void NavBaseInfo(void);              /* 启动时采集系统/环境基线（不
 
 /* ---------- 按词跳转模块 ---------- */
 int NavJump(int dir, BOOL shift);      /* 前台控件 + dir + shift(选区=F) -> 移动；返回移动格数(<0失败) */
+long long NavFocusCaret(void);         /* 诊断用：读焦点控件当前光标（读不到 -1），只在记录模式下调 */
 void NavSelTrackReset(void);           /* 清除 Shift 位移序列的锚点跟踪（引擎复位时） */
 int  ComputeSteps(const WCHAR* s, int len, int caret, int dir); /* 词边界算法，仅供单测 */
 

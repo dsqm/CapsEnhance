@@ -1058,6 +1058,28 @@ int NavJump(int dir, BOOL shift) {
     return r;
 }
 
+/* 非 static 仅供"注入后回读"的诊断日志用（act.c 记录模式下调）。
+   读当前焦点控件的光标：经典 Edit 用 EM_GETSEL；Scintilla 用字节位
+   （不换算成 UTF-16，诊断只看"动没动"，量纲一致即可）。读不到返回 -1。
+   为什么需要它：日志能证明"我们发了方向键"，但证明不了"目标程序认了" ——
+   用户看到"按了没反应"时，只有这一读才能把"没发出去"和"发了但目标程序
+   没动"分开。故意不做任何缓存，也不改任何状态。 */
+long long NavFocusCaret(void) {
+    HWND focus = GetFocusControl();
+    if (!focus) return -1;
+    if (IsClassicEdit(focus)) {
+        LONGLONG sel = 0;
+        if (!SendMsg(focus, EM_GETSEL, 0, 0, &sel)) return -1;
+        return (LONGLONG)LOWORD((DWORD)sel);
+    }
+    if (IsScintilla(focus)) {
+        LONGLONG pos = -1;
+        if (!SendMsg(focus, SCI_GETCURRENTPOS, 0, 0, &pos)) return -1;
+        return pos;
+    }
+    return -1;
+}
+
 static int NavJumpInner(int dir, BOOL shift) {
     WCHAR* text = NULL;
     int len = 0, caret = 0;
