@@ -444,8 +444,13 @@ static HWND GetFocusControl(void) {
 
 /* 是否"经典 Edit 协议"控件（可靠支持 WM_GETTEXT + EM_GETSEL）。
    白名单外不放行：Chromium 系窗口对 WM_GETTEXT 回的是标题、EM_GETSEL 是
-   垃圾值，混进来会把按词跳转带偏。EmEditor 的 EmEditorView 实测完美支持这套
-   协议（文本/光标都是 UTF-16 下标），只是类名不在经典名单里。 */
+   垃圾值，混进来会把按词跳转带偏。
+
+   EmEditor 的 EmEditorView 支持这套协议，但**位置的单位随文档编码变**：
+   UTF-16 文档给 UTF-16 下标（所以当初实测"完美支持"），**UTF-8 文档给的是
+   字节偏移**（实测 73 字符的中文文档 EM_GETSEL 回 181）。所以放它进来的前提
+   是 FastGetTextCaret 的单位一致性自检 —— 检测到不一致就放弃整条通道，
+   绝不能用它的值算 steps 或写 EM_SETSEL（见那里的说明）。 */
 static BOOL IsClassicEdit(HWND hwnd) {
     WCHAR c[96];
     if (!GetClassNameW(hwnd, c, 96)) return FALSE;
@@ -486,14 +491,36 @@ static BOOL FastGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut
     if (got <= 0) { free(buf); return FALSE; }
 
     /* 光标位置：EM_GETSEL。返回值打包 (选区start, 选区end)——选区有序
-       (start<=end)，Shift 位移时"活动端"按方向取其一（见 NavJump） */
+       (start<=end)，Shift 位移时"活动端"按方向取其一（见 NavJump）。
+
+       ★ 单位一致性自检（EmEditor 实测踩坑）：本通道假定 EM_GETSEL 与
+       WM_GETTEXT **同单位**（UTF-16 单元）。但有的"类 Edit"控件对外给 UTF-16
+       文本，EM_GETSEL/EM_SETSEL 却按**文档编码的字节**计 —— EmEditor 的
+       EmEditorView 就是：73 个字符的 UTF-8 中文文档，EM_GETSEL 回 181
+       （一个汉字 3 字节），而 WM_GETTEXT 回 73 个字符。
+       以前这里把越界值**钳到文本末尾**，把"单位不一致"这个明确信号抹成了
+       "看起来正常"：从假光标位置算出 steps、再把错位的字节值写回 EM_SETSEL，
+       落点会停在多字节字符中间并把该控件的内部状态改坏 —— 之后连**真实**
+       方向键都失灵（用户上报："跳词后自己按方向键都不行，只有 EmEditor"）。
+       判据只有一条：EM_GETSEL 的值超出文本长度就说明单位不同 ⇒ 整条通道放弃，
+       交给 UIA / IA2 / 原生 Ctrl+方向（原生是相对移动，与单位无关，安全）。
+       标准 Edit 控件恒有 值 <= 文本长度，不会误伤（也正因如此，钳制在这里
+       本来就永远不该触发 —— 它只在单位不一致时才生效）。 */
     LONGLONG sel = 0;
     if (!SendMsg(hwnd, EM_GETSEL, 0, 0, &sel)) { free(buf); return FALSE; }
-    int caret = ((DWORD)sel != 0xFFFFFFFF) ? (int)LOWORD((DWORD)sel) : 0;
-    if (caret < 0 || caret > (int)got) caret = (int)got;
-    int selEnd = ((DWORD)sel != 0xFFFFFFFF) ? (int)HIWORD((DWORD)sel) : caret;
+    DWORD packed = (DWORD)sel;
+    if (packed != 0xFFFFFFFF &&
+        ((LONGLONG)LOWORD(packed) > got || (LONGLONG)HIWORD(packed) > got)) {
+        if (g_recording.load())
+            CapLog("  Edit 通道：EM_GETSEL=%d/%d 超出文本长度 %lld，"
+                   "该控件按字节计位置（非 UTF-16），放弃本通道",
+                   (int)LOWORD(packed), (int)HIWORD(packed), got);
+        free(buf);
+        return FALSE;
+    }
+    int caret = (packed != 0xFFFFFFFF) ? (int)LOWORD(packed) : 0;
+    int selEnd = (packed != 0xFFFFFFFF) ? (int)HIWORD(packed) : caret;
     if (selEnd < caret) selEnd = caret;          /* 有序化 */
-    if (selEnd > (int)got) selEnd = (int)got;
 
     *text = buf;
     *lenOut = (int)got;

@@ -73,6 +73,45 @@ static void CaretLeft(void) {
     while (g_caret > 0 && ((unsigned char)g_doc[g_caret] & 0xC0) == 0x80) g_caret--;
 }
 
+/* ---- 假 EmEditorView：文本按 UTF-16 给、**位置按字节给** ----
+   EmEditor 的 EmEditorView 支持 Edit 协议，但位置的单位随文档编码变：
+   UTF-16 文档给 UTF-16 下标，UTF-8 文档给**字节偏移**（实测 73 字符的中文
+   文档 EM_GETSEL 回 181）。这个假窗口复现后者，用来钉住"单位一致性自检"
+   这条防线：Edit 通道必须整体放弃，而不是把越界值钳一下继续用。 */
+static const wchar_t* g_emText = L"马趁香微路远，沙笼月淡烟斜。渡波清彻映妍华。";
+static int g_emLen = 0;        /* 字符数（WM_GETTEXTLENGTH / WM_GETTEXT 的单位） */
+static int g_emByteCaret = 0;  /* 光标：**字节**偏移（EmEditor UTF-8 文档的行为） */
+static int g_emSetSel = 0;     /* EM_SETSEL 被调用次数：必须保持 0 */
+static int g_emKd = 0;         /* 收到的 WM_KEYDOWN 数：退回原生兜底时会 >0 */
+
+static LRESULT CALLBACK EmProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (!g_emLen) g_emLen = (int)wcslen(g_emText);
+    switch (m) {
+    case WM_GETTEXTLENGTH: return g_emLen;
+    case WM_GETTEXT: {
+        WCHAR* p = (WCHAR*)l;
+        if (!p) return 0;
+        int n = (int)w;
+        if (n > g_emLen + 1) n = g_emLen + 1;
+        if (n > 0) {
+            for (int i = 0; i < n - 1 && i < g_emLen; i++) p[i] = g_emText[i];
+            p[n - 1] = 0;
+        }
+        /* EmEditor 风格：把结尾 NUL 也算进计数（nav.c 会剥掉多余的 NUL） */
+        return g_emLen + 1;
+    }
+    case EM_GETSEL:                 /* 打包 (start, end)，这里按**字节**给 */
+        return (LRESULT)((DWORD)g_emByteCaret | ((DWORD)g_emByteCaret << 16));
+    case EM_SETSEL:
+        g_emSetSel++;
+        return 0;
+    case WM_KEYDOWN:
+        g_emKd++;
+        return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
 static LRESULT CALLBACK SciProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case SCI_GETTEXTLENGTH: return g_docLen;
@@ -255,6 +294,42 @@ int main(void) {
         EXPECT(LOWORD(sel) == 0, "EC: Edit 控件左跳回到 0");
         DestroyWindow(e);
         SetFocus(h);
+    }
+
+    /* ---- H. 假 EmEditorView（UTF-8 文档：位置按字节给）----
+       断言两件事：
+         · 一次 EM_SETSEL 都不发 —— 说明 Edit 通道**整体放弃**，而不是把越界的
+           EM_GETSEL 钳到文本末尾后继续用（那正是把 EmEditor 光标写到多字节
+           字符中间、连真实方向键都搞坏的路径）；
+         · 退回原生 Ctrl+方向（假窗口收到了方向键），跳转功能不因此消失。 */
+    {
+        WNDCLASSW ec = {0};
+        ec.lpfnWndProc   = EmProc;
+        ec.hInstance     = GetModuleHandleW(NULL);
+        ec.lpszClassName = L"EmEditorView";
+        RegisterClassW(&ec);
+
+        HWND em = CreateWindowW(L"EmEditorView", L"EmTest",
+                                WS_CHILD | WS_VISIBLE | WS_BORDER,
+                                10, 40, 380, 28, h, NULL, ec.hInstance, NULL);
+        if (!em) {
+            printf("  [FAIL] 假 EmEditorView 窗口创建失败\n");
+            fails++;
+        } else {
+            SetFocus(em);
+            Pump(150);
+            g_emLen = (int)wcslen(g_emText);      /* 22 个字符 */
+            g_emByteCaret = g_emLen * 3;          /* 66 字节：单位不一致的典型值 */
+            g_emSetSel = 0; g_emKd = 0;
+            NavJump(DIR_LEFT, FALSE);
+            Pump(400);
+            EXPECT(g_emSetSel == 0,
+                   "EM: 单位不一致 -> 完全不调用 EM_SETSEL（整条通道放弃）");
+            EXPECT(g_emKd > 0, "EM: 退回原生 Ctrl+方向（功能不丢）");
+            DestroyWindow(em);
+            SetFocus(h);
+            Pump(100);
+        }
     }
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
