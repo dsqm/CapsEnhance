@@ -591,8 +591,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int act = (int)wp;
         StackPush(act);
         if (g_recording.load())
-            CapLog("  [和弦] %s 按下 (active=%s inflight=%d)",
-                   ActName(act), ActName(g_activeAct), ActInFlight());
+            CapLog("  [和弦] %s 按下 (active=%s inflight=%d enh=%d shf=%d)",
+                   ActName(act), ActName(g_activeAct), ActInFlight(),
+                   (lp & TRIGF_ENH) ? 1 : 0, (lp & TRIGF_SHF) ? 1 : 0);
         /* 已在重复时按下另一个键、或当前没动作：都走这里 —— 按下即开火，
            不等稳定期（见 SnapMods 的说明）。短点（按下就抬手）同样从这条路
            开火，抬起时只补"还差的次数"（见 WM_TRIG_UP）。 */

@@ -77,6 +77,25 @@ static void TapVk(WORD vk) {
     Sleep(40);
 }
 
+/* 不带 EXTENDEDKEY 的普通键（F8 这类） */
+static void TapVkPlain(WORD vk) {
+    INPUT in[2];
+    memset(in, 0, sizeof(in));
+    in[0].type = INPUT_KEYBOARD; in[0].ki.wVk = vk;
+    in[0].ki.wScan = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    in[1] = in[0]; in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
+    SendInput(2, in, sizeof(INPUT));
+    Sleep(60);
+}
+
+/* 读回 (caret, selEnd)：两者不同 = 当前有选区 */
+static void ReadSel(HWND h, int* caret, int* selEnd) {
+    LONGLONG s = 0;
+    SendMessageTimeoutW(h, EM_GETSEL, 0, 0, SMTO_ABORTIFHUNG, 300, (PDWORD_PTR)&s);
+    DWORD v = (DWORD)s;
+    *caret = (int)LOWORD(v); *selEnd = (int)HIWORD(v);
+}
+
 static int ReadCaret(HWND h) {
     LONGLONG s = 0;
     SendMessageTimeoutW(h, EM_GETSEL, 0, 0, SMTO_ABORTIFHUNG, 300, (PDWORD_PTR)&s);
@@ -388,6 +407,40 @@ int main(void) {
                                 SMTO_ABORTIFHUNG, 300, NULL);   /* 复位以便下一轮 */
             Sleep(60);
         }
+    }
+
+    /* ================= G. EmEditor 的"选择模式"假设验证 =================
+       现象（用户）：光标在行尾，按两下 N 之后"整行被选中了"，光标却还在结尾，
+       之后按 L"取消选中"的行为也不对。
+       这与 EmEditor 的**选择模式**（默认 F8，开启后所有光标移动都变成扩展
+       选区）完全吻合：活动端留在原处、另一端移到词边界 -> 看起来就是"选中了
+       一段、光标还在原地"。
+       这里做实验：记下"移动是否变成选区" -> 按一次 F8 -> 再看一遍 -> 再按
+       一次 F8 复原。"移动是否变成选区"用 (caret, selEnd) 是否相等判断。 */
+    printf("\n---- G. \u9009\u62e9\u6a21\u5f0f\uff08F8\uff09\u5047\u8bbe\u9a8c\u8bc1 ----\n");
+    {
+        FocusEditor(h);
+        /* \u6ce8\u610f\uff1a\u6bcf\u6b21 EM_SETSEL \u5b9a\u4f4d\u540e\uff0c**\u7b2c\u4e00\u652f\u65b9\u5411\u952e\u5fc5\u88ab\u541e**\uff08\u5c31\u662f F \u6bb5\u90a3\u4e2a\u73b0\u8c61\uff09\uff0c
+           \u6240\u4ee5\u6bcf\u7ec4\u90fd\u5148\u53d1\u4e00\u652f"\u6d88\u5316\u7528"\u7684\u65b9\u5411\u952e\uff0c\u518d\u53d1\u89c2\u5bdf\u7528\u7684\u90a3\u652f\uff0c
+           \u5426\u5219\u6d4b\u5230\u7684\u6c38\u8fdc\u53ea\u662f"\u88ab\u541e"\u3002 */
+        #define OBSERVE(tag) \
+            do { \
+                SendMessageTimeoutW(h, EM_SETSEL, (WPARAM)40, (LPARAM)40, SMTO_ABORTIFHUNG, 300, NULL); \
+                Sleep(120); \
+                TapVk(VK_LEFT);                 /* \u6d88\u5316\u88ab\u541e\u7684\u90a3\u4e00\u6b21 */ \
+                int ca, sa; ReadSel(h, &ca, &sa); \
+                TapVk(VK_LEFT);                 /* \u89c2\u5bdf\u7528 */ \
+                int cb, sb; ReadSel(h, &cb, &sb); \
+                printf("  %s: \u6d88\u5316\u540e (%d,%d) --\u5de6\u79fb--> (%d,%d)  %s\\n", tag, ca, sa, cb, sb, \
+                       (cb != sb) ? "\u79fb\u52a8\u53d8\u6210\u4e86\u9009\u533a\uff01" : "\u666e\u901a\u79fb\u52a8\uff08\u6298\u53e0\uff09"); \
+            } while (0)
+
+        OBSERVE("G1 \u666e\u901a\u72b6\u6001      ");
+        TapVkPlain(VK_F8); Sleep(150);
+        OBSERVE("G2 \u6309\u8fc7 F8 \u540e     ");
+        TapVkPlain(VK_F8); Sleep(150);
+        OBSERVE("G3 \u518d\u6309 F8 \u590d\u539f  ");
+        #undef OBSERVE
     }
 
     /* 尽量把光标放回原处（用 EM_SETSEL 只在"原位"上，不改文本） */

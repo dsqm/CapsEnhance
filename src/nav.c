@@ -1192,8 +1192,11 @@ static int NavJumpInner(int dir, BOOL shift) {
 
     int steps = 0;
     int tgt = WordJumpTarget(text, len, activeCaret, dir, &steps);
-    if (g_recording.load()) CapLog("  path=%s len=%d caret=%d -> steps=%d tgt=%d",
-                            ChanName(path), len, activeCaret, steps, tgt);
+    if (g_recording.load())
+        CapLog("  path=%s len=%d caret=%d selEnd=%d shift=%d -> steps=%d tgt=%d%s",
+               ChanName(path), len, activeCaret, selEnd, shift ? 1 : 0, steps, tgt,
+               (shift && selEnd != caret) ? "  [本次判定为带选区修饰：会从当前端扩展到词边界]"
+                                          : "");
 
     if (steps <= 0) {
         /* 已到边界，无可跳转；此时读文本已成功，只是边界无可跳。
