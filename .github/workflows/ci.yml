@@ -60,6 +60,8 @@ jobs:
             echo artifact:
             for %%F in (bin\CapsEnhance.exe) do echo   size   = %%~zF bytes
             certutil -hashfile bin\CapsEnhance.exe SHA256
+            for %%F in (bin\CapsEnhanceSettings.exe) do echo settings size = %%~zF bytes
+            certutil -hashfile bin\CapsEnhanceSettings.exe SHA256
           ) > bin\BUILD-FINGERPRINT.txt
           type bin\BUILD-FINGERPRINT.txt
 
@@ -84,10 +86,13 @@ jobs:
         shell: cmd
         run: call test\build_wpsjump.bat
 
-      - name: Upload CapsEnhance.exe
+      # 两个 exe 一起发布：托盘的"设置"按同目录找 CapsEnhanceSettings.exe，
+      # 少带一个就等于设置功能在用户那里直接不可用。
+      - name: Upload exes
         uses: actions/upload-artifact@v4
         with:
           name: CapsEnhance-${{ github.sha }}
           path: |
             bin/CapsEnhance.exe
+            bin/CapsEnhanceSettings.exe
             bin/BUILD-FINGERPRINT.txt

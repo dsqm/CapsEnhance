@@ -43,6 +43,8 @@
 #define WM_MODE_UP     (WM_APP + 10)/* 某修饰模式的激活键全部抬起：wParam=mode */
 #define WM_WHEEL_HACCEL (WM_APP + 11)/* 横向滚动（Caps+Shift+滚轮）：wParam=delta，lParam=倍数。
                                        方向同浏览器：滚轮向上 = 向左。钩子已吞掉物理格。 */
+#define WM_RESTART_REQUEST (WM_APP + 12) /* 外部请求重启（--restart / 设置程序保存后） */
+#define WM_AUTODISABLE   (WM_APP + 13) /* 钩子 -> 主线程：自动屏蔽状态变化（wParam=1 命中名单） */
 
 #define PROBE_KEY      VK_OEM_3    /* 按住 C 时按 ` 触发焦点探测 */
 
@@ -243,6 +245,13 @@ void ActWheelClear(void);                /* 丢弃未补发的滚轮请求（松
    WheelScrollMul（倍数量与时间量是两种量，不混用）。 */
 void ActAutoScrollWheel(int delta);   /* 主线程：增强模式下的一次滚轮 */
 void ActAutoScrollStop(void);         /* 立即终止（暂停 / 退出 / 重启 / 反向滚） */
+/* 本次持续滚动是否"只发整格"（前台程序命中 [NoSmoothScroll] 名单）。
+   由 ActAutoScrollWheel 在**启动那一刻**按前台程序判定一次并记住：判定要查
+   前台进程名（OpenProcess），不能放在每拍的工作线程里，也没必要 —— 滚动
+   期间换程序的场景不值得为它每拍付一次系统调用。
+   对外暴露是为了可测（单测直接调它就能验证整格/小数刻度两条路）。 */
+void ActAutoScrollSetNoSmooth(BOOL on);
+BOOL ActAutoScrollNoSmooth(void);
 /* 钩子线程：用户有新输入 -> 打断。why/detail 只用于**记录模式下的那行日志**
    （与全项目一致：日志文件只在 `C + \`` 记录期间生成）；要查"它为什么停了"，
    先开始记录再复现，日志里会写清是谁停的与细节（键码 / 滚轮增量 / 鼠标消息号）。 */
@@ -304,6 +313,19 @@ void SendForceResetKeys(void);               /* 无条件对所有修饰键补�
 extern HWND g_mainWnd;
 
 /* ---------- 配置模块（CapsEnhance.ini，与 exe 同目录） ---------- */
+/* 进程名名单编号。三份名单语义完全不同（改通道 / 整段不介入 / 只改滚动粒度），
+   所以是"三份"而不是"一份 + 三个开关"。编号放在这里是为了让 cap.h 就能
+   表达"查哪份名单"（ConfigMatchList），而不必把 config.c 的枚举暴露出去。 */
+#define CFG_LIST_NATIVE      0   /* [NativeWordJump]：不做文本探测，直接发 Ctrl+←/→ */
+#define CFG_LIST_AUTODISABLE 1   /* [AutoDisable]：前台是它时整段不介入          */
+#define CFG_LIST_NOSMOOTH    2   /* [NoSmoothScroll]：持续滚动只发整格           */
+#define CFG_LIST_COUNT       3
+
+/* 名单容量：设置程序要用它来定界面里的数组，所以放在这里而不是 config.c
+   （同一份判据，别在两处各写一个 128 / 64）。 */
+#define CFG_MAX_ENTRIES 128   /* 每份名单最多多少条 */
+#define CFG_NAME_MAX    64    /* 单条进程名的最大字符数（含结尾的 0） */
+
 void ConfigLoad(void);                       /* 启动时读配置；缺失则写注释模板 */
 void ConfigLoadFrom(const WCHAR* path);      /* 从指定路径加载（单测用） */
 void ConfigUpgradeFile(const WCHAR* path);   /* 老配置补齐新增键（单测用） */
@@ -320,11 +342,31 @@ int  ConfigGetWheelScrollMul(void);         /* [General] WheelScrollMul：Caps+�
 int  ConfigGetWheelHScrollMul(void);        /* [General] WheelHScrollMul：Caps+Shift+滚轮 横向倍数，0=关闭 */
 int  ConfigGetAutoScrollInterval(void);     /* [General] AutoScrollInterval：持续滚动初始速度(ms/格) */
 int  ConfigGetAutoScrollFastMs(void);        /* [General] AutoScrollFastMs：持续滚动最快速度(ms/格) */
-BOOL ConfigGetAutoScrollSmooth(void);       /* [General] AutoScrollSmooth：小数刻度平滑注入 */
 BOOL ConfigGetAllowScintillaRead(void);     /* [General] AllowScintillaRead：允许 Scintilla 通道读目标进程内存（0=关闭该通道） */
-BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中名单 */
+BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中 [NativeWordJump] */
+BOOL ConfigIsAutoDisabled(HWND focus);      /* 前台窗口的进程是否命中 [AutoDisable]（命中 = 整段不介入） */
+BOOL ConfigIsNoSmoothScroll(HWND focus);    /* 前台窗口的进程是否命中 [NoSmoothScroll]（命中 = 持续滚动只发整格） */
+BOOL ConfigMatchList(int list, const WCHAR* exeName); /* 进程名是否命中指定名单（CFG_LIST_*） */
 BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口的进程 exe 名 */
 BOOL IsRunElevated(void);                   /* 真实运行权限（查进程令牌） */
+
+/* ---- 设置程序（settings/settings.c）用：改值 + 增量写回 ----
+   只给设置程序用：它改的是"某个配置项"，不是整份文本。钳制与解析同源
+   （config.c 的 Clamp*），写回保留注释与未知段（规则见 ConfigSaveFile）。
+   新增配置项时这里也要加一个 Set —— 与 Get 成对，漏了就是"界面改不动它"。 */
+void ConfigSetRunAsAdmin(BOOL v);
+void ConfigSetLogMaxKB(int v);
+void ConfigSetMaxArrowSteps(int v);
+void ConfigSetOverStepCtrl(BOOL v);
+void ConfigSetWheelScrollMul(int v);
+void ConfigSetAutoScrollInterval(int v);
+void ConfigSetAutoScrollFastMs(int v);
+void ConfigSetWheelHScrollMul(int v);
+void ConfigSetAllowScintillaRead(BOOL v);
+void        ConfigSetList(int list, const WCHAR* const* names, int n); /* 整份替换 */
+int         ConfigListCount(int list);
+const WCHAR* ConfigListAt(int list, int i);
+BOOL ConfigSaveFile(const WCHAR* path);      /* 写回 ini；失败返回 FALSE（文件不落盘） */
 
 /* ---------- 诊断/日志 ---------- */
 /* 日志写在 exe 同目录的 log\ 子目录里：一次记录一个文件

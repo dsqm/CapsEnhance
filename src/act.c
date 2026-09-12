@@ -288,12 +288,17 @@ static void WheelLaneStop(void) {
    旧写法是"每拍补 `档位` 格"：第 2 档起就是"一小串脉冲 + 一大段静默"，
    看上去在抖 —— 这就是本模型要替换掉的东西。
 
-   粒度（AutoScrollSmooth，默认开）：整格模式每拍发 120（原样一格）；平滑模式
-   把"一格"拆成若干**小数刻度**、同时把节拍缩短到 AUTOSCROLL_SMOOTH_TICK ——
-   两者速度完全等价（delta/beat 不变），但注入点更多、每次更小，于是像触控板
-   那样连续滑动，而不是"一格一格跳"。Windows 文档明确支持小数 zDelta
-   （"WHEEL_DELTA 的倍数或约数"），触控板正是这么滚的；目标程序若不做小数
-   累积就会完全不动，那种程序把 AutoScrollSmooth 设为 0 即可。
+   粒度（默认平滑）：平滑模式把"一格"拆成若干**小数刻度**、同时把节拍缩短到
+   AUTOSCROLL_SMOOTH_TICK —— 两者速度完全等价（delta/beat 不变），但注入点
+   更多、每次更小，于是像触控板那样连续滑动，而不是"一格一格跳"。Windows
+   文档明确支持小数 zDelta（"WHEEL_DELTA 的倍数或约数"），触控板正是这么滚的。
+   目标程序若不做小数累积就会完全不动 —— 那种程序写进 **[NoSmoothScroll]**
+   名单即可（整格模式：每拍发 120）。
+
+   为什么名单而不是一个全局开关：这是"个别程序的行为"，让所有程序一起陪着
+   退化没有道理；而且用户往往要滚的正是"不累积小数刻度"的那个程序，全局关
+   掉等于把最常用的那条路也堵了。判定在**启动那一刻**做一次（见
+   ActAutoScrollSetNoSmooth）：查前台进程名要 OpenProcess，不能每拍都做。
 
    状态机（active/dir/gear）由主线程在锁内更新，工作线程只按拍输出。
 
@@ -372,10 +377,16 @@ static DWORD AutoScrollTickMs(int gear) {
    注意慢到"每格时长 > 120*SMOOTH_TICK"(=4800ms) 时 delta 已经是最小的 1，
    此时节拍自然超过 SMOOTH_TICK（注入变疏）—— 这是"整刻度的物理下限"，
    不是缺陷：一个 120 的刻度拆不出比 1 更小的整数部分。
-   若某档本来就快过 SMOOTH_TICK（快速档/小 base），保持整格，免得 delta > 120。 */
+   若某档本来就快过 SMOOTH_TICK（快速档/小 base），保持整格，免得 delta > 120。
+
+   noSmooth = 前台程序命中 ** [NoSmoothScroll] ** 名单：整格模式。
+   声明在**这里**（函数上方）是因为 AutoScrollPlan 既被工作线程每拍调用、
+   也被单测的 ActAutoScrollBeat/Delta 调用，而"设置它"的 ActAutoScrollWheel
+   在文件更下方 —— 读方在前，就必须在读方之前声明。 */
+static volatile LONG   s_asNoSmooth = 0;
 static void AutoScrollPlan(int gear, DWORD* beat, int* delta) {
     DWORD gearTick = AutoScrollTickMs(gear);
-    if (ConfigGetAutoScrollSmooth() && gearTick > AUTOSCROLL_SMOOTH_TICK) {
+    if (!ATOMIC(&s_asNoSmooth) && gearTick > AUTOSCROLL_SMOOTH_TICK) {
         int d = (int)((WHEEL_STD_DELTA * (LONG)AUTOSCROLL_SMOOTH_TICK + (LONG)gearTick / 2)
                       / (LONG)gearTick);          /* 四舍五入 */
         if (d < 1) d = 1;
@@ -469,6 +480,13 @@ void ActAutoScrollInterrupt(const char* why, int detail) {
     ActAutoScrollStop();
 }
 
+/* 设/读"本次只发整格"。生产路径由 ActAutoScrollWheel 在启动那一刻按前台程序
+   调用；对外暴露是为了单测能直接验证整格与小数刻度两条路（不必伪造前台窗口）。 */
+void ActAutoScrollSetNoSmooth(BOOL on) {
+    InterlockedExchange(&s_asNoSmooth, on ? 1 : 0);
+}
+BOOL ActAutoScrollNoSmooth(void) { return ATOMIC(&s_asNoSmooth) != 0; }
+
 /* 单测用：给个机会把超时缩短（否则测一次要真等 10 分钟）。<=0 回缺省。 */
 void ActAutoScrollTestSetMax(int ms) {
     InterlockedExchange(&s_asMaxMs, (ms > 0) ? (LONG)ms : (LONG)AUTOSCROLL_MAX_MS);
@@ -498,6 +516,11 @@ void ActAutoScrollWheel(int delta) {
            dir/gear"，反过来写会让它读到 active=1、dir=0 的中间态 —— 那是"刚启动
            就自己停"与"空转"两种症状的来源。置 active 之前对工作线程而言都只是
            "还没在滚"，所以这样写没有任何窗口。 */
+        /* 粒度只在这里定一次：查前台进程名要 OpenProcess + 查询映像名，放在
+           每拍里做就是给"每一格滚动"加一次系统调用 —— 滚动期间换窗口这种
+           场景不值得付这个价（换窗口后重新滚一次即会重判）。 */
+        InterlockedExchange(&s_asNoSmooth,
+                            ConfigIsNoSmoothScroll(GetForegroundWindow()) ? 1 : 0);
         InterlockedExchange(&s_asDir, dir);
         InterlockedExchange(&s_asGear, 1);   /* 第一滚：最慢档启动 */
         InterlockedExchange(&s_asTicks, 0);  /* 新会话：拍数从头数（日志用） */

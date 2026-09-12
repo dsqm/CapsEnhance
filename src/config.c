@@ -10,15 +10,29 @@
 /* ================= 配置模块（CapsEnhance.ini，与 exe 同目录） =================
    零依赖 INI 风格：分节保存，便于以后继续加值。
      [General]         键值项：Key = Value
-     [NativeWordJump]  进程名名单（每行一个）
-   ; 或 # 开头的行是注释；空行忽略；[段名] 行切段。
+     [NativeWordJump]  进程名名单：不做文本探测，直接发 Ctrl+←/→
+     [AutoDisable]     进程名名单：前台是它时**整段不介入**（CapsLock 恢复正常）
+     [NoSmoothScroll]  进程名名单：持续滚动只发整格（不累积小数刻度的程序）
+   `;` 开头的行是注释（`#` **不是**）；空行忽略；`[段名]` 行切段。
    进程名完全匹配（大小写不敏感，.exe 后缀可写可不写）。
    文件不存在时写出一个带注释的模板。
-   占用：固定 128 条 × 64 字符的静态数组（约 16KB），无动态增长。 */
 
-#define CFG_MAX_ENTRIES 128
-#define CFG_NAME_MAX    64
+   三份名单**各自独立**：它们语义完全不同（改通道 / 整段不介入 / 只改滚动
+   粒度），共用一份就等于"任一命中都会触发所有行为"。所以名单是"加了索引
+   的数组"，而不是"一个数组 + 几个常量"。
+   占用：3 × 128 条 × 64 字符的静态数组（约 48KB），无动态增长。 */
+
+/* CFG_MAX_ENTRIES / CFG_NAME_MAX 在 cap.h（设置程序也要用） */
 #define CFG_VAL_LEN     256   /* 配置值缓冲：键名短，值留宽一点，宁可截断不可越界 */
+
+/* 名单编号：只在 config.c 内部使用（对外一律用具名查询函数，见文件末尾）。
+   加一份名单 = 加一个枚举值 + 一个段名 + 一个查询函数，解析/存储不用改。 */
+typedef enum {
+    CFGLIST_NATIVE     = CFG_LIST_NATIVE,      /* [NativeWordJump] */
+    CFGLIST_AUTODISABLE= CFG_LIST_AUTODISABLE, /* [AutoDisable]    */
+    CFGLIST_NOSMOOTH   = CFG_LIST_NOSMOOTH,    /* [NoSmoothScroll] */
+    CFGLIST_COUNT      = CFG_LIST_COUNT
+} CfgListId;
 
 /* 横向滚动的默认倍数：**1**（不放大）。
    横向是"每次滚轮挪一列"的语义，倍数 1 = 一个物理格换一次横向滚动，
@@ -105,14 +119,6 @@
 #define AUTOSCROLL_FAST_MIN      20
 #define AUTOSCROLL_FAST_MAX   60000
 
-/* 自动滚动是否用"高分频"平滑注入（默认开）。
-   标准滚轮刻度 WHEEL_DELTA = 120 是"一格"，但 Windows 明确支持**小于**
-   WHEEL_DELTA 的增量（文档：zDelta 是 WHEEL_DELTA 的"倍数或约数"）——
-   触控板/自由滚轮就是这么滚的：次数多、每次小。于是同一速度下可以有更多
-   注入点、每次只挪一点点，手感从"一格一格跳"变成连续滑动。
-   个别程序对小数刻度不做累积（表现为完全不动），把这里设 0 退回整格模式。 */
-#define AUTOSCROLL_SMOOTH_DEFAULT 1
-
 /* Scintilla 通道是否允许读取目标进程内存（默认开）。
    Scintilla 的 SCI_GETTEXT 只接受"对方进程地址空间里的缓冲区"，所以读全文
    必然要 OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ) + VirtualAllocEx
@@ -128,9 +134,13 @@
    约 13ms/格且目标程序要逐个处理，长跳会有可见的"光标爬行"；改发原生
    Ctrl+方向是一次到位（代价是落点由目标程序的词切分决定，需回读补正）。 */
 #define MAX_ARROW_STEPS_DEFAULT 4
+#define MAX_ARROW_STEPS_MAX     256   /* 注释里一直这么写，这里让它成为唯一的判据 */
 
-static WCHAR g_names[CFG_MAX_ENTRIES][CFG_NAME_MAX];
-static int   g_count = 0;
+/* 横向倍数的上限：与纵向同一个口径（以前是散在解析分支里的字面量 16） */
+#define WHEEL_HMUL_MAX 16
+
+static WCHAR g_names[CFGLIST_COUNT][CFG_MAX_ENTRIES][CFG_NAME_MAX];
+static int   g_count[CFGLIST_COUNT];
 static BOOL  g_runAsAdmin = TRUE;    /* 缺省启用（缺省配置就是 RunAsAdmin = 1） */
 static int   g_logMaxKB   = LOG_MAX_KB_DEFAULT;   /* 日志大小上限（KB），0 = 不限制 */
 static int   g_maxArrowSteps = MAX_ARROW_STEPS_DEFAULT;  /* 逐格步数上限，达到即改道 */
@@ -138,9 +148,12 @@ static BOOL  g_overStepCtrl = TRUE;  /* TRUE=超限改发 Ctrl+方向（原生�
 static int   g_wheelMul = WHEEL_MUL_DEFAULT;  /* Caps+滚轮 放大倍数，<2 = 不放大 */
 static int   g_autoScrollFastMs = AUTOSCROLL_FAST_DEFAULT;       /* 自动滚动最快速度(ms/格) */
 static int   g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT; /* 自动滚动初始节拍(ms) */
-static BOOL  g_autoScrollSmooth = AUTOSCROLL_SMOOTH_DEFAULT;     /* 自动滚动平滑注入 */
 static int   g_wheelHMul = WHEEL_HMUL_DEFAULT; /* Caps+Shift+滚轮 的横向滚动倍数，0=关闭 */
 static BOOL  g_allowSciRead = ALLOW_SCINTILLA_READ_DEFAULT; /* Scintilla 通道读目标进程内存 */
+/* 注：AutoScrollSmooth（全局平滑开关）已**删除**：它要表达的是"某些程序
+   不累积小数刻度"，那天然是"按程序区分"的事，做成全局开关就等于让所有程序
+   一起陪着退化。现在由 [NoSmoothScroll] 名单承担（见 ActAutoScrollWheel），
+   老配置里那行既不解析也不报错 —— 留着无害。 */
 
 /* 整数：只认前导十进制数字，其余（空/非法）返回默认值。
    超过 1e8 直接判非法：没有哪个配置项需要这么大，而继续累加会让
@@ -157,7 +170,19 @@ static int ParseIntW(const WCHAR* v, int def) {
     return any ? (int)n : def;
 }
 
-typedef enum { SEC_NONE, SEC_GENERAL, SEC_NATIVE, SEC_OTHER } CfgSec;
+typedef enum { SEC_NONE, SEC_GENERAL, SEC_NATIVE, SEC_AUTODISABLE,
+               SEC_NOSMOOTH, SEC_OTHER } CfgSec;
+
+/* 段名 -> 名单编号；不是名单段返回 -1。
+   段名一律大小写不敏感、并容忍 "Native Word Jump" 这种带空格的老写法。 */
+static int SecList(CfgSec sec) {
+    switch (sec) {
+    case SEC_NATIVE:      return CFGLIST_NATIVE;
+    case SEC_AUTODISABLE: return CFGLIST_AUTODISABLE;
+    case SEC_NOSMOOTH:    return CFGLIST_NOSMOOTH;
+    default:              return -1;
+    }
+}
 
 static void ConfigDefaultPath(WCHAR* out, size_t cap) {
     WCHAR wexe[MAX_PATH]; DWORD n = GetModuleFileNameW(NULL, wexe, MAX_PATH);
@@ -193,20 +218,42 @@ static BOOL ParseBoolW(const WCHAR* v) {
     return (v[0] == L'1' && v[1] == L'\0');
 }
 
-static void AddEntry(const WCHAR* name) {
-    if (g_count >= CFG_MAX_ENTRIES) return;
+/* ---------- 钳制：一份判据，解析与"设置程序改值"共用 ----------
+   以前这些上下限只写在解析分支里；设置程序要改值就只能再抄一遍，两处一旦
+   分叉就是"界面允许 999、加载回来变成 16"这类说不清的问题。现在解析与
+   ConfigSet* 都走这里。 */
+static int ClampInt(int v, int lo, int hi) {
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    return v;
+}
+static int ClampLogMaxKB(int v)  { return ClampInt(v, 0, LOG_MAX_KB_MAX); }
+static int ClampMaxArrowSteps(int v) { return ClampInt(v, 0, MAX_ARROW_STEPS_MAX); }
+static int ClampWheelMul(int v)  { return ClampInt(v, 0, WHEEL_MUL_MAX); }
+static int ClampWheelHMul(int v) { return ClampInt(v, 0, WHEEL_HMUL_MAX); }
+static int ClampInterval(int v)  { return ClampInt(v, AUTOSCROLL_INTERVAL_MIN, AUTOSCROLL_INTERVAL_MAX); }
+static int ClampFastMs(int v)    { return ClampInt(v, AUTOSCROLL_FAST_MIN, AUTOSCROLL_FAST_MAX); }
+
+static void AddEntry(int list, const WCHAR* name) {
+    if (list < 0 || list >= CFGLIST_COUNT) return;
+    if (g_count[list] >= CFG_MAX_ENTRIES) return;
     WCHAR tmp[CFG_NAME_MAX];
     _snwprintf_s(tmp, CFG_NAME_MAX, _TRUNCATE, L"%s", name);
     TrimW(tmp);
     StripExeW(tmp);
     if (!tmp[0]) return;
-    wcscpy_s(g_names[g_count], CFG_NAME_MAX, tmp);
-    g_count++;
+    wcscpy_s(g_names[list][g_count[list]], CFG_NAME_MAX, tmp);
+    g_count[list]++;
+}
+
+/* 名单是否为空 -> 决定查询是否可以"零成本短路"（名单空时连进程名都不用查） */
+static BOOL ListEmpty(int list) {
+    return (list < 0 || list >= CFGLIST_COUNT) ? TRUE : (g_count[list] == 0);
 }
 
 /* 非 static：供单元测试直接喂指定路径 */
 void ConfigLoadFrom(const WCHAR* path) {
-    g_count = 0;
+    for (int i = 0; i < CFGLIST_COUNT; i++) g_count[i] = 0;
     g_runAsAdmin = TRUE;
     g_logMaxKB = LOG_MAX_KB_DEFAULT;
     g_maxArrowSteps = MAX_ARROW_STEPS_DEFAULT;
@@ -214,7 +261,6 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_wheelMul = WHEEL_MUL_DEFAULT;
     g_autoScrollFastMs = AUTOSCROLL_FAST_DEFAULT;
     g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT;
-    g_autoScrollSmooth = AUTOSCROLL_SMOOTH_DEFAULT;
     g_wheelHMul = WHEEL_HMUL_DEFAULT;
     g_allowSciRead = ALLOW_SCINTILLA_READ_DEFAULT;
 
@@ -266,6 +312,10 @@ void ConfigLoadFrom(const WCHAR* path) {
             if (_wcsicmp(name, L"general") == 0)          sec = SEC_GENERAL;
             else if (_wcsicmp(name, L"nativewordjump") == 0 ||
                      _wcsicmp(name, L"native word jump") == 0) sec = SEC_NATIVE;
+            else if (_wcsicmp(name, L"autodisable") == 0 ||
+                     _wcsicmp(name, L"auto disable") == 0)     sec = SEC_AUTODISABLE;
+            else if (_wcsicmp(name, L"nosmoothscroll") == 0 ||
+                     _wcsicmp(name, L"no smooth scroll") == 0) sec = SEC_NOSMOOTH;
             else                                          sec = SEC_OTHER;
         } else if (sec == SEC_GENERAL) {
             WCHAR* eq = wcschr(line, L'=');
@@ -276,20 +326,13 @@ void ConfigLoadFrom(const WCHAR* path) {
                 _snwprintf_s(val, CFG_VAL_LEN, _TRUNCATE, L"%s", eq + 1);
                 TrimW(key); TrimW(val); LowerW(key);
                 if (_wcsicmp(key, L"runasadmin") == 0) g_runAsAdmin = ParseBoolW(val);
-                else if (_wcsicmp(key, L"logmaxkb") == 0) {
-                    int v = ParseIntW(val, LOG_MAX_KB_DEFAULT);
-                    if (v < 0) v = 0;                        /* 0 = 不限制 */
-                    if (v > LOG_MAX_KB_MAX) v = LOG_MAX_KB_MAX;
-                    g_logMaxKB = v;
-                }
-                else if (_wcsicmp(key, L"maxarrowsteps") == 0) g_maxArrowSteps = ParseIntW(val, MAX_ARROW_STEPS_DEFAULT);
+                else if (_wcsicmp(key, L"logmaxkb") == 0)
+                    g_logMaxKB = ClampLogMaxKB(ParseIntW(val, LOG_MAX_KB_DEFAULT));
+                else if (_wcsicmp(key, L"maxarrowsteps") == 0)
+                    g_maxArrowSteps = ClampMaxArrowSteps(ParseIntW(val, MAX_ARROW_STEPS_DEFAULT));
                 else if (_wcsicmp(key, L"overstepmode") == 0) g_overStepCtrl = ParseBoolW(val);
-                else if (_wcsicmp(key, L"wheelscrollmul") == 0) {
-                    int v = ParseIntW(val, WHEEL_MUL_DEFAULT);
-                    if (v < 0) v = 0;
-                    if (v > WHEEL_MUL_MAX) v = WHEEL_MUL_MAX;
-                    g_wheelMul = v;
-                }
+                else if (_wcsicmp(key, L"wheelscrollmul") == 0)
+                    g_wheelMul = ClampWheelMul(ParseIntW(val, WHEEL_MUL_DEFAULT));
                 /* 过渡期曾把本条改名为 WheelScrollMs（毫秒/格）。两种量不可换算，
                    所以旧键名既不解析、也不据它推算任何值 —— 直接忽略即可，
                    升级机制会补上新的 WheelScrollMul（老配置里那行 WheelScrollMs
@@ -298,37 +341,26 @@ void ConfigLoadFrom(const WCHAR* path) {
                    与上面那条同名的分支重复 —— 那条永远先匹配，于是这块成了
                    永不执行的死代码，还让人误以为旧键被特殊处理过。 */
                 else if (_wcsicmp(key, L"wheelscrollms") == 0) { /* 忽略（旧语义） */ }
-                else if (_wcsicmp(key, L"autoscrollinterval") == 0) {
-                    int v = ParseIntW(val, AUTOSCROLL_INTERVAL_DEFAULT);
-                    if (v < AUTOSCROLL_INTERVAL_MIN) v = AUTOSCROLL_INTERVAL_MIN;
-                    if (v > AUTOSCROLL_INTERVAL_MAX) v = AUTOSCROLL_INTERVAL_MAX;
-                    g_autoScrollInterval = v;
-                }
-                else if (_wcsicmp(key, L"autoscrollfastms") == 0) {
-                    int v = ParseIntW(val, AUTOSCROLL_FAST_DEFAULT);
-                    if (v < AUTOSCROLL_FAST_MIN) v = AUTOSCROLL_FAST_MIN;
-                    if (v > AUTOSCROLL_FAST_MAX) v = AUTOSCROLL_FAST_MAX;
-                    g_autoScrollFastMs = v;
-                }
-                else if (_wcsicmp(key, L"wheelhscrollmul") == 0) {
-                    int v = ParseIntW(val, WHEEL_HMUL_DEFAULT);
-                    if (v < 0) v = 0;      /* 0 = 关闭横向滚动 */
-                    if (v > 16) v = 16;    /* 与纵向 WheelScrollMul 同一个上限口径 */
-                    g_wheelHMul = v;
-                }
-                else if (_wcsicmp(key, L"autoscrollsmooth") == 0)
-                    g_autoScrollSmooth = ParseBoolW(val);
+                else if (_wcsicmp(key, L"autoscrollinterval") == 0)
+                    g_autoScrollInterval = ClampInterval(ParseIntW(val, AUTOSCROLL_INTERVAL_DEFAULT));
+                else if (_wcsicmp(key, L"autoscrollfastms") == 0)
+                    g_autoScrollFastMs = ClampFastMs(ParseIntW(val, AUTOSCROLL_FAST_DEFAULT));
+                else if (_wcsicmp(key, L"wheelhscrollmul") == 0)
+                    g_wheelHMul = ClampWheelHMul(ParseIntW(val, WHEEL_HMUL_DEFAULT));
+                /* autoscrollsmooth 已废弃（由 [NoSmoothScroll] 名单取代）：
+                   既不解析、也不据它推算任何值 —— 写进去完全无副作用。 */
+                else if (_wcsicmp(key, L"autoscrollsmooth") == 0) { /* 忽略（已废弃） */ }
                 else if (_wcsicmp(key, L"allowscintillaread") == 0)
                     g_allowSciRead = ParseBoolW(val);
                 /* 其余 [General] 项一律忽略：本项目所有配置项都在上面具名解析。
                    不认识的键（含已废弃的旧键名）留着也只是噪音，不解析、不保存。 */
                 else { /* 忽略未知/废弃键 */ }
             }
-        } else if (sec == SEC_NATIVE) {
-            AddEntry(line);
+        } else if (SecList(sec) >= 0) {
+            AddEntry(SecList(sec), line);
         } else if (sec == SEC_NONE) {
-            /* 兼容早期"不分节、一行一个进程名"的写法 */
-            if (!wcschr(line, L'=')) AddEntry(line);
+            /* 兼容早期"不分节、一行一个进程名"的写法（归入原生按词跳转名单） */
+            if (!wcschr(line, L'=')) AddEntry(CFGLIST_NATIVE, line);
         }
         line = nl ? nl + 1 : NULL;
     }
@@ -378,10 +410,6 @@ void ConfigLoad(void) {
             "; 范围 20..60000；想更快就调小，想让它也慢下来就调大。\n"
             "AutoScrollFastMs = 800\n"
             ";\n"
-            "; 自动滚动是否平滑注入（1=是 / 0=否）。1 时只发\"不足一格\"的小刻度、\n"
-            "; 次数更多，手感接近触控板连续滑动；个别程序不累积小刻度（完全不动）时设 0。\n"
-            "AutoScrollSmooth = 1\n"
-            ";\n"
             "; 横向滚动：按住 C + Shift 滚滚轮，横向挪动。倍数 1 = 一滚一格（默认），\n"
             "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n"
             "WheelHScrollMul = 1\n"
@@ -397,7 +425,22 @@ void ConfigLoad(void) {
             "; 直接发送 Ctrl+← / Ctrl+→，由该程序自身的词导航完成按词跳转（Shift 位移同样支持）。\n"
             "; 适用于文本读取不到、或读到的文本坐标与实际光标不符（按词跳转超调、光标乱飘）的程序。\n"
             "; 每行一个进程名：完全匹配、大小写不敏感、.exe 后缀可写可不写\n"
-            "Obsidian.exe";
+            "Obsidian.exe\n"
+            ";\n"
+            "[AutoDisable]\n"
+            "; 命中名单的程序**在前台**时：本程序整段不介入 —— CapsLock 恢复正常\n"
+            "; 功能，C+任意键也照常打字（不是“暂停后仍会吞键”，是真的完全不管）。\n"
+            "; 适合那些自己吃掉了 CapsLock、或 Caps 组合与它自己的快捷键冲突的程序\n"
+            "; （全屏游戏、远程桌面、虚拟机、部分 IDE）。\n"
+            "; 每行一个进程名：完全匹配、大小写不敏感、.exe 后缀可写可不写\n"
+            "; 例：mstsc.exe\n"
+            ";\n"
+            "[NoSmoothScroll]\n"
+            "; 持续滚动（C+Alt/D+滚轮）默认只发“不足一格”的小刻度（手感像触控板）。\n"
+            "; 少数程序不累积这种小刻度 —— 表现为滚了却完全不动。把它的进程名\n"
+            "; 写进这里，就只对它改回每次发整格（120）。\n"
+            "; 每行一个进程名：完全匹配、大小写不敏感、.exe 后缀可写可不写\n"
+            "; 例：someapp.exe";
         FILE* w = NULL;
         if (_wfopen_s(&w, path, L"wb") == 0 && w) {
             fwrite(kTemplate, 1, sizeof(kTemplate) - 1, w);
@@ -459,11 +502,8 @@ static const struct {
       "; 范围 " STR(AUTOSCROLL_FAST_MIN) ".." STR(AUTOSCROLL_FAST_MAX)
       "；想更快就调小，想让它也慢下来就调大。\n"
       "AutoScrollFastMs = " STR(AUTOSCROLL_FAST_DEFAULT) "\n" },
-    { "autoscrollsmooth",
-      "\n"
-      "; 自动滚动是否平滑注入（1=是 / 0=否）。1 时只发\"不足一格\"的小刻度、\n"
-      "; 次数更多，手感接近触控板连续滑动；个别程序不累积小刻度（完全不动）时设 0。\n"
-      "AutoScrollSmooth = " STR(AUTOSCROLL_SMOOTH_DEFAULT) "\n" },
+    /* autoscrollsmooth 曾在这里：它已被 [NoSmoothScroll] 名单取代，
+       **故意不再补进老配置** —— 补一个已经没人读的键只会误导用户去改它。 */
     { "wheelhscrollmul",
       "\n"
       "; 横向滚动：按住 C + Shift 滚滚轮，横向挪动。倍数 1 = 一滚一格（默认），\n"
@@ -622,10 +662,6 @@ int ConfigGetAutoScrollFastMs(void) {
     return g_autoScrollFastMs;
 }
 
-BOOL ConfigGetAutoScrollSmooth(void) {
-    return g_autoScrollSmooth;
-}
-
 BOOL ConfigGetAllowScintillaRead(void) {
     return g_allowSciRead;
 }
@@ -634,15 +670,36 @@ int ConfigGetWheelHScrollMul(void) {
     return g_wheelHMul;
 }
 
-/* 进程可执行文件名是否命中原生按词跳转名单（完全匹配，.exe 可选） */
-BOOL ConfigMatchName(const WCHAR* exeName) {
-    if (g_count == 0 || !exeName || !exeName[0]) return FALSE;
+/* 进程可执行文件名是否命中某份名单（完全匹配，.exe 可选） */
+BOOL ConfigMatchList(int list, const WCHAR* exeName) {
+    if (ListEmpty(list) || !exeName || !exeName[0]) return FALSE;
     WCHAR name[CFG_NAME_MAX];
     _snwprintf_s(name, CFG_NAME_MAX, _TRUNCATE, L"%s", exeName);
     StripExeW(name);
-    for (int i = 0; i < g_count; i++)
-        if (_wcsicmp(name, g_names[i]) == 0) return TRUE;
+    for (int i = 0; i < g_count[list]; i++)
+        if (_wcsicmp(name, g_names[list][i]) == 0) return TRUE;
     return FALSE;
+}
+
+BOOL ConfigMatchName(const WCHAR* exeName) {
+    return ConfigMatchList(CFGLIST_NATIVE, exeName);
+}
+
+/* 名单查询的统一入口：先取窗口所属进程的 exe 名，再查名单。
+   "名单为空"一律先短路 —— 绝大多数用户一份名单都不写，于是不必为每次
+   Caps 按下（或每次启动持续滚动）付出 OpenProcess +
+   QueryFullProcessImageName 的代价。 */
+static BOOL MatchFocus(int list, HWND focus) {
+    if (ListEmpty(list) || !focus) return FALSE;
+    WCHAR fname[MAX_PATH];
+    if (!ConfigGetProcessName(focus, fname, MAX_PATH)) return FALSE;
+    return ConfigMatchList(list, fname);
+}
+BOOL ConfigIsAutoDisabled(HWND focus) {
+    return MatchFocus(CFGLIST_AUTODISABLE, focus);
+}
+BOOL ConfigIsNoSmoothScroll(HWND focus) {
+    return MatchFocus(CFGLIST_NOSMOOTH, focus);
 }
 
 /* 取焦点窗口所属进程的 exe 文件名（含后缀）；失败返回 FALSE */
@@ -668,10 +725,281 @@ BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap) {
 }
 
 BOOL ConfigIsNativeWordJump(HWND focus) {
-    if (g_count == 0 || !focus) return FALSE;
-    WCHAR fname[MAX_PATH];
-    if (!ConfigGetProcessName(focus, fname, MAX_PATH)) return FALSE;
-    return ConfigMatchName(fname);
+    return MatchFocus(CFGLIST_NATIVE, focus);
+}
+
+/* ================= 设置程序用：改值 + 写回（增量更新） =================
+   设置程序（settings/settings.c）是一个**表单**界面，它改的是"某个配置项"，
+   而不是整份文本 —— 所以这里要提供两个东西：
+     · ConfigSet*：改内存里的值（钳制复用解析那套 Clamp*，不另写一份）；
+     · ConfigSaveFile：把内存里的值**增量**写回 ini。
+   为什么不是"整份重新生成"：配置文件里带大量注释，用户也可能留下我们不认识
+   的段或键；整份重写会把它们全冲掉（用户视角就是"我写的东西没了"）。
+   增量更新的规则：
+     · [General] 段：已有的键**就地替换值**；缺失的键补到该段末尾（连同
+       kUpgrades 里那份注释块，值用当前值，不是默认值）；
+     · 名单段：注释与空行保留，**名字行整段重建**（顺序即界面里的顺序）；
+     · 其它段 / 未知键：原样保留；BOM 与行尾风格（LF / CRLF）跟随原文件；
+     · 文件不存在：按"新建"处理（[General] + 全部键 + 三份名单段）。 */
+
+void ConfigSetRunAsAdmin(BOOL v)          { g_runAsAdmin = !!v; }
+void ConfigSetLogMaxKB(int v)             { g_logMaxKB = ClampLogMaxKB(v); }
+void ConfigSetMaxArrowSteps(int v)        { g_maxArrowSteps = ClampMaxArrowSteps(v); }
+void ConfigSetOverStepCtrl(BOOL v)        { g_overStepCtrl = !!v; }
+void ConfigSetWheelScrollMul(int v)       { g_wheelMul = ClampWheelMul(v); }
+void ConfigSetAutoScrollInterval(int v)   { g_autoScrollInterval = ClampInterval(v); }
+void ConfigSetAutoScrollFastMs(int v)     { g_autoScrollFastMs = ClampFastMs(v); }
+void ConfigSetWheelHScrollMul(int v)      { g_wheelHMul = ClampWheelHMul(v); }
+void ConfigSetAllowScintillaRead(BOOL v)  { g_allowSciRead = !!v; }
+
+/* 名单整体替换（顺序 = 传入顺序）。逐条走 AddEntry 才能拿到"去空白 / 去 .exe
+   / 去空行"那套规整 —— 界面里手写的名字与文件里读出来的必须是同一个样子。 */
+void ConfigSetList(int list, const WCHAR* const* names, int n) {
+    if (list < 0 || list >= CFGLIST_COUNT) return;
+    g_count[list] = 0;
+    if (!names) return;
+    for (int i = 0; i < n; i++) AddEntry(list, names[i]);
+}
+int ConfigListCount(int list) {
+    return (list >= 0 && list < CFGLIST_COUNT) ? g_count[list] : 0;
+}
+const WCHAR* ConfigListAt(int list, int i) {
+    if (list < 0 || list >= CFGLIST_COUNT || i < 0 || i >= g_count[list]) return NULL;
+    return g_names[list][i];
+}
+
+/* 名单段名（与解析时认的写法一致；新增名单段改这一处即可） */
+static const char* const kListSec[CFGLIST_COUNT] = {
+    "NativeWordJump", "AutoDisable", "NoSmoothScroll"
+};
+
+/* 当前所有 [General] 键的"键 = 值"（供写回用）。键名一律小写 —— 与解析时
+   比较用的形态一致，也保证"文件里 Key 写成任意大小写"都能被就地替换。 */
+/* key = 比较用的形态（小写，与解析/升级表一致）；
+   name = **写进文件的形态**（与模板一致的大小写）—— 两者不能只留一个：
+   用小写写回的话，用户文件里的 RunAsAdmin 会变成 runasadmin，解析没问题，
+   但"我的配置被人改了大小写"是实打实的观感问题。 */
+typedef struct { const char* key; const char* name; char val[24]; } KeyVal;
+static int GeneralValues(KeyVal* out, int cap) {
+    int n = 0;
+#define KV(k, nm, fmt, arg) do { if (n < cap) { \
+        out[n].key = (k); out[n].name = (nm); \
+        _snprintf_s(out[n].val, sizeof(out[n].val), _TRUNCATE, fmt, arg); \
+        n++; } } while (0)
+    KV("runasadmin",         "RunAsAdmin",         "%d", g_runAsAdmin ? 1 : 0);
+    KV("logmaxkb",           "LogMaxKB",           "%d", g_logMaxKB);
+    KV("maxarrowsteps",      "MaxArrowSteps",      "%d", g_maxArrowSteps);
+    KV("overstepmode",       "OverStepMode",       "%d", g_overStepCtrl ? 1 : 0);
+    KV("wheelscrollmul",     "WheelScrollMul",     "%d", g_wheelMul);
+    KV("autoscrollinterval", "AutoScrollInterval", "%d", g_autoScrollInterval);
+    KV("autoscrollfastms",   "AutoScrollFastMs",   "%d", g_autoScrollFastMs);
+    KV("wheelhscrollmul",    "WheelHScrollMul",    "%d", g_wheelHMul);
+    KV("allowscintillaread", "AllowScintillaRead", "%d", g_allowSciRead ? 1 : 0);
+#undef KV
+    return n;
+}
+
+static BOOL ReadAllBytes(const WCHAR* path, std::string* out, int* hasBom) {
+    if (hasBom) *hasBom = 0;
+    FILE* f = NULL;
+    if (_wfopen_s(&f, path, L"rb") != 0 || !f) return FALSE;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 1024 * 1024) { fclose(f); return FALSE; }
+    std::vector<char> raw((size_t)sz);
+    size_t rd = fread(raw.data(), 1, (size_t)sz, f);
+    fclose(f);
+    if (hasBom && rd >= 3 && (unsigned char)raw[0] == 0xEF &&
+        (unsigned char)raw[1] == 0xBB && (unsigned char)raw[2] == 0xBF)
+        *hasBom = 1;
+    out->assign(raw.data(), rd);
+    return TRUE;
+}
+
+/* 行首跳过空白后是否匹配 key，且后面是 '=' 或行尾（避免 "LogMaxKB2 = 1"）
+   —— 与 ConfigUpgradeFile 的判据同一套，别写成两样。 */
+static BOOL LineIsKey(const char* s, size_t len, const char* key) {
+    size_t i = 0;
+    while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) i++;
+    size_t klen = strlen(key);
+    if (len - i < klen) return FALSE;
+    if (_strnicmp(s + i, key, klen) != 0) return FALSE;
+    i += klen;
+    while (i < len && (s[i] == ' ' || s[i] == '\t')) i++;
+    return (i >= len) || (s[i] == '=');
+}
+/* 是否是 [段名] 行；sec 为空则"任意段行" */
+static BOOL LineIsSection(const char* s, size_t len, const char* sec) {
+    size_t i = 0;
+    while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) i++;
+    if (i >= len || s[i] != '[') return FALSE;
+    i++;
+    if (!sec) return TRUE;
+    size_t sl = strlen(sec);
+    if (len - i < sl + 1) return FALSE;
+    if (_strnicmp(s + i, sec, sl) != 0) return FALSE;
+    return s[i + sl] == ']';
+}
+static BOOL LineIsBlankOrComment(const char* s, size_t len) {
+    size_t i = 0;
+    while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) i++;
+    return (i >= len) || (s[i] == ';');
+}
+
+/* 输出缓冲：一行一个 '\n' 结尾。刻意**不用** std::vector<std::string> ——
+   本项目不开 C++ 异常（无 /EHsc），容器析构会让编译器报 C4530
+   （"用了异常处理程序但未启用展开语义"），而我们要保持 lint 零告警。
+   std::string 自己管增长，"容量算错"这类缺陷也不会回来。 */
+static void AppendLine(std::string* out, const std::string& line) {
+    out->append(line);
+    out->push_back('\n');
+}
+
+/* 把"键 = 当前值"连同 kUpgrades 里那份注释块追加进去（缺键时才用）。
+   注释块最后一行是 "Key = 默认值"，把它换成当前值 —— 不掉注释，也不写错值。 */
+/* key：小写、用于**匹配**注释块里的那一行；name：写进文件的形态 */
+static void AppendKeyBlock(std::string* out, const char* key, const char* name,
+                           const char* val) {
+    const char* block = NULL;
+    for (int i = 0; i < (int)(sizeof(kUpgrades) / sizeof(kUpgrades[0])); i++)
+        if (_stricmp(kUpgrades[i].key, key) == 0) { block = kUpgrades[i].block; break; }
+    std::string kv = std::string(name) + " = " + val;
+    if (!block) { AppendLine(out, kv); return; }
+    const char* p = block;
+    while (*p) {
+        const char* nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        std::string line(p, len);
+        size_t e = line.size();
+        while (e > 0 && (line[e - 1] == '\r')) e--;
+        if (LineIsKey(line.c_str(), e, key)) AppendLine(out, kv);
+        else AppendLine(out, line.substr(0, e));
+        if (!nl) break;
+        p = nl + 1;
+    }
+}
+
+BOOL ConfigSaveFile(const WCHAR* path) {
+    std::string raw;
+    int hasBom = 0;
+    BOOL exists = ReadAllBytes(path, &raw, &hasBom);
+    /* 行尾风格跟随原文件（新建的文件用 CRLF —— Windows 记事本打开才不会
+       挤成一行，虽然我们的解析器两种都认）。 */
+    BOOL crlf = exists ? (raw.find('\r') != std::string::npos) : TRUE;
+    const char* body = raw.data();
+    size_t bodyLen = raw.size();
+    if (hasBom && bodyLen >= 3) { body += 3; bodyLen -= 3; }
+
+    KeyVal kv[16];
+    int nkv = GeneralValues(kv, (int)(sizeof(kv) / sizeof(kv[0])));
+    BOOL done[16];
+    for (int i = 0; i < nkv; i++) done[i] = FALSE;
+
+    std::string out;
+    BOOL seenGeneral = FALSE;
+    BOOL seenList[CFGLIST_COUNT];
+    for (int i = 0; i < CFGLIST_COUNT; i++) seenList[i] = FALSE;
+    int sec = -1;          /* -1=文件头 0=General 1..3=名单段 99=其它段 */
+    int listId = -1;
+
+    /* 段结束时的收尾：把没写到的键 / 名单补进去。
+       （写成宏而不是 lambda：同样是避开"容器内放非平凡对象 + 无 /EHsc"的
+         C4530；这里只是往 out 里追加几行，没有捕获任何东西的必要。） */
+    #define FLUSH_SECTION() do { \
+        if (sec == 0) { \
+            for (int i = 0; i < nkv; i++) \
+                if (!done[i]) { AppendKeyBlock(&out, kv[i].key, kv[i].name, kv[i].val); done[i] = TRUE; } \
+        } else if (listId >= 0) { \
+            char u[CFG_NAME_MAX * 4]; \
+            for (int i = 0; i < g_count[listId]; i++) { \
+                WideCharToMultiByte(CP_UTF8, 0, g_names[listId][i], -1, \
+                                    u, (int)sizeof(u), NULL, NULL); \
+                AppendLine(&out, std::string(u)); \
+            } \
+        } \
+    } while (0)
+
+    size_t pos = 0;
+    while (pos <= bodyLen) {
+        const char* nl = (const char*)memchr(body + pos, '\n', bodyLen - pos);
+        size_t len = nl ? (size_t)(nl - (body + pos)) : bodyLen - pos;
+        std::string line(body + pos, len);
+        size_t e = line.size();
+        while (e > 0 && line[e - 1] == '\r') e--;
+        std::string core = line.substr(0, e);
+
+        BOOL isSec = LineIsSection(core.c_str(), core.size(), NULL);
+        if (isSec) {
+            FLUSH_SECTION();
+            sec = 99; listId = -1;
+            if (LineIsSection(core.c_str(), core.size(), "general")) {
+                sec = 0; seenGeneral = TRUE;
+            } else {
+                for (int i = 0; i < CFGLIST_COUNT; i++)
+                    if (LineIsSection(core.c_str(), core.size(), kListSec[i])) {
+                        sec = 100 + i; listId = i; seenList[i] = TRUE;
+                    }
+            }
+            AppendLine(&out, core);
+        } else if (sec == 0) {
+            BOOL hit = FALSE;
+            for (int i = 0; i < nkv && !hit; i++)
+                if (!done[i] && LineIsKey(core.c_str(), core.size(), kv[i].key)) {
+                    AppendLine(&out, std::string(kv[i].name) + " = " + kv[i].val);
+                    done[i] = TRUE; hit = TRUE;
+                }
+            if (!hit) AppendLine(&out, core);
+        } else if (listId >= 0) {
+            /* 名单段：只留注释与空行，名字行由 FLUSH_SECTION 统一重建 */
+            if (LineIsBlankOrComment(core.c_str(), core.size())) AppendLine(&out, core);
+        } else {
+            AppendLine(&out, core);
+        }
+
+        if (!nl) break;
+        pos = (size_t)(nl - body) + 1;
+        if (pos >= bodyLen && bodyLen > 0 && body[bodyLen - 1] == '\n') break;
+    }
+    FLUSH_SECTION();
+    #undef FLUSH_SECTION
+
+    /* 新建：[General] 段（连同全部键的注释块）插到最前面 */
+    if (!seenGeneral) {
+        std::string head;
+        AppendLine(&head, std::string("[General]"));
+        for (int i = 0; i < nkv; i++)
+            if (!done[i]) { AppendKeyBlock(&head, kv[i].key, kv[i].name, kv[i].val); done[i] = TRUE; }
+        out.insert(0, head);
+    }
+    /* 名单段缺失但名单非空：补在文件末尾 */
+    for (int i = 0; i < CFGLIST_COUNT; i++) {
+        if (seenList[i] || g_count[i] == 0) continue;
+        AppendLine(&out, std::string("[") + kListSec[i] + "]");
+        char u[CFG_NAME_MAX * 4];
+        for (int j = 0; j < g_count[i]; j++) {
+            WideCharToMultiByte(CP_UTF8, 0, g_names[i][j], -1, u, (int)sizeof(u), NULL, NULL);
+            AppendLine(&out, std::string(u));
+        }
+    }
+
+    /* 行尾风格统一（行在缓冲里一律以 '\n' 结尾，CRLF 在这里补） */
+    std::string text;
+    if (crlf)
+        for (size_t i = 0; i < out.size(); i++) {
+            if (out[i] == '\n') text.append("\r\n");
+            else text.push_back(out[i]);
+        }
+    else
+        text = out;
+
+    FILE* w = NULL;
+    if (_wfopen_s(&w, path, L"wb") != 0 || !w) return FALSE;
+    BOOL ok = TRUE;
+    if (hasBom) ok = (fwrite("\xEF\xBB\xBF", 1, 3, w) == 3);
+    if (ok && !text.empty()) ok = (fwrite(text.data(), 1, text.size(), w) == text.size());
+    fclose(w);
+    return ok;
 }
 
 /* 真实的运行权限（查进程令牌，与配置值无关）：托盘提示据此标注 */

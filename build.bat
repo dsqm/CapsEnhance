@@ -40,7 +40,25 @@ if errorlevel 1 (
     echo [ERROR] build failed
     exit /b 1
 )
+
+rem Settings editor: a separate exe on purpose -- the main program's thread
+rem hosts the keyboard hook, so it must never own a modal editor window.
+rem It links src\config.c: the form reads/writes config values through the
+rem same ConfigGet*/ConfigSet* the main program uses, so ranges and key names
+rem are never duplicated in the UI.
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
+   /Fobin\ ^
+   settings\settings.c src\config.c ^
+   /link /OUT:bin/CapsEnhanceSettings.exe ^
+   user32.lib gdi32.lib shell32.lib advapi32.lib ^
+   /SUBSYSTEM:WINDOWS
+if errorlevel 1 (
+    echo [ERROR] settings build failed
+    exit /b 1
+)
+
 rem Report what actually got built, with which toolchain. Cheap here, and it
 rem turns "the two exes differ, why?" into a one-line diff of the logs.
 for %%F in (bin\CapsEnhance.exe) do echo [OK] bin/CapsEnhance.exe built. size=%%~zF bytes
+for %%F in (bin\CapsEnhanceSettings.exe) do echo [OK] bin/CapsEnhanceSettings.exe built. size=%%~zF bytes
 where certutil >nul 2>&1 && certutil -hashfile bin\CapsEnhance.exe SHA256 | findstr /R /V "SHA256 CertUtil hash" 

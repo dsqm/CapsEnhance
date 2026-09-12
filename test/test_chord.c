@@ -745,7 +745,7 @@ int main(void) {
 
     CHECK(base == 1500, "R: 初始速度缺省 1500ms/格（约 2 格/秒）");
     CHECK(fast < base, "R: 最快档的毫秒数必须比初始档小（= 更快，阶梯方向正确）");
-    CHECK(ConfigGetAutoScrollSmooth(), "R: 平滑注入缺省开启");
+    CHECK(!ActAutoScrollNoSmooth(), "R: 平滑注入缺省开启（未命中 NoSmoothScroll 名单）");
 
     ActAutoScrollWheel(120);               /* 第一滚：增强档、最慢档、向上 */
     CHECK(ActAutoScrollActive() &&
@@ -792,16 +792,18 @@ int main(void) {
     CHECK(ActAutoScrollDelta() > 0 && ActAutoScrollDelta() < 120,
           "R: 顶档仍是小数刻度（平滑提速靠加 delta，不是加格数）");
 
-    /* 关掉平滑 -> 退回整格：delta 恒为 120、节拍就是速度档 */
-    WriteChordIni("[General]\r\nAutoScrollSmooth = 0\r\n");
-    ConfigLoadFrom(L"bin/chordtest.ini");
-    CHECK(!ConfigGetAutoScrollSmooth(), "R: AutoScrollSmooth=0 生效");
+    /* 命中 [NoSmoothScroll] -> 只发整格：delta 恒为 120、节拍就是速度档。
+       这是"某些程序不累积小数刻度（滚了不动）"的兜底，判据是**名单**而不是
+       全局开关，所以 ActAutoScrollSetNoSmooth 就是它的可观测入口。 */
+    ActAutoScrollSetNoSmooth(TRUE);
+    CHECK(ActAutoScrollNoSmooth(), "R: 名单命中 -> 整格模式生效");
     CHECK(ActAutoScrollDelta() == WHEEL_STD_DELTA,
-          "R: 关平滑后每拍发整格 120（兼容不累积小数刻度的程序）");
+          "R: 整格模式每拍发整格 120（兼容不累积小数刻度的程序）");
     CHECK(ActAutoScrollBeat() == ActAutoScrollTick(),
-          "R: 关平滑后节拍 = 速度档");
-    ConfigLoadFrom(L"bin/__absent__.ini");        /* 回缺省（平滑开） */
-    CHECK(ConfigGetAutoScrollSmooth(), "R: 回缺省后平滑重新开启");
+          "R: 整格模式节拍 = 速度档");
+    ActAutoScrollSetNoSmooth(FALSE);
+    CHECK(!ActAutoScrollNoSmooth() && ActAutoScrollDelta() < WHEEL_STD_DELTA,
+          "R: 关掉后平滑重新开启（delta 回到不足一格）");
 
     ResetWheelRec();
     Pump(300);                                    /* 顶档 1000ms/格，300ms 内至少 1 拍 */
@@ -1083,6 +1085,32 @@ int main(void) {
     /* 复位默认键位（别给以后新增的场景留坑） */
     ConfigLoadFrom(L"bin/__absent__.ini");
     KeyMapInit();
+
+    /* ---- 场景AD：[AutoDisable] 名单（自动屏蔽） ----
+       名单里的程序在**前台**时，Caps 开头的和弦整段不介入（hook.c 的
+       AutoDisableHit 走"反着按"那条已存在的不介入路径，吞/放天然对称，
+       不会造出"down 放行、up 被吞"的卡键）。
+       这里测的是那条**查询**本身：用一个本进程拥有的窗口代入"前台窗口"，
+       不依赖真实焦点 —— CI 的非交互会话里 SetForegroundWindow 不一定成功。 */
+    {
+        HWND me = CreateWindowExW(0, L"STATIC", L"adprobe", 0,
+                                  0, 0, 1, 1, NULL, NULL, NULL, NULL);
+        CHECK(me != NULL, "AD: 拿到本进程的窗口（代入前台窗口）");
+        if (me) {
+            WriteChordIni("[AutoDisable]\r\ntest_chord.exe\r\n");
+            ConfigLoadFrom(L"bin/chordtest.ini");
+            CHECK(ConfigIsAutoDisabled(me),
+                  "AD: 该窗口的进程在名单里 -> 命中（它到前台时整段不介入）");
+            CHECK(!ConfigIsAutoDisabled(NULL), "AD: 没有窗口 -> 不命中（NULL 防御）");
+            CHECK(!ConfigIsNativeWordJump(me),
+                  "AD: AutoDisable 名单不会连带命中 NativeWordJump（三份名单各自独立）");
+            WriteChordIni("[AutoDisable]\r\notherapp.exe\r\n");
+            ConfigLoadFrom(L"bin/chordtest.ini");
+            CHECK(!ConfigIsAutoDisabled(me), "AD: 名单里没有本进程 -> 不命中");
+            DestroyWindow(me);
+        }
+        ConfigLoadFrom(L"bin/__absent__.ini");   /* 复位：别影响后面的场景 */
+    }
 
     /* ---- 场景W：**先按修饰键、后按 C**（P1-1 回归） ----
        实测缺陷：按住 Alt 不放、再按 C、然后点按 J，**只发 1 次左键**（本该

@@ -286,9 +286,15 @@ static BOOL IsSingleShotAct(int act) { return ActHasFlag(act, ACTF_SINGLE_SHOT);
 
 /* ============ 托盘 ============ */
 static const WCHAR* APP_NAME = L"CapsEnhance";
-#define IDM_PAUSE   1
-#define IDM_EXIT    2
-#define IDM_RESTART 3
+#define IDM_PAUSE    1
+#define IDM_SETTINGS 2
+#define IDM_EXIT     3
+#define IDM_RESTART  4
+/* 设置程序：**独立 exe**，与本 exe 同目录。
+   为什么不把设置界面做进本体：本体是托盘常驻程序，它的主线程是键盘钩子的
+   宿主 —— 任何模态窗口/重活都会把钩子拖住（见 act.c 文件头）。设置界面要跑
+   消息循环、持有编辑控件、还要写文件，属于"另一类进程"。 */
+#define SETTINGS_EXE L"CapsEnhanceSettings.exe"
 
 /* 把进程工作集压回待机内存：UIA/TSF 等 DLL 一旦加载无法卸载，只能压页。
    用于"诊断结束"和"托盘菜单关闭"这类低频节点，让内存数值回落；
@@ -305,6 +311,7 @@ static void DoRestart(void);     /* 前向声明（定义在下方，TrayShowMen
    跳过（连"按任意键打断"都收不到），那个滚动就成了没人能停的东西。 */
 void ApplyPauseState(void);
 void TrayAddHint(const WCHAR* s);
+void TrayBalloon(const WCHAR* s);   /* 定义在下方：LaunchSettings 失败时要提示 */
 /* 托盘悬停提示统一入口：按"真实运行权限"追加管理员标注
    （查进程令牌，不看配置值，避免配置与实际不一致时误导） */
 static void TrayHint(const WCHAR* state) {
@@ -328,6 +335,42 @@ static void TrayAdd(void) {
 static void TrayRemove(void) {
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
 }
+/* exe 所在目录（结尾带 '\\'） */
+static void ExeDir(WCHAR* out, size_t cap) {
+    WCHAR exe[MAX_PATH] = L"";
+    if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) { out[0] = 0; return; }
+    WCHAR* slash = wcsrchr(exe, L'\\');
+    if (slash) *(slash + 1) = 0;
+    _snwprintf_s(out, cap, _TRUNCATE, L"%s", exe);
+}
+
+/* 拉起设置程序。找不到就明说（托盘气泡）：静默失败会让人以为"点了没反应"。
+   工作目录设成 exe 目录：设置程序据此定位 CapsEnhance.ini，双击时的工作
+   目录是不确定的（快捷方式/资源管理器都可能给不一样的）。 */
+static void LaunchSettings(void) {
+    WCHAR dir[MAX_PATH]; ExeDir(dir, MAX_PATH);
+    WCHAR path[MAX_PATH];
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s%s", dir, SETTINGS_EXE);
+    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
+        TrayBalloon(L"找不到设置程序：CapsEnhanceSettings.exe 应与 CapsEnhance.exe 在同一目录。");
+        return;
+    }
+    STARTUPINFOW si; PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+    /* CreateProcess 失败（策略/沙箱）再退 ShellExecute：后者走 shell 的启动
+       路径，覆盖率更高。两者都不行才提示 —— 不要一上来就只靠 ShellExecute，
+       它对"同目录 exe"也会受当前目录影响。 */
+    if (CreateProcessW(path, path, NULL, NULL, FALSE, 0, NULL, dir, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return;
+    }
+    if ((int)(INT_PTR)ShellExecuteW(NULL, L"open", path, NULL, dir, SW_SHOWNORMAL) > 32)
+        return;
+    TrayBalloon(L"设置程序启动失败。");
+}
+
 static void TrayShowMenu(void) {
     if (!g_menu) return;                 /* 菜单创建失败时不要拿 NULL 去用 */
     POINT pt;
@@ -338,6 +381,8 @@ static void TrayShowMenu(void) {
                              pt.x, pt.y, 0, g_mainWnd, NULL);
     if (cmd == IDM_PAUSE) {
         ApplyPauseState();
+    } else if (cmd == IDM_SETTINGS) {
+        LaunchSettings();
     } else if (cmd == IDM_RESTART) {
         DoRestart();
     } else if (cmd == IDM_EXIT) {
@@ -520,6 +565,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_ALREADY_RUNNING:         /* 又启动了一个实例：提示后让它自己退出 */
         TrayHint(L"已在运行中（不允许多个实例）");
+        return 0;
+    case WM_RESTART_REQUEST:
+        /* 外部（--restart 命令行 / 设置程序保存后）请求重启。
+           走的是托盘"重启程序"同一条路：它会先停执行线程、清卡键，
+           再拉起带 --wait-exit 的新实例 —— 配置因此被完整重读。 */
+        DoRestart();
+        return 0;
+    case WM_AUTODISABLE:
+        /* 钩子判定"前台程序命中 [AutoDisable]"的状态变了。
+           只在**未暂停**时改提示：暂停是用户显式切的，不该被自动屏蔽的
+           状态变化悄悄顶掉（否则托盘会显示"正在映射"而实际是暂停中）。 */
+        if (!g_state.paused)
+            TrayHint(wp ? L"已自动屏蔽（前台程序在名单内）" : L"正在映射");
         return 0;
     case WM_PROBE:
         /* C+`：切换诊断记录。开始=探测当前焦点并记录；再按=结束记录。
@@ -753,6 +811,19 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
             return WpsBridgeServe((unsigned long)bpid, (unsigned long)bseq);
     }
 
+    /* --restart：请求**已经在跑的那个实例**重启（设置程序保存配置后用它）。
+       为什么不直接改配置热加载：配置影响键位表、钩子的滚轮语义、日志上限等
+       多处状态，"全部重读一遍"就是重启，与其做一半不如把这条路径走实。
+       没找到运行中的实例 -> **照常启动**（不 return）：设置程序在程序没跑时
+       保存配置，用户按"保存"期待的也是"配置生效"。 */
+    if (HasSwitch(L"--restart", NULL)) {
+        HWND prev = FindWindowW(L"CapsEnhanceMain", NULL);
+        if (prev) {
+            PostMessageW(prev, WM_RESTART_REQUEST, 0, 0);
+            return 0;
+        }
+    }
+
     WaitOldInstanceExit();   /* 重启场景：等旧实例完全退出再初始化 */
     if (!EnsureSingleInstance()) return 0;   /* 已有实例在跑：提示后退出 */
 
@@ -767,6 +838,16 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                               CW_USEDEFAULT, CW_USEDEFAULT, 1, 1,
                               NULL, NULL, hInst, NULL);
     if (!g_mainWnd) return 1;
+
+    /* UIPI 放行：允许**完整性级别更低**的进程向本窗口发这几条消息。
+       Windows 默认拦掉"低 -> 高"的 PostMessage（UIPI），而管理员运行是本程序
+       的默认配置（RunAsAdmin=1），设置程序往往是普通权限 —— 不放行的话
+       "保存并重启"在管理员模式下会**静默失效**（消息被丢弃，无任何报错）。
+       同理覆盖 WM_ALREADY_RUNNING（重复启动时的提示也来自另一个实例）。 */
+#if WINVER >= 0x0600
+    ChangeWindowMessageFilterEx(g_mainWnd, WM_RESTART_REQUEST, MSGFLT_ALLOW, NULL);
+    ChangeWindowMessageFilterEx(g_mainWnd, WM_ALREADY_RUNNING, MSGFLT_ALLOW, NULL);
+#endif
 
     /* 本窗口只承载托盘菜单，永不接收文字输入。禁掉 IME/TSF：
        SetForegroundWindow 让它获得键盘焦点时，系统会为它初始化输入法
@@ -841,6 +922,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         g_menu = CreatePopupMenu();
         if (g_menu) {
             AppendMenuW(g_menu, MF_STRING, IDM_PAUSE, L"暂停映射");
+            AppendMenuW(g_menu, MF_STRING, IDM_SETTINGS, L"设置...");
             AppendMenuW(g_menu, MF_STRING, IDM_RESTART, L"重启程序");
             AppendMenuW(g_menu, MF_SEPARATOR, 0, NULL);
             AppendMenuW(g_menu, MF_STRING, IDM_EXIT, L"退出");

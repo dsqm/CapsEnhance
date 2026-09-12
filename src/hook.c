@@ -123,6 +123,32 @@ static BOOL SwallowTake(int vk) {
 #define PASS_OR_SWALLOW(vk, down) \
     (((!(down)) && SwallowTake(vk)) ? 1 : CallNextHookEx(g_hook, nCode, wParam, lParam))
 
+/* ---------- 自动屏蔽：[AutoDisable] 名单里的程序在前台时整段不介入 ----------
+   "不介入"的含义与"暂停映射"一样彻底：CapsLock 恢复正常功能、C+任意键照常
+   打字、Caps+滚轮也不放大 —— 走的正是"反着按"那条已经在用的路径
+   （g_capsSkip），所以吞/放天然对称，不会出现"down 放行、up 被吞"的卡键。
+
+   为什么不做成"运行时开关 g_state.paused"：那份状态是**用户显式**切换的，
+   自动屏蔽是**按前台程序**随时可能变的。两套原因混进同一个标志，就分不清
+   "用户自己暂停的"和"程序自动让开的"（托盘该显示哪个？恢复时该听谁的？）。
+   于是这里只在"按下 Caps 的那一刻"判定一次，本次和弦整个走不介入路径。
+
+   判定时机是**按下 Caps 那一刻**而不是每次按键：命中查询要查前台窗口的进程
+   名（OpenProcess + QueryFullProcessImageName），而名单为空时它一次系统调用
+   都不做（config.c 的 MatchFocus 先短路）—— 所以"没人用这个功能"时零成本。 */
+static BOOL s_autoDisabled = FALSE;   /* 上次判定结果：只在**变化**时通知主线程改提示 */
+
+/* 变化时才 PostMessage：提示更新要走一次 Shell_NotifyIcon，
+   没必要为每一次 Caps 按下都做（按住不放重复按 Caps 是很常见的）。 */
+static void AutoDisableNotify(BOOL hit) {
+    if (hit == s_autoDisabled) return;
+    s_autoDisabled = hit;
+    PostMessageW(g_mainWnd, WM_AUTODISABLE, (WPARAM)(hit ? 1 : 0), 0);
+}
+static BOOL AutoDisableHit(void) {
+    return ConfigIsAutoDisabled(GetForegroundWindow());
+}
+
 /* ---------- Caps 必须是本次和弦的**第一个**键 ----------
    用户明确要求：反着按的组合（先按 Alt 之类、再按 Caps）本程序**完全不处理**，
    只拦截"Caps 开头"的和弦。
@@ -285,6 +311,20 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                    连引擎状态都不碰（可能正有别的动作在跑）。 */
                 g_cMod = FALSE;
                 g_capsSkip = FALSE;
+                /* 自动屏蔽：前台程序在名单里 -> 本次和弦完全不介入。
+                   它排在"反着按"判定**之前**：让开的理由（程序要求）比"按法不对"
+                   更根本，而且两者走同一条不介入路径，顺序不影响正确性。 */
+                if (AutoDisableHit()) {
+                    g_capsSkip = TRUE;
+                    AutoDisableNotify(TRUE);
+                    if (g_recording.load()) {
+                        WCHAR pn[64] = L"?";
+                        ConfigGetProcessName(GetForegroundWindow(), pn, 64);
+                        CapLog("  Caps 不介入：前台程序 %S 命中 [AutoDisable] 名单", pn);
+                    }
+                    return CallNextHookEx(g_hook, nCode, wParam, lParam);
+                }
+                AutoDisableNotify(FALSE);
                 if (ChordKeyHeldBeforeCaps()) {
                     g_capsSkip = TRUE;      /* 本次会话完全不介入 */
                     if (g_recording.load())

@@ -21,8 +21,18 @@ BOOL ConfigGetOverStepCtrl(void);
 int  ConfigGetWheelScrollMul(void);
 int  ConfigGetAutoScrollFastMs(void);
 int  ConfigGetAutoScrollInterval(void);
+BOOL ConfigMatchList(int list, const WCHAR* exeName);
 BOOL ConfigGetAllowScintillaRead(void);
 BOOL IsRunElevated(void);
+/* 设置程序用的写回接口 */
+void ConfigSetRunAsAdmin(BOOL v);
+void ConfigSetLogMaxKB(int v);
+void ConfigSetMaxArrowSteps(int v);
+void ConfigSetWheelHScrollMul(int v);
+void ConfigSetList(int list, const WCHAR* const* names, int n);
+int  ConfigListCount(int list);
+const WCHAR* ConfigListAt(int list, int i);
+BOOL ConfigSaveFile(const WCHAR* path);
 
 static int fails = 0;
 #define EXPECT(cond, name) do { \
@@ -267,24 +277,45 @@ int main(void) {
     EXPECT(ConfigGetAutoScrollFastMs() == 300 && ConfigGetAutoScrollInterval() == 1500,
            "CFG: 改最快速度不影响初始速度（两项独立）");
 
-    /* 平滑注入开关 AutoScrollSmooth（默认 1）。样本用 0 —— 与默认值不同，
-       否则"自定义值生效"这条会恒真（默认值当样本的老坑）。 */
-    EXPECT(ConfigGetAutoScrollSmooth(), "CFG: AutoScrollSmooth 缺省为开");
+    /* 三份进程名名单**各自独立**：[NativeWordJump] / [AutoDisable] /
+       [NoSmoothScroll]。名字互不相同，才能证明"写进 A 段的不会命中 B 段" ——
+       它们语义完全不同（改通道 / 整段不介入 / 只改滚动粒度），共用一份就等于
+       任一命中都会触发所有行为。 */
+    WriteIni("[NativeWordJump]\r\nA1.exe\r\n[AutoDisable]\r\nB1.exe\r\n"
+             "[NoSmoothScroll]\r\nC1.exe\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigMatchList(CFG_LIST_NATIVE, L"A1.exe"),
+           "CFG: A1 命中 NativeWordJump");
+    EXPECT(ConfigMatchList(CFG_LIST_AUTODISABLE, L"B1"),
+           "CFG: B1 命中 AutoDisable（.exe 后缀可省）");
+    EXPECT(ConfigMatchList(CFG_LIST_NOSMOOTH, L"c1.EXE"),
+           "CFG: C1 命中 NoSmoothScroll（大小写不敏感）");
+    EXPECT(!ConfigMatchList(CFG_LIST_AUTODISABLE, L"A1.exe") &&
+           !ConfigMatchList(CFG_LIST_NOSMOOTH, L"A1.exe"),
+           "CFG: NativeWordJump 的名字不污染另两份名单");
+    EXPECT(!ConfigMatchList(CFG_LIST_NATIVE, L"B1.exe") &&
+           !ConfigMatchList(CFG_LIST_NATIVE, L"C1.exe"),
+           "CFG: 另两份名单的名字不污染 NativeWordJump");
+    EXPECT(!ConfigMatchList(CFG_LIST_AUTODISABLE, L"C1.exe"),
+           "CFG: AutoDisable 与 NoSmoothScroll 互不命中");
+    /* 注释不进名单（与 NativeWordJump 同一套解析） */
+    WriteIni("[AutoDisable]\r\n; Ghost.exe\r\nReal.exe\r\n[NoSmoothScroll]\r\nN1.exe\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(!ConfigMatchList(CFG_LIST_AUTODISABLE, L"Ghost.exe"),
+           "CFG: 注释里的名字不进 AutoDisable 名单");
+    EXPECT(ConfigMatchList(CFG_LIST_AUTODISABLE, L"real"),
+           "CFG: AutoDisable 段里的正常名字照常命中");
+    EXPECT(!ConfigMatchList(CFG_LIST_NATIVE, L"Real.exe"),
+           "CFG: AutoDisable 段的名字不进 NativeWordJump");
+    /* 名单编号越界：一律 FALSE（防御：调用方算错编号时不能读越界内存） */
+    EXPECT(!ConfigMatchList(-1, L"A1.exe") && !ConfigMatchList(CFG_LIST_COUNT, L"A1.exe"),
+           "CFG: 名单编号越界返回 FALSE");
+    /* 废弃键 AutoScrollSmooth（已被 [NoSmoothScroll] 名单取代）：既不解析、
+       也不据它推算任何值 —— 写进去必须完全无副作用。 */
     WriteIni("[General]\r\nAutoScrollSmooth = 0\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(!ConfigGetAutoScrollSmooth(), "CFG: AutoScrollSmooth=0 关闭平滑");
-    WriteIni("[General]\r\nAutoScrollSmooth = 1\r\n");
-    ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollSmooth(), "CFG: AutoScrollSmooth=1 打开平滑");
-    /* 布尔项一律只认 "1"（与 RunAsAdmin / OverStepMode 同一套约定）：
-       其余写法（true/yes/on）都当关，不做模糊匹配。 */
-    WriteIni("[General]\r\nAutoScrollSmooth = true\r\n");
-    ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(!ConfigGetAutoScrollSmooth(),
-           "CFG: AutoScrollSmooth 只认 1（true 视为关，与其它开关一致）");
-    WriteIni("[Other]\r\nAutoScrollSmooth = 0\r\n");
-    ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollSmooth(), "CFG: 非 General 段的 AutoScrollSmooth 不生效");
+    EXPECT(ConfigGetAutoScrollInterval() == 1500,
+           "CFG: 废弃键 AutoScrollSmooth 被忽略（滚动速度仍取缺省 1500）");
 
     /* 横向滚动倍数 WheelHScrollMul（Caps+Shift+滚轮）。默认必须是 **1**
        —— 一个物理格换一次横向滚动，与系统原生横向滚动一致。
@@ -357,7 +388,7 @@ int main(void) {
                "UPG: 激活键是编译期常量（Alt+D / F），与配置文件无关");
         FILE* fc = NULL;
         int hasLog = 0, hasSteps = 0, hasMode = 0, hasWheel = 0;
-        int hasInterval = 0, hasSmooth = 0, hasHMul = 0, hasFast = 0;
+        int hasInterval = 0, hasHMul = 0, hasFast = 0;
         if (fopen_s(&fc, "bin/cfgtest.ini", "r") == 0 && fc) {
             char line[512];
             while (fgets(line, sizeof(line), fc)) {
@@ -367,13 +398,12 @@ int main(void) {
                 if (strstr(line, "WheelScrollMul = 3")) hasWheel = 1;
                 if (strstr(line, "AutoScrollFastMs = 800")) hasFast = 1;
                 if (strstr(line, "AutoScrollInterval = 1500")) hasInterval = 1;
-                if (strstr(line, "AutoScrollSmooth = 1")) hasSmooth = 1;
                 if (strstr(line, "WheelHScrollMul = 1")) hasHMul = 1;
             }
             fclose(fc);
         }
         EXPECT(hasLog && hasSteps && hasMode && hasWheel && hasInterval
-               && hasSmooth && hasHMul && hasFast,
+               && hasHMul && hasFast,
                "UPG: 补齐块带注释写回文件（含新增项）");
     }
     /* 升级的容量算式必须正交覆盖四组边界：
@@ -511,14 +541,97 @@ int main(void) {
                "UPG: AutoScrollFastMs 自定义值不被覆盖（默认 1000、样本 300）");
         EXPECT(ConfigGetAutoScrollInterval() == 250,
                "UPG: AutoScrollInterval 自定义值不被覆盖");
-        EXPECT(!ConfigGetAutoScrollSmooth(),
-               "UPG: AutoScrollSmooth 自定义值不被覆盖（默认开、样本为关）");
         EXPECT(ConfigGetWheelHScrollMul() == 4,
                "UPG: WheelHScrollMul 自定义值不被覆盖（默认 1、样本为 4）");
         /* 未识别的键（含已废弃的 EnhanceKeys）不再被留存，也不影响任何取值：
            "通用字符串项"设施已随这两个键一起去掉，配置层只认上面具名解析的那些。 */
         EXPECT(ConfigGetWheelHScrollMul() == 4,
                "UPG: 废弃键不再被留存（横向倍数仍取自定义值 4）");
+    }
+
+    /* ---- 写回（设置程序用）：增量更新，注释与未知段必须原样保留 ----
+       整份重写会把用户写的注释、不认识的段和键一起冲掉，那是"我写的东西没了"
+       级别的问题，所以这里逐条把它钉住。 */
+    {
+        const char* before =
+            "; 我的备注\r\n"
+            "\r\n"
+            "[General]\r\n"
+            "; 自定义说明\r\n"
+            "RunAsAdmin = 1\r\n"
+            "LogMaxKB = 777\r\n"
+            "\r\n"
+            "[Mine]\r\n"
+            "Whatever = 1\r\n"
+            "\r\n"
+            "[NativeWordJump]\r\n"
+            "; 名单注释\r\n"
+            "Old1.exe\r\n"
+            "Old2.exe\r\n";
+        WriteIni(before);
+        ConfigLoadFrom(L"bin/cfgtest.ini");
+        EXPECT(ConfigGetLogMaxKB() == 777 && ConfigListCount(CFG_LIST_NATIVE) == 2,
+               "SAVE: 改前读到的就是文件里的值");
+
+        ConfigSetRunAsAdmin(FALSE);
+        ConfigSetLogMaxKB(999999);                 /* 越界 -> 应被钳到 65536 */
+        ConfigSetMaxArrowSteps(-5);                /* 越界 -> 钳到 0 */
+        ConfigSetWheelHScrollMul(4);
+        {
+            static const WCHAR* names[2] = { L"New1.exe", L"  New2  " };
+            ConfigSetList(CFG_LIST_NATIVE, names, 2);       /* 整份替换 + 去空白 */
+            static const WCHAR* dis[1] = { L"mstsc.exe" };
+            ConfigSetList(CFG_LIST_AUTODISABLE, dis, 1);    /* 原本没有这一段 */
+        }
+        EXPECT(ConfigSaveFile(L"bin/cfgtest.ini"), "SAVE: 写回成功");
+
+        ConfigLoadFrom(L"bin/cfgtest.ini");
+        EXPECT(!ConfigGetRunAsAdmin(), "SAVE: 布尔改成 0 已落盘");
+        EXPECT(ConfigGetLogMaxKB() == 65536, "SAVE: 越界值写回时被钳到上限 65536");
+        EXPECT(ConfigGetMaxArrowSteps() == 0, "SAVE: 负数被钳到 0");
+        EXPECT(ConfigGetWheelHScrollMul() == 4, "SAVE: 数值改动已落盘");
+        EXPECT(ConfigListCount(CFG_LIST_NATIVE) == 2 &&
+               ConfigListAt(CFG_LIST_NATIVE, 0) &&
+               _wcsicmp(ConfigListAt(CFG_LIST_NATIVE, 0), L"New1") == 0 &&
+               _wcsicmp(ConfigListAt(CFG_LIST_NATIVE, 1), L"New2") == 0,
+               "SAVE: 名单被整份替换（旧名字消失、空白被去掉）");
+        EXPECT(ConfigMatchList(CFG_LIST_AUTODISABLE, L"mstsc.exe"),
+               "SAVE: 原本不存在的名单段被补进文件");
+
+        /* 原样保留的部分（这是"增量更新"的全部意义） */
+        FILE* fr = NULL;
+        char whole[4096];
+        size_t wn = 0;
+        if (fopen_s(&fr, "bin/cfgtest.ini", "rb") == 0 && fr) {
+            wn = fread(whole, 1, sizeof(whole) - 1, fr);
+            fclose(fr);
+        }
+        whole[wn] = 0;
+        EXPECT(strstr(whole, "; 我的备注") != NULL, "SAVE: 文件头的注释保留");
+        EXPECT(strstr(whole, "; 自定义说明") != NULL, "SAVE: [General] 里的注释保留");
+        EXPECT(strstr(whole, "[Mine]") != NULL && strstr(whole, "Whatever = 1") != NULL,
+               "SAVE: 未知段与未知键原样保留");
+        EXPECT(strstr(whole, "; 名单注释") != NULL, "SAVE: 名单段里的注释保留");
+        EXPECT(strstr(whole, "Old1.exe") == NULL, "SAVE: 旧名字确实被替换掉（不是追加）");
+        EXPECT(strstr(whole, "\r\n") != NULL, "SAVE: 保持原本的 CRLF 行尾");
+        /* 键名不是"前缀匹配"：LogMaxKBExtra = 1 不该被当成 LogMaxKB 改掉 */
+        EXPECT(strstr(whole, "LogMaxKB = 65536") != NULL, "SAVE: 键写成 键 = 值 的形式");
+    }
+    /* 文件不存在时写回 = 新建（[General] 连带注释块 + 名单段） */
+    {
+        DeleteFileW(L"bin/cfgsave.ini");
+        WriteIni("[General]\r\nRunAsAdmin = 1\r\n");
+        ConfigLoadFrom(L"bin/cfgtest.ini");
+        ConfigSetWheelHScrollMul(7);
+        {
+            static const WCHAR* n[1] = { L"a.exe" };
+            ConfigSetList(CFG_LIST_NOSMOOTH, n, 1);
+        }
+        EXPECT(ConfigSaveFile(L"bin/cfgsave.ini"), "SAVE: 新文件写回成功");
+        ConfigLoadFrom(L"bin/cfgsave.ini");
+        EXPECT(ConfigGetWheelHScrollMul() == 7, "SAVE: 新建文件里自定义值正确");
+        EXPECT(ConfigMatchList(CFG_LIST_NOSMOOTH, L"a.exe"), "SAVE: 新建文件含名单段");
+        DeleteFileW(L"bin/cfgsave.ini");
     }
 
     /* '#' 开头不再算注释（只认 ';'）。可观测的差别：名单段里一行 "# Ghost.exe"
@@ -561,13 +674,17 @@ int main(void) {
     EXPECT(TemplateHas("WheelScrollMul = 3"), "CFG: 模板含 WheelScrollMul 默认值");
     EXPECT(TemplateHas("AutoScrollFastMs = 800"), "CFG: 模板含 AutoScrollFastMs 默认值");
     EXPECT(TemplateHas("AutoScrollInterval = 1500"), "CFG: 模板含 AutoScrollInterval 默认值");
-    EXPECT(TemplateHas("AutoScrollSmooth = 1"),    "CFG: 模板含 AutoScrollSmooth 默认值");
     EXPECT(TemplateHas("WheelHScrollMul = 1"),     "CFG: 模板含 WheelHScrollMul 默认值");
+    /* AutoScrollSmooth 已改为 [NoSmoothScroll] 名单：模板里不该再有这个键
+       （留着会让用户去改一个没人读的开关） */
+    EXPECT(!TemplateHas("AutoScrollSmooth"), "CFG: 模板不再含 AutoScrollSmooth（已废弃）");
     EXPECT(TemplateHas("AllowScintillaRead = 1"),  "CFG: 模板含 AllowScintillaRead 默认值");
     /* 激活键不再进配置：模板里**不该**再出现这两项（否则用户会以为能改） */
     EXPECT(!TemplateHas("EnhanceKeys"), "CFG: 模板不再含 EnhanceKeys（已改为编译期常量）");
     EXPECT(!TemplateHas("ShiftKeys"),   "CFG: 模板不再含 ShiftKeys（已改为编译期常量）");
     EXPECT(TemplateHas("[NativeWordJump]"),  "CFG: 模板含 NativeWordJump 段");
+    EXPECT(TemplateHas("[AutoDisable]"),     "CFG: 模板含 AutoDisable 段");
+    EXPECT(TemplateHas("[NoSmoothScroll]"),  "CFG: 模板含 NoSmoothScroll 段");
     DeleteFileW(L"bin/CapsEnhance.ini");            /* 删掉刚生成的模板 */
     if (hadRealIni) MoveFileW(L"bin/__ini_saved__.ini", L"bin/CapsEnhance.ini");
 
