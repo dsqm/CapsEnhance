@@ -1214,25 +1214,32 @@ static int NavJumpInner(int dir, BOOL shift) {
     NAV_LOCK();
     skipSetTry = (g_noSetProc[0] && procName[0] && !_wcsicmp(g_noSetProc, procName));
     NAV_UNLOCK();
-    /* 期望区间（有序）：锚已建立时活动端=tgt、锚端固定；无 Shift 收缩为一点。
-       Edit / WPS 两个"吃有序区间"的通道共用这一份计算（Sci 走字节域，自己算）。 */
-    int ws, we;
+    /* 期望区间：一端是**锚**（不动的那端），一端是**活动端**（= tgt，光标所在）。
+       谁大谁小无所谓，**顺序才是关键** —— 各通道"活动端落在哪个参数上"的约定
+       实测各不相同：
+         · Edit：EM_SETSEL 的活动端在 **lParam**。置位 (60,73) 之后 Shift+Left
+           动的是 73；置位 (73,60)（反序）动的是 60（test/emprobe.c 的 H 段实测）。
+         · WPS：Selection.SetRange(a,b) 的活动端在 **a**（[12,31] 之后 Shift+右
+           得到 [13,31]，动的是起点）—— 与 Edit 恰好相反。
+         · Scintilla：SCI_SETSEL(caret, anchor) 天然就是 (活动端, 锚)，本来就对。
+       此前一律传"有序区间"，于是 Edit 向左扩选后光标停在**右端**、WPS 向右扩选
+       后停在左端 —— 症状是"选中的那段光标落在结尾，随后按方向键（取消选中）的
+       行为不符合预期"。 */
+    int caretEnd, anchorEnd;
     if (!shift) {
-        ws = we = tgt;
+        caretEnd = anchorEnd = tgt;      /* 无选区：收缩为一点 */
     } else {
         NAV_LOCK();
-        int anchor = g_selAnchor;      /* 在锁内取快照：别把锁带进下面的 IPC */
+        int anchor = g_selAnchor;        /* 在锁内取快照：别把锁带进下面的 IPC */
         NAV_UNLOCK();
-        if (anchor >= 0) {
-            ws = (tgt < anchor) ? tgt : anchor;
-            we = (tgt < anchor) ? anchor : tgt;
-        } else {
-            ws = (dir == DIR_LEFT) ? tgt : caret;
-            we = (dir == DIR_LEFT) ? selEnd : tgt;
-        }
+        caretEnd = tgt;
+        anchorEnd = (anchor >= 0) ? anchor
+                                  : ((dir == DIR_LEFT) ? selEnd : caret);
     }
+    int ws = (caretEnd < anchorEnd) ? caretEnd : anchorEnd;  /* 有序区间：回读校验用 */
+    int we = (caretEnd < anchorEnd) ? anchorEnd : caretEnd;
     if (path == Chan::Edit && focus && steps >= DIRECT_JUMP_MIN) {
-        direct = ClassicSetSel(focus, ws, we);
+        direct = ClassicSetSel(focus, anchorEnd, caretEnd);   /* 活动端在 lParam */
         if (direct) direct = EditVerifySel(focus, ws, we);
         if (direct) {
             /* EM_SETSEL 不会滚动视图：光标可能被移到窗口外看不到
@@ -1256,7 +1263,8 @@ static int NavJumpInner(int dir, BOOL shift) {
                 }
             }
         }
-        if (direct && g_recording.load()) CapLog("  -> 直接 EM_SETSEL [%d,%d] 已校验", ws, we);
+        if (direct && g_recording.load())
+            CapLog("  -> 直接 EM_SETSEL [%d,%d] 活动端=%d 已校验", ws, we, caretEnd);
     } else if (path == Chan::Sci && focus && steps >= DIRECT_JUMP_MIN) {
         LONGLONG tb = Utf16ToDocBytes(text, tgt, sp.cp);
         if (tb >= 0) {
@@ -1282,11 +1290,14 @@ static int NavJumpInner(int dir, BOOL shift) {
            处理 —— 后者若再补箭头就是两个错误叠加。 */
         BOOL wpsDirect = (steps >= DIRECT_JUMP_MIN) || shift || (caret != selEnd);
         if (wpsDirect) {
-            int r = WpsSetSel(focus, ws, we);
+            /* 参数顺序 = (活动端, 锚)：WPS 的活动端落在**首个**参数上（见上方
+               区间计算的说明）。传"有序区间"会让向右扩选后的光标停在左端。 */
+            int r = WpsSetSel(focus, caretEnd, anchorEnd);
             if (r == WPS_SET_OK) {
                 direct = TRUE;
                 if (g_recording.load())
-                    CapLog("  -> 直接 Selection.SetRange [%d,%d] 已校验", ws, we);
+                    CapLog("  -> 直接 Selection.SetRange [%d,%d] 活动端=%d 已校验",
+                           ws, we, caretEnd);
             } else if (r == WPS_SET_UNSURE) {
                 skipArrows = TRUE;
                 if (g_recording.load())

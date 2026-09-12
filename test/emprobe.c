@@ -77,6 +77,21 @@ static void TapVk(WORD vk) {
     Sleep(40);
 }
 
+/* Shift + 某方向键（SendInput）：Shift 只影响活动端，用它判断活动端在哪一侧 */
+static void TapVkShift(WORD vk) {
+    INPUT in[4];
+    memset(in, 0, sizeof(in));
+    for (int i = 0; i < 4; i++) in[i].type = INPUT_KEYBOARD;
+    in[0].ki.wVk = VK_LSHIFT;
+    in[1].ki.wVk = vk;
+    in[1].ki.wScan = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    in[1].ki.dwFlags = KEYEVENTF_EXTENDEDKEY;
+    in[2] = in[1]; in[2].ki.dwFlags |= KEYEVENTF_KEYUP;
+    in[3] = in[0]; in[3].ki.dwFlags |= KEYEVENTF_KEYUP;
+    SendInput(4, in, sizeof(INPUT));
+    Sleep(60);
+}
+
 /* 不带 EXTENDEDKEY 的普通键（F8 这类） */
 static void TapVkPlain(WORD vk) {
     INPUT in[2];
@@ -409,38 +424,37 @@ int main(void) {
         }
     }
 
-    /* ================= G. EmEditor 的"选择模式"假设验证 =================
-       现象（用户）：光标在行尾，按两下 N 之后"整行被选中了"，光标却还在结尾，
-       之后按 L"取消选中"的行为也不对。
-       这与 EmEditor 的**选择模式**（默认 F8，开启后所有光标移动都变成扩展
-       选区）完全吻合：活动端留在原处、另一端移到词边界 -> 看起来就是"选中了
-       一段、光标还在原地"。
-       这里做实验：记下"移动是否变成选区" -> 按一次 F8 -> 再看一遍 -> 再按
-       一次 F8 复原。"移动是否变成选区"用 (caret, selEnd) 是否相等判断。 */
-    printf("\n---- G. \u9009\u62e9\u6a21\u5f0f\uff08F8\uff09\u5047\u8bbe\u9a8c\u8bc1 ----\n");
+    /* ================= H. EM_SETSEL 的"活动端"在哪一侧 =================
+       现象（用户）：Caps+F+N 选词后，选出来的那段**光标停在尾端**，
+       而前一次（走改道 Ctrl+Shift+Left 的）光标在首端 —— 两条路不一致，
+       于是随后按方向键时"取消选中"的行为不符合预期。
+       判据：Shift+方向键只动**活动端**，另一端（锚）不动。所以置位 [60,73]
+       之后连按两次 Shift+Left（第一次会被"吞"，见 F 段）：
+         读到 (59,73)  -> 动的是起点 -> 活动端在**首端**
+         读到 (60,72)  -> 动的是终点 -> 活动端在**尾端**
+       再试"反序" EM_SETSEL(73,60)：经典 Edit 约定里 wParam > lParam 表示
+       反选、光标落在 wParam 侧 —— 若 EmEditor 认这条，就能把活动端翻过来。 */
+    printf("\n---- H. EM_SETSEL 的活动端在哪一侧 ----\n");
     {
         FocusEditor(h);
-        /* \u6ce8\u610f\uff1a\u6bcf\u6b21 EM_SETSEL \u5b9a\u4f4d\u540e\uff0c**\u7b2c\u4e00\u652f\u65b9\u5411\u952e\u5fc5\u88ab\u541e**\uff08\u5c31\u662f F \u6bb5\u90a3\u4e2a\u73b0\u8c61\uff09\uff0c
-           \u6240\u4ee5\u6bcf\u7ec4\u90fd\u5148\u53d1\u4e00\u652f"\u6d88\u5316\u7528"\u7684\u65b9\u5411\u952e\uff0c\u518d\u53d1\u89c2\u5bdf\u7528\u7684\u90a3\u652f\uff0c
-           \u5426\u5219\u6d4b\u5230\u7684\u6c38\u8fdc\u53ea\u662f"\u88ab\u541e"\u3002 */
-        #define OBSERVE(tag) \
-            do { \
-                SendMessageTimeoutW(h, EM_SETSEL, (WPARAM)40, (LPARAM)40, SMTO_ABORTIFHUNG, 300, NULL); \
-                Sleep(120); \
-                TapVk(VK_LEFT);                 /* \u6d88\u5316\u88ab\u541e\u7684\u90a3\u4e00\u6b21 */ \
-                int ca, sa; ReadSel(h, &ca, &sa); \
-                TapVk(VK_LEFT);                 /* \u89c2\u5bdf\u7528 */ \
-                int cb, sb; ReadSel(h, &cb, &sb); \
-                printf("  %s: \u6d88\u5316\u540e (%d,%d) --\u5de6\u79fb--> (%d,%d)  %s\\n", tag, ca, sa, cb, sb, \
-                       (cb != sb) ? "\u79fb\u52a8\u53d8\u6210\u4e86\u9009\u533a\uff01" : "\u666e\u901a\u79fb\u52a8\uff08\u6298\u53e0\uff09"); \
-            } while (0)
-
-        OBSERVE("G1 \u666e\u901a\u72b6\u6001      ");
-        TapVkPlain(VK_F8); Sleep(150);
-        OBSERVE("G2 \u6309\u8fc7 F8 \u540e     ");
-        TapVkPlain(VK_F8); Sleep(150);
-        OBSERVE("G3 \u518d\u6309 F8 \u590d\u539f  ");
-        #undef OBSERVE
+        for (int k = 0; k < 2; k++) {
+            int a = 60, b = 73;
+            if (k == 1) { a = 73; b = 60; }        /* 反序：wParam > lParam */
+            SendMessageTimeoutW(h, EM_SETSEL, (WPARAM)a, (LPARAM)b,
+                                SMTO_ABORTIFHUNG, 300, NULL);
+            Sleep(150);
+            int c0, s0; ReadSel(h, &c0, &s0);
+            TapVkShift(VK_LEFT);                   /* 第一次：多半被吞 */
+            int c1, s1; ReadSel(h, &c1, &s1);
+            TapVkShift(VK_LEFT);                   /* 第二次：活动端真的动 */
+            int c2, s2; ReadSel(h, &c2, &s2);
+            const char* side = "?(两次都没动)";
+            if (c2 == c0 - 1 && s2 == s0)         side = "首端(左)";
+            else if (c2 == c0 && s2 == s0 - 1)    side = "尾端(右)";
+            printf("  %s EM_SETSEL(%d,%d)  读回(%d,%d) | Shift+L x1 -> (%d,%d) | x2 -> (%d,%d)"
+                   "  => 活动端在 %s\n",
+                   k ? "反序" : "正序", a, b, c0, s0, c1, s1, c2, s2, side);
+        }
     }
 
     /* 尽量把光标放回原处（用 EM_SETSEL 只在"原位"上，不改文本） */

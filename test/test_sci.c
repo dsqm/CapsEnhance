@@ -80,8 +80,12 @@ static void CaretLeft(void) {
    这条防线：Edit 通道必须整体放弃，而不是把越界值钳一下继续用。 */
 static const wchar_t* g_emText = L"马趁香微路远，沙笼月淡烟斜。渡波清彻映妍华。";
 static int g_emLen = 0;        /* 字符数（WM_GETTEXTLENGTH / WM_GETTEXT 的单位） */
-static int g_emPos = 0;        /* EM_GETSEL 回报的值（不同场景切不同单位） */
-static int g_emSetSel = 0;     /* EM_SETSEL 被调用次数：必须保持 0 */
+static int g_emPos = 0;        /* EM_SETSEL 之前的当前光标（各场景自行设定） */
+static int g_emSelA = 0, g_emSelB = 0;  /* 当前选区（有序两端），EM_GETSEL 报它 */
+static int g_emSetSel = 0;     /* EM_SETSEL 被调用次数 */
+static int g_emSetSelW = 0, g_emSetSelL = 0;  /* 最近一次 EM_SETSEL 的两个参数 */
+/* 设定"当前光标"（无选区）：EM_GETSEL 的两端都报它。场景里代替直接写 g_emPos。 */
+static void SetEmCaret(int p) { g_emPos = p; g_emSelA = p; g_emSelB = p; }
 static int g_emKd = 0;         /* 收到的 WM_KEYDOWN 数：退回原生兜底时会 >0 */
 
 static LRESULT CALLBACK EmProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -100,11 +104,17 @@ static LRESULT CALLBACK EmProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         /* EmEditor 风格：把结尾 NUL 也算进计数（nav.c 会剥掉多余的 NUL） */
         return g_emLen + 1;
     }
-    case EM_GETSEL:                 /* 打包 (start, end) */
-        return (LRESULT)((DWORD)g_emPos | ((DWORD)g_emPos << 16));
+    case EM_GETSEL:                 /* 打包 (start, end)：真实控件恒按**有序**回报，
+                                       所以"活动端在哪一侧"它这边看不出来
+                                       （那正是 test/emprobe.c 用 Shift+方向测出来的） */
+        return (LRESULT)((DWORD)g_emSelA | ((DWORD)g_emSelB << 16));
     case EM_SETSEL:
         g_emSetSel++;
-        g_emPos = (int)l;      /* 真的移动光标：置位后的回读校验才会通过 */
+        g_emSetSelW = (int)w; g_emSetSelL = (int)l;
+        /* 真实控件：区间会被有序化，但**活动端留在 lParam**（emprobe H 段实测） */
+        g_emSelA = ((int)w < (int)l) ? (int)w : (int)l;
+        g_emSelB = ((int)w < (int)l) ? (int)l : (int)w;
+        g_emPos  = (int)l;
         return 0;
     case WM_KEYDOWN:
         g_emKd++;
@@ -323,7 +333,7 @@ int main(void) {
 
             /* H1. 位置按**字节**给（EmEditor 的 UTF-8 文档）-> 单位不一致 ->
                整条 Edit 通道放弃 */
-            g_emPos = g_emLen * 3;                /* 66：远大于字符数 */
+            SetEmCaret(g_emLen * 3);              /* 66：远大于字符数 */
             g_emSetSel = 0; g_emKd = 0;
             NavJump(DIR_LEFT, FALSE);
             Pump(400);
@@ -335,12 +345,34 @@ int main(void) {
                **补一支探针方向键**：EmEditor 外部置位后会吞掉下一次输入（用户：
                "跳词后按 J 要按两下"），而那一次额度可以由我们主动喂掉
                （test/emprobe.c 实测 3/3 稳定），这样既保住瞬跳、用户也不用按两下。 */
-            g_emPos = 21;                         /* 末尾：左跳 steps=7 >= DIRECT_JUMP_MIN */
+            SetEmCaret(21);                       /* 末尾：左跳 steps=7 >= DIRECT_JUMP_MIN */
             g_emSetSel = 0; g_emKd = 0;
             NavJump(DIR_LEFT, FALSE);
             Pump(400);
             EXPECT(g_emSetSel == 1, "EM2: 单位一致 -> 正常外部置位");
             EXPECT(g_emKd >= 1, "EM2: 置位后补发探针方向键（喂掉被吞的那次输入）");
+
+            /* H3/H4. 带 Shift（Caps+F 扩选）时，**活动端必须落在 lParam**。
+               EmEditor 实测（test/emprobe.c H 段）：EM_SETSEL(60,73) 之后
+               Shift+Left 动的是 73；EM_SETSEL(73,60) 动的是 60 —— 也就是
+               "活动端 = lParam"。此前一律传有序区间 (小,大)，于是**向左扩选后
+               光标停在右端**（用户："选中的那段光标在结尾，随后按方向键取消选中
+               的行为不符合预期"）。这里直接断言传参顺序。 */
+            NavSelTrackReset();
+            SetEmCaret(21);
+            g_emSetSel = 0; g_emSetSelW = -1; g_emSetSelL = -1;
+            NavJump(DIR_LEFT, TRUE);              /* 左扩：活动端应落在**小**的一侧 */
+            Pump(400);
+            EXPECT(g_emSetSel == 1 && g_emSetSelL < g_emSetSelW,
+                   "EM3: 带 Shift 左扩 -> 活动端(EM_SETSEL 的 lParam)=左端");
+
+            NavSelTrackReset();
+            SetEmCaret(0);
+            g_emSetSel = 0; g_emSetSelW = -1; g_emSetSelL = -1;
+            NavJump(DIR_RIGHT, TRUE);             /* 右扩：活动端应落在**大**的一侧 */
+            Pump(400);
+            EXPECT(g_emSetSel == 1 && g_emSetSelL > g_emSetSelW,
+                   "EM4: 带 Shift 右扩 -> 活动端(EM_SETSEL 的 lParam)=右端");
 
             DestroyWindow(em);
             SetFocus(h);

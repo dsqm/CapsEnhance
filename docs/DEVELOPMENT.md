@@ -190,12 +190,13 @@
 
 | 通道 | API | 备注 |
 | --- | --- | --- |
-| 经典 Edit | `EM_SETSEL` | 无 anchor 概念，Shift 位移按"向左锚右端 / 向右锚左端"给出有序选区。**EmEditorView 不用它**（外部置位会吞掉下一次按键，见下方实测坑）|
-| Scintilla | `SCI_SETSEL(anchor, caret)` | 天然支持选区位移 |
+| 经典 Edit | `EM_SETSEL(锚, 活动端)` | **活动端在 lParam**（emprobe H 段实测：置位 `(60,73)` 后 `Shift+Left` 动的是 73、置位 `(73,60)` 后动的是 60）。区间会被有序化，所以**只有传参顺序能决定光标落在哪一端** —— 传有序区间会让向左扩选后的光标停在右端 |
+| Scintilla | `SCI_SETSEL(anchor, caret)` | 活动端 = `caret`（第二个参数），置位后用 `SCI_GETCURRENTPOS` 回读校验，本来就是对的 |
 | UIA | `TextRange.Select()` | 退化（空）range 上调用 Select 即移动光标。**仅限无 Shift**；Chromium 系对折叠 range 的负向端点移动一律拒绝，向左目标用正向增量 + 绝对定位构造 |
 | IA2 | `setCaretOffset` / `setSelection` | 不支持时返回 `E_FAIL` 退回箭头；**仅限无 Shift** |
-| WPS | `Selection.SetRange(start, end)` | `start == end` 即移光标；参数自动有序化；**带 Shift 或已有选区时必须走它** |
+| WPS | `Selection.SetRange(活动端, 锚)` | **活动端在第一个参数**（与 Edit 相反）—— 实测 `[12,31]` 后 `Shift+右` 得到 `[13,31]`，动的是起点。`start == end` 即移光标；**带 Shift 或已有选区时必须走它** |
 
+- **"活动端落在哪个参数上"各通道不同，不能统一传有序区间**（2026-09-12 修）：Edit 在 `lParam`、WPS 在首个参数、Scintilla 在 `caret`。统一传 `(小,大)` 的后果是"向左扩选后光标停在右端、向右扩选后停在左端"，紧接着按方向键时"取消选中"的方向与直觉相反。区间本身两种顺序等价，**只有传参顺序影响活动端**。
 - UIA / IA2 的位移**仅限无 Shift**：带选区时读回的位置是选区起点而非活动端，目标计算不成立——Shift 位移走箭头（anchor 语义天然正确）。WPS 置位**不限无 Shift**（`SetRange` 吃有序区间，位移序列锚点由自己维护）。
 - **置位并非对所有 UIA 实现有效**：Chromium 系支持（只支持移动 End 端点）；**WPF 系（如 Quicker 文本框）的 `Select()` 会返回成功但选区不动**，还会让显示光标短暂闪到目标却不真正生效——连续两次判定无效后本会话内对该程序不再尝试置位（消除闪烁，重启程序恢复），回读发现"光标未动"后自动退回箭头。
 - UIA / IA2 置位回读比经典 Edit 更严：仍同一页文本且光标恰在目标才算成功；HRESULT 成功但回读不符时不叠加箭头（避免双重错误）。
