@@ -31,27 +31,28 @@ typedef struct {
     int      outVk;  /* 目标虚拟键；0 = 不发键（见 flags）         */
     int      dir;    /* 按词跳转方向 DIR_*（仅 ACTF_WORDJUMP 有意义）  */
     unsigned flags;
+    const char* name; /* 日志可读名（诊断打点用；不参与任何判定） */
 } ActionDef;
 
 /* 顺序不敏感，ActOfVk 线性扫（表很小，且只在按键事件里查一次）。 */
 static const ActionDef kActions[] = {
-    { ACT_LEFT,      'J',        VK_LEFT,     -1, 0 },
-    { ACT_DOWN,      'K',        VK_DOWN,     -1, 0 },
-    { ACT_RIGHT,     'L',        VK_RIGHT,    -1, 0 },
-    { ACT_UP,        'I',        VK_UP,       -1, 0 },
-    { ACT_HOME,      'P',        VK_HOME,     -1, 0 },
-    { ACT_END,       VK_OEM_1,   VK_END,      -1, 0 },   /* ; */
-    { ACT_BACKSPACE, 'R',        VK_BACK,     -1, 0 },
-    { ACT_DELETE,    'W',        VK_DELETE,   -1, 0 },
-    { ACT_ENTER,     VK_SPACE,   VK_RETURN,   -1, 0 },
+    { ACT_LEFT,      'J',        VK_LEFT,     -1, 0,                  "←(J)" },
+    { ACT_DOWN,      'K',        VK_DOWN,     -1, 0,                  "↓(K)" },
+    { ACT_RIGHT,     'L',        VK_RIGHT,    -1, 0,                  "→(L)" },
+    { ACT_UP,        'I',        VK_UP,       -1, 0,                  "↑(I)" },
+    { ACT_HOME,      'P',        VK_HOME,     -1, 0,                  "Home(P)" },
+    { ACT_END,       VK_OEM_1,   VK_END,      -1, 0,                  "End(;)" },
+    { ACT_BACKSPACE, 'R',        VK_BACK,     -1, 0,                  "Bs(R)" },
+    { ACT_DELETE,    'W',        VK_DELETE,   -1, 0,                  "Del(W)" },
+    { ACT_ENTER,     VK_SPACE,   VK_RETURN,   -1, 0,                  "Enter" },
     /* 开关键：翻转动作，按一次只切一次 —— 属性写在表里，见 ACTF_SINGLE_SHOT。
        同时 ACTF_NO_SHIFT：它不是光标动作，不该被选区模式套上 Shift。 */
-    { ACT_CAPSLOCK,  VK_TAB,     VK_CAPITAL,  -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT },
+    { ACT_CAPSLOCK,  VK_TAB,     VK_CAPITAL,  -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT, "Caps(Tab)" },
     /* 按词跳转：方向写在表里，免得运行时靠 ACT_WORD_L/R 的数值去反推左右 */
-    { ACT_WORD_L,    'N',        0,          DIR_LEFT,  ACTF_WORDJUMP },
-    { ACT_WORD_R,    'M',        0,          DIR_RIGHT, ACTF_WORDJUMP },
+    { ACT_WORD_L,    'N',        0,          DIR_LEFT,  ACTF_WORDJUMP, "词←(N)" },
+    { ACT_WORD_R,    'M',        0,          DIR_RIGHT, ACTF_WORDJUMP, "词→(M)" },
     /* 诊断：没有触发键（由 PROBE_KEY 的特殊路径投递） */
-    { ACT_PROBE,     0,          0,          -1, ACTF_PROBE },
+    { ACT_PROBE,     0,          0,          -1, ACTF_PROBE, "探测" },
 };
 #define ACT_N ((int)(sizeof(kActions) / sizeof(kActions[0])))
 
@@ -82,6 +83,13 @@ int ActWordDir(int act) {
 BOOL ActHasFlag(int act, unsigned flag) {
     const ActionDef* d = FindAct(act);
     return d ? ((d->flags & flag) != 0) : FALSE;
+}
+
+/* 动作的可读名，只给诊断日志用（"为什么这次没发出去"时一眼能对上按的是哪个键）。
+   未知动作返回 "?"，不做任何判定。 */
+const char* ActName(int act) {
+    const ActionDef* d = FindAct(act);
+    return (d && d->name) ? d->name : "?";
 }
 
 /* ================= 修饰（和弦）模式表 ================= */

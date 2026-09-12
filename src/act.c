@@ -96,7 +96,18 @@ static DWORD WINAPI ActThread(LPVOID p) {
             InterlockedExchange(&s_busy, 1);
             LeaveCriticalSection(&s_cs);
 
+            /* 执行耗时打点：排查"按了键却要等一会儿才动"时，一眼看出是
+               本次动作本身慢（NavJump 的 IPC/COM），还是被前一条堵住了
+               （wait = 从投递到开始执行）。只在记录模式下写。 */
+            ULONGLONG tWait0 = GetTickCount64();
+            if (g_recording.load() && (j.act != ACT_NONE || j.fillAct != ACT_NONE))
+                CapLog("  [执行] 开始 act=%s fill=%s 排队等待=%llu ms (队列剩 %d)",
+                       ActName(j.act), ActName(j.fillAct),
+                       (unsigned long long)(tWait0 - j.postTick), s_n);
             RunJob(&j);
+            if (g_recording.load() && (j.act != ACT_NONE || j.fillAct != ACT_NONE))
+                CapLog("  [执行] 完成 act=%s 耗时=%llu ms", ActName(j.act),
+                       (unsigned long long)(GetTickCount64() - tWait0));
 
             InterlockedExchange(&s_busy, 0);
             SignalIdleIfEmpty();
@@ -676,6 +687,7 @@ void ActPost(const ActJob* job) {
         s_n--;
     }
     s_q[s_tail] = *job;
+    s_q[s_tail].postTick = GetTickCount64();   /* 投递时刻：诊断"排队等了多久" */
     s_tail = (s_tail + 1) % ACT_QUEUE_MAX;
     s_n++;
     ResetEvent(s_evIdle);

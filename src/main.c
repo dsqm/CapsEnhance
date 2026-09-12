@@ -584,6 +584,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TRIG_DOWN: {             /* 触发键按下：进入稳定期待开火 */
         int act = (int)wp;
         StackPush(act);
+        if (g_recording.load())
+            CapLog("  [和弦] %s 按下 (active=%d pending=%d inflight=%d)",
+                   ActName(act), g_activeAct, g_pendingAct, ActInFlight());
         if (g_activeAct != ACT_NONE && g_activeAct != act) {
             /* 已在重复时又按下另一个键：立刻切到新键（最后按下优先），
                重新走重复节奏。此前这里直接忽略，导致第二个键完全失灵。 */

@@ -165,6 +165,7 @@ int  ActOfVk(int vk);                   /* 触发键 -> 动作；ACT_NONE = 不�
 int  ActOutVk(int act);                 /* 动作 -> 目标虚拟键；0 = 不发键（看标志） */
 int  ActWordDir(int act);               /* 按词跳转动作 -> DIR_*；其余返回 -1 */
 BOOL ActHasFlag(int act, unsigned flag);/* 动作是否带某属性标志 */
+const char* ActName(int act);           /* 动作的可读名（仅诊断日志用，不做判定） */
 
 int  ModeFindByVk(int vk);              /* vk 是哪个模式激活键；-1 = 不是 */
 void ModeKeyEvent(int mode, int vk, BOOL down); /* 钩子线程：更新按住位图 */
@@ -189,6 +190,7 @@ typedef struct {
     BOOL enh;       /* 开火快照：增强模式（点按补齐到 3 次）      */
     BOOL shf;       /* 开火快照：选区模式（带 Shift）             */
     int  count;     /* fillAct 的已发送次数（补齐时用）           */
+    ULONGLONG postTick; /* 投递时刻（GetTickCount64）：诊断打点用，不参与判定 */
 } ActJob;
 
 BOOL ActStart(void);              /* 启动执行线程；失败返回 FALSE（退回同步） */
