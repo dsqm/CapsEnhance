@@ -1,6 +1,6 @@
 /* keytest.c - Chromium key delivery probe (Edge/VSCode share this engine).
  *
- * Why: Caps+U / Caps+O (word jump) fails in Notepad3 / EmEditor / VSCode.
+ * Why: Caps+N / Caps+O (word jump) fails in Notepad3 / EmEditor / VSCode.
  *      Suspect: the way we build SendInput events (scan code, EXTENDED flag,
  *      batched vs one-by-one, whether Ctrl is really held) makes the target
  *      receive a different key than intended. This tool runs every variant

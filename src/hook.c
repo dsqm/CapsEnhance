@@ -159,7 +159,7 @@ static BOOL AutoDisableHit(void) {
 
    判据用 g_phys（钩子自己维护的**物理**按下表，不含注入），覆盖三类键：
      · 修饰键（Alt/Ctrl/Shift/Win 左右）—— 系统的组合键语义会被我们打断；
-     · 触发键（J K L I P ; R W Space Tab N M）与模式激活键（默认 Alt/D/F）；
+     · 触发键（J K L I P ; R W Space Tab N O）与模式激活键（默认 Alt/D/F）；
      · 诊断键 `。
    键位表是数据的，所以这里一律查询（ActOfVk / ModeFindByVk），不写死键名；
    以后改键位不用回来改这里。

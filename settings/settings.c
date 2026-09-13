@@ -103,7 +103,7 @@ typedef struct {
     int          list;      /* CFG_LIST_* */
 } ListGroup;
 static const ListGroup kLists[] = {
-    { L"原生按词跳转 [NativeWordJump]：Caps+U/O 不再探测文本，直接发 Ctrl+←/→",
+    { L"原生按词跳转 [NativeWordJump]：Caps+N/O 不再探测文本，直接发 Ctrl+←/→",
       CFG_LIST_NATIVE },
     { L"自动屏蔽 [AutoDisable]：这些程序在前台时，本程序完全不介入（CapsLock 恢复正常）",
       CFG_LIST_AUTODISABLE },

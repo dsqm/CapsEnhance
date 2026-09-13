@@ -379,7 +379,7 @@ int main(void) {
     Reset();
     g_slowJumpMs = 400;
     Key(CLI_CAPS, TRUE); Pump(2);
-    Key('U', TRUE); Pump(2);        /* 跳词：立即开火，占住执行线程 400ms */
+    Key('N', TRUE); Pump(2);        /* 跳词：立即开火，占住执行线程 400ms */
     Pump(60);                       /* 等它确实在跑 */
     Key('J', TRUE); Pump(2);        /* 跳词期间点按：请求排在跳词后面 */
     Key('J', FALSE); Pump(2);
