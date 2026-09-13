@@ -88,7 +88,7 @@ static const Field kFields[] = {
     { IDC_RUN_ADMIN, L"以管理员身份运行（会弹 UAC）",                   NULL,      1, 0, 0 },
     { IDC_LOG_KB,    L"日志大小上限（0 = 不限制）",                    L"KB",     0, 0, 65536 },
     { IDC_STEPS,     L"按词跳转逐格上限（0 = 不限制，上限 256）",       L"格",     0, 0, 256 },
-    { IDC_OVER_CTRL, L"超过逐格上限时改发 Ctrl+方向（取消勾选只发一格）", NULL,      1, 0, 0 },
+    { IDC_OVER_CTRL, L"超过逐格上限时改发 Ctrl+方向（取消勾选只发一次方向键）", NULL,      1, 0, 0 },
     { IDC_WMUL,      L"Caps+滚轮 放大倍数（0/1 = 关闭）",              L"倍",     0, 0, 16 },
     { IDC_INTERVAL,  L"持续滚动初始速度（越大越慢）",                  L"毫秒/格", 0, 100, 60000 },
     { IDC_FASTMS,    L"持续滚动最快速度（越小越快）",                  L"毫秒/格", 0, 20, 60000 },
@@ -292,7 +292,7 @@ static void LoadConfig(void) {
     g_loading = FALSE;
     g_dirty = FALSE;
     UpdateTitle();
-    SetStatus(L"%s（Ctrl+S 保存并重启 CapsEnhance）", g_path);
+    SetStatus(L"");
 }
 
 /* 保存 = 界面 -> 配置层 -> 增量写回 ini -> 让本体重启。
@@ -522,7 +522,9 @@ static void Layout(int w, int h) {
         SetWindowPos(g_footer, HWND_TOP, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
-    if (g_status) MoveWindow(g_status, x, S(4), w - x * 2 - S(300), S(18), TRUE);
+    /* 状态栏独占一行（按钮在它下面那行），给足整个客户区宽：
+       窄窗口下提示文案也能完整显示，不用给按钮预留右侧空间 */
+    if (g_status) MoveWindow(g_status, x, S(4), w - x * 2, S(18), TRUE);
     int bw = S(96), fby = S(26);
     MoveWindow(GetDlgItem(g_footer, IDC_SAVE),   w - x - bw * 3 - S(16), fby, bw, S(26), TRUE);
     MoveWindow(GetDlgItem(g_footer, IDC_RELOAD), w - x - bw * 2 - S(8),  fby, bw, S(26), TRUE);
@@ -699,7 +701,7 @@ static void PickEnd(void) {
     g_pickList = -1;
     ReleaseCapture();
     SetCursor(LoadCursorW(NULL, (LPCWSTR)(ULONG_PTR)IDC_ARROW));
-    SetStatus(L"%s（Ctrl+S 保存并重启 CapsEnhance）", g_path);
+    SetStatus(L"");
 }
 
 static void PickBegin(int i) {
@@ -929,9 +931,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     /* 初始大小按 DPI 缩放，并**钳到工作区以内**：高 DPI 笔记本（150% + 768 高）
        上按 96 DPI 算出来的 780 像素窗口会超出屏幕底部，底部的按钮与状态栏
        就永远看不见了。 */
-    /* 宽度按最宽的一行（名单的输入框 + 四个按钮 ≈ 500）加些余量；
-       太宽的话长说明句和内容之间全是空白，反而难看 */
-    int winW = S(680), winH = S(780);
+    /* 宽度贴着内容走：最宽的是名单区标题句（约 490）和"输入框 + 单位 +
+       说明标签"一行（约 500），再留滚动条与边框的余量 —— 再宽的话
+       名单框右侧就是一大块用不上的空白 */
+    int winW = S(560), winH = S(780);
     {
         RECT wa;
         if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
