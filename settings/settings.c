@@ -534,9 +534,10 @@ static void Layout(int w, int h) {
        窄窗口下提示文案也能完整显示，不用给按钮预留右侧空间 */
     if (g_status) MoveWindow(g_status, x, S(4), w - x * 2, S(18), TRUE);
     int bw = S(88), bg = S(8), fby = S(26);
-    MoveWindow(GetDlgItem(g_footer, IDC_SAVEONLY), w - x - bw * 4 - bg * 3, fby, bw, S(26), TRUE);
-    MoveWindow(GetDlgItem(g_footer, IDC_SAVE),     w - x - bw * 3 - bg * 2, fby, bw, S(26), TRUE);
-    MoveWindow(GetDlgItem(g_footer, IDC_RELOAD),   w - x - bw * 2 - bg,     fby, bw, S(26), TRUE);
+    /* 右对齐排列，左->右：重新加载、保存、保存并重启、退出 */
+    MoveWindow(GetDlgItem(g_footer, IDC_RELOAD),   w - x - bw * 4 - bg * 3, fby, bw, S(26), TRUE);
+    MoveWindow(GetDlgItem(g_footer, IDC_SAVEONLY), w - x - bw * 3 - bg * 2, fby, bw, S(26), TRUE);
+    MoveWindow(GetDlgItem(g_footer, IDC_SAVE),     w - x - bw * 2 - bg,     fby, bw, S(26), TRUE);
     MoveWindow(GetDlgItem(g_footer, IDC_EXIT),     w - x - bw,              fby, bw, S(26), TRUE);
 
     UpdateScrollBar(off);
@@ -1175,9 +1176,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
                                0, 0, 10, 10, g_hwnd, NULL, hInst, NULL);
     g_status = MakeLabel(hInst, g_footer, L"", IDC_STATUS);
+    MakeBtn(hInst, g_footer, L"重新加载", IDC_RELOAD);
     MakeBtn(hInst, g_footer, L"保存", IDC_SAVEONLY);
     MakeBtn(hInst, g_footer, L"保存并重启", IDC_SAVE);
-    MakeBtn(hInst, g_footer, L"重新加载", IDC_RELOAD);
     MakeBtn(hInst, g_footer, L"退出", IDC_EXIT);
 
     ApplyFont();          /* 一次给所有子控件设字体（含刚建出来的） */
