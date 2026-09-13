@@ -497,11 +497,15 @@ static void Layout(int w, int h) {
     /* 名单高度固定（约五行，再多名单自己有滚动条），三组顺序往下排 */
     y += S(6);
     int listH = S(84);
+    /* 名单列表框**定宽**（右缘与"选窗添加"按钮对齐），不跟窗口拉伸：
+       进程名撑死几十个字符，窗口一宽列表框右边就是一大片用不上的白 */
+    int listW = w - x * 2;
+    if (listW > S(468)) listW = S(468);
     for (int i = 0; i < LIST_N; i++) {
         int base = IDC_LIST0 + i * LIST_STRIDE;
         MoveWindow(GetDlgItem(g_hwnd, base + 4), x, y - off, w - x * 2, S(18), TRUE);  /* 标题 */
         y += S(20);
-        MoveWindow(GetDlgItem(g_hwnd, base), x, y - off, w - x * 2, listH, TRUE);
+        MoveWindow(GetDlgItem(g_hwnd, base), x, y - off, listW, listH, TRUE);
         y += listH + S(4);
         MoveWindow(GetDlgItem(g_hwnd, base + 1), x, y - off, S(220), S(24), TRUE);     /* 名字输入 */
         MoveWindow(GetDlgItem(g_hwnd, base + 2), x + S(228), y - off, S(70), S(24), TRUE);
