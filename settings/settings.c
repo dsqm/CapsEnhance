@@ -2,7 +2,8 @@
    CapsEnhance 设置程序（CapsEnhanceSettings.exe）
 
    一个**表单式**的 CapsEnhance.ini 编辑器：布尔项是勾选框、数值项是输入框、
-   三份进程名名单各是一个可增删的列表。保存 = 写回 ini + 让本体重启
+   三份进程名名单各是一个可增删的列表，还能点"选窗添加"再点别的窗口，
+   把那个窗口的进程直接加进名单。保存 = 写回 ini + 让本体重启
    （`CapsEnhance.exe --restart`，本体重读配置才算生效）。
 
    为什么不是"直接编辑文本"：配置项的值域（LogMaxKB 0..65536、
@@ -58,7 +59,7 @@
 #define IDC_HMUL       207
 #define IDC_SCI        208
 
-/* 三份名单各一组：列表框 / 输入框 / 添加 / 删除 / 标题 */
+/* 三份名单各一组：列表框 / 输入框 / 添加 / 删除 / 标题 / 选窗添加 */
 #define IDC_LIST0  300
 #define IDC_NAME0  301
 #define IDC_ADD0   302
@@ -68,24 +69,27 @@
 
 /* ---------- 字段表：控件的"是什么"，不是"长什么样" ----------
    界面的每个输入框都从这里取标签、类型与范围；加一个配置项 = 加一行 +
-   Load / Save 里各加一个分支（键名与值域仍只在 config.c 定义一次）。 */
+   Load / Save 里各加一个分支（键名与值域仍只在 config.c 定义一次）。
+   标签只写中文说明 —— ini 里的键名属于配置文件的内部拼法，界面不重复；
+   数值单位（KB / 毫秒 …）单独一列，显示在输入框右侧。 */
 typedef struct {
     int          id;
     const WCHAR* label;
+    const WCHAR* unit;      /* 数值单位，显示在输入框右侧；勾选框为 NULL */
     int          isBool;     /* 1 = 勾选框，0 = 整数输入框 */
     int          min, max;
 } Field;
 
 static const Field kFields[] = {
-    { IDC_RUN_ADMIN, L"以管理员身份运行（RunAsAdmin，会弹 UAC）", 1, 0, 0 },
-    { IDC_LOG_KB,    L"日志大小上限 LogMaxKB（KB，0 = 不限制）",   0, 0, 65536 },
-    { IDC_STEPS,     L"按词跳转逐格上限 MaxArrowSteps（0 = 不限制）", 0, 0, 256 },
-    { IDC_OVER_CTRL, L"超过逐格上限时改发 Ctrl+方向（否则只发一格）", 1, 0, 0 },
-    { IDC_WMUL,      L"C+滚轮 放大倍数 WheelScrollMul（0/1 = 关闭）", 0, 0, 16 },
-    { IDC_INTERVAL,  L"持续滚动初始速度 AutoScrollInterval（毫秒/格，越大越慢）", 0, 100, 60000 },
-    { IDC_FASTMS,    L"持续滚动最快速度 AutoScrollFastMs（毫秒/格，越小越快）", 0, 20, 60000 },
-    { IDC_HMUL,      L"C+Shift+滚轮 横向倍数 WheelHScrollMul（0 = 关闭）", 0, 0, 16 },
-    { IDC_SCI,       L"允许读取 Scintilla 程序内存（关掉则退回逐格）", 1, 0, 0 },
+    { IDC_RUN_ADMIN, L"以管理员身份运行（会弹 UAC）",                   NULL,      1, 0, 0 },
+    { IDC_LOG_KB,    L"日志大小上限（0 = 不限制）",                    L"KB",     0, 0, 65536 },
+    { IDC_STEPS,     L"按词跳转逐格上限（0 = 不限制）",                L"格",     0, 0, 256 },
+    { IDC_OVER_CTRL, L"超过逐格上限时改发 Ctrl+方向（否则只发一格）",  NULL,      1, 0, 0 },
+    { IDC_WMUL,      L"C+滚轮 放大倍数（0/1 = 关闭）",                 L"倍",     0, 0, 16 },
+    { IDC_INTERVAL,  L"持续滚动初始速度（越大越慢）",                  L"毫秒/格", 0, 100, 60000 },
+    { IDC_FASTMS,    L"持续滚动最快速度（越小越快）",                  L"毫秒/格", 0, 20, 60000 },
+    { IDC_HMUL,      L"C+Shift+滚轮 横向倍数（0 = 关闭）",             L"倍",     0, 0, 16 },
+    { IDC_SCI,       L"允许读取 Scintilla 程序内存（关掉则退回逐格）", NULL,      1, 0, 0 },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
 
@@ -415,14 +419,18 @@ static void Layout(int w, int h) {
             MoveWindow(c, x, y, w - x * 2, rowBool - S(2), TRUE);
             y += rowBool;
         } else {
-            /* 数字框放**左边**、标签放右边：标签是长句（含键名与说明），
-               把输入框放在标签之后的话，窗口一窄它就被挤出客户区 ——
-               用户看到"有说明、没地方填"。输入框宽固定，标签吃剩下的空间。 */
-            HWND lab = GetDlgItem(g_hwnd, id + 500);
+            /* 数字框放**左边**、单位紧跟在框右侧、标签吃剩下的空间：
+               标签是长句，把输入框放在标签之后的话，窗口一窄它就被挤出
+               客户区 —— 用户看到"有说明、没地方填"。输入框与单位宽固定。 */
+            HWND lab  = GetDlgItem(g_hwnd, id + 500);
+            HWND unit = GetDlgItem(g_hwnd, id + 600);
+            int ux = x + editW + S(4), unitW = S(52);
             MoveWindow(c, x, y, editW, S(22), TRUE);
+            if (unit)
+                MoveWindow(unit, ux, y + S(4), unitW, S(18), TRUE);
             if (lab)
-                MoveWindow(lab, x + editW + S(10), y + S(4),
-                           w - x * 2 - editW - S(10), S(18), TRUE);
+                MoveWindow(lab, ux + unitW + S(8), y + S(4),
+                           w - (ux + unitW + S(8)) - x, S(18), TRUE);
             y += rowInt;
         }
         y += gap;
@@ -442,6 +450,7 @@ static void Layout(int w, int h) {
         MoveWindow(GetDlgItem(g_hwnd, base + 1), x, y, S(220), S(24), TRUE);      /* 名字输入 */
         MoveWindow(GetDlgItem(g_hwnd, base + 2), x + S(228), y, S(70), S(24), TRUE);
         MoveWindow(GetDlgItem(g_hwnd, base + 3), x + S(304), y, S(70), S(24), TRUE);
+        MoveWindow(GetDlgItem(g_hwnd, base + 5), x + S(380), y, S(88), S(24), TRUE);  /* 选窗添加 */
         y += S(28) + S(8);
     }
 
@@ -464,37 +473,42 @@ static LRESULT CALLBACK EditProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return CallWindowProcW(g_editOldProc, h, m, w, l);
 }
 
-static void AddName(int i) {
+/* 把一条进程名加进第 i 组名单：去首尾空白、去 .exe 后缀、去重。
+   返回是否真的加了（重名/空名不算）。名单里存的是"不带后缀"的形态
+   （匹配时两边都去），界面显示的样子就该是**真正存进去的样子**。 */
+static BOOL AddListEntry(int i, const WCHAR* raw) {
     int base = IDC_LIST0 + i * LIST_STRIDE;
-    HWND ed = GetDlgItem(g_hwnd, base + 1);
     HWND lb = GetDlgItem(g_hwnd, base);
-    WCHAR raw[CFG_NAME_MAX] = L"";
-    GetWindowTextW(ed, raw, CFG_NAME_MAX);
+    WCHAR trim[CFG_NAME_MAX];
+    _snwprintf_s(trim, CFG_NAME_MAX, _TRUNCATE, L"%s", raw);
 
     /* 去首尾空白：界面里粘进来的名字常带空格，而名单匹配是**完全匹配** */
-    size_t l = wcslen(raw);
-    while (l > 0 && (raw[l - 1] == L' ' || raw[l - 1] == L'\t')) raw[--l] = 0;
-    const WCHAR* lead = raw;
+    size_t l = wcslen(trim);
+    while (l > 0 && (trim[l - 1] == L' ' || trim[l - 1] == L'\t')) trim[--l] = 0;
+    const WCHAR* lead = trim;
     while (*lead == L' ' || *lead == L'\t') lead++;
 
     WCHAR buf[CFG_NAME_MAX];
     _snwprintf_s(buf, CFG_NAME_MAX, _TRUNCATE, L"%s", lead);
-    /* 去掉结尾的 .exe：名单里存的是"不带后缀"的形态（匹配时两边都去），
-       界面显示的样子就该是**真正存进去的样子** —— 否则用户看到
-       SmokeApp.exe、文件里却写着 SmokeApp，下次打开又变了个样。 */
     l = wcslen(buf);
     if (l >= 4 && _wcsicmp(buf + l - 4, L".exe") == 0) buf[l - 4] = 0;
-    if (!buf[0]) return;
+    if (!buf[0]) return FALSE;
 
     /* 去重：同样的名字出现两次没有意义（完全匹配，重复项纯噪音） */
-    if (SendMessageW(lb, LB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)buf) != LB_ERR) {
-        SetWindowTextW(ed, L"");
-        return;
-    }
+    if (SendMessageW(lb, LB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)buf) != LB_ERR)
+        return FALSE;
     SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)buf);
+    return TRUE;
+}
+
+static void AddName(int i) {
+    int base = IDC_LIST0 + i * LIST_STRIDE;
+    HWND ed = GetDlgItem(g_hwnd, base + 1);
+    WCHAR raw[CFG_NAME_MAX] = L"";
+    GetWindowTextW(ed, raw, CFG_NAME_MAX);
+    if (AddListEntry(i, raw)) MarkDirty();
     SetWindowTextW(ed, L"");
     SetFocus(ed);
-    MarkDirty();
 }
 
 static void DelName(int i) {
@@ -506,6 +520,116 @@ static void DelName(int i) {
     int n = (int)SendMessageW(lb, LB_GETCOUNT, 0, 0);
     SendMessageW(lb, LB_SETCURSEL, (WPARAM)((sel < n) ? sel : n - 1), 0);
     MarkDirty();
+}
+
+/* ---------------- 选窗添加 ----------------
+   Spy++ / AutoIt "Finder Tool" 的标准做法（微软 KB Q143045）：点"选窗添加"
+   后 SetCapture 把鼠标输入全收归本窗口 —— 目标窗口收不到这次点击、也不会被
+   切到前台；移动时 WindowFromPoint + GetAncestor(GA_ROOT) 找光标下的**顶层**
+   窗口（名单匹配的是进程，子控件没有自己的进程），用 PatBlt(DSTINVERT) 在
+   屏幕上给它描一圈反色边（反色再画一遍 = 擦除，不需要保存位图）；单击就把
+   该窗口的进程名（OpenProcess + QueryFullProcessImageNameW）加进名单。
+   Esc 或右键取消。 */
+
+static int  g_pickList = -1;      /* 正在为哪份名单选窗（-1 = 没在选窗） */
+static HWND g_pickHwnd = NULL;    /* 当前高亮的顶层窗口 */
+
+#ifndef PROCESS_QUERY_LIMITED_INFORMATION
+#define PROCESS_QUERY_LIMITED_INFORMATION 0x1000
+#endif
+typedef BOOL (WINAPI* PFN_QueryFullProcessImageNameW)(HANDLE, DWORD, LPWSTR, PDWORD);
+
+/* 选中窗口的进程名（纯文件名，不含路径）。失败多半是权限不够。 */
+static BOOL PickProcName(HWND hwnd, WCHAR* out, int cch) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (!pid) return FALSE;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return FALSE;
+    WCHAR path[1024];
+    DWORD sz = 1024;
+    BOOL ok = FALSE;
+    PFN_QueryFullProcessImageNameW q =
+        (PFN_QueryFullProcessImageNameW)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),
+                                                       "QueryFullProcessImageNameW");
+    if (q && q(h, 0, path, &sz)) {
+        const WCHAR* f = wcsrchr(path, L'\\');
+        _snwprintf_s(out, cch, _TRUNCATE, L"%s", f ? f + 1 : path);
+        ok = TRUE;
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+/* 在屏幕上把窗口描一圈反色边；对同一个窗口调两次正好抵消。 */
+static void PickFrame(HWND hwnd) {
+    RECT r;
+    if (!hwnd || !GetWindowRect(hwnd, &r)) return;
+    HDC dc = GetDC(NULL);
+    if (!dc) return;
+    int th = S(3), ww = r.right - r.left, wh = r.bottom - r.top;
+    PatBlt(dc, r.left, r.top, ww, th, DSTINVERT);
+    PatBlt(dc, r.left, r.bottom - th, ww, th, DSTINVERT);
+    PatBlt(dc, r.left, r.top, th, wh, DSTINVERT);
+    PatBlt(dc, r.right - th, r.top, th, wh, DSTINVERT);
+    ReleaseDC(NULL, dc);
+}
+
+static HWND PickHit(void) {
+    POINT pt;
+    if (!GetCursorPos(&pt)) return NULL;
+    HWND hit = WindowFromPoint(pt);
+    return hit ? GetAncestor(hit, GA_ROOT) : NULL;
+}
+
+/* 跟随光标更新高亮：目标变了就"旧框再画一遍（=擦）+ 新框画一遍"。 */
+static void PickTrack(void) {
+    HWND root = PickHit();
+    if (root == g_pickHwnd) return;
+    PickFrame(g_pickHwnd);
+    g_pickHwnd = root;
+    PickFrame(g_pickHwnd);
+}
+
+/* 退出选窗态：擦掉高亮框、还鼠标、释放捕获。 */
+static void PickEnd(void) {
+    if (g_pickList < 0) return;
+    PickFrame(g_pickHwnd);
+    g_pickHwnd = NULL;
+    g_pickList = -1;
+    ReleaseCapture();
+    SetCursor(LoadCursorW(NULL, (LPCWSTR)(ULONG_PTR)IDC_ARROW));
+    SetStatus(L"%s（Ctrl+S 保存并重启 CapsEnhance）", g_path);
+}
+
+static void PickBegin(int i) {
+    PickEnd();                       /* 上一次没结束就又点了一次：先收尾 */
+    g_pickList = i;
+    SetCapture(g_hwnd);
+    SetCursor(LoadCursorW(NULL, (LPCWSTR)(ULONG_PTR)IDC_CROSS));
+    SetStatus(L"选窗中：把鼠标移到目标窗口上（会描框高亮），点击即把它的进程加进该名单；Esc 或右键取消");
+    PickTrack();
+}
+
+/* 单击落定：取光标下窗口的进程名加进名单。必须在**抬起**时收尾 ——
+   若在按下时释放捕获，配对的抬起会漏给目标窗口，等于替用户在那里面点了一下。 */
+static void PickFinish(void) {
+    int i = g_pickList;
+    if (i < 0) return;
+    HWND root = PickHit();
+    PickEnd();
+    if (!root) { SetStatus(L"选窗失败：这里没有可取的窗口"); return; }
+    WCHAR name[CFG_NAME_MAX] = L"";
+    if (!PickProcName(root, name, CFG_NAME_MAX)) {
+        SetStatus(L"选窗失败：拿不到该窗口的进程名（权限不足？）");
+        return;
+    }
+    if (AddListEntry(i, name)) {
+        MarkDirty();
+        SetStatus(L"已把 %s 加进名单 —— Ctrl+S 保存并重启 CapsEnhance", name);
+    } else {
+        SetStatus(L"%s 已在该名单里，没有重复添加", name);
+    }
 }
 
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -525,6 +649,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             int sub = (id - IDC_LIST0) % LIST_STRIDE;
             if (sub == 2) { AddName(i); return 0; }
             if (sub == 3) { DelName(i); return 0; }
+            if (sub == 5) { PickBegin(i); return 0; }
             if (sub == 0 && HIWORD(w) == LBN_DBLCLK) { DelName(i); return 0; }
             return 0;
         }
@@ -532,6 +657,34 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (HIWORD(w) == BN_CLICKED || HIWORD(w) == EN_CHANGE) MarkDirty();
         return 0;
     }
+    case WM_MOUSEMOVE:
+        if (g_pickList >= 0) {          /* 捕获生效期间所有移动都归我们 */
+            PickTrack();
+            SetCursor(LoadCursorW(NULL, (LPCWSTR)(ULONG_PTR)IDC_CROSS));
+            return 0;
+        }
+        break;
+    case WM_LBUTTONDOWN:
+        if (g_pickList >= 0) return 0;  /* 按下不做事，等抬起（见 PickFinish） */
+        break;
+    case WM_LBUTTONUP:
+        if (g_pickList >= 0) { PickFinish(); return 0; }
+        break;
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+    case WM_MBUTTONUP:
+        if (g_pickList >= 0) { PickEnd(); return 0; }   /* 右键/中键 = 取消 */
+        break;
+    case WM_CAPTURECHANGED:
+        /* 捕获被别人抢走（正常流程不会走到）：也得收掉选窗态，别让高亮框留在屏上。
+           自己 PickEnd 里的 ReleaseCapture 也会发这条，那时 g_pickList 已复位，自然跳过。 */
+        if (g_pickList >= 0 && (HWND)l != g_hwnd) {
+            PickFrame(g_pickHwnd);
+            g_pickHwnd = NULL;
+            g_pickList = -1;
+            SetStatus(L"选窗已取消");
+        }
+        return 0;
     case WM_DPICHANGED:
         /* 拖到另一块不同缩放的显示器上：DPI 变了 -> 字体与所有尺寸都要重算，
            并按系统给的建议矩形调整窗口（否则窗口大小不变、内容挤在一起）。 */
@@ -558,6 +711,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     default:
         return DefWindowProcW(h, m, w, l);
     }
+    /* 选窗态下"不归我们管"的消息（g_pickList < 0）从上面的 break 落到这里 */
+    return DefWindowProcW(h, m, w, l);
 }
 
 static HWND MakeBtn(HINSTANCE hi, const WCHAR* text, int id) {
@@ -648,6 +803,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                             0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)id, hInst, NULL);
         } else {
             MakeLabel(hInst, kFields[i].label, id + 500);
+            if (kFields[i].unit)
+                MakeLabel(hInst, kFields[i].unit, id + 600);   /* 输入框右侧的单位 */
             HWND e = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                      WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
                                      0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)id, hInst, NULL);
@@ -672,6 +829,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         SendMessageW(ed, EM_LIMITTEXT, CFG_NAME_MAX - 1, 0);
         MakeBtn(hInst, L"添加", base + 2);
         MakeBtn(hInst, L"删除", base + 3);
+        MakeBtn(hInst, L"选窗添加", base + 5);
     }
 
     g_status = MakeLabel(hInst, L"", IDC_STATUS);
@@ -690,6 +848,13 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+        /* 选窗态下 Esc 取消：焦点多半在某个按钮/输入框上，主窗口的 WndProc
+           收不到这个按键，所以在循环里拦（这是唯一能稳稳看到所有按键的地方） */
+        if (g_pickList >= 0 && msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
+            PickEnd();
+            SetStatus(L"选窗已取消");
+            continue;
+        }
         /* Tab 在控件之间移动焦点：IsDialogMessage 让输入框也吃 Tab，
            否则设置界面里没法用键盘走完一整张表单。 */
         if (!IsDialogMessageW(g_hwnd, &msg)) {
