@@ -87,12 +87,12 @@ typedef struct {
 static const Field kFields[] = {
     { IDC_RUN_ADMIN, L"以管理员身份运行（会弹 UAC）",                   NULL,      1, 0, 0 },
     { IDC_LOG_KB,    L"日志大小上限（0 = 不限制）",                    L"KB",     0, 0, 65536 },
-    { IDC_STEPS,     L"按词跳转逐格上限（0 = 不限制）",                L"格",     0, 0, 256 },
-    { IDC_OVER_CTRL, L"超过逐格上限时改发 Ctrl+方向（否则只发一格）",  NULL,      1, 0, 0 },
-    { IDC_WMUL,      L"C+滚轮 放大倍数（0/1 = 关闭）",                 L"倍",     0, 0, 16 },
+    { IDC_STEPS,     L"按词跳转逐格上限（0 = 不限制，上限 256）",       L"格",     0, 0, 256 },
+    { IDC_OVER_CTRL, L"超过逐格上限时改发 Ctrl+方向（取消勾选只发一格）", NULL,      1, 0, 0 },
+    { IDC_WMUL,      L"Caps+滚轮 放大倍数（0/1 = 关闭）",              L"倍",     0, 0, 16 },
     { IDC_INTERVAL,  L"持续滚动初始速度（越大越慢）",                  L"毫秒/格", 0, 100, 60000 },
     { IDC_FASTMS,    L"持续滚动最快速度（越小越快）",                  L"毫秒/格", 0, 20, 60000 },
-    { IDC_HMUL,      L"C+Shift+滚轮 横向倍数（0 = 关闭）",             L"倍",     0, 0, 16 },
+    { IDC_HMUL,      L"Caps+Shift+滚轮 横向倍数（0 = 关闭）",          L"倍",     0, 0, 16 },
     { IDC_SCI,       L"允许读取 Scintilla 程序内存（关掉则退回逐格）", NULL,      1, 0, 0 },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
@@ -707,7 +707,7 @@ static void PickBegin(int i) {
     g_pickList = i;
     SetCapture(g_hwnd);
     SetCursor(LoadCursorW(NULL, (LPCWSTR)(ULONG_PTR)IDC_CROSS));
-    SetStatus(L"选窗中：点哪个窗口（描框高亮）就加哪个进程；设置窗口自己不算；Esc 或右键取消");
+    SetStatus(L"选窗中：点哪个窗口就加哪个进程（Esc/右键取消）");
     PickTrack();
 }
 
@@ -929,7 +929,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     /* 初始大小按 DPI 缩放，并**钳到工作区以内**：高 DPI 笔记本（150% + 768 高）
        上按 96 DPI 算出来的 780 像素窗口会超出屏幕底部，底部的按钮与状态栏
        就永远看不见了。 */
-    int winW = S(880), winH = S(780);
+    /* 宽度按最宽的一行（名单的输入框 + 四个按钮 ≈ 500）加些余量；
+       太宽的话长说明句和内容之间全是空白，反而难看 */
+    int winW = S(680), winH = S(780);
     {
         RECT wa;
         if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
