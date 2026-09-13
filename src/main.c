@@ -286,6 +286,18 @@ static BOOL IsSingleShotAct(int act) { return ActHasFlag(act, ACTF_SINGLE_SHOT);
 
 /* ============ 托盘 ============ */
 static const WCHAR* APP_NAME = L"CapsEnhance";
+
+/* 程序图标：exe 资源里的 app.ico（16/24/32 三帧 PNG，见 res/app.rc，资源号 1）。
+   托盘显示的是"小图标"：**故意按 32px 请求**而不是 SM_CXSMICON —— 本进程没有
+   声明 DPI 感知，GetSystemMetrics 恒报 16，托盘在高 DPI 下把 16 的帧放大必然
+   发糊；要最大的帧交给 explorer 缩小几乎无损（本机 175% 托盘正好要 28px）。
+   参数不能叫 small：rpcndr.h 里 `small` 是个类型（unsigned char）。
+   LR_SHARED：系统缓存图标句柄，不需要（也不得）DestroyIcon。 */
+static HICON LoadAppIcon(BOOL wantSmall) {
+    int cx = wantSmall ? 16 : 32;
+    return (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(1),
+                             IMAGE_ICON, cx, cx, LR_SHARED);
+}
 #define IDM_PAUSE    1
 #define IDM_SETTINGS 2
 #define IDM_EXIT     3
@@ -328,7 +340,7 @@ static void TrayAdd(void) {
     g_nid.uID = 1;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TOGGLE_TRAY;
-    g_nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    g_nid.hIcon = LoadAppIcon(FALSE);       /* 通用系统图标早已让人认不出本程序 */
     wcscpy_s(g_nid.szTip, 128, APP_NAME);
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
@@ -827,11 +839,15 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     WaitOldInstanceExit();   /* 重启场景：等旧实例完全退出再初始化 */
     if (!EnsureSingleInstance()) return 0;   /* 已有实例在跑：提示后退出 */
 
-    WNDCLASSW wc = {0};
+    /* WNDCLASSEX（不是 WNDCLASS）：小图标 hIconSm 只在 EX 版里有 */
+    WNDCLASSEXW wc = {0};
+    wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
+    wc.hIcon = LoadAppIcon(FALSE);        /* 任务切换器 / 资源管理器用大图标 */
+    wc.hIconSm = LoadAppIcon(TRUE);       /* 标题栏与托盘用小图标 */
     wc.lpszClassName = L"CapsEnhanceMain";
-    if (!RegisterClassW(&wc)) return 1;
+    if (!RegisterClassExW(&wc)) return 1;
 
     g_mainWnd = CreateWindowW(L"CapsEnhanceMain", APP_NAME,
                               WS_POPUP | WS_OVERLAPPEDWINDOW,

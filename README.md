@@ -11,7 +11,7 @@ Windows **CapsLock** 快捷键增强程序。按住 `CapsLock` 当作修饰键�
 ## 快速开始
 
 1. 把 `CapsEnhance.exe` 与 `CapsEnhanceSettings.exe` 放到同一个目录，双击 `CapsEnhance.exe` 运行。
-2. 从托盘菜单可**暂停映射 / 打开设置 / 重启程序 / 退出**。
+2. 托盘会出现程序图标（首次可能收进托盘"隐藏图标"溢出区，从任务栏设置里拖出来即可常驻）；从托盘菜单可**暂停映射 / 打开设置 / 重启程序 / 退出**。
 3. 需要管理员权限时，在配置里打开 `RunAsAdmin = 1`（默认已开，见[配置](#配置-capsenhanceini)）。
 
 > **CapsLock 会被本程序拦截**：按住才是光亮键的"映射模式"，单击或长按不做任何事、也不触发真的 CapsLock。需要大小写切换时，用 `CapsLock + Tab` 发送一次真实的 CapsLock。
@@ -180,6 +180,8 @@ someapp.exe
 ```bat
 build.bat    rem 生成 bin\CapsEnhance.exe 与 bin\CapsEnhanceSettings.exe
 ```
+
+程序图标（托盘 / 窗口 / 资源管理器）来自 `res\app.ico`（16/24/32 三帧，由 `res\icon*.png` 打包，嵌入为 exe 资源 #1）。换图标：替换 `res\` 下的三张 PNG 重新跑一次 `python` 打包脚本或用任意 ICO 工具生成同名 `app.ico` 即可。
 
 两个 exe 必须放在同一目录：托盘菜单的"设置"按**同目录**找 `CapsEnhanceSettings.exe`，设置程序也按同目录找 `CapsEnhance.ini` 与 `CapsEnhance.exe`。
 
