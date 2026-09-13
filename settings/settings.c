@@ -48,8 +48,9 @@
 #define MAIN_EXE    L"CapsEnhance.exe"
 
 /* ---- 控件 ID ---- */
+#define IDC_SAVEONLY 101   /* 只保存不重启 */
 #define IDC_STATUS  105
-#define IDC_SAVE    102
+#define IDC_SAVE    102    /* 保存并重启 */
 #define IDC_RELOAD  103
 #define IDC_EXIT    104
 
@@ -364,7 +365,9 @@ static BOOL SaveConfig(void) {
     }
     g_dirty = FALSE;
     UpdateTitle();
-    SetStatus(L"已保存 %s，正在重启 CapsEnhance…", g_path);
+    /* 文案对"只保存"和"保存并重启"都成立：真重启的话 RestartMain 会马上
+       把状态栏覆写成"已保存并请求重启"。 */
+    SetStatus(L"已保存 %s（重启 CapsEnhance 后生效）", g_path);
     return TRUE;
 }
 
@@ -530,10 +533,11 @@ static void Layout(int w, int h) {
     /* 状态栏独占一行（按钮在它下面那行），给足整个客户区宽：
        窄窗口下提示文案也能完整显示，不用给按钮预留右侧空间 */
     if (g_status) MoveWindow(g_status, x, S(4), w - x * 2, S(18), TRUE);
-    int bw = S(96), fby = S(26);
-    MoveWindow(GetDlgItem(g_footer, IDC_SAVE),   w - x - bw * 3 - S(16), fby, bw, S(26), TRUE);
-    MoveWindow(GetDlgItem(g_footer, IDC_RELOAD), w - x - bw * 2 - S(8),  fby, bw, S(26), TRUE);
-    MoveWindow(GetDlgItem(g_footer, IDC_EXIT),   w - x - bw,             fby, bw, S(26), TRUE);
+    int bw = S(88), bg = S(8), fby = S(26);
+    MoveWindow(GetDlgItem(g_footer, IDC_SAVEONLY), w - x - bw * 4 - bg * 3, fby, bw, S(26), TRUE);
+    MoveWindow(GetDlgItem(g_footer, IDC_SAVE),     w - x - bw * 3 - bg * 2, fby, bw, S(26), TRUE);
+    MoveWindow(GetDlgItem(g_footer, IDC_RELOAD),   w - x - bw * 2 - bg,     fby, bw, S(26), TRUE);
+    MoveWindow(GetDlgItem(g_footer, IDC_EXIT),     w - x - bw,              fby, bw, S(26), TRUE);
 
     UpdateScrollBar(off);
     g_laidScroll = off;
@@ -555,10 +559,117 @@ static void SetScroll(int pos) {
     Layout(rc.right, rc.bottom);
 }
 
-/* 表单子控件的子类，干两件事：
+/* ---------------- 按钮的自绘 ----------------
+   默认的 Win32 按钮在 Win10/11 上是一块浅灰浮凸，一排按钮摆在一起既看不出
+   主次、也看不出鼠标指没指着。这里在既有子类里把按钮的 WM_PAINT 整个接管：
+     · "保存并重启"是主操作 -> 强调蓝填充，悬停变亮、按下变深（Fluent 主按钮）；
+     · 其余按钮 -> 白底描边，悬停浅蓝底 + 蓝边（Fluent 次级按钮）；
+     · 圆角、焦点虚线框、禁用态、空格键按下（BM_SETSTATE）一并画出。
+   状态（悬停/按下/主次）存**窗口属性**：GWLP_USERDATA 已被原过程占用。
+   点击行为不动 —— 按下/抬起仍交给按钮默认过程，BN_CLICKED 照常发给父窗口，
+   所以跨进程 BM_CLICK、Tab 焦点、键盘触发全都和原来一样。 */
+
+#define BTNPROP_PRIMARY L"capPrimary"
+#define BTNPROP_HOVER   L"capHover"
+#define BTNPROP_PRESSED L"capPressed"
+
+static BOOL BtnFlag(HWND h, const WCHAR* prop) {
+    return (BOOL)(INT_PTR)GetPropW(h, prop);
+}
+static void SetBtnFlag(HWND h, const WCHAR* prop, BOOL v) {
+    if (BtnFlag(h, prop) != v) {
+        SetPropW(h, prop, (HANDLE)(INT_PTR)(v ? 1 : 0));
+        InvalidateRect(h, NULL, TRUE);
+        UpdateWindow(h);          /* 悬停/按下要"即时"反馈，等下次 PAINT 太钝 */
+    }
+}
+
+static void TrackBtnHover(HWND h) {
+    TRACKMOUSEEVENT t;
+    memset(&t, 0, sizeof(t));
+    t.cbSize = sizeof(t);
+    t.dwFlags = TME_LEAVE;
+    t.hwndTrack = h;
+    TrackMouseEvent(&t);
+}
+
+static void PaintButton(HWND h, HDC dc) {
+    RECT rc;
+    GetClientRect(h, &rc);
+    BOOL primary = BtnFlag(h, BTNPROP_PRIMARY);
+    BOOL hover   = BtnFlag(h, BTNPROP_HOVER);
+    BOOL pressed = BtnFlag(h, BTNPROP_PRESSED);
+    BOOL enabled = IsWindowEnabled(h);
+
+    /* 先铺父窗口的底色：圆角露出的四个角才像是"透明"的 */
+    {
+        HBRUSH bg = CreateSolidBrush(GetSysColor(COLOR_BTNFACE));
+        FillRect(dc, &rc, bg);
+        DeleteObject(bg);
+    }
+
+    COLORREF fill, border, text;
+    if (!enabled) {
+        fill = RGB(246, 246, 246); border = RGB(189, 189, 189); text = RGB(160, 160, 160);
+    } else if (primary) {
+        fill   = pressed ? RGB(0, 90, 158)   : hover ? RGB(26, 134, 217) : RGB(0, 120, 215);
+        border = fill;
+        text   = RGB(255, 255, 255);
+    } else {
+        fill   = pressed ? RGB(204, 228, 247) : hover ? RGB(229, 241, 251) : RGB(252, 252, 252);
+        border = pressed ? RGB(0, 84, 153)    : hover ? RGB(0, 120, 215)   : RGB(173, 173, 173);
+        text   = RGB(0, 0, 0);
+    }
+
+    int rad = S(4);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);   /* 画笔没有 W/A 之分 */
+    HBRUSH br = CreateSolidBrush(fill);
+    HGDIOBJ open = SelectObject(dc, pen);
+    HGDIOBJ obr = SelectObject(dc, br);
+    /* 右/下各收 1px：RoundRect 的边画在包围矩形**边上**，不收会被客户区裁掉 */
+    RoundRect(dc, rc.left, rc.top, rc.right - 1, rc.bottom - 1, rad * 2, rad * 2);
+    SelectObject(dc, open);
+    SelectObject(dc, obr);
+    DeleteObject(pen);
+    DeleteObject(br);
+
+    WCHAR txt[96];
+    GetWindowTextW(h, txt, 96);
+    HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+    if (!f) f = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HGDIOBJ of = SelectObject(dc, f);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, text);
+    RECT tr = rc;
+    if (pressed && !primary) OffsetRect(&tr, 0, 1);   /* 次级按钮按下时文字下沉一点 */
+    DrawTextW(dc, txt, -1, &tr,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(dc, of);
+
+    if (GetFocus() == h) {                 /* 键盘焦点：虚线框（对话框惯例） */
+        RECT frc = rc;
+        InflateRect(&frc, -S(3), -S(3));
+        DrawFocusRect(dc, &frc);
+    }
+}
+
+/* 只自绘**普通下压按钮**。类名判断远远不够 —— 勾选框（BS_AUTOCHECKBOX）、
+   单选钮、分组框全是 "Button" 类，按类名放行会把它们也画成下压按钮
+   （实测：勾选框整个变成一长条按钮，复选框本身消失了）。
+   只认 BS_PUSHBUTTON / BS_DEFPUSHBUTTON 两种式样。 */
+static BOOL BtnIsPush(HWND h) {
+    WCHAR cls[16];
+    if (!(GetClassNameW(h, cls, 16) > 0 && _wcsicmp(cls, L"Button") == 0))
+        return FALSE;
+    DWORD st = (DWORD)GetWindowLongPtrW(h, GWL_STYLE) & BS_TYPEMASK;
+    return st == BS_PUSHBUTTON || st == BS_DEFPUSHBUTTON;
+}
+
+/* 表单子控件的子类，干三件事：
    1. 接 Ctrl+S / Ctrl+回车 —— 焦点多半在某个子控件上，主窗口收不到按键；
    2. 把滚轮转给主窗口 —— 滚轮默认落在**焦点**控件头上，不转的话页面永远
-      滚不动（列表框也转：名单很短，滚轮滚页面比滚列表更符合直觉）。
+      滚不动（列表框也转：名单很短，滚轮滚页面比滚列表更符合直觉）；
+   3. 按钮全部自绘（见上"按钮的自绘"）。
    原过程存 GWLP_USERDATA：EDIT/BUTTON/LISTBOX 各有各的默认过程，
    不能共用一个全局变量。 */
 static LRESULT CALLBACK ChildProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -570,6 +681,46 @@ static LRESULT CALLBACK ChildProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_MOUSEWHEEL) {
         SendMessageW(g_hwnd, m, w, l);
         return 0;
+    }
+    if (BtnIsPush(h)) {
+        switch (m) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(h, &ps);
+            if (dc) PaintButton(h, dc);
+            EndPaint(h, &ps);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;                    /* 整块区域自画，先擦一遍只会闪 */
+        case WM_MOUSEMOVE:
+            if (IsWindowEnabled(h) && !BtnFlag(h, BTNPROP_HOVER)) {
+                SetBtnFlag(h, BTNPROP_HOVER, TRUE);
+                TrackBtnHover(h);        /* 只在第一次进入时注册 LEAVE */
+            }
+            break;
+        case WM_MOUSELEAVE:
+            SetBtnFlag(h, BTNPROP_HOVER, FALSE);
+            break;
+        case WM_LBUTTONDOWN:
+            SetBtnFlag(h, BTNPROP_PRESSED, TRUE);
+            break;
+        case WM_LBUTTONUP:
+        case WM_CAPTURECHANGED:
+            SetBtnFlag(h, BTNPROP_PRESSED, FALSE);
+            break;
+        case BM_SETSTATE:                /* 键盘空格触发：默认过程不发消息只置状态 */
+            SetBtnFlag(h, BTNPROP_PRESSED, w != 0);
+            break;
+        case WM_ENABLE:                  /* 必须落到默认过程：lParam 是新状态 */
+        case WM_SETFONT:                 /* wParam 是新字体，WM_GETFONT 要取得到 */
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+            InvalidateRect(h, NULL, TRUE);
+            break;
+        default:
+            break;
+        }
     }
     return CallWindowProcW((WNDPROC)GetWindowLongPtrW(h, GWLP_USERDATA), h, m, w, l);
 }
@@ -654,9 +805,11 @@ static BOOL PickProcName(HWND hwnd, WCHAR* out, int cch) {
     WCHAR path[1024];
     DWORD sz = 1024;
     BOOL ok = FALSE;
+    HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
     PFN_QueryFullProcessImageNameW q =
-        (PFN_QueryFullProcessImageNameW)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),
-                                                       "QueryFullProcessImageNameW");
+        k32 ? (PFN_QueryFullProcessImageNameW)GetProcAddress(k32,
+                                                       "QueryFullProcessImageNameW")
+            : NULL;
     if (q && q(h, 0, path, &sz)) {
         const WCHAR* f = wcsrchr(path, L'\\');
         _snwprintf_s(out, cch, _TRUNCATE, L"%s", f ? f + 1 : path);
@@ -761,6 +914,12 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_COMMAND: {
         int id = LOWORD(w);
+        if (id == IDC_SAVEONLY) {
+            /* 只保存不重启：改完几个数值想攒着一起生效，或者本体压根没在跑
+               （下次启动自然读到新配置）时用这个。 */
+            SaveConfig();
+            return 0;
+        }
         if (id == IDC_SAVE)   { DoSave(); return 0; }
         if (id == IDC_EXIT)   { AskSaveAndClose(); return 0; }
         if (id == IDC_RELOAD) {
@@ -873,6 +1032,9 @@ static HWND MakeBtn(HINSTANCE hi, HWND parent, const WCHAR* text, int id) {
     HWND b = CreateWindowExW(0, L"BUTTON", text,
                              WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_PUSHBUTTON | WS_TABSTOP,
                              0, 0, 10, 10, parent, (HMENU)(INT_PTR)id, hi, NULL);
+    /* "保存并重启"是主操作 -> 自绘时上强调蓝；要在第一次绘制前设好 */
+    if (b && id == IDC_SAVE)
+        SetPropW(b, BTNPROP_PRIMARY, (HANDLE)(INT_PTR)1);
     HookChild(b);        /* 按钮也转发滚轮 / 接 Ctrl+S（焦点常停在按钮上） */
     return b;
 }
@@ -940,18 +1102,26 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
        说明标签"一行（约 500），再留滚动条与边框的余量 —— 再宽的话
        名单框右侧就是一大块用不上的空白 */
     int winW = S(560), winH = S(780);
+    int winX = CW_USEDEFAULT, winY = CW_USEDEFAULT;
     {
         RECT wa;
         if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
             int aw = wa.right - wa.left - S(40), ah = wa.bottom - wa.top - S(60);
             if (aw > S(480) && winW > aw) winW = aw;
             if (ah > S(360) && winH > ah) winH = ah;
+            /* **工作区**居中（不含任务栏）：CW_USEDEFAULT 是级联摆放，
+               窗口会落在屏幕左上角 —— 这么大一张表单贴着边放很难受。
+               钳位防的是"窗口比工作区还大"时算出负坐标。 */
+            winX = wa.left + ((wa.right - wa.left) - winW) / 2;
+            winY = wa.top + ((wa.bottom - wa.top) - winH) / 2;
+            if (winX < wa.left) winX = wa.left;
+            if (winY < wa.top) winY = wa.top;
         }
     }
 
     g_hwnd = CreateWindowExW(0, WND_CLASS, APP_TITLE,
                              WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL,
-                             CW_USEDEFAULT, CW_USEDEFAULT, winW, winH,
+                             winX, winY, winW, winH,
                              NULL, NULL, hInst, NULL);
     if (!g_hwnd) return 1;
 
@@ -1005,6 +1175,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
                                0, 0, 10, 10, g_hwnd, NULL, hInst, NULL);
     g_status = MakeLabel(hInst, g_footer, L"", IDC_STATUS);
+    MakeBtn(hInst, g_footer, L"保存", IDC_SAVEONLY);
     MakeBtn(hInst, g_footer, L"保存并重启", IDC_SAVE);
     MakeBtn(hInst, g_footer, L"重新加载", IDC_RELOAD);
     MakeBtn(hInst, g_footer, L"退出", IDC_EXIT);
