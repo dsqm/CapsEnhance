@@ -497,10 +497,11 @@ static void Layout(int w, int h) {
     /* 名单高度固定（约五行，再多名单自己有滚动条），三组顺序往下排 */
     y += S(6);
     int listH = S(84);
-    /* 名单列表框**定宽**（右缘与"选窗添加"按钮对齐），不跟窗口拉伸：
-       进程名撑死几十个字符，窗口一宽列表框右边就是一大片用不上的白 */
+    /* 名单列表框**定宽**，不跟窗口拉伸：进程名撑死几十个字符，宽列表框
+       右边全是用不上的白（328 ≈ 按钮 468 再砍 30%）；真有超长名字时
+       列表框自带横向滚动条兜底 */
     int listW = w - x * 2;
-    if (listW > S(468)) listW = S(468);
+    if (listW > S(328)) listW = S(328);
     for (int i = 0; i < LIST_N; i++) {
         int base = IDC_LIST0 + i * LIST_STRIDE;
         MoveWindow(GetDlgItem(g_hwnd, base + 4), x, y - off, w - x * 2, S(18), TRUE);  /* 标题 */
@@ -983,7 +984,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         int base = IDC_LIST0 + i * LIST_STRIDE;
         MakeLabel(hInst, g_hwnd, kLists[i].label, base + 4);
         HookChild(CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-                                  WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_VSCROLL | WS_TABSTOP |
+                                  WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS |
+                                  WS_VSCROLL | WS_HSCROLL | WS_TABSTOP |
                                   LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
                                   0, 0, 10, 10, g_hwnd,
                                   (HMENU)(INT_PTR)base, hInst, NULL));
