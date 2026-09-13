@@ -1,0 +1,4 @@
+; ASCII only (rc.exe reads this as ANSI).
+; 1 = APPICON: the exe's own icon (Explorer / taskbar / tray), referenced by
+; MAKEINTRESOURCEW(1) in main.c. app.ico carries 16/24/32 PNG frames.
+1 ICON "app.ico"

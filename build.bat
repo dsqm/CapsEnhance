@@ -8,6 +8,30 @@ if errorlevel 1 exit /b 1
 
 if not exist "bin" mkdir bin
 
+rem ---- icon resource: the exe's own icon (Explorer / taskbar / tray) ----
+rem rc.exe lives in the SDK's bin, which build_env.bat does NOT put on PATH.
+rem NOTE: %SDK% contains "(x86)" - never expand it inside a ( ) block, goto only.
+set "RC=%SDK%\bin\%SDKVER%\x64\rc.exe"
+if exist "%RC%" goto have_rc
+set "RC=%SDK%\bin\%SDKVER%\x86\rc.exe"
+if exist "%RC%" goto have_rc
+echo [ERROR] rc.exe not found under "%SDK%\bin\%SDKVER%"
+exit /b 1
+:have_rc
+"%RC%" /nologo /fo bin\app.res res\app.rc
+if errorlevel 1 (
+    echo [ERROR] resource compile failed
+    exit /b 1
+)
+rem .res must be converted to a COFF obj for the linker. Keep the name flat
+rem ("app_res.obj"): a double extension ("app.res.obj") makes cl treat the
+rem file as C++ source when listed before /link.
+cvtres /nologo /MACHINE:X64 /OUT:bin\app_res.obj bin\app.res
+if errorlevel 1 (
+    echo [ERROR] resource convert failed
+    exit /b 1
+)
+
 rem /W4 instead of /W3: this project has already been bitten by silent
 rem sign/size mismatches in cross-process message plumbing, and the extra
 rem level costs nothing.
@@ -33,6 +57,7 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP ^
    src\hook.c src\nav.c src\send.c src\act.c src\config.c src\keymap.c src\main.c ^
    src\autodisp.c src\bridge.c src\wps.c ^
    /link /OUT:bin/CapsEnhance.exe ^
+   bin\app_res.obj ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib ^
    /SUBSYSTEM:WINDOWS
 
