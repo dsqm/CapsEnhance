@@ -421,7 +421,7 @@ void ConfigLoad(void) {
             "AllowScintillaRead = " STR(ALLOW_SCINTILLA_READ_DEFAULT) "\n"
             ";\n"
             "[NativeWordJump]\n"
-            "; 命中名单的程序：Caps+N / Caps+M 不做文本探测，\n"
+            "; 命中名单的程序：Caps+U / Caps+O 不做文本探测，\n"
             "; 直接发送 Ctrl+← / Ctrl+→，由该程序自身的词导航完成按词跳转（Shift 位移同样支持）。\n"
             "; 适用于文本读取不到、或读到的文本坐标与实际光标不符（按词跳转超调、光标乱飘）的程序。\n"
             "; 每行一个进程名：完全匹配、大小写不敏感、.exe 后缀可写可不写\n"
