@@ -14,10 +14,13 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Fobin\keymap_chord.obj src\keymap.c
 if errorlevel 1 exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
+   /Isrc /c /Fobin\winmove_chord.obj src\winmove.c
+if errorlevel 1 exit /b 1
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Fobin\test_chord.obj test\test_chord.c
 if errorlevel 1 exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE ^
-   bin\test_chord.obj bin\config_chord.obj bin\keymap_chord.obj ^
+   bin\test_chord.obj bin\config_chord.obj bin\keymap_chord.obj bin\winmove_chord.obj ^
    /link /OUT:bin/test_chord.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib ^
    /SUBSYSTEM:CONSOLE

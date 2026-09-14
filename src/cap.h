@@ -73,6 +73,7 @@
 #define ACT_WORD_L 11                /* 按词跳转向左                             */
 #define ACT_WORD_R 12                /* 按词跳转向右                             */
 #define ACT_PROBE  13                /* 诊断：探测当前焦点控件                */
+#define ACT_MOVEWIN 14               /* 把焦点窗口挪到鼠标光标处（多显示器）  */
 
 #define DIR_LEFT 0
 #define DIR_RIGHT 1
@@ -85,6 +86,7 @@
 #define ACTF_WORDJUMP    0x02   /* 按词跳转：交给 nav.c 的 NavJump，不走按键发送 */
 #define ACTF_PROBE       0x04   /* 诊断：交给 nav.c 的 NavProbe，不走按键发送 */
 #define ACTF_NO_SHIFT    0x08   /* 不吃选区修饰：即使选区模式生效也裸发（开关键用） */
+#define ACTF_MOVEWIN     0x10   /* 挪窗口：交给 winmove.c 的移动动作，不走按键发送 */
 
 /* ---------- 修饰（和弦）模式 ----------
    按住 C 期间生效的"组合修饰"。**激活键是编译期常量，不读配置**（见下面
@@ -211,6 +213,16 @@ void ActClear(void);              /* 丢弃未开始的请求（引擎复位） 
 void ActClearKeepFill(void);      /* 同上，但保留"松手补齐"类请求             */
 int  ActInFlight(void);           /* 队列中 + 正在执行的动作数                */
 void ActDrain(void);              /* 等队列清空且当前动作结束                 */
+
+/* ---------- 窗口挪到光标处（src/winmove.c） ----------
+   一个动作两个用途：多显示器之间搬窗口；把跑到屏幕外的窗口拉回来。
+   落点 = 窗口中心对齐光标，再整体钳进"光标所在显示器的工作区"。 */
+void WinComputePlacement(const RECT* work, POINT cursor, int w, int h, POINT* out);
+                        /* 纯函数：算左上角落点。单测用它覆盖多显示器几何（不碰真实窗口） */
+BOOL WinMoveWindowToCursor(HWND hwnd);
+                        /* 移动指定窗口（测试与实现共用；不自己去查前台窗口） */
+BOOL WinMoveFocusedToCursor(void);
+                        /* 动作入口：把焦点程序的**顶层**窗口挪到光标处 */
 
 /* 滚轮加速专用通道（独立队列 + 独立线程，见 act.c）。
    ActWheelPost 由主线程调用，绝不阻塞：原来的实现是在主线程 Sleep(2ms)

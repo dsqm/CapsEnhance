@@ -51,6 +51,9 @@ static const ActionDef kActions[] = {
     /* 按词跳转：方向写在表里，免得运行时靠 ACT_WORD_L/R 的数值去反推左右 */
     { ACT_WORD_L,    'N',        0,          DIR_LEFT,  ACTF_WORDJUMP, "词←(N)" },
     { ACT_WORD_R,    'O',        0,          DIR_RIGHT, ACTF_WORDJUMP, "词→(O)" },
+    /* 挪窗口：单发命令（不发键、与光标/选区无关）。位置由光标决定，所以
+       "增强模式发 3 次"没有意义 —— SINGLE_SHOT 同时挡掉重复与松手补齐。 */
+    { ACT_MOVEWIN,   'Q',        0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_MOVEWIN, "窗口→光标(Q)" },
     /* 诊断：没有触发键（由 PROBE_KEY 的特殊路径投递） */
     { ACT_PROBE,     0,          0,          -1, ACTF_PROBE, "探测" },
 };

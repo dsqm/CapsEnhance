@@ -55,7 +55,7 @@ rem /W4 + /analyze steps, which must stay at zero warnings.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP ^
    /Fobin\ ^
    src\hook.c src\nav.c src\send.c src\act.c src\config.c src\keymap.c src\main.c ^
-   src\autodisp.c src\bridge.c src\wps.c ^
+   src\autodisp.c src\bridge.c src\wps.c src\winmove.c ^
    /link /OUT:bin/CapsEnhance.exe ^
    bin\app_res.obj ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib ^

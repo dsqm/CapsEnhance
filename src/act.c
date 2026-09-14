@@ -61,6 +61,12 @@ static void RunJob(const ActJob* j) {
                松开 Caps 的 keyup 会被系统跳过，g_cMod 卡住，之后按 Tab 就冒出
                大写锁定。 */
             NavProbe();
+        } else if (ActHasFlag(act, ACTF_MOVEWIN)) {
+            /* 挪窗口（C+Q）：SetWindowPos 要等对方窗口过程处理完位置变化，
+               对方卡住就能把调用者拖住 —— 和执行线程存在的理由同源（见文件头），
+               所以也在这一层执行，不走主线程。 */
+            if (!WinMoveFocusedToCursor() && g_recording.load())
+                CapLog("  [窗口] 没有可挪的前台窗口（桌面/任务栏，或就是本程序自己）");
         } else {
             /* 诊断：按键动作"发了"与"目标程序认了"是两件事 —— 用户看到
                "按了没反应"时，只有回读光标才能区分。只在记录模式下读，
