@@ -194,7 +194,13 @@ static int WpsComSetSelOnce(long start, long end) {
     BOOL postOK = AdGetLong(sel.get(), L"Start", &postS) &&
                   AdGetLong(sel.get(), L"End", &postE);
 
-    if (postOK && postS == start && postE == end) return WPS_SET_OK;
+    /* 回读拿到的 Start/End **必然有序**（WPS 会自行有序化，见上面的调用注释），
+       所以只能与有序区间比较：直接比 start/end 的话，"向右扩选"的调用（活动端
+       在首个参数、数值大于锚）永远判不出 OK，会静默滑进 WPS_SET_UNSURE，把
+       "可安全退回箭头"这条兜底也一起关掉。 */
+    long lo = (start < end) ? start : end;
+    long hi = (start < end) ? end : start;
+    if (postOK && postS == lo && postE == hi) return WPS_SET_OK;
     /* 位置完全没动 -> 安全的"没生效"：调用方可以照原计划退回逐格箭头 */
     if (postOK && preOK && postS == preS && postE == preE) return WPS_SET_NONE;
     /* 其余情况（读不回来 / 动到了别处）一律"状态不明"：绝不能再补箭头，

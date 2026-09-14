@@ -265,6 +265,9 @@ static BOOL SciGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut,
     if (cb > got) cb = got;
     SendMsg(hwnd, SCI_GETANCHOR, 0, 0, &ab);
     if (ab < 0) ab = cb;
+    if (ab > got) ab = got;   /* 与 cb 同一处理：以读到的文本长度为准。越界只可能
+                                 是两次调用之间文档被改过，钳回长度比把越界值
+                                 送进 SCI_SETSEL 安全 */
 
     int caretU16 = MultiByteToWideChar(ucp, 0, buf, (int)cb, NULL, 0);
     if (caretU16 < 0) caretU16 = 0;

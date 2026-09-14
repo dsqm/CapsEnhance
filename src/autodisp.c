@@ -91,7 +91,7 @@ BOOL AdGetLong(IDispatch* d, const WCHAR* name, long* out) {
     BOOL ok = FALSE;
     if      (v.vt == VT_I4)  { *out = (long)v.lVal; ok = TRUE; }
     else if (v.vt == VT_I2)  { *out = (long)v.iVal; ok = TRUE; }
-    else if (v.vt == VT_UI4) { *out = (long)v.lVal; ok = TRUE; }
+    else if (v.vt == VT_UI4) { *out = (long)v.ulVal; ok = TRUE; }
     VariantClear(&v);
     return ok;
 }
