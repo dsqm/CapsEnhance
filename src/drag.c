@@ -1,3 +1,28 @@
+/* ======================================================================
+   CapsEnhance —— Windows CapsLock 快捷键增强程序
+   Copyright (C) 2026  qm
+
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+   ------------------------------------------------------------------
+   本文件的部分内容派生自 AltSnap
+     AltSnap: Copyright (C) 2015 Stefan Sundin
+              Modified By Raymond Gillibert in 2022
+              https://github.com/RamonUnch/AltSnap
+   AltSnap 以 GPL-3.0-or-later 授权；本项目同样以 GPL-3.0-or-later 授权。
+   ------------------------------------------------------------------ */
+
 /* ================= Caps + 左键拖动挪窗口（src/drag.c） =================
    按住 Caps 时按下左键：把**光标下的顶层窗口**接管过来跟着鼠标走 ——
    也就是 AltSnap 用 Alt+左键做的事（本项目把修饰键换成了 Caps）。
@@ -11,11 +36,12 @@
      · 不做拖动时的透明（AltSnap 默认 MoveTrans=255 = 关）与双击最大化；
      · 不穿透点击：Caps+左键按下去就是"拖"，不再传给目标程序（AltSnap 默认
        PiercingClick=0，同为不穿透）；
-     · 黑名单支持**进程名**与**窗口类名**两种条目（[DragBlacklist]），默认值逐条
-       取自 AltSnap 的默认黑名单（Processes + Windows 两条）。AltSnap 还支持
-       "标题"维度，本项目不支持：取另一个进程的标题要发 WM_GETTEXT（跨进程
-       IPC），而判定发生在鼠标钩子上 —— 钩子上绝不能做跨进程消息。
-       AltSnap 的默认条目每条都带类名或进程名，所以默认语义仍然完整。
+     · 黑名单分**两份**（[DragWindowBlacklist] 按窗口类名 / [DragProcessBlacklist]
+       按进程名），与 AltSnap 默认黑名单的 Windows / Processes 两条一一对应，
+       默认值也逐条取自它，各自独立缺省回落。AltSnap 还支持"标题"维度，本项目
+       不支持：取另一个进程的标题要发 WM_GETTEXT（跨进程 IPC），而判定发生在
+       鼠标钩子上 —— 钩子上绝不能做跨进程消息。AltSnap 的默认条目每条都带类名
+       或进程名，所以默认语义仍然完整。
 
    ★ 拖动的"最新位置 wins"：钩子每帧只做一次临界区写 + SetEvent（不排队、不
    阻塞），执行线程醒来取**最新**的点应用一次 —— 多余的中间帧自然合并，与

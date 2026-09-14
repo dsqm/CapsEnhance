@@ -1501,18 +1501,59 @@ int main(void) {
             GetWindowRect(w, &r0);
             POINT in = { r0.left + 120, r0.top + 80 };   /* 窗口内的一点 */
 
-            /* ① 内置默认黑名单：**没有 [DragBlacklist] 段也要生效**（取自 AltSnap 的默认值）。
-               任务栏（Shell_TrayWnd）是 AltSnap Windows 列表里的类名，
+            /* ① 内置默认黑名单：**两份段都不写也要生效**（取自 AltSnap 的默认值）。
+               窗口名单：任务栏（Shell_TrayWnd）是 AltSnap Windows 列表里的类名，
                用它当"必中"的样本最稳 —— 它一定存在。 */
             WriteChordIni("[General]\r\n");
             ConfigLoadFrom(L"bin/chordtest.ini");
             HWND tray = FindWindowW(L"Shell_TrayWnd", NULL);
             CHECK(tray != NULL && ConfigIsDragBlacklisted(tray),
-                  "AF: 内置默认黑名单命中任务栏（取自 AltSnap 的 Shell_TrayWnd）");
+                  "AF: 窗口名单内置默认命中任务栏（取自 AltSnap 的 Shell_TrayWnd）");
             CHECK(!ConfigIsDragBlacklisted(w), "AF: 普通窗口不在默认黑名单里");
 
-            /* ② 类名条目：命中后左键**原样透传**（不接管、不进入拖拽） */
+            /* ② 两份名单**各自独立**：
+               · 只把本窗口的类名写进 [DragWindowBlacklist] -> 命中（窗口名单生效）；
+               · 换成只写进程名，且进程名不是本测试进程 -> 不命中（证明是**两份**，
+                 不是"任一份非空就全算命中"）。 */
+            WriteChordIni("[DragWindowBlacklist]\r\n*|CapsEnhanceDragProbe\r\n");
+            ConfigLoadFrom(L"bin/chordtest.ini");
+            CHECK(ConfigIsDragBlacklisted(w),
+                  "AF: [DragWindowBlacklist] 写窗口类 -> 命中");
+            /* 窗口名单被显式写成空的（段还在）-> 该类名不再命中，
+               而进程名单仍是内置默认 -> 探针进程也不在进程名单里 */
+            WriteChordIni("[DragWindowBlacklist]\r\n[DragProcessBlacklist]\r\n");
+            ConfigLoadFrom(L"bin/chordtest.ini");
+            CHECK(!ConfigIsDragBlacklisted(w),
+                  "AF: 两份都写成空段 -> 不再命中（段存在即以文件为准）");
+            CHECK(tray != NULL && !ConfigIsDragBlacklisted(tray),
+                  "AF: 窗口名单被清空 -> 任务栏也不再命中（各自独立回落）");
+
+            /* ③ 进程名单：用本测试进程的 exe 名当样本（一定存在、也一定不在默认名单里） */
+            {
+                WCHAR me[MAX_PATH] = L"";
+                GetModuleFileNameW(NULL, me, MAX_PATH);
+                WCHAR* sl = wcsrchr(me, L'\\');
+                const WCHAR* myExe = sl ? sl + 1 : me;
+                WCHAR ini[512];
+                _snwprintf_s(ini, 512, _TRUNCATE,
+                             L"[DragWindowBlacklist]\r\n[DragProcessBlacklist]\r\n%s\r\n",
+                             myExe);
+                char u8[1024];
+                WideCharToMultiByte(CP_UTF8, 0, ini, -1, u8, 1024, NULL, NULL);
+                WriteChordIni(u8);
+                ConfigLoadFrom(L"bin/chordtest.ini");
+                CHECK(ConfigIsDragBlacklisted(w),
+                      "AF: [DragProcessBlacklist] 写进程名 -> 命中");
+            }
+
+            /* ④ 旧段名 [DragBlacklist]（拆成两份之前的写法）：按条目形态分流 —— 含 `|`
+               的走窗口名单，其余走进程名单。两个样本一起验。 */
             WriteChordIni("[DragBlacklist]\r\n*|CapsEnhanceDragProbe\r\n");
+            ConfigLoadFrom(L"bin/chordtest.ini");
+            CHECK(ConfigIsDragBlacklisted(w), "AF: 旧段名里的类名条目 -> 走窗口名单");
+
+            /* ⑤ 类名条目：命中后左键**原样透传**（不接管、不进入拖拽） */
+            WriteChordIni("[DragWindowBlacklist]\r\n*|CapsEnhanceDragProbe\r\n");
             ConfigLoadFrom(L"bin/chordtest.ini");
             Key(CLI_CAPS, TRUE); Pump(2);
             CHECK(MousePt(WM_LBUTTONDOWN, in) == 0,
@@ -1520,7 +1561,7 @@ int main(void) {
             CHECK(!DragActive(), "AF: 黑名单 -> 不进入拖拽");
             Key(CLI_CAPS, FALSE); Pump(2);
 
-            /* ③ 正常拖拽：down 吞掉 + 窗口跟随位移 + up 吞掉并收手 */
+            /* ⑥ 正常拖拽：down 吞掉 + 窗口跟随位移 + up 吞掉并收手 */
             WriteChordIni("[General]\r\n");      /* 清掉黑名单（回内置默认） */
             ConfigLoadFrom(L"bin/chordtest.ini");
             Key(CLI_CAPS, TRUE); Pump(2);

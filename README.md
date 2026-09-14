@@ -164,14 +164,21 @@ mstsc.exe
 
 > 判据是"**前台窗口**所属进程"，且只在**按下 Caps 那一刻**判定 —— 切到别的窗口立刻恢复，不需要重启。
 
-#### `[DragBlacklist]`：不许 `Caps+左键` 拖动的窗口
+#### 拖动黑名单：`[DragWindowBlacklist]` 与 `[DragProcessBlacklist]`
 
-按住 Caps 拖左键时，命中下面条目的窗口**不被接管**（左键原样透传）。条目两种写法：
+按住 Caps 拖左键时，命中名单的窗口**不被接管**（左键原样透传）。**两份名单各管一头**，与 AltSnap 的 `Windows` / `Processes` 两条一一对应：
 
-- 进程名：`name.exe`（与其它名单一致，`.exe` 可省）；
-- 窗口类名：`*|类名`（AltSnap 的写法；条目里的"标题"字段**不支持** —— 读另一个进程的标题是跨进程 IPC，鼠标钩子上做不了）。
+| 段 | 判定依据 | 条目写法 |
+|---|---|---|
+| `[DragWindowBlacklist]` | 窗口**类名** | `*|类名`（AltSnap 写法）或直接写 `类名` |
+| `[DragProcessBlacklist]` | 窗口所属**进程名** | `name.exe`（`.exe` 可省） |
 
-默认值逐条取自 AltSnap 的默认黑名单（`Processes` 与 `Windows` 两条）。**只要这个段存在，就以文件为准**（内置默认不再生效）—— 想关掉黑名单就把这个段删空。
+两处细节：
+
+- 条目里的"**标题**"字段**不支持** —— 读另一个进程的标题要发 `WM_GETTEXT`，那是跨进程 IPC，而判定发生在鼠标钩子上。AltSnap 的默认条目每条都带类名或进程名，所以默认语义仍然完整。
+- **每份名单各自独立**：谁的段没写，就用谁的内置默认（逐条取自 AltSnap）；段一旦存在就以文件为准 —— 想把某份名单清空，把它下面那几行删掉即可。
+
+> 旧写法 `[DragBlacklist]` 仍然认（拆成两份之前版本生成的配置）：里面的条目按形态自动分流 —— 含 `|` 的进窗口名单，其余进进程名单。
 
 #### `[NoSmoothScroll]`：持续滚动只发整格
 
@@ -242,3 +249,19 @@ build_wpsjump.bat  rem WPS 通道真机检查（没装 WPS 自动跳过）
 CI（GitHub Actions，`.github/workflows/ci.yml`）：push / PR 时在 `windows-latest` 上依次跑单测集成 → Debug 守卫 → 诊断工具构建 → 静态分析 → 重启/日志进程级检查 → WPS 真机检查（无 WPS 自动跳过）→ 构建并把 exe 上传为 artifact。
 
 > 开发者想要架构、实现原理、排障细节与各模块职责，见 **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**。
+
+---
+
+## 许可证
+
+本项目以 **GNU General Public License v3.0 或更新版本**（GPL-3.0-or-later）发布，全文见 [LICENSE](LICENSE)。
+
+部分内容派生自 [AltSnap](https://github.com/RamonUnch/AltSnap)（`Caps+左键拖动窗口`的交互与实现思路、以及 `[DragWindowBlacklist]` / `[DragProcessBlacklist]` 的默认名单）：
+
+```
+AltSnap: Copyright (C) 2015 Stefan Sundin
+         Modified By Raymond Gillibert in 2022
+         https://github.com/RamonUnch/AltSnap
+```
+
+AltSnap 同样以 GPL-3.0-or-later 授权，因此本项目也采用同一许可证。若你要分发本程序的二进制，请一并提供对应源码（GPL-3.0 第 6 节）。

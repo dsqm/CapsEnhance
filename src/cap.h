@@ -351,8 +351,9 @@ extern HWND g_mainWnd;
 #define CFG_LIST_NATIVE      0   /* [NativeWordJump]：不做文本探测，直接发 Ctrl+←/→ */
 #define CFG_LIST_AUTODISABLE 1   /* [AutoDisable]：前台是它时整段不介入          */
 #define CFG_LIST_NOSMOOTH    2   /* [NoSmoothScroll]：持续滚动只发整格           */
-#define CFG_LIST_DRAG        3   /* [DragBlacklist]：这些窗口/程序不许 Caps+左键拖 */
-#define CFG_LIST_COUNT       4
+#define CFG_LIST_DRAGWIN     3   /* [DragWindowBlacklist]：按窗口类名，不许拖动  */
+#define CFG_LIST_DRAGPROC    4   /* [DragProcessBlacklist]：按进程名，不许拖动    */
+#define CFG_LIST_COUNT       5
 
 /* 名单容量：设置程序要用它来定界面里的数组，所以放在这里而不是 config.c
    （同一份判据，别在两处各写一个 128 / 64）。 */
@@ -378,7 +379,7 @@ int  ConfigGetAutoScrollFastMs(void);        /* [General] AutoScrollFastMs：持
 BOOL ConfigGetAllowScintillaRead(void);     /* [General] AllowScintillaRead：允许 Scintilla 通道读目标进程内存（0=关闭该通道） */
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中 [NativeWordJump] */
 BOOL ConfigIsAutoDisabled(HWND focus);      /* 前台窗口的进程是否命中 [AutoDisable]（命中 = 整段不介入） */
-BOOL ConfigIsDragBlacklisted(HWND hwnd);    /* 该窗口是否命中 [DragBlacklist]（进程名或类名，见模板说明） */
+BOOL ConfigIsDragBlacklisted(HWND hwnd);    /* 是否命中两份拖动黑名单之一（[DragWindowBlacklist] 按类名 / [DragProcessBlacklist] 按进程名） */
 BOOL ConfigIsNoSmoothScroll(HWND focus);    /* 前台窗口的进程是否命中 [NoSmoothScroll]（命中 = 持续滚动只发整格） */
 BOOL ConfigMatchList(int list, const WCHAR* exeName); /* 进程名是否命中指定名单（CFG_LIST_*） */
 BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口的进程 exe 名 */
