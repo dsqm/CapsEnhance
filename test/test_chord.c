@@ -277,6 +277,30 @@ static void WriteChordIni(const char* body) {
                for(int __i=0;__i<g_recN;__i++) printf("%d:%d ",g_rec[__i].vk,g_rec[__i].n);\
                printf(")\n"); fails++; } } while (0)
 
+/* 场景AE 用：窗口中心是否落在光标附近（"窗口中心对准光标"这条契约的直接判据）。
+   不用"光标在窗口里"来判 —— 那个在窗口自己缩小后**仍然是真**的，测不出区别。 */
+static BOOL CenteredOn(RECT r, POINT p, int tol) {
+    int dx = (int)((r.left + r.right) / 2) - (int)p.x;
+    int dy = (int)((r.top + r.bottom) / 2) - (int)p.y;
+    if (dx < 0) dx = -dx;
+    if (dy < 0) dy = -dy;
+    return dx <= tol && dy <= tol;
+}
+
+/* 场景AE 用：模拟"挪过去之后自己改尺寸"的程序 —— 实测 CLaunch 在 125% 屏上是
+   578x437、到 150% 屏上变成 495x374（它保持**物理**尺寸不变）。按旧尺寸算出的
+   中心一遇到它改尺寸就偏了几十像素，用户看到的就是"按一下没完全过去、再按一下
+   才对"。g_shrinkOnMove > 0 时，窗口在**被移动之后**缩一次。 */
+static int g_shrinkOnMove = 0;
+static LRESULT CALLBACK ShrinkProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_WINDOWPOSCHANGED && g_shrinkOnMove > 0) {
+        g_shrinkOnMove--;                 /* 只缩一次，免得无限递归 */
+        SetWindowPos(h, NULL, 0, 0, 360, 260,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
 int main(void) {
     g_state.paused = FALSE;
     SetWindowsHookExW(WH_KEYBOARD_LL, CapProc, GetModuleHandleW(NULL), 0);
@@ -1246,6 +1270,151 @@ int main(void) {
     CHECK(g_phys[VK_LMENU] == 0, "AA: 残留的物理位已被修正");
     Sim(CLI_CAPS, FALSE);
     Pump(60); Drain();
+
+    /* ---- 场景AE：把焦点窗口挪到光标处（C+Q）----
+       这个动作不发任何键，风险全在"几何"上，所以分两段测：
+         ① 纯函数 WinComputePlacement：多显示器（含副屏在左的**负坐标**）、
+            任务栏挤掉的高度、窗口比工作区还大 —— 不需要真窗口就能全覆盖；
+         ② 真窗口端到端：把自己的窗口扔到屏幕外，验证能被拉回光标处且整窗可见
+            （正是"窗口被拖出屏幕外、拽不回来"那个用途）。
+       窗口用**自己注册的类 + DefWindowProc**：main.c 的 WndProc 收到
+       WM_DESTROY 会 PostQuitMessage，借它的类会把测试的消息循环打掉。 */
+    {
+        RECT work; POINT cur, dst;
+
+        /* 先钉住"接线"：键位表把 Q 接到这个动作上，且属性是"单发、不吃选区、
+           不发键"。这些是数据，最容易在改键位时被顺手改坏。 */
+        CHECK(ActOfVk('Q') == ACT_MOVEWIN, "AE: 触发键 Q -> 挪窗口动作");
+        CHECK(ActHasFlag(ACT_MOVEWIN, ACTF_MOVEWIN) &&
+              ActHasFlag(ACT_MOVEWIN, ACTF_SINGLE_SHOT) &&
+              ActHasFlag(ACT_MOVEWIN, ACTF_NO_SHIFT),
+              "AE: 属性 = 由 winmove 执行 + 单发 + 不吃选区修饰");
+        CHECK(ActOutVk(ACT_MOVEWIN) == 0, "AE: 该动作不发任何键");
+
+        work.left = 0; work.top = 0; work.right = 1920; work.bottom = 1080;
+        cur.x = 1000; cur.y = 500;
+        WinComputePlacement(&work, cur, 800, 600, &dst);
+        CHECK(dst.x == 600 && dst.y == 200, "AE: 单屏 -> 窗口中心对齐光标");
+
+        cur.x = 10; cur.y = 10;                       /* 光标贴左上角 */
+        WinComputePlacement(&work, cur, 800, 600, &dst);
+        CHECK(dst.x == 0 && dst.y == 0, "AE: 光标贴左上角 -> 钳进工作区");
+
+        cur.x = 1910; cur.y = 1070;                   /* 光标贴右下角 */
+        WinComputePlacement(&work, cur, 800, 600, &dst);
+        CHECK(dst.x == 1120 && dst.y == 480, "AE: 光标贴右下角 -> 整窗仍在工作区内");
+
+        cur.x = 960; cur.y = 540;                     /* 窗口比工作区还大 */
+        WinComputePlacement(&work, cur, 2000, 1200, &dst);
+        CHECK(dst.x == 0 && dst.y == 0,
+              "AE: 窗口大于工作区 -> 左上角对齐（不推出屏幕）");
+
+        /* 副屏在右：光标在第二块屏上，窗口必须落到那一块里（本功能的主用途） */
+        work.left = 1920; work.right = 3840;
+        cur.x = 2500; cur.y = 400;
+        WinComputePlacement(&work, cur, 800, 600, &dst);
+        CHECK(dst.x == 2100 && dst.y == 100 &&
+              dst.x >= work.left && dst.x + 800 <= work.right,
+              "AE: 副屏在右 -> 落在光标那一块屏内");
+
+        /* 副屏在左：Windows 里左侧/上方的副屏坐标是**负数**，别当成越界值 */
+        work.left = -1920; work.right = 0;
+        cur.x = -1000; cur.y = 300;
+        WinComputePlacement(&work, cur, 640, 480, &dst);
+        CHECK(dst.x == -1320 && dst.y == 60 &&
+              dst.x >= work.left && dst.x + 640 <= work.right,
+              "AE: 副屏在左（负坐标）-> 同样落在该屏内");
+
+        /* 任务栏占掉底部：工作区比显示器矮，窗口不许压到任务栏上 */
+        work.left = 0; work.right = 1920; work.bottom = 1040;
+        cur.x = 960; cur.y = 1030;
+        WinComputePlacement(&work, cur, 800, 600, &dst);
+        CHECK(dst.y == 440 && dst.y + 600 == work.bottom,
+              "AE: 有任务栏 -> 下沿贴工作区，不压任务栏");
+
+        /* ---- 真窗口：扔到屏幕外 -> 拉回光标处 ---- */
+        POINT saveCur;
+        GetCursorPos(&saveCur);
+        MONITORINFO mi;
+        memset(&mi, 0, sizeof(mi));
+        mi.cbSize = sizeof(mi);
+        HMONITOR hMon = MonitorFromPoint(saveCur, MONITOR_DEFAULTTONEAREST);
+        POINT tgt = saveCur;
+        if (hMon && GetMonitorInfoW(hMon, &mi)) {      /* 光标放在工作区正中 */
+            tgt.x = mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left) / 2;
+            tgt.y = mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top) / 2;
+        }
+        WNDCLASSW wc2 = {0};
+        wc2.lpfnWndProc = ShrinkProc;
+        wc2.hInstance = GetModuleHandleW(NULL);
+        wc2.lpszClassName = L"CapsEnhanceWinMove";
+        RegisterClassW(&wc2);
+        HWND w = CreateWindowW(L"CapsEnhanceWinMove", L"winmove",
+                               WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                               -4000, -4000, 400, 300,
+                               NULL, NULL, GetModuleHandleW(NULL), NULL);
+        CHECK(w != NULL, "AE: 测试窗口创建成功");
+        if (w) {
+            RECT wr;
+            GetWindowRect(w, &wr);
+            CHECK(wr.right <= mi.rcWork.left,
+                  "AE: 前置条件 —— 窗口确实在屏幕外（工作区左侧之外）");
+            SetCursorPos(tgt.x, tgt.y);
+            Pump(30);
+            GetCursorPos(&tgt);          /* 以**实际**光标为准：别的进程可能挪过它，
+                                            产品读的就是实时坐标，断言必须同源 */
+            CHECK(WinMoveWindowToCursor(w) != FALSE, "AE: 屏幕外的窗口 -> 移动成功");
+            Pump(30);
+            GetWindowRect(w, &wr);
+            CHECK(wr.left >= mi.rcWork.left && wr.top >= mi.rcWork.top &&
+                  wr.right <= mi.rcWork.right && wr.bottom <= mi.rcWork.bottom,
+                  "AE: 拉回后整窗可见（完全落在工作区内）");
+            CHECK(tgt.x >= wr.left && tgt.x < wr.right &&
+                  tgt.y >= wr.top && tgt.y < wr.bottom,
+                  "AE: 光标落在窗口里（窗口中心对准光标）");
+            CHECK(CenteredOn(wr, tgt, 8), "AE: 窗口中心对准光标（±8px）");
+
+            /* 最大化：位置由系统按显示器算、给它的 (x,y) 会被忽略，所以必须先
+               还原再挪 —— 但挪完要还回去，不能顺手取消用户的最大化状态。 */
+            ShowWindow(w, SW_MAXIMIZE);
+            Pump(30);
+            CHECK(IsZoomed(w) != FALSE, "AE: 前置条件 —— 窗口已最大化");
+            SetCursorPos(tgt.x, tgt.y);
+            WinMoveWindowToCursor(w);
+            Pump(30);
+            CHECK(IsZoomed(w) != FALSE, "AE: 最大化的窗口挪完仍是最大化");
+
+            /* 对方程序"挪完自己改尺寸"（实测 CLaunch 跨不同缩放比例的屏就是这样）：
+               按旧尺寸算的中心会偏，用户看到的是"按一下没完全过去、再按一下才对"。
+               让窗口在被移动一次后就缩一次，断言**一次调用**就能落到光标处。 */
+            ShowWindow(w, SW_RESTORE);
+            Pump(30);
+            SetWindowPos(w, NULL, -4000, -4000, 400, 300,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            Pump(30);
+            SetCursorPos(tgt.x, tgt.y);
+            Pump(30);
+            GetCursorPos(&tgt);          /* 同上：用实际光标位置做判据 */
+            g_shrinkOnMove = 1;                 /* 下一次移动后自己缩成 360x260 */
+            CHECK(WinMoveWindowToCursor(w) != FALSE,
+                  "AE: 会自己改尺寸的程序 -> 一次调用完成");
+            Pump(60);
+            GetWindowRect(w, &wr);
+            printf("       (改尺寸后: 目标光标=%d,%d 实际 rect=%d,%d,%d,%d)\n",
+                   (int)tgt.x, (int)tgt.y, (int)wr.left, (int)wr.top,
+                   (int)wr.right, (int)wr.bottom);
+            CHECK(tgt.x >= wr.left && tgt.x < wr.right &&
+                  tgt.y >= wr.top  && tgt.y < wr.bottom,
+                  "AE: 对方改尺寸后窗口仍落在光标处（回读重算生效）");
+            CHECK(CenteredOn(wr, tgt, 8),
+                  "AE: 对方改尺寸后窗口中心重新对准光标（±8px）");
+            CHECK((int)(wr.right - wr.left) == 360 && (int)(wr.bottom - wr.top) == 260,
+                  "AE: 前置条件 —— 窗口确实自己缩成了 360x260");
+
+            DestroyWindow(w);
+        }
+        SetCursorPos(saveCur.x, saveCur.y);            /* 还原用户的光标位置 */
+    }
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
     return fails;
