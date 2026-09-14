@@ -6,7 +6,11 @@
        按一下让它在光标处重新出现。
 
    落点规则（`WinComputePlacement`，纯函数、可单测）：
-     以窗口**中心**对齐光标，再把整个窗口钳进"光标所在显示器的工作区"。
+     **窗口左上角对齐光标**，再把整个窗口钳进"光标所在显示器的工作区"。
+     为什么不用"中心对齐"：居中必须先按尺寸换算（`左上角 = 光标 − 尺寸/2`），
+     而尺寸是**对方的** —— 它跨屏时可能自己改尺寸（实测 CLaunch：125% 屏上
+     578x437，挪到 150% 屏上变 495x374），按旧尺寸算出的中心立刻就偏了，
+     表现出来就是"按一下没完全过去、再按一下才对"。左上角对齐**不依赖尺寸**。
      钳制顺序是先"右下"后"左上"：窗口比工作区还大时让左上角对齐，至少保证
      标题栏可见 —— 那种情况钳不出更优解，但也不能把窗口推到屏幕外。
 
@@ -16,11 +20,11 @@
    工作区取 `MONITORINFO.rcWork`（已排除任务栏），所以窗口不会被压到托盘上，
    钳出来的位置一定是"整窗可见"的。
 
-   ★ 移动是"请求 + 回读校验 + 按新尺寸重算"，最多 3 次 —— 因为**对方程序可能
-   自己改尺寸**：实测 CLaunch 在 125% 屏上 578x437、挪到 150% 屏上变成 495x374
-   （它保持物理尺寸不变）。按旧尺寸算出的中心一遇到它改尺寸就偏了几十像素，
-   用户看到的就是"按一下没完全过去，再按一下才对"。回读它的新尺寸、重算落点，
-   把这件事变成一次点击完成 —— "发了对方未必认，动完回读一次"是本项目的老规矩
+   ★ 移动是"请求 + 回读锚点 + 重试"，最多 3 次。回读的是**左上角**是否落在我们要
+   的位置上（右/下两边不判：对方改尺寸是它的自由，左上角对了窗口就是"从这里开始"）。
+   左上角对齐本身已经免疫"对方改尺寸"，所以这一步针对的是另一种程序：**收到移动
+   请求后又自己挪走**（带吸附/跟随行为的启动器、面板类工具）。那就再发一次，最多
+   3 次，最后把实际落点写进日志 —— "发了对方未必认，动完回读一次"是本项目的老规矩
    （见 `SendArrowsStrict` 的补正、`EM_SETSEL` 的回读）。
 
    ★ 坐标系与 DPI：本进程**没有声明 DPI 感知**，于是 Windows 把整个桌面按系统
@@ -77,19 +81,27 @@ static void ClassNameToAnsi(HWND hwnd, char* out, int cap) {
     out[cap - 1] = 0;
 }
 
-/* 两个矩形是否"基本重合"（容差见 MOVE_TOLERANCE）。 */
-static BOOL NearRect(const RECT* a, const RECT* b, int tol) {
-    return llabs((long long)a->left   - (long long)b->left)   <= tol
-        && llabs((long long)a->top    - (long long)b->top)    <= tol
-        && llabs((long long)a->right  - (long long)b->right)  <= tol
-        && llabs((long long)a->bottom - (long long)b->bottom) <= tol;
+/* 两个点是否"基本重合"（容差见 MOVE_TOLERANCE）。只比**锚点**（左上角）：
+   右/下两边不参与判定 —— 程序被挪过去之后自己改尺寸是它的自由，那不是我们的
+   落点错了（左上角对了，窗口就是"从这里开始"）。 */
+static BOOL AnchorAt(const RECT* got, POINT want, int tol) {
+    return llabs((long long)got->left - (long long)want.x) <= tol
+        && llabs((long long)got->top  - (long long)want.y) <= tol;
 }
 
 /* 落点计算（纯函数：不碰窗口、不碰屏幕，所以多显示器几何能被单测覆盖）。
-   out = 窗口左上角。 */
+   out = 窗口左上角。
+
+   **规则：左上角对齐光标**（不是"中心对齐光标"）。理由：居中要算
+   `左上角 = 光标 − 尺寸/2`，而尺寸是**对方的** —— 有的程序跨屏会自己改尺寸
+   （实测 CLaunch 在 125% 屏上 578x437、到 150% 屏上变 495x374），按旧尺寸算出的
+   中心立刻就偏了（实测偏 41px），用户看到的是"按一下没完全过去、再按一下才对"。
+   左上角对齐**不依赖尺寸**，它怎么改都不影响落点。
+   （尺寸仍然要读，但**只为把整窗钳进工作区**：窗口比工作区大时钳不出更优解，
+   至少保证左上角可见 —— 钳制需要尺寸，"落点"不需要。） */
 void WinComputePlacement(const RECT* work, POINT cursor, int w, int h, POINT* out) {
-    LONG x = cursor.x - w / 2;          /* 中心对齐光标 */
-    LONG y = cursor.y - h / 2;
+    LONG x = cursor.x;                  /* 左上角对齐光标 */
+    LONG y = cursor.y;
     x = std::min<LONG>(x, work->right - w);   /* 先钳右下：整窗别越过工作区 */
     y = std::min<LONG>(y, work->bottom - h);
     x = std::max<LONG>(x, work->left);        /* 再钳左上：窗口大于工作区时保左上角 */
@@ -115,7 +127,7 @@ BOOL WinMoveWindowToCursor(HWND hwnd) {
     /* 声明区都放在**第一条 goto 之前**并用 C 风格赋值：`goto` 跳过"带初始化
        的局部声明"在 C++ 里是错（C2362），写成声明区就从结构上不会踩到。 */
     BOOL ok = FALSE;
-    RECT wr, want, got;
+    RECT wr, got;
     POINT cur, dst;
     int w = 0, h = 0, wFirst = 0, hFirst = 0;
     int tries = 0;
@@ -123,7 +135,6 @@ BOOL WinMoveWindowToCursor(HWND hwnd) {
     HMONITOR hMon = NULL;
     memset(&mi, 0, sizeof(mi));
     memset(&wr, 0, sizeof(wr));
-    memset(&want, 0, sizeof(want));
     memset(&got, 0, sizeof(got));
     memset(&cur, 0, sizeof(cur));
     memset(&dst, 0, sizeof(dst));
@@ -140,8 +151,6 @@ BOOL WinMoveWindowToCursor(HWND hwnd) {
         h = (int)(wr.bottom - wr.top);
         if (i == 0) { wFirst = w; hFirst = h; }      /* 只为日志：对方改没改尺寸 */
         WinComputePlacement(&mi.rcWork, cur, w, h, &dst);
-        want.left = dst.x; want.top = dst.y;
-        want.right = dst.x + w; want.bottom = dst.y + h;
 
         /* 坐标是**屏幕坐标**（顶层窗口；SetWindowPos 的文档写作 "client
            coordinates"，那是文档里沿用已久的措辞错误）。不改大小、不动 Z 序、
@@ -153,7 +162,7 @@ BOOL WinMoveWindowToCursor(HWND hwnd) {
         if (!ok) break;                              /* 请求被拒（UIPI 等）：没什么可重试的 */
         Sleep(MOVE_SETTLE_MS);
         if (!GetWindowRect(hwnd, &got)) break;
-        if (NearRect(&got, &want, MOVE_TOLERANCE)) break;   /* 已就位 */
+        if (AnchorAt(&got, dst, MOVE_TOLERANCE)) break;   /* 锚点已就位 */
     }
 
     if (g_recording.load()) {
@@ -167,12 +176,13 @@ BOOL WinMoveWindowToCursor(HWND hwnd) {
                (int)mi.rcMonitor.right, (int)mi.rcMonitor.bottom,
                (int)mi.rcWork.left, (int)mi.rcWork.top,
                (int)mi.rcWork.right, (int)mi.rcWork.bottom);
-        CapLog("  [窗口]   尺寸%dx%d -> 请求(%d,%d) 实际[%d,%d..%d,%d] 尝试%d次%s%s",
-               wFirst, hFirst, (int)dst.x, (int)dst.y,
+        CapLog("  [窗口]   尺寸%dx%d%s -> 请求左上角(%d,%d) 实际[%d,%d..%d,%d] 尝试%d次%s",
+               wFirst, hFirst,
+               (w != wFirst || h != hFirst) ? "（对方改过尺寸，落点不受影响）" : "",
+               (int)dst.x, (int)dst.y,
                (int)got.left, (int)got.top, (int)got.right, (int)got.bottom,
                tries,
-               NearRect(&got, &want, MOVE_TOLERANCE) ? "" : "   <<< 未就位",
-               (w != wFirst || h != hFirst) ? "   （对方改了尺寸，已按新尺寸重算）" : "");
+               AnchorAt(&got, dst, MOVE_TOLERANCE) ? "" : "   <<< 锚点未就位（对方又把它挪走了）");
     }
 
 done:
