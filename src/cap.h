@@ -223,6 +223,21 @@ BOOL WinMoveWindowToCursor(HWND hwnd);
                         /* 移动指定窗口（测试与实现共用；不自己去查前台窗口） */
 BOOL WinMoveFocusedToCursor(void);
                         /* 动作入口：把焦点程序的**顶层**窗口挪到光标处 */
+BOOL WinIsShellClass(HWND hwnd);
+                        /* 桌面 / 任务栏 / 通知区那类"不是普通窗口"的壳窗口（winmove 与 drag 共用） */
+
+/* ---------- Caps + 左键拖动挪窗口（src/drag.c） ----------
+   钩子只做"判定 + 记录 + 唤醒"（鼠标输入的关键路径上不能阻塞），
+   SetWindowPos 由本模块的专用线程执行（与滚轮 / 持续滚动同一套通道模型）。
+   判定与落点规则借鉴 AltSnap（它默认用 Alt 键做同一件事）。 */
+BOOL DragBegin(POINT pt);   /* 钩子：按下那一刻判定是否接管；TRUE = 接管（调用方必须吞掉这次按下） */
+void DragMove(POINT pt);    /* 钩子：更新最新光标位置并唤醒执行线程（每帧一次内存写 + SetEvent） */
+void DragEnd(void);         /* 钩子：结束本次拖动（执行线程会补上最后一次落点） */
+BOOL DragActive(void);      /* 是否正在拖动（键盘钩子"松开 Caps 就收手"要用） */
+void DragLaneStart(void);   /* act.c 的 ActStart 调用（起不来则该功能静默不可用） */
+void DragLaneStop(void);    /* act.c 的 ActStop 调用 */
+void DragComputeTopLeft(POINT wndTL, POINT from, POINT to, POINT* out);
+                        /* 纯函数：落点 = 按下时的窗口左上角 + 光标位移（单测覆盖） */
 
 /* 滚轮加速专用通道（独立队列 + 独立线程，见 act.c）。
    ActWheelPost 由主线程调用，绝不阻塞：原来的实现是在主线程 Sleep(2ms)
@@ -336,7 +351,8 @@ extern HWND g_mainWnd;
 #define CFG_LIST_NATIVE      0   /* [NativeWordJump]：不做文本探测，直接发 Ctrl+←/→ */
 #define CFG_LIST_AUTODISABLE 1   /* [AutoDisable]：前台是它时整段不介入          */
 #define CFG_LIST_NOSMOOTH    2   /* [NoSmoothScroll]：持续滚动只发整格           */
-#define CFG_LIST_COUNT       3
+#define CFG_LIST_DRAG        3   /* [DragBlacklist]：这些窗口/程序不许 Caps+左键拖 */
+#define CFG_LIST_COUNT       4
 
 /* 名单容量：设置程序要用它来定界面里的数组，所以放在这里而不是 config.c
    （同一份判据，别在两处各写一个 128 / 64）。 */
@@ -362,6 +378,7 @@ int  ConfigGetAutoScrollFastMs(void);        /* [General] AutoScrollFastMs：持
 BOOL ConfigGetAllowScintillaRead(void);     /* [General] AllowScintillaRead：允许 Scintilla 通道读目标进程内存（0=关闭该通道） */
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中 [NativeWordJump] */
 BOOL ConfigIsAutoDisabled(HWND focus);      /* 前台窗口的进程是否命中 [AutoDisable]（命中 = 整段不介入） */
+BOOL ConfigIsDragBlacklisted(HWND hwnd);    /* 该窗口是否命中 [DragBlacklist]（进程名或类名，见模板说明） */
 BOOL ConfigIsNoSmoothScroll(HWND focus);    /* 前台窗口的进程是否命中 [NoSmoothScroll]（命中 = 持续滚动只发整格） */
 BOOL ConfigMatchList(int list, const WCHAR* exeName); /* 进程名是否命中指定名单（CFG_LIST_*） */
 BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口的进程 exe 名 */

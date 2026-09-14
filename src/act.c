@@ -675,6 +675,7 @@ BOOL ActStart(void) {
     s_init = TRUE;
     WheelLaneStart();      /* 滚轮加速的独立线程（起不来则退回主线程同步兜底） */
     AutoScrollLaneStart(); /* 自动滚动的独立线程（起不来则该功能静默不可用） */
+    DragLaneStart();       /* 拖拽窗口的独立线程（起不来则该功能静默不可用） */
     return TRUE;
 }
 
@@ -689,6 +690,7 @@ void ActStop(void) {
     InterlockedExchange(&s_dead, 1);
     AutoScrollLaneStop();                /* 先停自动滚动：它可能还在持续注入 */
     WheelLaneStop();                     /* 再停滚轮通道：它只注入鼠标滚轮 */
+    DragLaneStop();                      /* 再停拖拽通道：它只挪窗口 */
     InterlockedExchange(&s_stop, 1);
     SendArrowsRequestInterrupt();        /* 正在逐格输出时立刻止住 */
     ActClear();

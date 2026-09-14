@@ -63,7 +63,7 @@
 
 /* 桌面壳与任务栏也是"前台窗口"的候选（Win+T、点任务栏都会），但挪它们毫无
    意义，而且会真把任务栏搬走。按类名挡掉（桌面 = Progman/WorkerW）。 */
-static BOOL IsShellClass(HWND hwnd) {
+BOOL WinIsShellClass(HWND hwnd) {
     WCHAR cls[64] = L"";
     if (!GetClassNameW(hwnd, cls, 64)) return FALSE;
     return wcscmp(cls, L"Shell_TrayWnd") == 0
@@ -207,7 +207,7 @@ BOOL WinMoveFocusedToCursor(void) {
        挪子窗口只会把它从父窗口里撕出来。GA_ROOT = 该子窗口所属的顶层窗口。 */
     HWND top = GetAncestor(fg, GA_ROOT);
     if (!top) return FALSE;
-    if (IsShellClass(top)) return FALSE;
+    if (WinIsShellClass(top)) return FALSE;
 
     return WinMoveWindowToCursor(top);
 }

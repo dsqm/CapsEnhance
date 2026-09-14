@@ -109,6 +109,9 @@ static const ListGroup kLists[] = {
       CFG_LIST_AUTODISABLE },
     { L"持续滚动只发整格 [NoSmoothScroll]：不累积小数刻度（滚了不动）的程序",
       CFG_LIST_NOSMOOTH },
+    { L"拖动窗口黑名单 [DragBlacklist]：不许 Caps+左键拖动的程序/窗口类"
+      L"（类名条目写成 *|类名）",
+      CFG_LIST_DRAG },
 };
 #define LIST_N ((int)(sizeof(kLists) / sizeof(kLists[0])))
 

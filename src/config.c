@@ -31,6 +31,7 @@ typedef enum {
     CFGLIST_NATIVE     = CFG_LIST_NATIVE,      /* [NativeWordJump] */
     CFGLIST_AUTODISABLE= CFG_LIST_AUTODISABLE, /* [AutoDisable]    */
     CFGLIST_NOSMOOTH   = CFG_LIST_NOSMOOTH,    /* [NoSmoothScroll] */
+    CFGLIST_DRAG       = CFG_LIST_DRAG,        /* [DragBlacklist]  */
     CFGLIST_COUNT      = CFG_LIST_COUNT
 } CfgListId;
 
@@ -171,7 +172,7 @@ static int ParseIntW(const WCHAR* v, int def) {
 }
 
 typedef enum { SEC_NONE, SEC_GENERAL, SEC_NATIVE, SEC_AUTODISABLE,
-               SEC_NOSMOOTH, SEC_OTHER } CfgSec;
+               SEC_NOSMOOTH, SEC_DRAG, SEC_OTHER } CfgSec;
 
 /* 段名 -> 名单编号；不是名单段返回 -1。
    段名一律大小写不敏感、并容忍 "Native Word Jump" 这种带空格的老写法。 */
@@ -180,6 +181,7 @@ static int SecList(CfgSec sec) {
     case SEC_NATIVE:      return CFGLIST_NATIVE;
     case SEC_AUTODISABLE: return CFGLIST_AUTODISABLE;
     case SEC_NOSMOOTH:    return CFGLIST_NOSMOOTH;
+    case SEC_DRAG:        return CFGLIST_DRAG;
     default:              return -1;
     }
 }
@@ -251,6 +253,30 @@ static BOOL ListEmpty(int list) {
     return (list < 0 || list >= CFGLIST_COUNT) ? TRUE : (g_count[list] == 0);
 }
 
+/* [DragBlacklist] 的**内置默认**，逐条取自 AltSnap 的默认黑名单
+   （AltSnap.dni 的 [Blacklist] Processes 与 Windows 两条，AltSnap v1.68）。
+   条目形态（见 ConfigIsDragBlacklisted）：
+     · 进程名：`name.exe`（.exe 可省，大小写不敏感）
+     · 类名：`*|ClassName`（AltSnap 语法；条目里的标题字段解析后忽略 —— 取另一个
+       进程的标题要发 WM_GETTEXT，那是跨进程 IPC，鼠标钩子上绝不能做；
+       AltSnap 的默认条目每条都带类名或进程名，所以默认语义仍然完整）。
+   只有 ini 里没有 [DragBlacklist] 段时才用它们；段一存在，文件说了算。 */
+static const WCHAR* const kDragBlacklistDefaults[] = {
+    /* —— AltSnap [Blacklist] Processes —— */
+    L"StartMenuExperienceHost.exe", L"SearchApp.exe", L"mstsc.exe", L"msrdc.exe",
+    L"osk.exe", L"Virtual PC.exe", L"LeagueClient.exe", L"LeagueClientUx.exe",
+    L"LeagueClientUxRender.exe",
+    /* —— AltSnap [Blacklist] Windows（取其中的类名部分） —— */
+    L"*|Progman", L"*|MultitaskingViewFrame", L"*|TaskSwitcherWnd",
+    L"*|TaskSwitcherOverlayWnd", L"*|WorkerW", L"*|Shell_TrayWnd",
+    L"*|BaseBar", L"*|#32768", L"*|XamlExplorerHostIslandWindow",
+    L"*|MozillaDropShadowWindowClass", L"*|VistaSwitcher_SwitcherWnd",
+    L"*|TaskListThumbnailWnd", L"*|NotifyIconOverflowWindow",
+    L"*|Windows.UI.Core.CoreWindow", L"*|NativeHWNDHost",
+    L"*|Xaml_WindowedPopupClass", L"*|Shell_SecondaryTrayWnd",
+    L"*|SimpleWindowSwitcher_{BEA057BB-66C7-4758-A610-FAE6013E9F98}",
+    L"*|YuiWnd",
+};
 /* 非 static：供单元测试直接喂指定路径 */
 void ConfigLoadFrom(const WCHAR* path) {
     for (int i = 0; i < CFGLIST_COUNT; i++) g_count[i] = 0;
@@ -293,6 +319,7 @@ void ConfigLoadFrom(const WCHAR* path) {
     widev[wl] = 0;
     WCHAR* wide = widev.data();
 
+    BOOL sawDrag = FALSE;   /* [DragBlacklist] 段在文件里出现过吗（没有就用内置默认） */
     CfgSec sec = SEC_NONE;
     WCHAR* line = wide;
     while (line) {
@@ -316,6 +343,8 @@ void ConfigLoadFrom(const WCHAR* path) {
                      _wcsicmp(name, L"auto disable") == 0)     sec = SEC_AUTODISABLE;
             else if (_wcsicmp(name, L"nosmoothscroll") == 0 ||
                      _wcsicmp(name, L"no smooth scroll") == 0) sec = SEC_NOSMOOTH;
+            else if (_wcsicmp(name, L"dragblacklist") == 0 ||
+                     _wcsicmp(name, L"drag blacklist") == 0) { sec = SEC_DRAG; sawDrag = TRUE; }
             else                                          sec = SEC_OTHER;
         } else if (sec == SEC_GENERAL) {
             WCHAR* eq = wcschr(line, L'=');
@@ -364,6 +393,15 @@ void ConfigLoadFrom(const WCHAR* path) {
         }
         line = nl ? nl + 1 : NULL;
     }
+
+    /* [DragBlacklist] 段缺失 -> 装**内置默认**（取自 AltSnap 的默认黑名单，见下）。
+       这样老配置不用动文件就能得到一份合理的默认黑名单；一旦文件里出现了这个段
+       （哪怕是空的），就以文件为准 —— "把段删空"是用户关掉黑名单的合法方式。
+       设置程序保存时会把内存里的名单（含默认）整段写回文件，于是默认值对老用户
+       也变成看得见、可编辑的。 */
+    if (!sawDrag)
+        for (size_t di = 0; di < sizeof(kDragBlacklistDefaults) / sizeof(kDragBlacklistDefaults[0]); di++)
+            AddEntry(CFGLIST_DRAG, kDragBlacklistDefaults[di]);
 }
 
 void ConfigLoad(void) {
@@ -440,7 +478,44 @@ void ConfigLoad(void) {
             "; 少数程序不累积这种小刻度 —— 表现为滚了却完全不动。把它的进程名\n"
             "; 写进这里，就只对它改回每次发整格（120）。\n"
             "; 每行一个进程名：完全匹配、大小写不敏感、.exe 后缀可写可不写\n"
-            "; 例：someapp.exe";
+            "; 例：someapp.exe\n"
+            ";\n"
+            "[DragBlacklist]\n"
+            "; 按住 Caps 用**左键拖动**可以挪动当前窗口；命中下面条目的窗口不被接管\n"
+            "; （左键原样透传）。默认黑名单与 AltSnap 的默认值一致（Processes + Windows）。\n"
+            "; 条目两种写法：\n"
+            ";   进程名：name.exe（.exe 可省，大小写不敏感）\n"
+            ";   窗口类：*|ClassName（AltSnap 写法；条目里的标题字段被忽略，\n"
+            ";            因为读另一个进程的标题是跨进程 IPC，鼠标钩子上做不了）\n"
+            "; 注意：只要这个段存在，就以文件为准（内置默认不再生效）——\n"
+            "; 想关掉黑名单就把这个段删空。\n"
+            "StartMenuExperienceHost.exe\n"
+            "SearchApp.exe\n"
+            "mstsc.exe\n"
+            "msrdc.exe\n"
+            "osk.exe\n"
+            "Virtual PC.exe\n"
+            "LeagueClient.exe\n"
+            "LeagueClientUx.exe\n"
+            "LeagueClientUxRender.exe\n"
+            "*|Progman\n"
+            "*|MultitaskingViewFrame\n"
+            "*|TaskSwitcherWnd\n"
+            "*|TaskSwitcherOverlayWnd\n"
+            "*|WorkerW\n"
+            "*|Shell_TrayWnd\n"
+            "*|BaseBar\n"
+            "*|#32768\n"
+            "*|XamlExplorerHostIslandWindow\n"
+            "*|MozillaDropShadowWindowClass\n"
+            "*|VistaSwitcher_SwitcherWnd\n"
+            "*|TaskListThumbnailWnd\n"
+            "*|NotifyIconOverflowWindow\n"
+            "*|Windows.UI.Core.CoreWindow\n"
+            "*|NativeHWNDHost\n"
+            "*|Xaml_WindowedPopupClass\n"
+            "*|Shell_SecondaryTrayWnd\n"
+            "*|YuiWnd";
         FILE* w = NULL;
         if (_wfopen_s(&w, path, L"wb") == 0 && w) {
             fwrite(kTemplate, 1, sizeof(kTemplate) - 1, w);
@@ -760,6 +835,7 @@ void ConfigSetList(int list, const WCHAR* const* names, int n) {
     if (!names) return;
     for (int i = 0; i < n; i++) AddEntry(list, names[i]);
 }
+
 int ConfigListCount(int list) {
     return (list >= 0 && list < CFGLIST_COUNT) ? g_count[list] : 0;
 }
@@ -768,9 +844,41 @@ const WCHAR* ConfigListAt(int list, int i) {
     return g_names[list][i];
 }
 
+/* [DragBlacklist] 是否命中这个窗口。
+   条目两种形态（见上面 kDragBlacklistDefaults 的说明）：
+     · 含 `|` -> 类名条目：取最后一个 `|` 右边那段当类名（左边的 exe/标题字段不支持，
+       AltSnap 默认值里那些左侧都是 `*`）；
+     · 否则 -> 进程名条目（与其它名单一样：完全匹配、忽略大小写、.exe 可省）。
+   为什么不匹配标题：取另一个进程的窗口标题要发 WM_GETTEXT（跨进程 IPC），
+   而这个查询发生在**鼠标钩子**上（按下左键那一刻）—— 钩子上绝不能做跨进程消息。 */
+static BOOL DragListHit(const WCHAR* exe, const WCHAR* cls) {
+    for (int i = 0; i < g_count[CFGLIST_DRAG]; i++) {
+        const WCHAR* it = g_names[CFGLIST_DRAG][i];
+        const WCHAR* bar = wcsrchr(it, L'|');
+        if (bar) {
+            if (cls && cls[0] && _wcsicmp(bar + 1, cls) == 0) return TRUE;
+        } else if (exe && exe[0]) {
+            WCHAR a[CFG_NAME_MAX], e[CFG_NAME_MAX];
+            _snwprintf_s(a, CFG_NAME_MAX, _TRUNCATE, L"%s", it);
+            _snwprintf_s(e, CFG_NAME_MAX, _TRUNCATE, L"%s", exe);
+            StripExeW(a); StripExeW(e);
+            if (_wcsicmp(a, e) == 0) return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+BOOL ConfigIsDragBlacklisted(HWND hwnd) {
+    if (!hwnd || ListEmpty(CFGLIST_DRAG)) return FALSE;
+    WCHAR cls[128] = L"", exe[MAX_PATH] = L"";
+    GetClassNameW(hwnd, cls, 128);                 /* 类名是本地查询，无 IPC */
+    ConfigGetProcessName(hwnd, exe, MAX_PATH);     /* 与 [AutoDisable] 同一条路 */
+    return DragListHit(exe, cls);
+}
+
 /* 名单段名（与解析时认的写法一致；新增名单段改这一处即可） */
 static const char* const kListSec[CFGLIST_COUNT] = {
-    "NativeWordJump", "AutoDisable", "NoSmoothScroll"
+    "NativeWordJump", "AutoDisable", "NoSmoothScroll", "DragBlacklist"
 };
 
 /* 当前所有 [General] 键的"键 = 值"（供写回用）。键名一律小写 —— 与解析时

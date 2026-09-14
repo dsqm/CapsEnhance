@@ -347,6 +347,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                    会在上面 `if (!g_cMod) 放行` 分支出去，没人再清闩锁 ——
                    下一次 C+` 的首次按下就哑了。 */
                 g_probeArmed = FALSE;
+                DragEnd();                      /* C 松开：拖拽立即收手（若在拖） */
                 SendArrowsRequestInterrupt();   /* C 松开：立即打断逐格输出 */
                 PostMessageW(g_mainWnd, WM_CAPS_UP, 0, 0);
                 return 1;
@@ -473,6 +474,12 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
    移到执行线程"（act.c）要解决的问题，两者是同一根因的两个面。 */
 static HHOOK g_mouseHook = NULL;
 
+/* Caps+左键拖动：**down 被吞过，up 就必须吞** —— 与键盘那套 g_swallowVk 是
+   同一条"吞放配对"规矩（只吞 down 会让目标程序认为按键一直按着）。
+   Caps 中途松开导致拖拽结束也不清这个标志：那次 up 仍要吞，否则就漏了一个
+   孤立的抬起给目标程序。 */
+static volatile BOOL g_dragSwallowUp = FALSE;
+
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode != HC_ACTION) return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
     const MSLLHOOKSTRUCT* m = (const MSLLHOOKSTRUCT*)lParam;
@@ -480,10 +487,41 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
        "打断持续滚动"（放大/持续滚动都在注入滚轮）。 */
     if (!m || (m->flags & LLMHF_INJECTED))
         return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
-    /* 移动是这里最热的事件（每次移动都进来）：第一个分支就放行，别为它多花比较。
-       它也算"鼠标动作"，但**不算按键**，不打断持续滚动 —— 否则手一抖就停了。 */
+
+    /* 拖拽窗口（Caps+左键）进行中：移动只更新落点并**照常放行** —— 目标程序
+       没收到按下的左键，一次鼠标移动对它是无害的；按键则按配对规则吞掉；
+       其余鼠标事件（右键/中键/滚轮）不参与拖拽，原样放行。 */
+    if (DragActive()) {
+        if (wParam == WM_MOUSEMOVE) {
+            DragMove(m->pt);
+            return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
+        }
+        if (wParam == WM_LBUTTONUP) {
+            DragEnd();
+            g_dragSwallowUp = FALSE;
+            return 1;
+        }
+        return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
+    }
+
+    /* 移动是这里最热的事件（每次移动都进来）：第一个分支就放行，别为它多花比较。 */
     if (wParam == WM_MOUSEMOVE)
         return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
+
+    if (wParam == WM_LBUTTONDOWN) {
+        /* Caps + 左键 = 拖动当前窗口（判定与执行都在 drag.c；接管成功就吞掉
+           这次按下 —— 目标程序收不到它，拖动期间也就不会有"选中/拖拽"副作用）。
+           判定在这里做（含黑名单），是因为吞不吞必须**现在**决定：事后发现
+           该放行就来不及了（down 已经没了）。 */
+        const BOOL drag = (!g_state.paused && g_cMod && DragBegin(m->pt));
+        g_dragSwallowUp = drag;
+        /* 左键按下本身就是"用户的新输入"：不管这次有没有开始拖拽，
+           持续滚动都要打断 —— 不能因为新功能把这条旧语义丢掉。 */
+        ActAutoScrollInterrupt("鼠标键", (int)wParam);
+        if (drag) return 1;
+    } else if (wParam == WM_LBUTTONUP) {
+        g_dragSwallowUp = FALSE;         /* 没在拖：清掉残留的配对标志 */
+    }
 
     if (wParam == WM_MOUSEWHEEL || wParam == WM_MOUSEHWHEEL) {
         BOOL vert  = (wParam == WM_MOUSEWHEEL);
@@ -549,10 +587,11 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
            delta=0 的滚轮不带任何信息（部分驱动与触控板会发占位帧），不算输入 ——
            否则它就是个"什么都滚不动、却把滚动停掉"的隐形杀手。 */
         if (delta != 0) ActAutoScrollInterrupt("滚轮", delta);
-    } else if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN ||
+    } else if (wParam == WM_RBUTTONDOWN ||
                wParam == WM_MBUTTONDOWN || wParam == WM_XBUTTONDOWN) {
         /* 鼠标键按下也算"任意键"（用户明确要的"包含鼠标"）。
-           抬起不算 —— 那是按下动作的收尾，不是新动作。 */
+           抬起不算 —— 那是按下动作的收尾，不是新动作。
+           左键不在这里：它有自己的语义（Caps+左键 = 拖动窗口，见 DragBegin）。 */
         ActAutoScrollInterrupt("鼠标键", (int)wParam);
     }
 

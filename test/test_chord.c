@@ -202,6 +202,14 @@ static LRESULT MouseEv(UINT msg, DWORD flags) {
     ms.flags = flags;
     return LowLevelMouseProc(HC_ACTION, msg, (LPARAM)&ms);
 }
+/* 拖拽相关用例用：带**坐标**的鼠标事件（拖拽按 pt 找窗口，必须能指定位置）。
+   flags=0 表示非注入（生产钩子对注入事件一律放行）。 */
+static LRESULT MousePt(UINT msg, POINT pt) {
+    MSLLHOOKSTRUCT ms; memset(&ms, 0, sizeof(ms));
+    ms.pt = pt;
+    ms.flags = 0;
+    return LowLevelMouseProc(HC_ACTION, msg, (LPARAM)&ms);
+}
 /* 排干所有待处理消息（含残留 TIMER/TRIG） */
 static void Sink(void) {
     MSG m;
@@ -896,9 +904,16 @@ int main(void) {
     ActAutoScrollWheel(120);
     Sink();
     CHECK(ActAutoScrollActive(), "R: 鼠标场景已重新启动");
-    MouseEv(WM_LBUTTONDOWN, 0);
+    /* "鼠标按下"的样本点取**任务栏**：它在默认拖动黑名单里（不接管），所以这条
+       用例只验"鼠标按下打断持续滚动"本身 —— 不会顺带启动一次拖拽，也不受
+       桌面上恰好压着哪个窗口的影响（(0,0) 处有什么是随环境变的）。 */
+    HWND trayWnd = FindWindowW(L"Shell_TrayWnd", NULL);
+    RECT trayRc = { 0, 0, 0, 0 };
+    if (trayWnd) GetWindowRect(trayWnd, &trayRc);
+    POINT tbPt = { (trayRc.left + trayRc.right) / 2, (trayRc.top + trayRc.bottom) / 2 };
+    MousePt(WM_LBUTTONDOWN, tbPt);
     CHECK(!ActAutoScrollActive(), "R: 鼠标按键按下 -> 终止连续滚动");
-    MouseEv(WM_LBUTTONUP, 0);
+    MousePt(WM_LBUTTONUP, tbPt);
 
     /* 鼠标移动 -> **不**终止（移动不是"按键"，否则手一抖就停） */
     ActAutoScrollWheel(120);
@@ -1380,18 +1395,22 @@ int main(void) {
                   "AE: 前置条件 —— 窗口确实在屏幕外（工作区左侧之外）");
             SetCursorPos(tgt.x, tgt.y);
             Pump(30);
-            GetCursorPos(&tgt);          /* 以**实际**光标为准：别的进程可能挪过它，
-                                            产品读的就是实时坐标，断言必须同源 */
+            GetCursorPos(&tgt);          /* 以**实际**光标为准：别的进程可能挪过它 */
+            POINT c0 = tgt, c1;
             CHECK(WinMoveWindowToCursor(w) != FALSE, "AE: 屏幕外的窗口 -> 移动成功");
             Pump(30);
+            GetCursorPos(&c1);           /* 光标若在测试期间被移动，对准断言就不成立 */
+            BOOL curStable = (c0.x == c1.x && c0.y == c1.y);
+            tgt = c1;
             GetWindowRect(w, &wr);
-            printf("       (拉回后: 光标=%d,%d rect=%d,%d,%d,%d)\n",
+            printf("       (拉回后: 光标=%d,%d rect=%d,%d,%d,%d)%s\n",
                    (int)tgt.x, (int)tgt.y, (int)wr.left, (int)wr.top,
-                   (int)wr.right, (int)wr.bottom);
+                   (int)wr.right, (int)wr.bottom, curStable ? "" : "  （光标被移动，跳过对准断言）");
             CHECK(wr.left >= mi.rcWork.left && wr.top >= mi.rcWork.top &&
                   wr.right <= mi.rcWork.right && wr.bottom <= mi.rcWork.bottom,
                   "AE: 拉回后整窗可见（完全落在工作区内）");
-            CHECK(AnchorAt(wr, tgt, 4), "AE: 拉回后左上角对准光标（±4px）");
+            CHECK(!curStable || AnchorAt(wr, tgt, 8),
+                  "AE: 拉回后左上角对准光标（±8px）");
             CHECK(tgt.x >= wr.left && tgt.x < wr.right &&
                   tgt.y >= wr.top && tgt.y < wr.bottom,
                   "AE: 光标就在窗口的左上角（伸手就能抓到）");
@@ -1417,17 +1436,21 @@ int main(void) {
             SetCursorPos(tgt.x, tgt.y);
             Pump(30);
             GetCursorPos(&tgt);          /* 同上：用实际光标位置做判据 */
+            c0 = tgt;
             g_shrinkOnMove = 1;                 /* 下一次移动后自己缩成 360x260 */
             CHECK(WinMoveWindowToCursor(w) != FALSE,
                   "AE: 会自己改尺寸的程序 -> 调用成功");
             Pump(60);
+            GetCursorPos(&c1);
+            curStable = (c0.x == c1.x && c0.y == c1.y);
+            tgt = c1;
             GetWindowRect(w, &wr);
-            printf("       (改尺寸后: 光标=%d,%d rect=%d,%d,%d,%d)\n",
+            printf("       (改尺寸后: 光标=%d,%d rect=%d,%d,%d,%d)%s\n",
                    (int)tgt.x, (int)tgt.y, (int)wr.left, (int)wr.top,
-                   (int)wr.right, (int)wr.bottom);
+                   (int)wr.right, (int)wr.bottom, curStable ? "" : "  （光标被移动，跳过对准断言）");
             CHECK((int)(wr.right - wr.left) == 360 && (int)(wr.bottom - wr.top) == 260,
                   "AE: 前置条件 —— 窗口确实自己缩成了 360x260");
-            CHECK(AnchorAt(wr, tgt, 4),
+            CHECK(!curStable || AnchorAt(wr, tgt, 8),
                   "AE: 对方改尺寸也不影响落点（左上角仍对准光标）");
 
             /* ② 挪过去之后**又把自己挪走**（带吸附/跟随行为的启动器、面板）。
@@ -1452,6 +1475,83 @@ int main(void) {
             DestroyWindow(w);
         }
         SetCursorPos(saveCur.x, saveCur.y);            /* 还原用户的光标位置 */
+    }
+
+    /* ---- 场景AF：Caps + 左键拖动挪窗口 ----
+       直接喂鼠标事件给生产的鼠标钩子过程（flags=0 = 非注入）：
+         LBUTTONDOWN(Caps 按着) -> 接管并吞掉；MOUSEMOVE -> 放行 + 拖拽通道
+         按"抓取基准 + 位移"挪窗口；LBUTTONUP -> 吞掉（与按下配对）并收手。
+       测试窗口必须是 **topmost**：WindowFromPoint 返回最上层的窗口，
+       控制台或别的窗口压在上面就测不准。 */
+    {
+        WNDCLASSW wc3 = {0};
+        wc3.lpfnWndProc = DefWindowProcW;
+        wc3.hInstance = GetModuleHandleW(NULL);
+        wc3.lpszClassName = L"CapsEnhanceDragProbe";
+        RegisterClassW(&wc3);
+        HWND w = CreateWindowExW(WS_EX_TOPMOST, L"CapsEnhanceDragProbe", L"drag",
+                                 WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                                 400, 300, 320, 220,
+                                 NULL, NULL, GetModuleHandleW(NULL), NULL);
+        CHECK(w != NULL, "AF: 测试窗口创建成功");
+        if (w) {
+            SetWindowPos(w, NULL, 400, 300, 320, 220, SWP_NOZORDER | SWP_NOACTIVATE);
+            Pump(30);
+            RECT r0;
+            GetWindowRect(w, &r0);
+            POINT in = { r0.left + 120, r0.top + 80 };   /* 窗口内的一点 */
+
+            /* ① 内置默认黑名单：**没有 [DragBlacklist] 段也要生效**（取自 AltSnap 的默认值）。
+               任务栏（Shell_TrayWnd）是 AltSnap Windows 列表里的类名，
+               用它当"必中"的样本最稳 —— 它一定存在。 */
+            WriteChordIni("[General]\r\n");
+            ConfigLoadFrom(L"bin/chordtest.ini");
+            HWND tray = FindWindowW(L"Shell_TrayWnd", NULL);
+            CHECK(tray != NULL && ConfigIsDragBlacklisted(tray),
+                  "AF: 内置默认黑名单命中任务栏（取自 AltSnap 的 Shell_TrayWnd）");
+            CHECK(!ConfigIsDragBlacklisted(w), "AF: 普通窗口不在默认黑名单里");
+
+            /* ② 类名条目：命中后左键**原样透传**（不接管、不进入拖拽） */
+            WriteChordIni("[DragBlacklist]\r\n*|CapsEnhanceDragProbe\r\n");
+            ConfigLoadFrom(L"bin/chordtest.ini");
+            Key(CLI_CAPS, TRUE); Pump(2);
+            CHECK(MousePt(WM_LBUTTONDOWN, in) == 0,
+                  "AF: 黑名单（类名条目）-> 左键透传，不接管");
+            CHECK(!DragActive(), "AF: 黑名单 -> 不进入拖拽");
+            Key(CLI_CAPS, FALSE); Pump(2);
+
+            /* ③ 正常拖拽：down 吞掉 + 窗口跟随位移 + up 吞掉并收手 */
+            WriteChordIni("[General]\r\n");      /* 清掉黑名单（回内置默认） */
+            ConfigLoadFrom(L"bin/chordtest.ini");
+            Key(CLI_CAPS, TRUE); Pump(2);
+            POINT p1 = in;
+            CHECK(MousePt(WM_LBUTTONDOWN, p1) == 1, "AF: 接管 -> 吞掉左键按下");
+            CHECK(DragActive(), "AF: 拖拽已开始");
+
+            POINT p2 = { p1.x + 100, p1.y + 80 };
+            MousePt(WM_MOUSEMOVE, p2);
+            RECT want = { r0.left + 100, r0.top + 80,
+                          r0.left + 100 + (r0.right - r0.left),
+                          r0.top + 80 + (r0.bottom - r0.top) };
+            BOOL moved = FALSE;
+            RECT r;
+            for (int i = 0; i < 60 && !moved; i++) {
+                Pump(10);
+                GetWindowRect(w, &r);
+                moved = (r.left == want.left && r.top == want.top);
+            }
+            CHECK(moved, "AF: 窗口跟随光标位移（+100,+80）");
+
+            CHECK(MousePt(WM_LBUTTONUP, p2) == 1, "AF: 吞掉左键抬起（与按下配对）");
+            Pump(60);
+            CHECK(!DragActive(), "AF: 抬起后拖拽结束");
+            GetWindowRect(w, &r);
+            CHECK(r.left == want.left && r.top == want.top,
+                  "AF: 结束后停在最后一次落点上");
+
+            Key(CLI_CAPS, FALSE); Pump(2);
+            DestroyWindow(w);
+        }
     }
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
