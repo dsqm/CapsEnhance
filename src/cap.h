@@ -119,12 +119,16 @@
    掉，既不建立 happens-before、也不保证原子性。所以"跨线程用的标志"不能写
    volatile，要么 std::atomic、要么由一把锁 / 一次 join 建立顺序。
 
-   本项目里**真正跨线程**的用户态标志只有两个：
+   本项目里**真正跨线程**的用户态标志共有三组：
 
      · g_recording —— 主线程写（C+` 切换），而 act.c / send.c / nav.c 的
        **工作线程**读它，决定要不要写诊断日志。→ std::atomic<bool>（本文件）
      · send.c 的 g_injectedDown —— 方向相反：act.c **工作线程**注入修饰键时写，
        主线程退出 / 重启时读。→ std::atomic<bool>（定义在 send.c，不在头文件）
+     · send.c 的逐格打断标志 g_arrBusy / g_arrDir / g_arrBreak —— 前两个 act.c
+       **工作线程**写（ArrowsEmit）、主线程钩子读（SendArrowsConflicts）；
+       g_arrBreak 反过来（主线程写、工作线程读）。→ 仍用 volatile：它们是
+       "意图"标志，最坏只是晚一拍响应，不值得付 atomic 的代价
 
    其余在这里声明为 volatile 的标志（g_cMod / g_shiftMod / g_state.paused /
    g_actEnh / g_actShf / g_btnCount）**其实都不跨线程**：两个低级钩子都由主线程
@@ -299,7 +303,7 @@ void SendKeyOnce(int vk, BOOL shift);        /* 单击一个键，shift 全程�
 #define ARROW_SEND_ONE     2   /* 超限且 OverStepMode=0：只发一格，不补正    */
 int  SendArrows(int dir, int n, BOOL shift); /* n 个左/右箭头，返回 ARROW_SEND_* */
 void SendArrowsStrict(int dir, int n, BOOL shift); /* 同上但绝不改道（补正专用） */
-void SendArrowsRequestInterrupt(void);       /* 请求打断正在进行的逐格输出（钩子线程调用） */
+void SendArrowsRequestInterrupt(void);       /* 请求打断正在进行的逐格输出（主线程：钩子回调 / ActStop） */
 BOOL SendArrowsConflicts(int act);           /* act 是否与正在逐格输出的方向冲突 */
 void SendNativeWordJump(int dir, BOOL shift);/* 原生 Ctrl(+Shift)+方向：按词跳转兜底 */
 void SendWheelAccel(int delta, int mul);     /* 纵向放大：补发 (mul-1) 个同值刻度 */

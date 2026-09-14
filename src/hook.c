@@ -4,13 +4,14 @@
 HHOOK g_hook = NULL;
 GlobalState g_state;
 
-/* C（CapsLock）实时状态：钩子线程写，主线程与鼠标钩子读。
+/* C（CapsLock）实时状态：键盘钩子回调写，鼠标钩子回调与窗口消息处理读
+   —— 三者都在主线程上串行（见 cap.h 的 volatile 分界说明）。
    修饰模式（增强/选区）的按住位图不在这里 —— 它在 keymap.c 的模式表里，
    由 ModeKeyEvent 维护、ModeDown 查询（唯一判据，见 cap.h）。
    钩子从不判断"按的是 D 还是 Alt"，只问"这个键属于哪个模式"。 */
 volatile BOOL g_cMod = FALSE;
 
-/* 真实 Shift 的按住状态：钩子线程写，鼠标钩子读。
+/* 真实 Shift 的按住状态：键盘钩子回调写，鼠标钩子回调读（同在主线程）。
    用途只有一个 —— **Caps + Shift + 滚轮 = 横向滚动**。
    注意与 keymap.c 的"选区模式"（默认 F，作用是给动作加 Shift）不是一回事：
    那是"模拟 Shift 的效果"，这里读的是**用户真的按着 Shift**。
@@ -230,13 +231,14 @@ void ReleaseFill(int act, BOOL enh, BOOL shift, int count) {
     while (count < 3) { SendActOnce(act, shift); count++; }
 }
 
-/* ---------- 触发键抬起时随消息带走"这一刻"的修饰快照 ----------
-   **只用于诊断日志**：引擎在按下那一刻就开火并冻结修饰快照了（见 main.c 的
-   SnapMods），抬起时的处理只做"停重复 + 按增强模式补齐"，不再读修饰。
-   留着它是为了让日志能显示"抬起时修饰还在不在"（排查点按补齐是否按预期
-   触发时有用），所以它必须取**事件发生那一刻**的值：钩子回调与主线程的
-   消息处理是异步的，用户在钩子里"点按 J"之后立刻松开 Alt 时，Alt 的抬起
-   已经在钩子里清掉了按住位图，主线程现读会读到"Alt 已松"。 */
+/* ---------- 触发键按下/抬起时随消息带走"这一刻"的修饰快照 ----------
+   **按下**那条（WM_TRIG_DOWN）的 lParam 是**权威的开火快照**：main.c 处理
+   这条消息时把 TRIGF_* 取进 g_actEnh / g_actShf，再加进日志（见 SnapMods）。
+   **抬起**那条（WM_TRIG_UP）的 lParam 目前只投递、没有读者；留着以备日志
+   需要"抬起时修饰还在不在"。
+   两条都必须取**事件发生那一刻**的值：钩子回调与主线程的消息处理是异步的，
+   "点按 J"之后立刻松开 Alt 时，Alt 的抬起已经在钩子里清掉了按住位图，
+   主线程现读会读到"Alt 已松"，该带增强的那一发就变成裸动作。 */
 static LPARAM ModeSnapFlags(void) {
     LPARAM f = 0;
     if (ModeDown(MODE_ENHANCE)) f |= TRIGF_ENH;

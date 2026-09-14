@@ -110,7 +110,7 @@ typedef enum {
 /* 「Caps + Alt/D + 滚轮」持续滚动的**最快速度**（毫秒/格，越小越快）。
    自动滚动的速度阶梯 = 从 AutoScrollInterval 起步、逐档提速到本值为止
    （几何插值，见 act.c），所以本值是"上限"而不是"起始值"。
-   默认 1000 = 1 格/秒 = 3 行/秒 ≈ 180 行/分钟（按系统每次滚 3 行）—— 已经比
+   默认 800 = 1.25 格/秒 ≈ 3.8 行/秒 ≈ 225 行/分钟（按系统每次滚 3 行）—— 已经比
    任何阅读速度都快，属于"看完了、快速往下翻"的档位；想更快就调小（下限 20），
    想让它也慢下来就调大。
    注：本项与 AutoScrollInterval **有意分开、不共用** —— 虽然同单位，但一个管
@@ -134,7 +134,7 @@ typedef enum {
    约 13ms/格且目标程序要逐个处理，长跳会有可见的"光标爬行"；改发原生
    Ctrl+方向是一次到位（代价是落点由目标程序的词切分决定，需回读补正）。 */
 #define MAX_ARROW_STEPS_DEFAULT 4
-#define MAX_ARROW_STEPS_MAX     256   /* 注释里一直这么写，这里让它成为唯一的判据 */
+#define MAX_ARROW_STEPS_MAX     256   /* 硬上限：任何路径都不会超过这个步数 */
 
 /* 横向倍数的上限：与纵向同一个口径（以前是散在解析分支里的字面量 16） */
 #define WHEEL_HMUL_MAX 16
@@ -387,7 +387,7 @@ void ConfigLoad(void) {
             "LogMaxKB = " STR(LOG_MAX_KB_DEFAULT) "\n"
             ";\n"
             "; 逐格按词跳转的最大步数：达到该步数就不再逐格发送，\n"
-            "; 改按 OverStepMode 处理（4 = 4 格及以上即瞬跳），避免方向键发太久。\n"
+            "; 改按 OverStepMode 处理（" STR(MAX_ARROW_STEPS_DEFAULT) " = 该步数及以上瞬跳），避免方向键发太久。\n"
             "; 0 = 不限制（一律逐格），最大 256\n"
             "MaxArrowSteps = " STR(MAX_ARROW_STEPS_DEFAULT) "\n"
             ";\n"
@@ -475,7 +475,7 @@ static const struct {
     { "maxarrowsteps",
       "\n"
       "; 逐格按词跳转的最大步数：达到该步数就不再逐格发送，\n"
-      "; 改按 OverStepMode 处理（4 = 4 格及以上即瞬跳），避免方向键发太久。\n"
+      "; 改按 OverStepMode 处理（" STR(MAX_ARROW_STEPS_DEFAULT) " = 该步数及以上瞬跳），避免方向键发太久。\n"
       "; 0 = 不限制（一律逐格），最大 256\n"
       "MaxArrowSteps = " STR(MAX_ARROW_STEPS_DEFAULT) "\n" },
     { "overstepmode",

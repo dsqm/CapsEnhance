@@ -96,7 +96,7 @@
 
 ## 跨线程安全与和弦引擎要点
 
-- **`volatile` 与 `std::atomic` 的分界**（容易搞混，先看这条）：`volatile` **不是同步原语** —— 它只阻止编译器优化，不建立 happens-before、也不保证原子性。所以"跨线程用的标志"必须用 `std::atomic`。本项目里**真正被另一个线程读**的用户态标志只有一个：`g_recording`（主线程写，`act.c` / `send.c` / `nav.c` 的**工作线程**读它决定要不要写日志）→ `std::atomic<bool>`，读写显式写 `.load()` / `.store()`。`send.c` 的 `g_injectedDown`（工作线程写、主线程退出时读）同理。
+- **`volatile` 与 `std::atomic` 的分界**（容易搞混，先看这条）：`volatile` **不是同步原语** —— 它只阻止编译器优化，不建立 happens-before、也不保证原子性。所以"跨线程用的标志"必须用 `std::atomic`。本项目里**真正跨线程**的用户态标志有三组：`g_recording`（主线程写，`act.c` / `send.c` / `nav.c` 的**工作线程**读它决定要不要写日志）→ `std::atomic<bool>`，读写显式写 `.load()` / `.store()`；`send.c` 的 `g_injectedDown`（工作线程写、主线程退出时读）→ 同样 `std::atomic<bool>`；以及 `send.c` 的逐格打断标志 `g_arrBusy` / `g_arrDir` / `g_arrBreak`（前两个 act **工作线程**写、主线程钩子读，`g_arrBreak` 反过来）→ 它们是"意图"标志、最坏只晚一拍响应，仍用 `volatile`。
   其余声明为 `volatile` 的标志（`g_cMod` / `g_shiftMod` / `g_state.paused` / `g_actEnh` / `g_actShf` / `g_btnCount`）**都不跨线程**：两个低级钩子都由主线程 `SetWindowsHookEx` 安装，于是键盘回调、鼠标回调与窗口消息处理**全在主线程上串行**；工作线程刻意不读它们（开火快照随 `ActJob` 传值过去）。那些 `volatile` 的真实作用是防"编译器把循环里的读取提升到循环外"（回调是**异步进入**的，编译器看不出来），**不是**同步。
 - hook 回调只改上述标记 + `PostMessage`，主线程在单一消息循环里串行消费，避免竞态。
 - **开火快照（修饰）**：`main.c` 在**按下触发键那一刻**把快照读进 `g_actEnh` / `g_actShf`，随 `ActJob` 一起投递给执行线程。快照来源是钩子随 `WM_TRIG_DOWN` 带来的 `TRIGF_*` 位（事件时刻的状态），不是消息处理时现读 `ModeDown()`——钩子回调与消息处理异步，现读会读到"修饰已经松开"（见下方"修饰快照取事件时刻"）。早期那份 `pendMask` 门闩（`ModePending`）与 `downMask` 同步置位/清除、恒等，从未真正生效，已在代码审查 P1-1 中删除；现在以 `ModeDown()` 为唯一判据。
@@ -167,7 +167,7 @@
 
 ## 按词跳转（WordJump）实现
 
-`N` / `M` 不做简单的 "Ctrl+方向"，而是**读取控件真实文本**，按自定义边界算法跳到目标位置，因此在中文、英文、数字、生僻字混排文本里更稳定。
+`N` / `O` 不做简单的 "Ctrl+方向"，而是**读取控件真实文本**，按自定义边界算法跳到目标位置，因此在中文、英文、数字、生僻字混排文本里更稳定。
 
 ### 字符分类（反向判定）
 
@@ -205,7 +205,7 @@
 
 各通道要点：
 
-1. **经典 Edit / RichEdit / EmEditorView**：`WM_GETTEXT` + `EM_GETSEL`。白名单外不放行（Chromium 系窗口对这两条消息回的是标题和垃圾值）；直接置位后回读校验，控件只实现半套协议时自动退回逐格箭头。两条防线：`EM_GETSEL` 的值超出文本长度 ⇒ 单位不一致（该控件按字节计位置）⇒ **整条通道放弃**；`AllowDirectSet()` 为假的控件（EmEditor）**只读不写**。
+1. **经典 Edit / RichEdit / EmEditorView**：`WM_GETTEXT` + `EM_GETSEL`。白名单外不放行（Chromium 系窗口对这两条消息回的是标题和垃圾值）；直接置位后回读校验，控件只实现半套协议时自动退回逐格箭头。两条防线：`EM_GETSEL` 的值超出文本长度 ⇒ 单位不一致（该控件按字节计位置）⇒ **整条通道放弃**；**连续两次直接置位无效**（返回成功但光标没动，WPF 一类实现如此）→ 本次会话内对该进程不再尝试置位（`g_noSetProc` / `g_noSetCount`，重启恢复，避免光标反复空闪）。
 2. **Scintilla 系**（Notepad3 / Notepad++ / SciTE）：`SCI_*` 窗口消息。文档以字节为单位（UTF-8 下中文 3 字节/字），整条通道在字节域取原始文本再转 UTF-16 交给词边界算法；`SCI_GETTEXT` 的缓冲区指针属于对方进程，必须先 `VirtualAllocEx` 再读回。跳距 ≥ 6 用 `SCI_SETSEL` 瞬跳。
 3. **UIA** `TextPattern`/`TextPattern2`：支持 QQ、Edge 等 Chromium/WinUI 控件。锚定顺序：焦点元素沿祖先链 → 焦点 HWND 沿祖先链 → 焦点 HWND 子树检索；读回文本短于 2 字符视为占位弃用。
    - **Electron 编辑器**：无障碍节点（`role=textbox` 的 div）只有在开启无障碍模式（或系统检测到读屏器）时才写入光标附近的真实文本并同步选区——否则外部读到的是 1 字符占位。**开启后按词跳转引擎（含中文混排、不跨行）可完整工作**，未开启则走原生 `Ctrl+方向` 兜底（或加入 `[NativeWordJump]`）。平滑光标等纯视觉动画无关。
@@ -464,7 +464,7 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 - `TrayHint`（悬停提示 `szInfo`/`szTip`）不受此限，改完立即生效。
 
 ### 配置（config.c）
-- **改一个配置项要动六处**：常量 → `ConfigLoadFrom`（含钳制）→ `kTemplate` → `kUpgrades` → `ConfigGet*` → README/本文。漏一处只静默不一致。改默认值务必全局搜数值（注释/模板/`kUpgrades`/测试断言里都可能写死）（详见[配置项的设计与新增清单](#配置项的设计与新增清单)）。
+- **改一个配置项要动八处**（常量 → `ConfigLoadFrom`（含钳制）→ `kTemplate` → `kUpgrades` → `ConfigGet*` / `ConfigSet*` → `GeneralValues()` → `settings.c` 的 `kFields` → README/本文；完整清单见下）。漏一处只静默不一致。改默认值务必全局搜数值（注释/模板/`kUpgrades`/测试断言里都可能写死）（详见[配置项的设计与新增清单](#配置项的设计与新增清单)）。
 
 ### COM / 跨进程
 - **借来的接口指针绝不 Release**：曾把调用方 `FindDocElement` 传进来的元素也 `Release` → WPS 每次走失败路径、引用计数归零 → `c0000005`。只有 `AddRef` 过或规则上归你的才释放（详见[按词跳转](#按词跳转wordjump实现) 的"UIA 引用计数坑"）。

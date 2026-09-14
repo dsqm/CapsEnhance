@@ -100,14 +100,20 @@ void SendKeyOnce(int vk, BOOL shift) {
 }
 
 /* 逐格输出的打断机制：
-   SendArrows 的循环跑在主线程，期间主线程被占用、无法处理任何消息，
-   所以"松开 C"和"改道按键"这些打断意图只能由钩子线程置 volatile 标志，
-   循环里每发完一对键检查一次（最坏 ~13ms 内响应）。
-   触发条件（hook.c 调用）：
-     1) C（CapsLock）松开 —— 映射模式结束，立即停；
-     2) 按下与当前输出方向不同的触发键 —— 改道（如正在 ← 时按 L）。
+   循环跑在 **act.c 的动作工作线程**上（NavJump 由 RunJob 调用），不是主线程，
+   所以"松开 C"和"改道按键"这些打断意图由**主线程**（钩子回调；退出时还有
+   ActStop）置 volatile 标志，循环里每发完一对键检查一次（最坏 ~13ms 内响应）。
+   触发条件：
+     1) C（CapsLock）松开 —— 映射模式结束，立即停（hook.c）；
+     2) 按下与当前输出方向不同的触发键 —— 改道（如正在 ← 时按 L）（hook.c）。
    打断后循环立即退出，循环外的收尾（抬起 Shift）照常执行；
-   改道按键的 TRIG_DOWN 已在主线程队列里，循环结束后自然开火衔接。 */
+   改道按键的 TRIG_DOWN 已在主线程队列里，循环结束后自然开火衔接。
+
+   ★ g_arrBusy / g_arrDir / g_arrBreak 是本项目**第三组真正跨线程**的标志
+     （前两个工作线程写、主线程钩子读；g_arrBreak 主线程写、工作线程读，
+     见 cap.h 的"atomic / volatile 的分界"）。它们是"意图"标志，最坏只是晚
+     一拍响应，所以维持 volatile；若要改 atomic，SendArrowsConflicts 里的
+     `!g_arrBusy` 必须一并改成显式 .load()。 */
 static volatile BOOL g_arrBusy = FALSE;    /* 正在逐格输出 */
 static volatile int  g_arrDir  = -1;       /* 当前输出方向 (DIR_*) */
 static volatile BOOL g_arrBreak = FALSE;   /* 打断请求 */

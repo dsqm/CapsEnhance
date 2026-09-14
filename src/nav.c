@@ -21,9 +21,11 @@
 #pragma comment(lib, "oleacc.lib")
 #pragma comment(lib, "advapi32.lib")   /* OpenProcessToken / DuplicateTokenEx */
 
-/* 能直接设光标的通道（经典 Edit / Scintilla）瞬跳的最少步数：小于该值用
-   真实箭头（行为一致），等于或大于则一步置到目标(瞬跳)，避免远距离逐格
-   发送方向键拖慢。UIA/IA2 通道无法直接设光标，不受此值影响。 */
+/* "直接置光标（瞬跳）"的最少步数：小于该值用真实箭头（行为一致），等于或
+   大于则一步置到目标，避免远距离逐格发方向键拖慢。**四个通道都受此值约束**：
+   经典 Edit / Scintilla / UIA / IA2（UIA/IA2 还要求无 Shift —— 带选区时回读的
+   caret 是选区起点而非活动端，目标计算本身不成立）；WPS 另有"带 Shift 或
+   已有选区就必须置位"的附加条件。 */
 #define DIRECT_JUMP_MIN 6
 
 /* ============ IAccessibleText（IAccessible2）手工声明 ============
