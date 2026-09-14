@@ -1586,11 +1586,72 @@ int main(void) {
             CHECK(moved, "AF: 窗口跟随光标位移（+100,+80）");
 
             CHECK(MousePt(WM_LBUTTONUP, p2) == 1, "AF: 吞掉左键抬起（与按下配对）");
+
+
             Pump(60);
             CHECK(!DragActive(), "AF: 抬起后拖拽结束");
             GetWindowRect(w, &r);
             CHECK(r.left == want.left && r.top == want.top,
                   "AF: 结束后停在最后一次落点上");
+
+            Pump(60);
+            Key(CLI_CAPS, FALSE); Pump(2);
+
+            /* ⑦ **拖出阈值**（AltSnap 同款 DragThreshold + DragOutThresholdPx）：
+               最大化窗口按下即还原会把窗口缩小，所以点一下（手没动）**必须什么都不做**。
+               阈值内的小位移也不动；拖过阈值才开始还原 + 跟随。 */
+            ShowWindow(w, SW_MAXIMIZE);
+            Pump(60);
+            CHECK(IsZoomed(w) != FALSE, "AF: 前置条件 —— 窗口已最大化");
+            {
+                RECT maxRc;
+                GetWindowRect(w, &maxRc);
+                POINT inMax = { maxRc.left + 60, maxRc.top + 40 };   /* 最大化窗口内一点 */
+
+                /* ⑦-1 按下 + 直接抬起（点一下，手没动）-> 仍最大化 */
+                Key(CLI_CAPS, TRUE); Pump(2);
+                CHECK(MousePt(WM_LBUTTONDOWN, inMax) == 1,
+                      "AF: 最大化窗口上按下 -> 仍接管（吞掉点击）");
+                CHECK(MousePt(WM_LBUTTONUP, inMax) == 1,
+                      "AF: 抬起也被吞（与按下配对）");
+                Pump(80);
+                CHECK(IsZoomed(w) != FALSE,
+                      "AF: Caps+左键**点一下**不会把最大化窗口缩小");
+                Key(CLI_CAPS, FALSE); Pump(2);
+
+                /* ⑦-2 阈值内的小位移（+8px）-> 仍最大化、仍未还原 */
+                Key(CLI_CAPS, TRUE); Pump(2);
+                MousePt(WM_LBUTTONDOWN, inMax);
+                /* 变量名别叫 small：rpcndr.h 里 small 是个类型(unsigned char)，
+                   写 `POINT small` 会被当成“类型 + 类型”解析失败。 */
+                POINT smallPt = { inMax.x + 8, inMax.y + 4 };
+                MousePt(WM_MOUSEMOVE, smallPt);
+                Pump(120);
+                CHECK(IsZoomed(w) != FALSE,
+                      "AF: 阈值内的小位移不还原（不缩窗口）");
+                MousePt(WM_LBUTTONUP, smallPt);
+                Pump(60);
+                Key(CLI_CAPS, FALSE); Pump(2);
+
+                /* ⑦-3 拖过阈值（+60px）-> 还原并跟随光标 */
+                Key(CLI_CAPS, TRUE); Pump(2);
+                MousePt(WM_LBUTTONDOWN, inMax);
+                POINT big = { inMax.x + 60, inMax.y + 40 };
+                MousePt(WM_MOUSEMOVE, big);
+                BOOL restored = FALSE;
+                RECT rr;
+                for (int i = 0; i < 80 && !restored; i++) {
+                    Pump(10);
+                    restored = (IsZoomed(w) == FALSE);
+                }
+                CHECK(restored, "AF: 越过拖出阈值 -> 还原成普通窗口");
+                GetWindowRect(w, &rr);
+                CHECK(rr.left != maxRc.left || rr.top != maxRc.top,
+                      "AF: 还原后位置随光标（不再占满整屏）");
+                MousePt(WM_LBUTTONUP, big);
+                Pump(60);
+                Key(CLI_CAPS, FALSE); Pump(2);
+            }
 
             Key(CLI_CAPS, FALSE); Pump(2);
             DestroyWindow(w);

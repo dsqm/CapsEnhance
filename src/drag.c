@@ -57,6 +57,14 @@
 #define DRAG_SETTLE_MS   20    /* 等待/轮询的步长（毫秒） */
 #define DRAG_RESTORE_MAX 200   /* 等"最大化还原"落地的上限，等不到就收手 */
 
+/* 拖出阈值（对齐 AltSnap 的 `DragThreshold=1` + `DragOutThresholdPx=20`）：
+   **只对最大化窗口**生效 —— 按下之后要先拖出 DRAG_OUT_THRESHOLD_PX 像素，才真正
+   开始“还原 + 跟随”。为什么必须有：最大化窗口一还原就变小，如果“按下即还原”，
+   那么 Caps+左键**点一下**（手没动）也会把窗口缩小 —— 这是本功能最刺眼的问题。
+   （AltSnap 的 DragThreshold：0=不设阈值；1=只对最大化/已吸附窗口设（默认）；
+   2=总是设；3=缩放时也设。我们还没有“吸附”，所以等价于 1。普通窗口按下即跟手。） */
+#define DRAG_OUT_THRESHOLD_PX 20
+
 #define DRAG_STOPPED(p) (InterlockedCompareExchange((p), 0, 0) != 0)
 
 static DWORD WINAPI DragThread(LPVOID p);   /* 前置声明：LaneStart 要先建线程 */
@@ -66,6 +74,8 @@ static DWORD WINAPI DragThread(LPVOID p);   /* 前置声明：LaneStart 要先�
    "写序竞态"（数据/标志两步写）用锁从根上消灭；拖动一拍一次，开销远小于
    一次 SetWindowPos。 */
 static HWND  s_hwnd = NULL;      /* 正在拖的窗口（只做 IsWindow 校验，不持有引用） */
+static POINT s_pressPt;          /* 按下点：只用于判定"有没有拖出阈值"，不参与落点计算 */
+static BOOL  s_waitDragOut = FALSE; /* TRUE = 还在等拖出阈值（仅最大化窗口） */
 static POINT s_wndTL;            /* 抓取基准：按下（或还原完成）那一刻的窗口左上角 */
 static int   s_w = 0, s_h = 0;   /* 抓取时的尺寸（拖动不改尺寸） */
 static POINT s_origin;           /* 抓取那一刻的光标 */
@@ -86,15 +96,24 @@ void DragComputeTopLeft(POINT wndTL, POINT from, POINT to, POINT* out) {
     out->y = wndTL.y + (to.y - from.y);
 }
 
+/* 是否“拖出了”阈值：**任一轴**超过即算（与 AltSnap 的 `IsPtDragOut` 同义 ——
+   它是个方框判定而不是半径）。用方框是因为用户拖动方向不确定；用半径会让斜向
+   拖动比正上下左右更难触发。 */
+static BOOL DragOutReached(POINT from, POINT to, int px) {
+    return (to.x > from.x + px) || (to.x < from.x - px) ||
+           (to.y > from.y + px) || (to.y < from.y - px);
+}
+
 /* ---- 起停（act.c 的 ActStart / ActStop 调用） ---- */
 void DragLaneStart(void) {
     if (s_init) return;
     memset(&s_wndTL, 0, sizeof(s_wndTL));
     memset(&s_origin, 0, sizeof(s_origin));
     memset(&s_cur, 0, sizeof(s_cur));
+    memset(&s_pressPt, 0, sizeof(s_pressPt));
     s_w = s_h = 0;
     s_ticks = 0;
-    s_pending = s_endReq = s_needRestore = FALSE;
+    s_pending = s_endReq = s_needRestore = s_waitDragOut = FALSE;
     InterlockedExchange(&s_active, 0);
     InterlockedExchange(&s_stop, 0);
     InitializeCriticalSection(&s_cs);
@@ -151,12 +170,22 @@ BOOL DragBegin(POINT pt) {
 
     EnterCriticalSection(&s_cs);
     s_hwnd = hwnd;
+    s_pressPt = pt;                  /* ★ 阈值判定专用（落点用的 s_origin 会被重锚） */
     s_origin = pt;
     s_cur = pt;
-    s_pending = TRUE;                /* 先算一次落点（哪怕光标还没动） */
     s_endReq = FALSE;
-    s_needRestore = wasMax;
     s_ticks = 0;
+    if (wasMax) {
+        /* 最大化：先**什么都不做**，等拖出阈值再还原 —— 否则“按下即还原”会让
+           Caps+左键点一下就把窗口缩小。 */
+        s_waitDragOut = TRUE;
+        s_needRestore = FALSE;
+        s_pending = FALSE;
+    } else {
+        s_waitDragOut = FALSE;
+        s_needRestore = FALSE;
+        s_pending = TRUE;            /* 普通窗口：先算一次落点（哪怕光标还没动） */
+    }
     s_w = s_h = 0;
     s_wndTL.x = s_wndTL.y = 0;
     if (!wasMax) {                   /* 普通窗口：抓取基准现在就能定 */
@@ -176,10 +205,9 @@ BOOL DragBegin(POINT pt) {
         CapLog("  [拖拽] 开始 hwnd=%p cls=%s rect[%ld,%ld..%ld,%ld] 起点(%ld,%ld)%s",
                (void*)hwnd, cls8[0] ? cls8 : "?",
                (long)rc.left, (long)rc.top, (long)rc.right, (long)rc.bottom,
-               (long)pt.x, (long)pt.y, wasMax ? " 最大化→先还原" : "");
+               (long)pt.x, (long)pt.y,
+               wasMax ? " 最大化→等拖出阈值才还原" : "");
     }
-    if (wasMax)
-        PostMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE, 0);   /* **异步**还原：不在钩子里等 */
     SetEvent(s_ev);
     return TRUE;
 }
@@ -225,21 +253,55 @@ static DWORD WINAPI DragThread(LPVOID p) {
         }
 
         /* 读一拍的状态（窗口 / 锚点 / 尺寸在锁内取，免得和 Begin/End 撕裂） */
-        BOOL endReq = FALSE, pending = FALSE, needRestore = FALSE;
+        BOOL endReq = FALSE, pending = FALSE, needRestore = FALSE, waitOut = FALSE;
         HWND hwnd = NULL;
-        POINT tl, to;
+        POINT tl, to, org, press;
         int w = 0, h = 0, ticks = 0;
         EnterCriticalSection(&s_cs);
         hwnd = s_hwnd;
         endReq = s_endReq;
         pending = s_pending;
         needRestore = s_needRestore;
+        waitOut = s_waitDragOut;
         to = s_cur;
+        press = s_pressPt;
         tl = s_wndTL;
+        org = s_origin;
         w = s_w;
         h = s_h;
         ticks = s_ticks;
         LeaveCriticalSection(&s_cs);
+
+        /* 阶段 0：等“拖出阈值”（仅最大化窗口）。没越过就**完全不动它**，包括不还原 ——
+           于是 Caps+左键点一下（手没动）不会把最大化窗口缩小；松手时直接收手，
+           窗口原样不动（点击已被吞掉，不会漏给目标程序）。 */
+        if (waitOut) {
+            if (!DragOutReached(press, to, DRAG_OUT_THRESHOLD_PX)) {
+                if (!endReq) continue;          /* 阈值内：继续等（或等松手） */
+                if (g_recording.load())
+                    CapLog("  [拖拽] 结束（未越过拖出阈值，窗口未动）");
+                EnterCriticalSection(&s_cs);
+                s_hwnd = NULL;
+                s_pending = FALSE;
+                s_endReq = FALSE;
+                s_waitDragOut = FALSE;
+                LeaveCriticalSection(&s_cs);
+                InterlockedExchange(&s_active, 0);
+                running = FALSE;
+                continue;
+            }
+            /* 越过阈值：现在才异步还原，下一拍等它落地（阶段 1 的有界轮询）。 */
+            PostMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE, 0);
+            EnterCriticalSection(&s_cs);
+            s_waitDragOut = FALSE;
+            s_needRestore = TRUE;
+            s_pending = TRUE;
+            LeaveCriticalSection(&s_cs);
+            needRestore = TRUE;
+            pending = TRUE;
+            if (g_recording.load())
+                CapLog("  [拖拽] 越过拖出阈值(%dpx) -> 还原+移动", DRAG_OUT_THRESHOLD_PX);
+        }
 
         /* 窗口没了：收手（ Begin/End 之外唯一的收手路径） */
         if (!hwnd || !IsWindow(hwnd)) {
@@ -293,7 +355,7 @@ static DWORD WINAPI DragThread(LPVOID p) {
         /* 阶段 2：落点 = 抓取基准左上角 + 光标位移，应用一次（有新点或要收手才算） */
         if (pending || endReq) {
             POINT dst;
-            DragComputeTopLeft(tl, s_origin, to, &dst);
+            DragComputeTopLeft(tl, org, to, &dst);
             /* ASYNCWINDOWPOS：对方线程卡住不拖住执行线程（见文件头）。 */
             SetWindowPos(hwnd, NULL, (int)dst.x, (int)dst.y, 0, 0,
                          SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
@@ -308,6 +370,8 @@ static DWORD WINAPI DragThread(LPVOID p) {
             s_hwnd = NULL;
             s_pending = FALSE;
             s_endReq = FALSE;
+            s_waitDragOut = FALSE;
+            s_needRestore = FALSE;
             InterlockedExchange(&s_active, 0);
             running = FALSE;
         }
