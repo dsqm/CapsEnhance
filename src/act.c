@@ -218,7 +218,7 @@ void ActWheelPost(int delta, int mul)  { WheelPost(delta, mul, FALSE); }
 void ActWheelPostH(int delta, int n)   { WheelPost(delta, n,   TRUE);  }
 
 /* 丢弃还没补发的滚轮请求（松开 C / 引擎复位时）。
-   用户的预期是"松开 C 就是普通滚轮"，所以松手后不该再有加速尾流。 */
+   预期是"松开 C 就是普通滚轮"，所以松手后不该再有加速尾流。 */
 void ActWheelClear(void) {
     if (!s_wInit) return;
     EnterCriticalSection(&s_wcs);
@@ -308,7 +308,7 @@ static void WheelLaneStop(void) {
        或**没按着和弦**的滚轮（`ActAutoScrollInterrupt`，由钩子线程调用）；
      · **超时**：从最后一次调速起算 AUTOSCROLL_MAX_MS（10 分钟），到点自行终止；
      · 暂停映射 / 退出 / 重启（`ActAutoScrollStop` / ActStop）。
-   松开 Caps 或增强修饰键 **不再**终止 —— 用户要的是"滚起来就能松手读，
+   松开 Caps 或增强修饰键 **不再**终止 —— 设计意图是"滚起来就能松手读，
    想停的时候按一下键"。工作线程也不再自查 g_cMod/ModeDown（那是旧规则）。
 
    记录模式下每一次终止都会留一行（谁停的 + 细节 + 已注入拍数，见
@@ -424,7 +424,7 @@ static volatile LONG   s_asDir    = 0;     /* +1 上滚 / -1 下滚 */
    这里正是按那条提示做的：既避开它，又保留单字宽的无锁读写。） */
 static volatile LONG   s_asDeadline = 0;
 /* 本次会话已经注入过多少拍。**只服务日志**：终止那行带上它，就能一眼分开
-   "一拍都没发出去就被停"与"发了一拍就停"（用户报的"滚一下就停"正是后者），
+   "一拍都没发出去就被停"与"发了一拍就停"（"滚一下就停"正是后者），
    也能反过来证明"它其实一直在注入，只是目标程序没反应"。 */
 static volatile LONG   s_asTicks = 0;
 
@@ -527,7 +527,7 @@ void ActAutoScrollWheel(int delta) {
         InterlockedExchange(&s_asActive, 1);
     } else if ((int)ATOMIC(&s_asDir) != dir) {
         /* 反向：立即终止，并**清零档位** —— 下次启动从第 1 档重来，
-           不残留打断前的速度（用户要的"反向打断后重置滚动速度"）。
+           不残留打断前的速度（"反向打断后重置滚动速度"）。
            记录模式下留一行（含两边方向与这一格的增量）：反向终止也是"无故停了"
            的常见来源（滚轮回弹/编码器抖动会发一个极小反向量），有日志才分得清。 */
         if (g_recording.load())

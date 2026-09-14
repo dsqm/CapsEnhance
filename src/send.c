@@ -150,7 +150,7 @@ static void ArrowsEmit(int dir, int n, BOOL shift) {
 }
 
 /* 补正专用：即使步数达到 MaxArrowSteps 也逐格走完，**不**改道。
-   补正的步数是"目标 - 实测落点"算出来的，它不是用户要跳的距离；若再判一次
+   补正的步数是"目标 - 实测落点"算出来的，它不是本次要跳的距离；若再判一次
    超限就又会改道一次，而改道之后没有任何人再回读落点 —— 补正白做、光标又
    落回段中间（这正是 QQ 场景里"按词跳转落到段中间"的根因之一）。 */
 void SendArrowsStrict(int dir, int n, BOOL shift) {
@@ -180,7 +180,7 @@ int SendArrows(int dir, int n, BOOL shift) {
             CapLog("  -> 逐格步数 %d 达到 MaxArrowSteps(%d)，只发一格",
                    want, maxSteps);
         ArrowsEmit(dir, 1, shift);
-        return ARROW_SEND_ONE;   /* 用户明确要"跳一格即停"：不做补正 */
+        return ARROW_SEND_ONE;   /* 既定行为"跳一格即停"：不做补正 */
     }
     ArrowsEmit(dir, n, shift);
     return ARROW_SEND_STEPS;

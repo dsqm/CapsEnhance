@@ -342,7 +342,7 @@ int main(void) {
             EXPECT(g_emKd > 0, "EM1: 退回原生 Ctrl+方向（功能不丢）");
 
             /* H2. 位置单位一致（UTF-16 文档）-> 正常走外部置位，但置位后要
-               **补一支探针方向键**：EmEditor 外部置位后会吞掉下一次输入（用户：
+               **补一支探针方向键**：EmEditor 外部置位后会吞掉下一次输入（现象：
                "跳词后按 J 要按两下"），而那一次额度可以由我们主动喂掉
                （test/emprobe.c 实测 3/3 稳定），这样既保住瞬跳、用户也不用按两下。 */
             SetEmCaret(21);                       /* 末尾：左跳 steps=7 >= DIRECT_JUMP_MIN */
@@ -356,7 +356,7 @@ int main(void) {
                EmEditor 实测（test/emprobe.c H 段）：EM_SETSEL(60,73) 之后
                Shift+Left 动的是 73；EM_SETSEL(73,60) 动的是 60 —— 也就是
                "活动端 = lParam"。此前一律传有序区间 (小,大)，于是**向左扩选后
-               光标停在右端**（用户："选中的那段光标在结尾，随后按方向键取消选中
+               光标停在右端**（现象："选中的那段光标在结尾，随后按方向键取消选中
                的行为不符合预期"）。这里直接断言传参顺序。 */
             NavSelTrackReset();
             SetEmCaret(21);

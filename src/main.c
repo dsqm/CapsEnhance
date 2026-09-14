@@ -268,7 +268,7 @@ static void PostAct(int act, int fillAct, int count, BOOL keep) {
    再按 Alt）就是一次没有增强/选区的普通动作 —— 不补正、也不"过一会儿才生效"。
    这里曾经是"按下触发键后等 50ms（CHORD_SETTLE 稳定期）再开火"，用来兜住
    "动作先到、修饰后到"的乱序；代价是**每一个**触发键都要白等 50ms 才响应
-   （实测按下到开火 57~71ms），用户明确要求改成严格要求顺序。 */
+   （实测按下到开火 57~71ms），故改为严格要求顺序。 */
 static void SnapMods(void) {
     g_actEnh = ModeDown(MODE_ENHANCE);
     g_actShf = ModeDown(MODE_SHIFT);
@@ -491,9 +491,9 @@ static void ResetEngine(void) {
        点按的一部分，不能因为紧接着松开 C 就被清掉。 */
     ActClearKeepFill();
     /* 滚轮加速的待补队列也一起丢：松开 C 之后不该再有加速尾流
-       （用户预期"松开 C 就是普通滚轮"）。 */
+       （预期"松开 C 就是普通滚轮"）。 */
     ActWheelClear();
-    /* **持续滚动刻意不在这里停**（2026-09-11 改版）：用户要的是"滚一下就能
+    /* **持续滚动刻意不在这里停**（2026-09-11 改版）：设计意图是"滚一下就能
        松手读，想停的时候按一下键"，所以松开 C / 松开修饰键都不该打断它。
        它的终止条件见 cap.h 的持续滚动一节：反向滚、用户新输入、超时、
        以及暂停/退出/重启（后两者在各自的路径上显式调 ActAutoScrollStop）。 */
@@ -794,8 +794,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
            **这里刻意不终止持续滚动**（2026-09-11 改版）：松开 Alt/D 不再打断，
            滚动继续，直到用户按任意键/鼠标，或超过 10 分钟上限（act.c）。
            （此前这里有一句 `if (mode == MODE_ENHANCE) ActAutoScrollStop()`，
-           与工作线程每拍自查 g_cMod/ModeDown 一起构成"松手即停"，现均按用户
-           要求移除。） */
+           与工作线程每拍自查 g_cMod/ModeDown 一起构成"松手即停"，现均已移除。） */
         (void)wp;
         return 0;
     /* ---- 托盘 ---- */

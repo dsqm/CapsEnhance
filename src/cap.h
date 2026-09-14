@@ -297,7 +297,7 @@ void SendKeyOnce(int vk, BOOL shift);        /* 单击一个键，shift 全程�
    目标程序，落点由**它的**词切分决定 —— 实测 QQ(Chromium/ICU 词典) 的
    Ctrl+方向是 1~2 字一步，而我们按"连续汉字段"整段算，两者不一致时改道会
    把光标丢在段中间。所以改道那一次必须回读并按差额补足；而 OverStepMode=0
-   的"只发一格"是用户明确的"跳一格即停"，不能补。 */
+   的"只发一格"是既定的"跳一格即停"，不能补。 */
 #define ARROW_SEND_STEPS   0   /* 逐格发完 n 步（可做丢键补正）              */
 #define ARROW_SEND_HANDOFF 1   /* 改道成原生 Ctrl+方向：落点必须回读校验     */
 #define ARROW_SEND_ONE     2   /* 超限且 OverStepMode=0：只发一格，不补正    */
