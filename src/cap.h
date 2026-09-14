@@ -357,7 +357,6 @@ void SendWheelNotches(int delta, int n);     /* 补发 n 个同值刻度（持�
 void SendWheelHNotches(int delta, int n);    /* 横向：n 个 ±120 刻度（Caps+Shift+滚轮） */
 #define WHEEL_STD_DELTA 120                  /* 标准滚轮刻度（WHEEL_DELTA） */
 void SendClearStuckModifiers(void);          /* 清卡键：逻辑按下且物理未按的补抬起（重启/退出用） */
-void SendForceResetKeys(void);               /* 无条件对所有修饰键补抬起（--reset-keys 强制重置） */
 
 /* ---------- 主窗口 ---------- */
 extern HWND g_mainWnd;

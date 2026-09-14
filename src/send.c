@@ -303,10 +303,3 @@ void SendClearStuckModifiers(void) {
     /* CapsLock 是开关键，逻辑状态表示"灯亮"，不是卡键；只在明确没物理按住
        且灯亮时才切一次，避免把用户的大小写状态改乱 —— 保守起见不处理。 */
 }
-
-/* 强制重置键盘状态（命令行 --reset-keys）：不看任何状态，对所有修饰键
-   各补一次抬起。用于程序已被杀死、状态表丢失的场合（等价 AHK 社区常用的
-   "把所有修饰键 Send Up 一遍"）。 */
-void SendForceResetKeys(void) {
-    for (int i = 0; i < MOD_COUNT; i++) ReleaseMod(kMods[i]);
-}

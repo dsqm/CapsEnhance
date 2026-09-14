@@ -197,8 +197,6 @@ someapp.exe
 
 - 排障辅助命令行：
   
-  - `CapsEnhance.exe --wps-read`：读一次 WPS 光标附近文本并写日志，排查"WPS 里为什么不生效"。
-  - `CapsEnhance.exe --reset-keys`：清一次卡住的修饰键后退出（用于进程被强杀后残留的卡键）。
   - `CapsEnhance.exe --restart`：请求正在运行的实例重启（等同托盘"重启程序"）。**本体没在跑时它会照常启动** —— 设置程序保存配置后用的就是它，脚本里也能用。
 
 ---

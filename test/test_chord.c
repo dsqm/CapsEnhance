@@ -34,12 +34,12 @@ void NavBaseInfo(void) { /* 启动基线采集：本测试桩掉 */ }
 void NavBaseAppendLine(const WCHAR* t) { (void)t; }   /* main.c 往基线追加 DPI 自检行 */
 void NavSelTrackReset(void) { /* 选区锚跟踪：本测试桩掉 */ }
 long long NavFocusCaret(void) { return -1; }   /* 光标回读只给诊断日志用，本测试没有真编辑器 */
-/* WPS 通道桩（真实现要链接 nav.c，本测试不链）：
-   WinMain 里那三个入口（--wps-bridge / --wps-read / 退出时关桥）桩掉即可 */
+/* WPS 通道桩（真实现要链接 wps.c/bridge.c，本测试不链）：
+   WinMain 里那三个入口 —— --bridge 子进程模式（BrParseChildSwitch）、
+   退出时关桥（WpsBridgeShutdown）、以及 wps.c 的桥服务函数 —— 桩掉即可 */
 int  WpsBridgeServe(unsigned long pid, unsigned long seq) { (void)pid; (void)seq; return 0; }
 BOOL BrParseChildSwitch(DWORD* pid, DWORD* seq) { (void)pid; (void)seq; return FALSE; }
 void WpsBridgeShutdown(void) { }
-int  WpsSelfTest(void) { return 0; }
 
 /* ---- 捕获钩子：记录注入的完整事件序列（按下/抬起），并可统计次数 ---- */
 typedef struct { int vk; int n; } Rec;

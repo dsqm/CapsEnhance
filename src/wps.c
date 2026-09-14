@@ -382,33 +382,3 @@ int WpsBridgeServe(unsigned long pid, unsigned long seq) {
 }
 
 void WpsBridgeShutdown(void) { BrShutdown(); }
-
-/* --wps-read：读一次并写日志（用户自查"WPS 里为什么不生效"用） */
-int WpsSelfTest(void) {
-    WCHAR* text = NULL; int len = 0, caret = 0, selEnd = 0;
-    CapLog("===== WPS 自检 =====");
-    CapLog("运行权限: %s", IsRunElevated() ? "管理员（走降权桥）" : "普通用户（本进程直读）");
-    BOOL ok = WpsReadAny(&text, &len, &caret, &selEnd);
-    if (!ok) {
-        CapLog("读不到：WPS 没运行 / 没打开文档 / 接口未注册。详见上面的失败原因。");
-        WpsBridgeShutdown();       /* 自检是一次性的，别把桥子进程留着 */
-        return 1;
-    }
-    CapLog("成功: 文档长度=%d 光标=%d 选区末端=%d", len, caret, selEnd);
-    {
-        int a = caret - 20; if (a < 0) a = 0;
-        int b = caret + 20; if (b > len) b = len;
-        WCHAR* seg = (WCHAR*)malloc((size_t)(b - a + 1) * sizeof(WCHAR));
-        if (seg) {
-            memcpy(seg, text + a, (size_t)(b - a) * sizeof(WCHAR));
-            seg[b - a] = 0;
-            char utf[512];
-            if (WideCharToMultiByte(CP_UTF8, 0, seg, -1, utf, (int)sizeof(utf), NULL, NULL) > 0)
-                CapLog("光标附近[-20,+20] = [%s]", utf);
-            free(seg);
-        }
-    }
-    free(text);
-    WpsBridgeShutdown();
-    return 0;
-}

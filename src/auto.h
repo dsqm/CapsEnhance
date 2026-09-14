@@ -91,6 +91,5 @@ int  WpsSetSel(HWND focus, int start, int end);
 
 int  WpsBridgeServe(unsigned long pid, unsigned long seq);  /* 子进程入口 */
 void WpsBridgeShutdown(void);                               /* 父进程退出前：关掉桥 */
-int  WpsSelfTest(void);                                     /* --wps-read：读一次并写日志 */
 
 #endif

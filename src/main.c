@@ -838,19 +838,6 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
        指错窗口、位移也会比光标多跑一截。AltSnap 同样在清单里声明了这一条。 */
     WinInitDpiAwareness();
 
-    /* --reset-keys：无条件把所有修饰键补一次"抬起"然后退出。
-       用于程序已被杀死（状态表随进程消失）留下的卡键，等价于 AHK 社区
-       常用的"把所有修饰键 Send Up 一遍"。可自建快捷方式随时调用。 */
-    if (HasSwitch(L"--reset-keys", NULL)) {
-        SendForceResetKeys();
-        return 0;
-    }
-
-    /* --wps-read：读一次 WPS 光标处文本并写日志（自查"WPS 里为什么不生效"）。
-       放在单实例检查之前：它不该被已经在跑的实例挡住。 */
-    if (HasSwitch(L"--wps-read", NULL))
-        return WpsSelfTest();
-
     /* --bridge <父pid> <序号>：降权桥的子进程模式（见 src/bridge.c）。
        它是本 exe 的"普通权限副本"，只在别的进程里代跑那些"只有普通权限才看得见
        的对象"，不装钩子、不建窗口、不建托盘 —— 必须抢在单实例检查之前返回。
