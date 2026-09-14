@@ -288,13 +288,16 @@ static BOOL IsSingleShotAct(int act) { return ActHasFlag(act, ACTF_SINGLE_SHOT);
 static const WCHAR* APP_NAME = L"CapsEnhance";
 
 /* 程序图标：exe 资源里的 app.ico（16/24/32 三帧 PNG，见 res/app.rc，资源号 1）。
-   托盘显示的是"小图标"：**故意按 32px 请求**而不是 SM_CXSMICON —— 本进程没有
-   声明 DPI 感知，GetSystemMetrics 恒报 16，托盘在高 DPI 下把 16 的帧放大必然
-   发糊；要最大的帧交给 explorer 缩小几乎无损（本机 175% 托盘正好要 28px）。
+   托盘显示的是"小图标"：**请求 32（最大帧）或 SM_CXSMICON 中较大者**。
+   为什么不直接用 SM_CXSMICON：本进程已声明 Per-Monitor V2（见 WinInitDpiAwareness），
+   SM_CXSMICON 是**真实**值（本机 175% 下 = 28），但不同机器可能是 16/24/32/40…；
+   而本 exe 只有 16/24/32 三帧。取两者的较大值 = "有 32 就交给 explorer 缩小
+   （缩小几乎无损），要的比 32 还大时也尽量给足"。
    参数不能叫 small：rpcndr.h 里 `small` 是个类型（unsigned char）。
    LR_SHARED：系统缓存图标句柄，不需要（也不得）DestroyIcon。 */
 static HICON LoadAppIcon(BOOL wantSmall) {
-    int cx = wantSmall ? 16 : 32;
+    int want = GetSystemMetrics(SM_CXSMICON);
+    int cx = wantSmall ? (want > 32 ? want : 32) : 32;
     return (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(1),
                              IMAGE_ICON, cx, cx, LR_SHARED);
 }
@@ -828,6 +831,13 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     int rc = 0;
     g_state.paused = FALSE;
 
+    /* ★ 第一件事：声明 DPI 感知（Per-Monitor V2）。
+       必须在**创建任何窗口之前** —— 托盘消息窗口就在下面几步里建。
+       不声明的后果见 cap.h 的 `WinInitDpiAwareness`：低级鼠标钩子给物理坐标，
+       而本进程的窗口 API 会用虚拟坐标，两者差一个缩放比 → Caps+左键拖动会
+       指错窗口、位移也会比光标多跑一截。AltSnap 同样在清单里声明了这一条。 */
+    WinInitDpiAwareness();
+
     /* --reset-keys：无条件把所有修饰键补一次"抬起"然后退出。
        用于程序已被杀死（状态表随进程消失）留下的卡键，等价于 AHK 社区
        常用的"把所有修饰键 Send Up 一遍"。可自建快捷方式随时调用。 */
@@ -941,6 +951,20 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     if (!g_quit) {
         /* 启动不写日志文件；采集系统/环境基线供 C+` 诊断时输出。启动不发声。 */
         NavBaseInfo();
+        /* 追加坐标空间自检（**这一行是拖动/挪窗口错位类问题的第一现场**）：
+           低级鼠标钩子的 MSLLHOOKSTRUCT.pt 永远是物理像素，所以本进程也必须活在
+           物理空间 —— 只有 WinInitDpiAwareness() 生效时两边才一致。判定与实现
+           都在 winmove.c（本文件只是把它报出来），详见 cap.h 的说明。 */
+        {
+            WCHAR dpiLine[256];
+            _snwprintf_s(dpiLine, sizeof(dpiLine) / sizeof(dpiLine[0]), _TRUNCATE,
+                         L"DPI 感知 = %ls  坐标空间 = %ls\n",
+                         WinDpiAwarenessName(),
+                         WinCoordSpaceConsistent()
+                             ? L"物理(与钩子一致)"
+                             : L"**虚拟化(与钩子不一致，拖动会错位!)**");
+            NavBaseAppendLine(dpiLine);
+        }
 
         /* 配置要求以管理员运行且当前不是管理员：申请提权重启一次。
            提权实例带 --wait-exit —— 必须等本实例释放单实例互斥量之后再装

@@ -31,6 +31,7 @@ int NavJump(int dir, BOOL shift) {
 }
 void NavProbe(void) { /* 诊断探测：本测试桩掉 */ }
 void NavBaseInfo(void) { /* 启动基线采集：本测试桩掉 */ }
+void NavBaseAppendLine(const WCHAR* t) { (void)t; }   /* main.c 往基线追加 DPI 自检行 */
 void NavSelTrackReset(void) { /* 选区锚跟踪：本测试桩掉 */ }
 long long NavFocusCaret(void) { return -1; }   /* 光标回读只给诊断日志用，本测试没有真编辑器 */
 /* WPS 通道桩（真实现要链接 nav.c，本测试不链）：
@@ -285,15 +286,16 @@ static void WriteChordIni(const char* body) {
                for(int __i=0;__i<g_recN;__i++) printf("%d:%d ",g_rec[__i].vk,g_rec[__i].n);\
                printf(")\n"); fails++; } } while (0)
 
-/* 场景AE 用：窗口**左上角**是否落在光标附近 —— "窗口左上角对齐光标"这条契约的
-   直接判据。不用"光标在窗口里"来判（窗口自己缩小后那个仍然成立，测不出区别），
-   也不用"中心对准"（那要按尺寸换算，而落点规则已经改成不依赖尺寸了）。 */
-static BOOL AnchorAt(RECT r, POINT p, int tol) {
-    int dx = (int)r.left - (int)p.x;
-    int dy = (int)r.top  - (int)p.y;
-    if (dx < 0) dx = -dx;
-    if (dy < 0) dy = -dy;
-    return dx <= tol && dy <= tol;
+/* 场景AE 用：回读到的矩形是否等于"按既定规则算出的落点"。
+   **期望值调用产品自己的纯函数**（`WinComputePlacement`）而不是硬写"左上角 == 光标"：
+   光标贴着工作区下沿时整窗放不下，产品会按规则钳进来（实测：工作区底 706、窗口高 260、
+   光标 y=498 → 正确落点 446），那种情况硬断言必然假红。
+   也不拿"光标在不在窗口里"当判据 —— 窗口自己缩小后那个仍然成立，测不出区别。 */
+static BOOL PlacementMatches(const RECT* work, POINT cursor, RECT got) {
+    POINT exp;
+    WinComputePlacement(work, cursor,
+                        (int)(got.right - got.left), (int)(got.bottom - got.top), &exp);
+    return got.left == exp.x && got.top == exp.y;
 }
 
 /* 场景AE 用：模拟两类"不老实"的程序（真机上都会遇到）。
@@ -1409,11 +1411,11 @@ int main(void) {
             CHECK(wr.left >= mi.rcWork.left && wr.top >= mi.rcWork.top &&
                   wr.right <= mi.rcWork.right && wr.bottom <= mi.rcWork.bottom,
                   "AE: 拉回后整窗可见（完全落在工作区内）");
-            CHECK(!curStable || AnchorAt(wr, tgt, 8),
-                  "AE: 拉回后左上角对准光标（±8px）");
+            CHECK(!curStable || PlacementMatches(&mi.rcWork, tgt, wr),
+                  "AE: 拉回后落点 = 既定规则（左上角对齐光标，放不下就钳进工作区）");
             CHECK(tgt.x >= wr.left && tgt.x < wr.right &&
                   tgt.y >= wr.top && tgt.y < wr.bottom,
-                  "AE: 光标就在窗口的左上角（伸手就能抓到）");
+                  "AE: 光标仍在窗口内（伸手就能抓到）");
 
             /* 最大化：位置由系统按显示器算、给它的 (x,y) 会被忽略，所以必须先
                还原再挪 —— 但挪完要还回去，不能顺手取消用户的最大化状态。 */
@@ -1450,8 +1452,8 @@ int main(void) {
                    (int)wr.right, (int)wr.bottom, curStable ? "" : "  （光标被移动，跳过对准断言）");
             CHECK((int)(wr.right - wr.left) == 360 && (int)(wr.bottom - wr.top) == 260,
                   "AE: 前置条件 —— 窗口确实自己缩成了 360x260");
-            CHECK(!curStable || AnchorAt(wr, tgt, 8),
-                  "AE: 对方改尺寸也不影响落点（左上角仍对准光标）");
+            CHECK(!curStable || PlacementMatches(&mi.rcWork, tgt, wr),
+                  "AE: 对方改尺寸也不影响落点（按新尺寸算出的落点一致）");
 
             /* ② 挪过去之后**又把自己挪走**（带吸附/跟随行为的启动器、面板）。
                这种只能靠"回读锚点 + 再发一次"；一次调用要能收敛（≤3 次）。 */
@@ -1469,7 +1471,7 @@ int main(void) {
             printf("       (自挪后: 光标=%d,%d rect=%d,%d,%d,%d)\n",
                    (int)tgt.x, (int)tgt.y, (int)wr.left, (int)wr.top,
                    (int)wr.right, (int)wr.bottom);
-            CHECK(AnchorAt(wr, tgt, 4),
+            CHECK(PlacementMatches(&mi.rcWork, tgt, wr),
                   "AE: 对方自己挪走后被重试拉回（回读锚点生效）");
 
             DestroyWindow(w);

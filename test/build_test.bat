@@ -27,6 +27,20 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib ^
    /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
+rem 坐标空间（DPI 感知）测试：独立 exe，必须没有任何窗口时跑
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
+   /Isrc /c /Fobin\winmove_dpi.obj src\winmove.c
+if errorlevel 1 exit /b 1
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
+   /Isrc /c /Fobin\dpitest.obj test\dpitest.c
+if errorlevel 1 exit /b 1
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE ^
+   bin\dpitest.obj bin\winmove_dpi.obj ^
+   /link /OUT:bin/dpitest.exe user32.lib gdi32.lib shell32.lib /SUBSYSTEM:CONSOLE
+if errorlevel 1 exit /b 1
+echo [OK] compiled. running dpitest...
+".\bin\dpitest.exe"
+if errorlevel 1 exit /b 1
 echo [OK] compiled. running...
 ".\bin\test_chord.exe"
 exit /b %errorlevel%

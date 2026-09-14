@@ -1516,6 +1516,21 @@ void NavBaseInfo(void) {
     g_baseReady = 1;
 }
 
+/* 往启动基线里**追加**一行（由 main.c 调用）。
+   为什么要有这个 API：有些"环境事实"nav.c 不该知道 —— 比如"本进程的 DPI 感知级别
+   与坐标空间是否和鼠标钩子一致"（那属于窗口几何那一层的知识，实现和判定都在
+   winmove.c）。让 nav.c 去调 winmove.c 会把"按词跳转"模块拖上窗口几何的依赖，
+   连带几个只链 nav.c 的测试也要跟着改构建脚本；反过来由 main.c 追加最省事，
+   模块边界也正：nav.c 只负责"收集"，谁有补充谁追加。 */
+void NavBaseAppendLine(const WCHAR* text) {
+    if (!g_baseReady || !text || !text[0]) return;
+    size_t o = wcslen(g_baseInfo);
+    size_t add = wcslen(text);
+    if (o + add >= sizeof(g_baseInfo) / sizeof(g_baseInfo[0])) return;  /* 满就丢，绝不越界 */
+    memcpy(g_baseInfo + o, text, (add + 1) * sizeof(WCHAR));
+    g_baseReady = 1;
+}
+
 void NavProbe(void) {
     HWND fg = GetForegroundWindow();
     WCHAR cls[96] = L"?"; WCHAR title[128] = L"?";

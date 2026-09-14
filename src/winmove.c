@@ -27,11 +27,14 @@
    3 次，最后把实际落点写进日志 —— "发了对方未必认，动完回读一次"是本项目的老规矩
    （见 `SendArrowsStrict` 的补正、`EM_SETSEL` 的回读）。
 
-   ★ 坐标系与 DPI：本进程**没有声明 DPI 感知**，于是 Windows 把整个桌面按系统
-   DPI 统一虚拟化后交给它 —— `GetCursorPos` / `MonitorFromPoint` /
-   `GetWindowRect` / `SetWindowPos` 用的是**同一个**（本进程的）虚拟坐标空间，
-   读与写自洽。混合缩放的两块屏上，这个空间会有"缝"（实测主屏 0..1463、
-   副屏 1707..3414），但读写都在同一空间里，所以仍然落到光标处。
+   ★ 坐标系与 DPI：本进程在 `WinMain` 一开始就声明 **Per-Monitor V2** 感知
+   （`WinInitDpiAwareness`），于是 `GetCursorPos` / `MonitorFromPoint` /
+   `GetWindowRect` / `SetWindowPos` 全部落在**物理像素**空间 —— 与低级鼠标钩子
+   给的 `MSLLHOOKSTRUCT.pt`（官方定义就是 per-monitor-aware screen coordinates）
+   是同一个空间。**这一点是必须的**：不声明感知时系统会把整个桌面按 96DPI 虚拟化，
+   只有本进程的 API 用虚拟坐标，钩子仍给物理坐标，两边差一个缩放比 ——
+   表现为"只能拖有焦点的窗口""窗口比光标多跑一截"。声明之后，混合缩放的多屏也不
+   再有虚拟空间那道"缝"。
    将来若给本体声明 Per-Monitor 感知，这段代码不用改：那只是把同一个自洽关系
    挪到物理像素空间。（依据：MS「High DPI Desktop Application Development on
    Windows」——"Windows scales and converts DPI-sensitive information from some
@@ -108,6 +111,94 @@ void WinComputePlacement(const RECT* work, POINT cursor, int w, int h, POINT* ou
     y = std::max<LONG>(y, work->top);
     out->x = x;
     out->y = y;
+}
+
+/* ================= 坐标空间：声明 DPI 感知 =================
+   为什么这件事必须做、以及不做会怎样，见 `cap.h` 里 `WinInitDpiAwareness` 的说明。
+   这里只记实现上要注意的：
+     · **必须在创建任何窗口之前调用**（消息窗口 / 托盘 / 任何 HWND），否则系统已经
+       按旧感知级别把窗口建好了，改感知也来不及；
+     · 动态取 `SetProcessDpiAwarenessContext`（Win10 1607+）才能拿到 PMv2；
+       拿不到就退回进程级 `SetProcessDPIAware`（Win8.1 之前）；
+     · 一旦被清单/外部设过（`SetProcessDpiAwarenessContext` 返回 FALSE 且
+       GetLastError == ERROR_ACCESS_DENIED），就不要再尝试 —— 那次调用已经失败。 */
+typedef BOOL (WINAPI* PFN_SetProcessDpiAwarenessContext)(HANDLE);
+typedef BOOL (WINAPI* PFN_SetProcessDPIAware)(void);
+typedef UINT (WINAPI* PFN_GetAwarenessFromCtx)(HANDLE);
+typedef HANDLE (WINAPI* PFN_GetThreadCtx)(void);
+typedef BOOL (WINAPI* PFN_AreCtxEqual)(HANDLE, HANDLE);
+
+/* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4（不引 shellscalingapi.h，
+   那个头在旧 SDK 里可能没有）。 */
+#define DPI_CTX_PMV2 ((HANDLE)(INT_PTR)-4)
+
+void WinInitDpiAwareness(void) {
+    HMODULE u = GetModuleHandleW(L"user32.dll");
+    if (!u) return;
+    PFN_SetProcessDpiAwarenessContext setCtx =
+        (PFN_SetProcessDpiAwarenessContext)GetProcAddress(u, "SetProcessDpiAwarenessContext");
+    if (setCtx) {
+        if (setCtx(DPI_CTX_PMV2)) return;
+        /* 已经是别的感知级别（清单设过 / 已被调用过）→ 不再降级覆盖，
+           免得把显式设好的级别改坏。 */
+        if (GetLastError() == ERROR_ACCESS_DENIED) return;
+    }
+    PFN_SetProcessDPIAware setOld = (PFN_SetProcessDPIAware)GetProcAddress(u, "SetProcessDPIAware");
+    if (setOld) setOld();
+}
+
+/* 自检：钩子给的是物理坐标，所以本进程也必须活在物理空间。
+   ★ 判据用**显示模式尺寸**（`EnumDisplaySettings` 的 `dmPelsWidth`）：它**不被**
+   DPI 虚拟化，永远返回真实像素；而本进程的 `SM_CXSCREEN` 在"不感知"时会被按系统
+   DPI 缩小。两者不等 = 虚拟化生效 = 与钩子不在一个空间（本机 1462 vs 2558）。
+   ★ **别用 `GetPhysicalCursorPos` 当判据**（这是我第一版的错）：实测它对本进程
+   同样做虚拟化 —— 不感知时它与 `GetCursorPos` 一起返回 772,350（真实 1351,613），
+   两边一起变，看起来"一致"，恰好把这个 bug 藏过去。
+   比不出结果（拿不到 DEVMODE）时不报错：宁可不报，也不要误报。 */
+BOOL WinCoordSpaceConsistent(void) {
+    DEVMODEW dm;
+    memset(&dm, 0, sizeof(dm));
+    dm.dmSize = sizeof(dm);
+    if (!EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm)) return TRUE;
+    if (dm.dmPelsWidth == 0) return TRUE;
+    int w = GetSystemMetrics(SM_CXSCREEN);
+    if (w <= 0) return TRUE;
+    return (DWORD)w == dm.dmPelsWidth;
+}
+
+/* 当前感知级别名（日志用）。同样动态取，避免旧 SDK 缺符号。
+
+   ★ 实测坑：`GetAwarenessFromDpiAwarenessContext` 对 **PerMonitor 与 PerMonitorV2
+   都返回 2**（V2 的差别在行为上——非客户区缩放、子窗口 DPI 通知——不在这个枚举里），
+   所以想区分 V2 必须用 `AreDpiAwarenessContextsEqual(ctx, PMv2)`。
+   本函数先按上下文精确比，比不出来再退回枚举名。 */
+const WCHAR* WinDpiAwarenessName(void) {
+    HMODULE u = GetModuleHandleW(L"user32.dll");
+    if (!u) return L"未知";
+    PFN_GetThreadCtx getCtx = (PFN_GetThreadCtx)GetProcAddress(u, "GetThreadDpiAwarenessContext");
+    if (!getCtx) return L"未知";
+    HANDLE ctx = getCtx();
+
+    PFN_AreCtxEqual eq =
+        (PFN_AreCtxEqual)GetProcAddress(u, "AreDpiAwarenessContextsEqual");
+    if (eq) {
+        /* 各上下文常量的原始值：-1 不感知 / -2 系统级 / -3 每显示器 / -4 每显示器V2 */
+        if (eq(ctx, (HANDLE)(INT_PTR)-4)) return L"每显示器V2(PerMonitorV2)";
+        if (eq(ctx, (HANDLE)(INT_PTR)-3)) return L"每显示器(PerMonitor)";
+        if (eq(ctx, (HANDLE)(INT_PTR)-2)) return L"系统级(DPI_AWARE)";
+        if (eq(ctx, (HANDLE)(INT_PTR)-1)) return L"不感知(DPI_UNAWARE)";
+    }
+    PFN_GetAwarenessFromCtx getAw =
+        (PFN_GetAwarenessFromCtx)GetProcAddress(u, "GetAwarenessFromDpiAwarenessContext");
+    if (getAw) {
+        switch (getAw(ctx)) {
+        case 0: return L"不感知(DPI_UNAWARE)";
+        case 1: return L"系统级(DPI_AWARE)";
+        case 2: return L"每显示器(PerMonitor 或 V2，本机 API 分不出)";
+        default: break;
+        }
+    }
+    return L"未知";
 }
 
 /* 移动**指定**窗口（不自己去找前台窗口：测试要能一次一个地验证它）。

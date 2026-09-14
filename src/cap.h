@@ -226,6 +226,24 @@ BOOL WinMoveFocusedToCursor(void);
 BOOL WinIsShellClass(HWND hwnd);
                         /* 桌面 / 任务栏 / 通知区那类"不是普通窗口"的壳窗口（winmove 与 drag 共用） */
 
+/* ---------- 坐标空间（进程级，必须在建任何窗口之前调用一次） ----------
+   ★ 根因记录：低级鼠标钩子给的 `MSLLHOOKSTRUCT.pt` **永远是物理像素**
+   （官方定义就是 "per-monitor-aware screen coordinates"），而**不声明 DPI 感知**的
+   进程里 `GetCursorPos` / `WindowFromPoint` / `GetWindowRect` / `SetWindowPos` 用的
+   是系统按 96DPI **虚拟化**过的坐标。两者不在一个空间 —— 本机实测（真实 2558x1319
+   @175%）：钩子给 (1351,613)，而不感知的进程里 `GetCursorPos` 是 (772,350)。
+   于是 `WindowFromPoint(钩子坐标)` 会指到别的地方（表现为"只能拖有焦点的窗口"），
+   而光标位移（物理量）加到虚拟坐标上会让窗口多跑 75%（表现为"跟光标差很远"）。
+   对策与 AltSnap 一致：**声明 Per-Monitor V2**，让两边都落在物理空间。
+   调用点：`WinMain` 的第一件事；测试可单独调用（见 test_chord 末尾）。 */
+void WinInitDpiAwareness(void);
+BOOL WinCoordSpaceConsistent(void);
+                        /* 自检：本进程坐标空间是否与钩子一致（GetCursorPos vs
+                           GetPhysicalCursorPos）。不一致说明 DPI 感知没生效 ——
+                           拖动/挪窗口都会错位，启动时写日志报警。 */
+const WCHAR* WinDpiAwarenessName(void);
+                        /* 当前 DPI 感知级别名（仅日志/诊断用，不做判定） */
+
 /* ---------- Caps + 左键拖动挪窗口（src/drag.c） ----------
    钩子只做"判定 + 记录 + 唤醒"（鼠标输入的关键路径上不能阻塞），
    SetWindowPos 由本模块的专用线程执行（与滚轮 / 持续滚动同一套通道模型）。
@@ -412,6 +430,7 @@ void CapLog(const char* fmt, ...);   /* 追加写当前会话日志（可多线�
 void LogNewSession(void);            /* 开始记录时调用：新建一个以时间命名的日志文件 */
 void NavProbe(void);                 /* 探测当前焦点控件并写入日志 + 弹窗 */
 void NavBaseInfo(void);              /* 启动时采集系统/环境基线（不落盘，C+` 诊断时输出） */
+void NavBaseAppendLine(const WCHAR* text);   /* 往基线里追加一行（main.c 补 DPI/坐标空间自检用） */
 
 /* ---------- 按词跳转模块 ---------- */
 int NavJump(int dir, BOOL shift);      /* 前台控件 + dir + shift(选区=F) -> 移动；返回移动格数(<0失败) */

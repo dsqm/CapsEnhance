@@ -38,6 +38,23 @@ static HWND WaitNewWindow(HWND oldHwnd, int timeoutMs) {
     return NULL;
 }
 
+/* 从**外部**查一个进程的 DPI 感知级别（shcore.dll，动态取以免改链接行）。
+   为什么要在 restarttest 里查：这是唯一"产品真进程"的端到端检查。
+   `WinInitDpiAwareness()` 是否真的被调用过，看这一个数字就知道 ——
+   而它一旦丢了，Caps+左键拖动就会"指错窗口、位移比光标多跑一截"
+   （低级鼠标钩子给物理坐标，不感知的进程用虚拟坐标，两者差一个缩放比）。 */
+typedef HRESULT (WINAPI* PFN_GetProcessDpiAwareness)(HANDLE, int*);
+static int ProcDpiAwareness(HANDLE h) {
+    HMODULE s = LoadLibraryW(L"shcore.dll");
+    if (!s) return -1;
+    PFN_GetProcessDpiAwareness f =
+        (PFN_GetProcessDpiAwareness)GetProcAddress(s, "GetProcessDpiAwareness");
+    int v = -1;
+    if (f) f(h, &v);
+    FreeLibrary(s);
+    return v;   /* 0=不感知 1=系统级 2=每显示器 */
+}
+
 int main(void) {
     WCHAR exe[MAX_PATH];
     DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
@@ -46,6 +63,15 @@ int main(void) {
     for (DWORD i = 0; i < n; i++) if (exe[i] == L'\\') slash = &exe[i];
     if (slash) *(slash + 1) = 0;
     wcscat_s(exe, MAX_PATH, L"CapsEnhance.exe");
+
+    /* 前置条件：**起跑时不能已有实例在跑**。否则下面的断言会成片失败，而原因只有一个
+       （新进程被单实例守卫挡掉、立刻退出），看起来却像产品坏了 —— 这种误导性失败
+       最难查。本机 RunAsAdmin=1 时最后留下的实例是**提权**的，普通权限杀不掉，
+       要等它自行退出（父进程结束后）或把 ini 里 RunAsAdmin 设 0 再跑。 */
+    if (FindWindowW(L"CapsEnhanceMain", NULL) != NULL) {
+        printf("CapsEnhance is ALREADY RUNNING - close it first (or set RunAsAdmin=0 in CapsEnhance.ini).\n");
+        return 2;
+    }
 
     STARTUPINFOW si; PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
@@ -61,6 +87,21 @@ int main(void) {
 
     HWND hwndA = WaitMainWindow(3000);
     EXPECT(hwndA != NULL, "A 启动且主窗口出现");
+
+    /* ★ 坐标空间保险丝：产品进程必须是 DPI 感知的。
+       低级鼠标钩子的 MSLLHOOKSTRUCT.pt 永远是**物理像素**，而不感知的进程里
+       GetCursorPos/WindowFromPoint/GetWindowRect/SetWindowPos 用**虚拟**坐标 ——
+       差一个缩放比。缩放显示器上（本机 175%）现象就是：Caps+左键拖不动无焦点的
+       窗口（WindowFromPoint 指到别处）、拖全屏窗口时位移比光标多跑一截。
+       断言 != 0（不感知）；Win10+ 正常应拿到 2（每显示器）。 */
+    {
+        int aw = ProcDpiAwareness(hA);
+        /* 用窄字符打印：宽窄混用时的缓冲/编码会让这一行与别的输出交错，
+           而它正是排查坐标空间问题时要看的第一行。 */
+        printf("CapsEnhance.exe DPI awareness = %d (0=unaware 1=system 2=per-monitor) ", aw);
+        fflush(stdout);
+        EXPECT(aw != 0, "产品进程声明了 DPI 感知（与钩子同坐标空间）");
+    }
 
     /* B：等 A 退出后再初始化 */
     WCHAR cmd[MAX_PATH + 64];
