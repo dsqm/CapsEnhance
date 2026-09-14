@@ -394,7 +394,6 @@ DPI 感知 = 每显示器V2(PerMonitorV2)  坐标空间 = 物理(与钩子一致
 - **黑名单 = 两份**（`[DragWindowBlacklist]` 按窗口类名 / `[DragProcessBlacklist]` 按进程名），与 AltSnap 的 `Windows` / `Processes` 两条一一对应，各自独立缺省回落（谁的段没写就用谁的内置默认，都逐条取自 AltSnap）。命中任一份即不接管。
   **不支持标题维度**：取另一个进程的标题要发 `WM_GETTEXT`（跨进程 IPC），而判定发生在鼠标钩子上；AltSnap 的默认条目每条都带类名或进程名，默认语义仍完整。
   两份名单的空判定分开做：类名是本地调用（便宜），进程名要 `OpenProcess`（与 `[AutoDisable]` 同一条路）—— 名单为空时不该付这个代价。
-  旧段名 `[DragBlacklist]` 作为兼容入口保留：条目按形态分流（含 `|` 走窗口名单，其余走进程名单）。
 
 ---
 

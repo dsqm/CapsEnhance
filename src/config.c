@@ -205,7 +205,7 @@ static int ParseIntW(const WCHAR* v, int def) {
 }
 
 typedef enum { SEC_NONE, SEC_GENERAL, SEC_NATIVE, SEC_AUTODISABLE,
-               SEC_NOSMOOTH, SEC_DRAGWIN, SEC_DRAGPROC, SEC_DRAGLEGACY,
+               SEC_NOSMOOTH, SEC_DRAGWIN, SEC_DRAGPROC,
                SEC_OTHER } CfgSec;
 
 /* 段名 -> 名单编号；不是名单段返回 -1。
@@ -392,11 +392,6 @@ void ConfigLoadFrom(const WCHAR* path) {
             } else if (_wcsicmp(name, L"dragprocessblacklist") == 0 ||
                        _wcsicmp(name, L"drag process blacklist") == 0) {
                 sec = SEC_DRAGPROC; sawDragProc = TRUE;
-            } else if (_wcsicmp(name, L"dragblacklist") == 0 ||
-                       _wcsicmp(name, L"drag blacklist") == 0) {
-                /* 旧段名（拆成两份之前的写法）：按**条目形态**分流 ——
-                   含 `|` 的是窗口类名条目，其余是进程名条目。 */
-                sec = SEC_DRAGLEGACY;
             }
             else                                          sec = SEC_OTHER;
         } else if (sec == SEC_GENERAL) {
@@ -438,9 +433,6 @@ void ConfigLoadFrom(const WCHAR* path) {
                    不认识的键（含已废弃的旧键名）留着也只是噪音，不解析、不保存。 */
                 else { /* 忽略未知/废弃键 */ }
             }
-        } else if (sec == SEC_DRAGLEGACY) {
-            /* 旧段名：含 `|` 走窗口名单，否则走进程名单 */
-            AddEntry(wcschr(line, L'|') ? CFGLIST_DRAGWIN : CFGLIST_DRAGPROC, line);
         } else if (SecList(sec) >= 0) {
             AddEntry(SecList(sec), line);
         } else if (sec == SEC_NONE) {

@@ -1548,11 +1548,13 @@ int main(void) {
                       "AF: [DragProcessBlacklist] 写进程名 -> 命中");
             }
 
-            /* ④ 旧段名 [DragBlacklist]（拆成两份之前的写法）：按条目形态分流 —— 含 `|`
-               的走窗口名单，其余走进程名单。两个样本一起验。 */
+            /* ④ 不认识的段名一律忽略（不再为旧段名留兼容入口 —— 本程序只有作者
+               一个人用，配置随版本改即可）。用"旧段名 + 本该命中的条目"当样本：
+               命中 = 兼容还在，不命中 = 真的被忽略了。 */
             WriteChordIni("[DragBlacklist]\r\n*|CapsEnhanceDragProbe\r\n");
             ConfigLoadFrom(L"bin/chordtest.ini");
-            CHECK(ConfigIsDragBlacklisted(w), "AF: 旧段名里的类名条目 -> 走窗口名单");
+            CHECK(!ConfigIsDragBlacklisted(w),
+                  "AF: 未知段名被忽略（旧 [DragBlacklist] 不再认）");
 
             /* ⑤ 类名条目：命中后左键**原样透传**（不接管、不进入拖拽） */
             WriteChordIni("[DragWindowBlacklist]\r\n*|CapsEnhanceDragProbe\r\n");
