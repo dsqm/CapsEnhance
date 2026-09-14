@@ -573,3 +573,10 @@ void HookUninstall(void) {
 }
 
 BOOL HookMouseAvailable(void) { return g_mouseHook != NULL; }
+
+/* 上次自动屏蔽判定结果（[AutoDisable] 名单里的程序是否在前台）。
+   托盘提示重建（explorer 重启后补提示）需要读它 —— 那份提示内容由
+   "暂停 / 记录中 / 自动屏蔽 / 滚轮可用"共同决定，缺一个就恢复不出正确文案。
+   只在主线程读（s_autoDisabled 也是主线程通过 WM_AUTODISABLE 间接维护的
+   判定结果，钩子回调与消息处理同在主线程，串行）。 */
+BOOL HookAutoDisabled(void) { return s_autoDisabled; }

@@ -333,6 +333,30 @@ static void TrayHint(const WCHAR* state) {
                  L"CapsEnhance：", state);
     TrayAddHint(buf);
 }
+
+/* 按**当前全部状态**算出该显示的提示文案并写上去。
+   为什么需要它：悬停提示的内容由好几个状态共同决定（暂停 / 记录中 /
+   [AutoDisable] 命中 / 滚轮钩子可用性），而这些状态各自只在自己**变化时**
+   主动改提示。一旦发生"图标被重建"的事件 —— 最典型的是 **explorer 重启**
+   （收到 TaskbarCreated，系统把通知区图标全清掉、要程序自己重新加）——
+   TrayAdd() 只会把提示写回静态的 APP_NAME，于是"（管理员）""正在映射"
+   这些信息全部丢失，且**再没有任何状态变化去补它**：用户看到的就是
+   "时间一长，悬停提示里管理员那行字没了"（实为 explorer 悄悄重启过）。
+   所以图标（重）建之后一律走这个函数，把完整文案重建出来。
+   优先级：暂停 > 记录中 > 自动屏蔽 > 滚轮不可用 > 正常映射。
+   （暂停最优先：那是用户显式切的，不该被其它状态顶掉 —— 与 WM_AUTODISABLE
+     的既有约定一致；记录中是临时的诊断态，也要能看出来。） */
+static void TrayCurrentHint(void) {
+    if (g_state.paused)
+        TrayHint(L"已暂停（CapsLock 恢复原功能）");
+    else if (g_recording.load())
+        TrayHint(L"正在记录日志（C+\x60 结束）");
+    else if (HookAutoDisabled())
+        TrayHint(L"已自动屏蔽（前台程序在名单内）");
+    else
+        TrayHint(HookMouseAvailable() ? L"正在映射" : L"正在映射（滚轮功能不可用）");
+}
+
 static void TrayAdd(void) {
     memset(&g_nid, 0, sizeof(g_nid));
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
@@ -565,7 +589,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     static UINT s_taskbarCreated = 0;
     if (!s_taskbarCreated)
         s_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
-    if (msg == s_taskbarCreated) { TrayAdd(); return 0; }
+    /* explorer 重启后系统清空了通知区（图标连同悬停提示一起没了），必须重新
+       ADD，**并把完整提示一起重建**（只 ADD 的话 szTip 是裸 APP_NAME，
+       "（管理员）""正在映射"这些全丢，而且再没有状态变化去补它 —— 用户看到的
+       就是"时间一长，悬停提示里管理员那行字不见了"，实为 explorer 悄悄重启过）。
+       此时钩子早已装好，TrayCurrentHint 能读到真实状态，重建出的文案与当时一致。 */
+    if (msg == s_taskbarCreated) { TrayAdd(); TrayCurrentHint(); return 0; }
 
     switch (msg) {
     /* ---- 和弦引擎事件 ---- */
@@ -943,8 +972,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
             AppendMenuW(g_menu, MF_SEPARATOR, 0, NULL);
             AppendMenuW(g_menu, MF_STRING, IDM_EXIT, L"退出");
         }
-        /* 鼠标钩子（滚轮加速）装不上不影响主映射，但要让人看见，别静默降级 */
-        TrayHint(HookMouseAvailable() ? L"正在映射" : L"正在映射（滚轮功能不可用）");
+        /* 钩子都装完了，按当前全部状态刷新一次提示（滚轮钩子装不上要让人看见，
+           别静默降级；[AutoDisable] 与记录态也一并纳入）。 */
+        TrayCurrentHint();
     }
 
     MSG msg;
