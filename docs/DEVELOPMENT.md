@@ -88,6 +88,7 @@
 | `wps.c` | **专用**的 WPS 文字通道：ProgID / 进程名 / 属性链 / 直接置位，以及跑在桥上的请求-应答协议。界面在 `src/auto.h` |
 | `send.c` | **模拟按键与滚轮的唯一出口**。扩展键标志（方向键 / Home / End / Del 等必须带 `KEYEVENTF_EXTENDEDKEY`）、逐条发送节奏、Ctrl/Shift 组合键的正确按住与释放、滚轮加速的逐格补发、超限改道的判定（`SendArrows`）、`SendInput` 返回值检查（UIPI 拒绝时记录） |
 | `act.c` | **执行线程**。串行执行会阻塞的发送动作；滚轮注入与持续滚动各有一条独立通道；持续滚动的状态机在锁内维护、由工作线程按拍输出 |
+| `winmove.c` | **把焦点窗口挪到光标处**（`C+Q`）。落点计算是纯函数（单测覆盖多显示器几何）；执行部分只碰窗口几何：前台窗口 → `GA_ROOT` 顶层 → 还原（最小化/最大化）→ `MonitorFromPoint(DEFAULTTONEAREST)` + `MONITORINFO.rcWork` 钳制 → `SetWindowPos`。不认识键位（触发键在 `keymap.c`、分派在 `act.c`） |
 
 > 分层意义：以后要支持"另一个只有 COM 才读得到的程序"（如 WPS 表格），照 `wps.c` 再写一个文件即可，`autodisp.c` 与 `bridge.c` 原样复用。
 > 激活键（`Alt/D`、`F`）**不做成配置项**：它们属于和弦语法本身，改变量级 < 配置项，历史实装成 `EnhanceKeys` / `ShiftKeys` 后已回退（改它们等于改功能）。但 `keymap.c` 那层模式抽象仍在，以后想改常量只需动 `cap.h` 一处。
@@ -303,6 +304,24 @@ WPS 置位的回读校验返回**三态**：
 
 ---
 
+## 窗口挪到光标处（`winmove.c`）
+
+一句话：`GetForegroundWindow()` → `GetAncestor(GA_ROOT)` → 还原（最小化/最大化）→ `MonitorFromPoint(…, MONITOR_DEFAULTTONEAREST)` + `MONITORINFO.rcWork` → `SetWindowPos`。
+
+几个决定与其理由：
+
+- **落点 = 窗口中心对准光标，再整窗钳进"光标所在显示器的工作区"**。取 `rcWork` 而不是显示器全矩形：`rcWork` 已排除任务栏与桌面工具栏，钳进它才能保证"整窗可见、不压托盘"。这条规则是唯一一个"两个用途同时成立"的：搬屏时窗口出现在手边，找回屏幕外的窗口时一定完整可见。窗口比工作区还大时对齐左上角（钳不出更优解，但至少标题栏在）。
+- **`MONITOR_DEFAULTTONEAREST` 不是可选项**：官方文档写明它返回"离该点**最近**的显示器"，于是"光标落在两屏之间的缝里""改过分辨率/拔过屏、坐标悬空"都能兜住，而不是整条路径失败。
+- **最小化/最大化窗口必须先 `SW_RESTORE`**：最大化的窗口位置由系统按所在显示器算、传给它的 `(x,y)` 会被忽略；最小化的窗口 `GetWindowRect` 拿到的**不是**还原位置（照着算就会挪到错的地方）。最大化那条最后再 `SW_MAXIMIZE` 回去，等价于 `Win+Shift+方向` 的语义（状态不变、只换屏）。
+- **"请求 → 回读 → 按新尺寸重算"最多 3 次**（`MOVE_TRIES`）：有的程序会**自己改尺寸**。实测 CLaunch 在 125% 屏上是 578x437、挪到 150% 屏上变成 495x374（它保持**物理**尺寸不变），按旧尺寸算出的中心一遇到它改尺寸就偏了几十像素 —— 用户看到的就是"**按一下没完全过去，再按一下才对**"。回读它的新尺寸、重新对准光标，把这件事变成一次点击完成。判据是**回读的矩形 vs 请求的矩形**（容差 `MOVE_TOLERANCE` 3px），**不是**"光标在不在窗口里" —— 窗口自己缩小之后光标仍在窗口内，那个判据测不出区别（写测试时真踩到了，见 `test_chord.c` 场景AE 的 `CenteredOn`）。
+- **一律带 `SWP_ASYNCWINDOWPOS`**（对方线程卡住不拖住执行线程；文档：调用线程与窗口所属线程不在同一输入队列时系统把请求**投递**过去）。代价是**回读会抢在请求生效之前** → 回读前先 `Sleep(MOVE_SETTLE_MS)` 让一小会儿。顺带解决了"最大化必须等位置生效"：确认回读一致之后才 `SW_MAXIMIZE`，否则最大化可能先执行、把窗口铺回**原来**那块屏。
+- **只挪顶层窗口**：Chromium 系 / UWP 的前台窗口往往是内容子窗口，挪它等于把它从父窗口里撕出来 → 一律 `GetAncestor(GA_ROOT)`。桌面（`Progman` / `WorkerW`）与任务栏（`Shell_TrayWnd` / `Shell_SecondaryTrayWnd`）按类名挡掉；前台是本进程自己（托盘菜单）时也直接返回。
+- **放在执行线程**（`act.c` 的 `RunJob`）：`SetWindowPos` 要向对方窗口过程发 `WM_WINDOWPOSCHANGING`/`CHANGED`，对方卡住时同步调用能一直等下去 —— 与按词跳转/探测同一个根因（见 `act.c` 顶部）。非最大化的路径带 `SWP_ASYNCWINDOWPOS`：文档明确"调用线程与窗口所属线程不在同一输入队列时，系统把请求**投递**过去"，本线程不必陪着等。
+- **坐标系与 DPI**：本进程**没有声明 DPI 感知**，Windows 会把整个桌面按系统 DPI 统一虚拟化后交给我们 —— `GetCursorPos` / `MonitorFromPoint` / `GetWindowRect` / `SetWindowPos` 用的是**同一个**（本进程的）坐标空间，读与写自洽，所以主副屏缩放比例不同也能落到光标处（依据：MS「High DPI Desktop Application Development on Windows」——"Windows scales and converts DPI-sensitive information from some APIs to the coordinate space of the calling thread"）。将来若给本体声明 Per-Monitor 感知，这段代码不用改：那只是把同一个自洽关系挪到物理像素空间。
+- 动作**不发键**：`SINGLE_SHOT`（不进重复节奏、不做松手补齐）与 `NO_SHIFT`（不吃选区修饰）都写在键位表里，`Q` 也不参与"发 3 次"的增强语义。
+
+---
+
 ## 滚轮三路实现要点
 
 按住 `C` 时滚轮请求在钩子里只做一次**投递**（`WM_WHEEL_HACCEL` / `WM_WHEEL_ENH` / `WM_WHEEL_ACCEL`），状态机与注入都在 `act.c` 的独立通道 + 独立线程里跑。三路共用配置的判定顺序：**真实 `Shift` → 横向；增强模式（Alt/D）→ 持续滚动；否则 → 快速滚动**。
@@ -457,6 +476,12 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 - **超时是"钩子被摘掉"时的最后一道闸**：旧代码靠工作线程读 `g_cMod`/`ModeDown` 自查，钩子一被摘除那两个值永远是"还按着" → 无限滚。死线只存 **32 位**（取 `GetTickCount64` 低 32 位，回绕比较，别撕裂）。
 - **倍数量与毫秒/格不混用**：`AutoScrollFastMs` 必须 **<** `AutoScrollInterval`，写反 → 阶梯静默退化为恒速（详见[滚轮三路实现要点](#滚轮三路实现要点)）。
 - **别造有状态模式**：翻转类动作（`C+Tab`，`ACTF_SINGLE_SHOT`，由 `IsSingleShotAct` / `StackRemove` 处理）不进重复/补齐，否则偶数次 = 没切。
+
+### 窗口挪动（`winmove.c`）
+- **按了 `C+Q` 没反应**只有三种原因：前台是桌面/任务栏（按类名挡掉）、前台就是本程序自己（托盘菜单）、或者该程序命中 `[AutoDisable]`（整段不介入）。记录模式下会写两行 `[窗口]`：类名、光标、显示器/工作区、尺寸、请求落点、实际矩形、尝试次数。
+- **"要按两下才过去" = 对方程序自己改了尺寸/位置**：那里会回读并按新尺寸重算（见[窗口挪到光标处](#窗口挪到光标处winmovec)）；日志里会带"（对方改了尺寸，已按新尺寸重算）"。
+- **别把"最大化"当普通窗口挪**：它的位置由系统按所在显示器算。必须先 `SW_RESTORE` 再挪、挪完 `SW_MAXIMIZE` 回去；而且要**确认回读一致（= 位置已生效）再最大化**，否则会铺回**原来**那块屏。
+- **别用显示器全矩形**：要用 `rcWork`，否则窗口会压到任务栏下面。
 
 ### 托盘气泡（main.c `TrayBalloon`）
 - Windows 通知区**同一图标同时只显示一条气泡**；当前气泡还在时再发 `NIM_MODIFY + NIF_INFO` 会被**排队**（Win10/11 下被转成 toast、同来源摞进队列），要等前一条超时（约 10s）才弹——表现为"开始记录的气泡还挂着，按 `C+\`` 结束的气泡迟迟不出现"。
