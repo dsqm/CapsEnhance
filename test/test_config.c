@@ -132,7 +132,10 @@ int main(void) {
     EXPECT(!ConfigGetRunAsAdmin(), "CFG: 空值视为假");
     WriteIni("[General]\r\n\r\n");
     ConfigLoadFrom(L"bin/cfgtest.ini");
-    EXPECT(ConfigGetRunAsAdmin(), "CFG: 缺省为真（缺省配置就是 RunAsAdmin = 1）");
+    /* ★ 缺省已改为**不提权**（RunAsAdmin = 0）：普通用法不需要管理员，
+       只有要拖动/操作"以管理员运行的窗口"时才需要设 1（UIPI 会拦住低权限进程对高权限窗口的
+       SetWindowPos）。这条断言就是那个默认值的保险丝。 */
+    EXPECT(!ConfigGetRunAsAdmin(), "CFG: 缺省为假（缺省配置就是 RunAsAdmin = 0）");
 
     /* 日志上限 LogMaxKB（KB） */
     WriteIni("[General]\r\nLogMaxKB = 512\r\n");
@@ -664,7 +667,7 @@ int main(void) {
     ConfigLoad();
     EXPECT(!TemplateHasForbidden(), "CFG: 模板不含禁用字样（VSCode/vsc）");
     /* 模板必须把每个 [General] 开关连默认值写出来，否则用户不知道有这些项 */
-    EXPECT(TemplateHas("RunAsAdmin = 1"),    "CFG: 模板含 RunAsAdmin 默认值");
+    EXPECT(TemplateHas("RunAsAdmin = 0"),    "CFG: 模板含 RunAsAdmin 默认值 0（默认不提权）");
     EXPECT(TemplateHas("LogMaxKB = 2048"),   "CFG: 模板含 LogMaxKB 默认值");
     /* 默认值来自 config.c 的编译期常量：这里按取值现拼，改默认不会漏改断言 */
     { char tpl[64];

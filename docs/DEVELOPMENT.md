@@ -151,7 +151,7 @@
 
 两个容易踩的点：
 
-- **UIPI**：Windows 默认拦掉"完整性级别低 → 高"的 `PostMessage`。而 `RunAsAdmin=1`（默认）意味着本体常驻实例**是**管理员，而设置程序往往是普通权限 —— 不放行的话"保存并重启"会**静默失效**（消息被丢弃、没有任何报错）。所以窗口建好后对 `WM_RESTART_REQUEST` / `WM_ALREADY_RUNNING` 调 `ChangeWindowMessageFilterEx(..., MSGFLT_ALLOW, ...)`。
+- **UIPI**：Windows 默认拦掉"完整性级别低 → 高"的 `PostMessage`。而开启 `RunAsAdmin=1`（**默认 0**）意味着本体常驻实例**是**管理员，而设置程序往往是普通权限 —— 不放行的话"保存并重启"会**静默失效**（消息被丢弃、没有任何报错）。所以窗口建好后对 `WM_RESTART_REQUEST` / `WM_ALREADY_RUNNING` 调 `ChangeWindowMessageFilterEx(..., MSGFLT_ALLOW, ...)`。
 - **顺序**：`--restart` 的处理必须排在**单实例检查之前**，否则"已经有一个在跑"会让它连消息都发不出去就退出了。
 
 ---

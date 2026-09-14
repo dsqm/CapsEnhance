@@ -895,7 +895,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     /* UIPI 放行：允许**完整性级别更低**的进程向本窗口发这几条消息。
        Windows 默认拦掉"低 -> 高"的 PostMessage（UIPI），而管理员运行是本程序
-       的默认配置（RunAsAdmin=1），设置程序往往是普通权限 —— 不放行的话
+       的 RunAsAdmin（开启时），设置程序往往是普通权限 —— 不放行的话
        "保存并重启"在管理员模式下会**静默失效**（消息被丢弃，无任何报错）。
        同理覆盖 WM_ALREADY_RUNNING（重复启动时的提示也来自另一个实例）。 */
 #if WINVER >= 0x0600

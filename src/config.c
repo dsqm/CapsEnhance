@@ -168,7 +168,14 @@ typedef enum {
 
 static WCHAR g_names[CFGLIST_COUNT][CFG_MAX_ENTRIES][CFG_NAME_MAX];
 static int   g_count[CFGLIST_COUNT];
-static BOOL  g_runAsAdmin = TRUE;    /* 缺省启用（缺省配置就是 RunAsAdmin = 1） */
+/* 缺省**不提权**（缺省配置就是 RunAsAdmin = 0）。
+   为什么改默认：绝大多数功能（和弦映射、按词跳转、滚动、Caps+左键拖动普通窗口）
+   都不需要管理员；默认提权只会让每次启动多弹一次 UAC，还带来两个副作用 ——
+   管理员进程看不到普通权限程序的 COM/UIA 对象（WPS 得额外走降权桥），
+   以及进程级测试在本机沙箱里会卡在 UAC 等待。
+   什么时候需要设 1：**要拖动/操作以管理员运行的窗口** —— UIPI 会拦住低完整性
+   进程对高完整性窗口的 SetWindowPos，不提权就拖不动它们。 */
+static BOOL  g_runAsAdmin = FALSE;
 static int   g_logMaxKB   = LOG_MAX_KB_DEFAULT;   /* 日志大小上限（KB），0 = 不限制 */
 static int   g_maxArrowSteps = MAX_ARROW_STEPS_DEFAULT;  /* 逐格步数上限，达到即改道 */
 static BOOL  g_overStepCtrl = TRUE;  /* TRUE=超限改发 Ctrl+方向（原生按词跳转） */
@@ -315,7 +322,7 @@ static const WCHAR* const kDragProcDefaults[] = {
 /* 非 static：供单元测试直接喂指定路径 */
 void ConfigLoadFrom(const WCHAR* path) {
     for (int i = 0; i < CFGLIST_COUNT; i++) g_count[i] = 0;
-    g_runAsAdmin = TRUE;
+    g_runAsAdmin = FALSE;      /* 缺省不提权（理由见 g_runAsAdmin 定义处） */
     g_logMaxKB = LOG_MAX_KB_DEFAULT;
     g_maxArrowSteps = MAX_ARROW_STEPS_DEFAULT;
     g_overStepCtrl = TRUE;
@@ -470,7 +477,9 @@ void ConfigLoad(void) {
             "[General]\n"
             "; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）\n"
             "; 1=启用，0=禁用\n"
-            "RunAsAdmin = 1\n"
+            "; 默认 0：普通用法不需要管理员；只有要拖动/操作**以管理员运行的窗口**\n"
+            "; （UIPI 会拦住低权限进程对高权限窗口的 SetWindowPos）时才需要设 1。\n"
+            "RunAsAdmin = 0\n"
             ";\n"
             "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
             "; 范围 0.." STR(LOG_MAX_KB_MAX) "，超出按上限钳制\n"
@@ -597,7 +606,8 @@ static const struct {
       "\n"
       "; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）\n"
       "; 1=启用，0=禁用\n"
-      "RunAsAdmin = 1\n" },
+      "; 默认 0：只有要拖动/操作**以管理员运行的窗口**时才需要设 1。\n"
+      "RunAsAdmin = 0\n" },
     { "logmaxkb",
       "\n"
       "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
