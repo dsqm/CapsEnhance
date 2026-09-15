@@ -1517,7 +1517,7 @@ int main(void) {
                · 只把本窗口的类名写进 [DragWindowBlacklist] -> 命中（窗口名单生效）；
                · 换成只写进程名，且进程名不是本测试进程 -> 不命中（证明是**两份**，
                  不是"任一份非空就全算命中"）。 */
-            WriteChordIni("[DragWindowBlacklist]\r\n*|CapsEnhanceDragProbe\r\n");
+            WriteChordIni("[DragWindowBlacklist]\r\nCapsEnhanceDragProbe\r\n");
             ConfigLoadFrom(L"bin/chordtest.ini");
             CHECK(ConfigIsDragBlacklisted(w),
                   "AF: [DragWindowBlacklist] 写窗口类 -> 命中");
@@ -1551,13 +1551,13 @@ int main(void) {
             /* ④ 不认识的段名一律忽略（不再为旧段名留兼容入口 —— 本程序只有作者
                一个人用，配置随版本改即可）。用"旧段名 + 本该命中的条目"当样本：
                命中 = 兼容还在，不命中 = 真的被忽略了。 */
-            WriteChordIni("[DragBlacklist]\r\n*|CapsEnhanceDragProbe\r\n");
+            WriteChordIni("[DragBlacklist]\r\nCapsEnhanceDragProbe\r\n");
             ConfigLoadFrom(L"bin/chordtest.ini");
             CHECK(!ConfigIsDragBlacklisted(w),
                   "AF: 未知段名被忽略（旧 [DragBlacklist] 不再认）");
 
             /* ⑤ 类名条目：命中后左键**原样透传**（不接管、不进入拖拽） */
-            WriteChordIni("[DragWindowBlacklist]\r\n*|CapsEnhanceDragProbe\r\n");
+            WriteChordIni("[DragWindowBlacklist]\r\nCapsEnhanceDragProbe\r\n");
             ConfigLoadFrom(L"bin/chordtest.ini");
             Key(CLI_CAPS, TRUE); Pump(2);
             CHECK(MousePt(WM_LBUTTONDOWN, in) == 0,

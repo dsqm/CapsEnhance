@@ -288,30 +288,33 @@ static BOOL ListEmpty(int list) {
     return (list < 0 || list >= CFGLIST_COUNT) ? TRUE : (g_count[list] == 0);
 }
 
-/* 两份拖动黑名单的**内置默认**，与 AltSnap 的默认黑名单一一对应
-   （AltSnap.dni 的 [Blacklist] Windows 与 Processes 两条，AltSnap v1.68）。
+/* 两份拖动黑名单的**内置默认**，取自 AltSnap 的默认黑名单
+   （AltSnap.dni 的 [Blacklist] 段，AltSnap v1.68）。
 
    AltSnap 那两条就是两类：**窗口**（按类名）与**进程**（按 exe 名）。这里也分成
    两份名单，各自独立缺省回落 —— 谁的段没写就用谁的内置默认。
 
-   条目形态（见 ConfigIsDragBlacklisted）：
-     · 窗口名单：`*|ClassName`（AltSnap 语法；`*|` 直接写 `ClassName` 也认）。
-       条目里的**标题字段不支持** —— 取另一个进程的标题要发 WM_GETTEXT，那是跨进程
-       IPC，而判定发生在鼠标钩子上（钩子上绝不能做跨进程消息）。AltSnap 的默认条目
-       每条都带类名，所以默认语义仍然完整。
+   ★ 条目形态：**只写名字本身**。
+     · 窗口名单：窗口**类名**，如 `Shell_TrayWnd`；
      · 进程名单：`name.exe`（.exe 可省，大小写不敏感）。
+   为什么不带 AltSnap 的 `*|` 前缀：AltSnap 的规则是 `exe名:标题|类名`（三段同时
+   匹配，`*` 为通配，`|` 前为空 = 要求标题为空）。而**取另一个进程的窗口标题要发
+   WM_GETTEXT（跨进程 IPC）**，可这个查询发生在**鼠标钩子**上（按下左键那一刻）——
+   钩子上绝不能做跨进程消息。所以本项目**没有标题这一维**，前缀写上去只会误导。
+   相应地，AltSnap 默认里那三条**指定了标题**的（`Program Manager|Progman`、
+   `Volume Control|Tray Volume`、`yui.exe:Yui|YuiWnd`）已删除 —— 只按类名匹配会
+   比 AltSnap 的原意宽。（桌面/任务栏另有代码级兜底，见 WinIsShellClass。）
+
    只有 ini 里没有对应的段时才用内置默认；段一存在，文件说了算。 */
 static const WCHAR* const kDragWinDefaults[] = {
-    /* —— AltSnap [Blacklist] Windows —— */
-    L"*|Progman", L"*|MultitaskingViewFrame", L"*|TaskSwitcherWnd",
-    L"*|TaskSwitcherOverlayWnd", L"*|WorkerW", L"*|Shell_TrayWnd",
-    L"*|BaseBar", L"*|#32768", L"*|XamlExplorerHostIslandWindow",
-    L"*|MozillaDropShadowWindowClass", L"*|VistaSwitcher_SwitcherWnd",
-    L"*|TaskListThumbnailWnd", L"*|NotifyIconOverflowWindow",
-    L"*|Windows.UI.Core.CoreWindow", L"*|NativeHWNDHost",
-    L"*|Xaml_WindowedPopupClass", L"*|Shell_SecondaryTrayWnd",
-    L"*|SimpleWindowSwitcher_{BEA057BB-66C7-4758-A610-FAE6013E9F98}",
-    L"*|YuiWnd",
+    /* —— AltSnap [Blacklist] Windows（去掉标题字段后的类名）—— */
+    L"MultitaskingViewFrame", L"TaskSwitcherWnd", L"TaskSwitcherOverlayWnd",
+    L"WorkerW", L"Shell_TrayWnd", L"BaseBar", L"#32768",
+    L"XamlExplorerHostIslandWindow", L"MozillaDropShadowWindowClass",
+    L"VistaSwitcher_SwitcherWnd", L"TaskListThumbnailWnd",
+    L"NotifyIconOverflowWindow", L"Windows.UI.Core.CoreWindow",
+    L"NativeHWNDHost", L"Xaml_WindowedPopupClass", L"Shell_SecondaryTrayWnd",
+    L"SimpleWindowSwitcher_{BEA057BB-66C7-4758-A610-FAE6013E9F98}",
 };
 static const WCHAR* const kDragProcDefaults[] = {
     /* —— AltSnap [Blacklist] Processes —— */
@@ -536,10 +539,9 @@ void ConfigLoad(void) {
             "[DragWindowBlacklist]\n"
             "; 按住 Caps 用左键拖动可以挪动当前窗口；命中名单的窗口不被接管\n"
             "; （左键原样透传）。下面是一份常用的默认值，可直接增删。\n"
-            "; 条目写法：*|ClassName（也认只写 ClassName）。\n"
-            "; 注意条目里的「标题」字段不支持 —— 读另一个进程的标题要发 WM_GETTEXT\n"
+            "; 条目写法：窗口类名本身，例如 Shell_TrayWnd。\n"
+            "; 只按类名判定，没有「标题」这一维：读另一个进程的标题要发 WM_GETTEXT\n"
             "; （跨进程 IPC），而判定发生在鼠标钩子上，钩子上不能做跨进程消息。\n"
-            "Progman\n"
             "MultitaskingViewFrame\n"
             "TaskSwitcherWnd\n"
             "TaskSwitcherOverlayWnd\n"
@@ -556,7 +558,7 @@ void ConfigLoad(void) {
             "NativeHWNDHost\n"
             "Xaml_WindowedPopupClass\n"
             "Shell_SecondaryTrayWnd\n"
-            "YuiWnd\n"
+            "SimpleWindowSwitcher_{BEA057BB-66C7-4758-A610-FAE6013E9F98}\n"
             ";\n"
             "[DragProcessBlacklist]\n"
             "; 同上，但按进程名判定。\n"
@@ -902,17 +904,14 @@ const WCHAR* ConfigListAt(int list, int i) {
     return g_names[list][i];
 }
 
-/* 窗口名单是否命中这个类名。
-   条目形态：`*|ClassName`（AltSnap 语法）或直接写 `ClassName` —— 两种都取
-   `|` 右边那段的语义（没有 `|` 时整条就是类名）。
-   **不支持标题**：取另一个进程的窗口标题要发 WM_GETTEXT（跨进程 IPC），
-   而这个查询发生在**鼠标钩子**上（按下左键那一刻）—— 钩子上绝不能做跨进程消息。 */
+/* 窗口名单是否命中这个类名（完全匹配、忽略大小写；条目就是类名本身）。
+   **没有标题这一维**：读另一个进程的窗口标题要发 WM_GETTEXT（跨进程 IPC），
+   而这个查询发生在**鼠标钩子**上（按下左键那一刻）—— 钩子上绝不能做跨进程消息。
+   所以条目写法是"光名字"，不带 AltSnap 的 `标题|类名` 前缀（见 kDragWinDefaults）。 */
 static BOOL DragWinHit(const WCHAR* cls) {
     if (!cls || !cls[0]) return FALSE;
     for (int i = 0; i < g_count[CFGLIST_DRAGWIN]; i++) {
-        const WCHAR* it = g_names[CFGLIST_DRAGWIN][i];
-        const WCHAR* bar = wcsrchr(it, L'|');
-        if (_wcsicmp(bar ? bar + 1 : it, cls) == 0) return TRUE;
+        if (_wcsicmp(g_names[CFGLIST_DRAGWIN][i], cls) == 0) return TRUE;
     }
     return FALSE;
 }

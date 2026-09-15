@@ -5,7 +5,7 @@
    五份名单各是一个可增删的列表。列表那一行还有"选取窗口"：点它再点别的窗口，
    取到的东西**先填进左侧输入框**（不直接入名单），确认后点"添加"才加进去 ——
    这样能先看清取到了什么、也能顺手改一改。
-   取什么由名单决定：进程名单取进程名，窗口类名单取**类名**（写成 `*|类名`）。
+   取什么由名单决定：进程名单取进程名，窗口类名单取**类名**（原样，无前缀）。
    保存 = 写回 ini + 让本体重启
    （`CapsEnhance.exe --restart`，本体重读配置才算生效）。
 
@@ -104,7 +104,8 @@ static const Field kFields[] = {
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
 
 /* 选窗时该取什么：进程名单取进程名（`xxx.exe`）；**窗口类名单要取类名**
-   （写成 `*|类名`，AltSnap 写法）—— 把进程名填进"窗口类"名单里永远匹配不上。 */
+   —— 把进程名填进"窗口类"名单里永远匹配不上。取到的类名**原样**填进输入框
+   （不带任何前缀：本项目的窗口名单只按类名判定，没有"标题"这一维）。 */
 #define PICK_PROC  0
 #define PICK_CLASS 1
 
@@ -933,7 +934,7 @@ static void PickFinish(void) {
     PickEnd();
     if (!root) { SetStatus(L"选窗失败：这里没有可取的窗口"); return; }
 
-    /* 取什么由名单决定：进程名单取进程名，窗口类名单取类名（`*|类名`）。 */
+    /* 取什么由名单决定：进程名单取进程名，窗口类名单取类名（原样，无前缀）。 */
     WCHAR name[CFG_NAME_MAX] = L"";
     if (kLists[i].pickKind == PICK_CLASS) {
         WCHAR cls[128] = L"";
@@ -941,7 +942,7 @@ static void PickFinish(void) {
             SetStatus(L"选窗失败：拿不到该窗口的类名");
             return;
         }
-        _snwprintf_s(name, CFG_NAME_MAX, _TRUNCATE, L"*|%s", cls);
+        _snwprintf_s(name, CFG_NAME_MAX, _TRUNCATE, L"%s", cls);
     } else if (!PickProcName(root, name, CFG_NAME_MAX)) {
         SetStatus(L"选窗失败：拿不到该窗口的进程名（权限不足？）");
         return;
