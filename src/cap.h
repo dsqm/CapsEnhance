@@ -362,9 +362,10 @@ void SendClearStuckModifiers(void);          /* 清卡键：逻辑按下且物�
 extern HWND g_mainWnd;
 
 /* ---------- 配置模块（CapsEnhance.ini，与 exe 同目录） ---------- */
-/* 进程名名单编号。三份名单语义完全不同（改通道 / 整段不介入 / 只改滚动粒度），
-   所以是"三份"而不是"一份 + 三个开关"。编号放在这里是为了让 cap.h 就能
-   表达"查哪份名单"（ConfigMatchList），而不必把 config.c 的枚举暴露出去。 */
+/* 名单编号。五份名单语义完全不同（改通道 / 整段不介入 / 只改滚动粒度 /
+   拖动时按窗口类放过 / 拖动时按进程放过），所以是"五份"而不是"一份 + 几个开关"。
+   编号放在这里是为了让 cap.h 就能表达"查哪份名单"（ConfigMatchList），
+   而不必把 config.c 的枚举暴露出去。 */
 #define CFG_LIST_NATIVE      0   /* [NativeWordJump]：不做文本探测，直接发 Ctrl+←/→ */
 #define CFG_LIST_AUTODISABLE 1   /* [AutoDisable]：前台是它时整段不介入          */
 #define CFG_LIST_NOSMOOTH    2   /* [NoSmoothScroll]：持续滚动只发整格           */

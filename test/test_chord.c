@@ -1157,7 +1157,7 @@ int main(void) {
                   "AD: 该窗口的进程在名单里 -> 命中（它到前台时整段不介入）");
             CHECK(!ConfigIsAutoDisabled(NULL), "AD: 没有窗口 -> 不命中（NULL 防御）");
             CHECK(!ConfigIsNativeWordJump(me),
-                  "AD: AutoDisable 名单不会连带命中 NativeWordJump（三份名单各自独立）");
+                  "AD: AutoDisable 名单不会连带命中 NativeWordJump（各名单各自独立）");
             WriteChordIni("[AutoDisable]\r\notherapp.exe\r\n");
             ConfigLoadFrom(L"bin/chordtest.ini");
             CHECK(!ConfigIsAutoDisabled(me), "AD: 名单里没有本进程 -> 不命中");

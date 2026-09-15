@@ -2,8 +2,11 @@
    CapsEnhance 设置程序（CapsEnhanceSettings.exe）
 
    一个**表单式**的 CapsEnhance.ini 编辑器：布尔项是勾选框、数值项是输入框、
-   三份进程名名单各是一个可增删的列表，还能点"选窗添加"再点别的窗口，
-   把那个窗口的进程直接加进名单。保存 = 写回 ini + 让本体重启
+   五份名单各是一个可增删的列表。列表那一行还有"选取窗口"：点它再点别的窗口，
+   取到的东西**先填进左侧输入框**（不直接入名单），确认后点"添加"才加进去 ——
+   这样能先看清取到了什么、也能顺手改一改。
+   取什么由名单决定：进程名单取进程名，窗口类名单取**类名**（写成 `*|类名`）。
+   保存 = 写回 ini + 让本体重启
    （`CapsEnhance.exe --restart`，本体重读配置才算生效）。
 
    为什么不是"直接编辑文本"：配置项的值域（LogMaxKB 0..65536、
@@ -25,8 +28,10 @@
    当前 DPI 取系统消息字体，所有像素尺寸经 S() 缩放；拖到不同缩放的显示器
    上时按 WM_DPICHANGED 重建字体并重排（见 MakeFont / Layout）。
 
-   滚动：内容（数值项 + 三份名单）比窗口高时出竖向滚动条，滚轮和滚动条
+   滚动：内容（数值项 + 五份名单）比窗口高时出竖向滚动条，滚轮和滚动条
    都能滚；底部按钮与状态栏是"窗框"，不参与滚动（见 SetScroll / Layout）。
+   滚轮若停在**某个列表框上**，滚的是那个列表框而不是整个表单
+   （见 WndProc 的 WM_MOUSEWHEEL / ScrollListBy）。
    ============================================================ */
 #define WIN32_LEAN_AND_MEAN
 #include "cap.h"
@@ -64,7 +69,7 @@
 #define IDC_HMUL       207
 #define IDC_SCI        208
 
-/* 三份名单各一组：列表框 / 输入框 / 添加 / 删除 / 标题 / 选窗添加 */
+/* 五份名单各一组：列表框 / 输入框 / 添加 / 删除 / 标题 / 选取窗口 */
 #define IDC_LIST0  300
 #define IDC_NAME0  301
 #define IDC_ADD0   302
@@ -98,23 +103,27 @@ static const Field kFields[] = {
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
 
+/* 选窗时该取什么：进程名单取进程名（`xxx.exe`）；**窗口类名单要取类名**
+   （写成 `*|类名`，AltSnap 写法）—— 把进程名填进"窗口类"名单里永远匹配不上。 */
+#define PICK_PROC  0
+#define PICK_CLASS 1
+
 typedef struct {
     const WCHAR* label;
     int          list;      /* CFG_LIST_* */
+    int          pickKind;  /* PICK_PROC / PICK_CLASS */
 } ListGroup;
 static const ListGroup kLists[] = {
     { L"原生按词跳转 [NativeWordJump]：Caps+N/O 不再探测文本，直接发 Ctrl+←/→",
-      CFG_LIST_NATIVE },
+      CFG_LIST_NATIVE,     PICK_PROC },
     { L"自动屏蔽 [AutoDisable]：这些程序在前台时，本程序完全不介入（CapsLock 恢复正常）",
-      CFG_LIST_AUTODISABLE },
+      CFG_LIST_AUTODISABLE, PICK_PROC },
     { L"持续滚动只发整格 [NoSmoothScroll]：不累积小数刻度（滚了不动）的程序",
-      CFG_LIST_NOSMOOTH },
-    { L"拖动窗口黑名单 [DragWindowBlacklist]：这些**窗口类**不许 Caps+左键拖动"
-      L"（默认值取自 AltSnap）",
-      CFG_LIST_DRAGWIN },
-    { L"拖动进程黑名单 [DragProcessBlacklist]：这些**进程**的窗口一律不许拖动"
-      L"（默认值取自 AltSnap）",
-      CFG_LIST_DRAGPROC },
+      CFG_LIST_NOSMOOTH,   PICK_PROC },
+    { L"拖动窗口黑名单 [DragWindowBlacklist]：这些**窗口类**不许 Caps+左键拖动",
+      CFG_LIST_DRAGWIN,    PICK_CLASS },
+    { L"拖动进程黑名单 [DragProcessBlacklist]：这些**进程**的窗口一律不许拖动",
+      CFG_LIST_DRAGPROC,   PICK_PROC },
 };
 #define LIST_N ((int)(sizeof(kLists) / sizeof(kLists[0])))
 
@@ -522,7 +531,7 @@ static void Layout(int w, int h) {
         MoveWindow(GetDlgItem(g_hwnd, base + 1), x, y - off, S(220), S(24), TRUE);     /* 名字输入 */
         MoveWindow(GetDlgItem(g_hwnd, base + 2), x + S(228), y - off, S(70), S(24), TRUE);
         MoveWindow(GetDlgItem(g_hwnd, base + 3), x + S(304), y - off, S(70), S(24), TRUE);
-        MoveWindow(GetDlgItem(g_hwnd, base + 5), x + S(380), y - off, S(88), S(24), TRUE);  /* 选窗添加 */
+        MoveWindow(GetDlgItem(g_hwnd, base + 5), x + S(380), y - off, S(88), S(24), TRUE);  /* 选取窗口 */
         y += S(28) + S(8);
     }
     g_contentH = y + S(6);
@@ -734,6 +743,33 @@ static LRESULT CALLBACK ChildProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     return CallWindowProcW((WNDPROC)GetWindowLongPtrW(h, GWLP_USERDATA), h, m, w, l);
 }
+/* 这个窗口是不是某个名单列表框（滚轮判定用） */
+static int ListIndexFromHwnd(HWND h) {
+    if (!h) return -1;
+    for (int i = 0; i < LIST_N; i++)
+        if (h == GetDlgItem(g_hwnd, IDC_LIST0 + i * LIST_STRIDE)) return i;
+    return -1;
+}
+
+/* 用滚轮滚列表框。
+   为什么自己发 WM_VSCROLL 而不是把 WM_MOUSEWHEEL 原样转给列表框：所有子控件都
+   被子类过程 ChildProc 接管，而它会把滚轮**转回主窗口**（那是以前"滚轮只滚整个
+   表单"的做法）—— 原样转发就会转成死循环。
+   步长跟随系统设置（SPI_GETWHEELSCROLLLINES）；用户把"每次滚多少行"设成 0
+   表示不滚动，那就真的不滚。 */
+static void ScrollListBy(HWND lb, int delta) {
+    int notches = delta / WHEEL_DELTA;
+    if (!notches) return;
+    DWORD lines = 3;
+    if (!SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0)) lines = 3;
+    const BOOL page = (lines == WHEEL_PAGESCROLL);
+    if (!page && lines == 0) return;                 /* 系统设置：不使用滚轮滚动 */
+    int n = (int)(page ? 1 : lines) * (notches < 0 ? -notches : notches);
+    const WPARAM cmd = (WPARAM)(page ? (notches > 0 ? SB_PAGEUP : SB_PAGEDOWN)
+                                     : (notches > 0 ? SB_LINEUP : SB_LINEDOWN));
+    for (int k = 0; k < n; k++) SendMessageW(lb, WM_VSCROLL, cmd, 0);
+}
+
 static void HookChild(HWND h) {
     if (h) SetWindowLongPtrW(h, GWLP_USERDATA,
                              SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)ChildProc));
@@ -877,7 +913,9 @@ static void PickBegin(int i) {
     g_pickList = i;
     SetCapture(g_hwnd);
     SetCursor(LoadCursorW(NULL, (LPCWSTR)(ULONG_PTR)IDC_CROSS));
-    SetStatus(L"选窗中：点哪个窗口就加哪个进程（Esc/右键取消）");
+    SetStatus(kLists[i].pickKind == PICK_CLASS
+                  ? L"选窗中：点哪个窗口就取它的**窗口类**填进输入框（Esc/右键取消）"
+                  : L"选窗中：点哪个窗口就取它的**进程名**填进输入框（Esc/右键取消）");
     PickTrack();
 }
 
@@ -894,16 +932,29 @@ static void PickFinish(void) {
     }
     PickEnd();
     if (!root) { SetStatus(L"选窗失败：这里没有可取的窗口"); return; }
+
+    /* 取什么由名单决定：进程名单取进程名，窗口类名单取类名（`*|类名`）。 */
     WCHAR name[CFG_NAME_MAX] = L"";
-    if (!PickProcName(root, name, CFG_NAME_MAX)) {
+    if (kLists[i].pickKind == PICK_CLASS) {
+        WCHAR cls[128] = L"";
+        if (!GetClassNameW(root, cls, 128) || !cls[0]) {
+            SetStatus(L"选窗失败：拿不到该窗口的类名");
+            return;
+        }
+        _snwprintf_s(name, CFG_NAME_MAX, _TRUNCATE, L"*|%s", cls);
+    } else if (!PickProcName(root, name, CFG_NAME_MAX)) {
         SetStatus(L"选窗失败：拿不到该窗口的进程名（权限不足？）");
         return;
     }
-    if (AddListEntry(i, name)) {
-        MarkDirty();
-        SetStatus(L"已把 %s 加进名单 —— Ctrl+S 保存并重启 CapsEnhance", name);
-    } else {
-        SetStatus(L"%s 已在该名单里，没有重复添加", name);
+
+    /* ★ 只**填进输入框**，不直接加进名单 —— 由用户确认后点"添加"。
+       这样能先看清取到的是什么、也能顺手改一改（比如只留进程名的主体）。 */
+    {
+        HWND ed = GetDlgItem(g_hwnd, IDC_LIST0 + i * LIST_STRIDE + 1);
+        SetWindowTextW(ed, name);
+        SetFocus(ed);
+        SendMessageW(ed, EM_SETSEL, 0, -1);     /* 全选：直接打字就能覆盖 */
+        SetStatus(L"已取到 %s —— 确认后点「添加」才会加进名单", name);
     }
 }
 
@@ -1003,11 +1054,24 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         SetScroll(pos);
         return 0;
     }
-    case WM_MOUSEWHEEL:
-        /* 子控件（见 ChildProc）把滚轮转到这里；选窗态下滚轮无意义，吞掉 */
-        if (g_pickList < 0)
-            SetScroll(ScrollPos() - ((short)HIWORD(w)) / WHEEL_DELTA * S(48));
+    case WM_MOUSEWHEEL: {
+        /* 子控件（见 ChildProc）把滚轮转到这里。规则：
+             ① 选窗态下滚轮无意义 -> 吞掉；
+             ② 光标停在某个**名单列表框**上 -> 滚那个列表框（以前滚轮只滚整个表单，
+                列表框只能拖滚动条）；
+             ③ 否则滚整个表单。 */
+        if (g_pickList >= 0) return 0;
+        POINT pt;
+        pt.x = (LONG)(short)LOWORD(l);
+        pt.y = (LONG)(short)HIWORD(l);
+        HWND over = WindowFromPoint(pt);
+        if (ListIndexFromHwnd(over) >= 0) {
+            ScrollListBy(over, (int)(short)HIWORD(w));
+            return 0;
+        }
+        SetScroll(ScrollPos() - ((short)HIWORD(w)) / WHEEL_DELTA * S(48));
         return 0;
+    }
     case WM_DPICHANGED:
         /* 拖到另一块不同缩放的显示器上：DPI 变了 -> 字体与所有尺寸都要重算，
            并按系统给的建议矩形调整窗口（否则窗口大小不变、内容挤在一起）。 */
@@ -1177,7 +1241,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         HookChild(ed);
         MakeBtn(hInst, g_hwnd, L"添加", base + 2);
         MakeBtn(hInst, g_hwnd, L"删除", base + 3);
-        MakeBtn(hInst, g_hwnd, L"选窗添加", base + 5);
+        MakeBtn(hInst, g_hwnd, L"选取窗口", base + 5);   /* 只填输入框，还得点"添加" */
     }
 
     /* 底部"窗框"最后建：z 序压在表单内容之上，滚动时挡住溢出的内容 */

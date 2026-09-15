@@ -42,9 +42,9 @@
    进程名完全匹配（大小写不敏感，.exe 后缀可写可不写）。
    文件不存在时写出一个带注释的模板。
 
-   三份名单**各自独立**：它们语义完全不同（改通道 / 整段不介入 / 只改滚动
-   粒度），共用一份就等于"任一命中都会触发所有行为"。所以名单是"加了索引
-   的数组"，而不是"一个数组 + 几个常量"。
+   五份名单**各自独立**：它们语义完全不同（改通道 / 整段不介入 / 只改滚动
+   粒度 / 拖动按窗口类放过 / 拖动按进程放过），共用一份就等于"任一命中都会
+   触发所有行为"。所以名单是"加了索引的数组"，而不是"一个数组 + 几个常量"。
    占用：3 × 128 条 × 64 字符的静态数组（约 48KB），无动态增长。 */
 
 /* CFG_MAX_ENTRIES / CFG_NAME_MAX 在 cap.h（设置程序也要用） */
@@ -535,8 +535,8 @@ void ConfigLoad(void) {
             ";\n"
             "[DragWindowBlacklist]\n"
             "; 按住 Caps 用**左键拖动**可以挪动当前窗口；命中名单的窗口不被接管\n"
-            "; （左键原样透传）。默认值与 AltSnap 的 [Blacklist] Windows 一致。\n"
-            "; 条目写法：*|ClassName（AltSnap 写法）或直接写 ClassName。\n"
+            "; （左键原样透传）。下面是一份常用的默认值，可直接增删。\n"
+            "; 条目写法：*|ClassName（也认只写 ClassName）。\n"
             "; 注意条目里的**标题字段不支持** —— 读另一个进程的标题要发 WM_GETTEXT\n"
             "; （跨进程 IPC），而判定发生在鼠标钩子上，钩子上不能做跨进程消息。\n"
             "Progman\n"
@@ -559,7 +559,7 @@ void ConfigLoad(void) {
             "YuiWnd\n"
             ";\n"
             "[DragProcessBlacklist]\n"
-            "; 同上，但按**进程名**判定。默认值与 AltSnap 的 [Blacklist] Processes 一致。\n"
+            "; 同上，但按**进程名**判定。\n"
             "; 条目写法：name.exe（.exe 可省，大小写不敏感）\n"
             "StartMenuExperienceHost.exe\n"
             "SearchApp.exe\n"
@@ -873,7 +873,7 @@ BOOL ConfigIsNativeWordJump(HWND focus) {
        kUpgrades 里那份注释块，值用当前值，不是默认值）；
      · 名单段：注释与空行保留，**名字行整段重建**（顺序即界面里的顺序）；
      · 其它段 / 未知键：原样保留；BOM 与行尾风格（LF / CRLF）跟随原文件；
-     · 文件不存在：按"新建"处理（[General] + 全部键 + 三份名单段）。 */
+     · 文件不存在：按"新建"处理（[General] + 全部键 + 五份名单段）。 */
 
 void ConfigSetRunAsAdmin(BOOL v)          { g_runAsAdmin = !!v; }
 void ConfigSetLogMaxKB(int v)             { g_logMaxKB = ClampLogMaxKB(v); }
