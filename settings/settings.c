@@ -120,9 +120,9 @@ static const ListGroup kLists[] = {
       CFG_LIST_AUTODISABLE, PICK_PROC },
     { L"持续滚动只发整格 [NoSmoothScroll]：不累积小数刻度（滚了不动）的程序",
       CFG_LIST_NOSMOOTH,   PICK_PROC },
-    { L"拖动窗口黑名单 [DragWindowBlacklist]：这些**窗口类**不许 Caps+左键拖动",
+    { L"拖动窗口黑名单 [DragWindowBlacklist]：这些窗口类不许 Caps+左键拖动",
       CFG_LIST_DRAGWIN,    PICK_CLASS },
-    { L"拖动进程黑名单 [DragProcessBlacklist]：这些**进程**的窗口一律不许拖动",
+    { L"拖动进程黑名单 [DragProcessBlacklist]：这些进程的窗口一律不许拖动",
       CFG_LIST_DRAGPROC,   PICK_PROC },
 };
 #define LIST_N ((int)(sizeof(kLists) / sizeof(kLists[0])))
@@ -914,8 +914,8 @@ static void PickBegin(int i) {
     SetCapture(g_hwnd);
     SetCursor(LoadCursorW(NULL, (LPCWSTR)(ULONG_PTR)IDC_CROSS));
     SetStatus(kLists[i].pickKind == PICK_CLASS
-                  ? L"选窗中：点哪个窗口就取它的**窗口类**填进输入框（Esc/右键取消）"
-                  : L"选窗中：点哪个窗口就取它的**进程名**填进输入框（Esc/右键取消）");
+                  ? L"选窗中：点哪个窗口就取它的窗口类填进输入框（Esc/右键取消）"
+                  : L"选窗中：点哪个窗口就取它的进程名填进输入框（Esc/右键取消）");
     PickTrack();
 }
 
