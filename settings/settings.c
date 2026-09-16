@@ -68,6 +68,9 @@
 #define IDC_FASTMS     206
 #define IDC_HMUL       207
 #define IDC_SCI        208
+#define IDC_IME_CAPS   209
+#define IDC_IME_LSHF   210
+#define IDC_IME_RSHF   211
 
 /* 五份名单各一组：列表框 / 输入框 / 添加 / 删除 / 标题 / 选取窗口 */
 #define IDC_LIST0  300
@@ -100,6 +103,10 @@ static const Field kFields[] = {
     { IDC_FASTMS,    L"持续滚动最快速度（越小越快）",                  L"毫秒/格", 0, 20, 60000 },
     { IDC_HMUL,      L"Caps+Shift+滚轮 横向倍数（0 = 关闭）",          L"倍",     0, 0, 16 },
     { IDC_SCI,       L"允许读取 Scintilla 程序内存（关掉则退回逐格）", NULL,      1, 0, 0 },
+    /* 单键切换输入法：0=不处理 1=切中文 2=切英文（值域与语义只在 config.c 定义） */
+    { IDC_IME_CAPS,  L"单击 Caps 时切输入法（0=不处理 1=中文 2=英文）",  NULL,     0, 0, 2 },
+    { IDC_IME_LSHF,  L"单击左 Shift 时切输入法（同上；英文键盘下都不处理）", NULL,   0, 0, 2 },
+    { IDC_IME_RSHF,  L"单击右 Shift 时切输入法（同上；英文键盘下都不处理）", NULL,   0, 0, 2 },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
 
@@ -298,6 +305,9 @@ static void LoadConfig(void) {
             case IDC_INTERVAL: SetIntField(c, ConfigGetAutoScrollInterval()); break;
             case IDC_FASTMS:   SetIntField(c, ConfigGetAutoScrollFastMs()); break;
             case IDC_HMUL:     SetIntField(c, ConfigGetWheelHScrollMul()); break;
+            case IDC_IME_CAPS: SetIntField(c, ConfigGetImeMode(IME_KEY_CAPS)); break;
+            case IDC_IME_LSHF: SetIntField(c, ConfigGetImeMode(IME_KEY_LSHIFT)); break;
+            case IDC_IME_RSHF: SetIntField(c, ConfigGetImeMode(IME_KEY_RSHIFT)); break;
             default: break;
             }
         }
@@ -352,6 +362,9 @@ static BOOL SaveConfig(void) {
             case IDC_INTERVAL: ConfigSetAutoScrollInterval(v); break;
             case IDC_FASTMS:   ConfigSetAutoScrollFastMs(v); break;
             case IDC_HMUL:     ConfigSetWheelHScrollMul(v); break;
+            case IDC_IME_CAPS: ConfigSetImeMode(IME_KEY_CAPS, v); break;
+            case IDC_IME_LSHF: ConfigSetImeMode(IME_KEY_LSHIFT, v); break;
+            case IDC_IME_RSHF: ConfigSetImeMode(IME_KEY_RSHIFT, v); break;
             default: break;
             }
         }

@@ -46,6 +46,28 @@
 #define WM_RESTART_REQUEST (WM_APP + 12) /* 外部请求重启（--restart / 设置程序保存后） */
 #define WM_AUTODISABLE   (WM_APP + 13) /* 钩子 -> 主线程：自动屏蔽状态变化（wParam=1 命中名单） */
 
+/* ---------- 单键切换输入法（src/ime.c） ----------
+   三个"单键"各配一个模式值（IME_MODE_*），配置里是 [General] 的
+   ImeCapsMode / ImeLShiftMode / ImeRShiftMode。
+   为什么是"每键一个模式值"而不是三个布尔开关：三个键的差别只有"切到哪一边"
+   这一个维度，做成数据之后加一个键只加一行常量，判定代码一处不动 —— 与
+   keymap.c"属性写在表里、不在逻辑里列举"是同一条规矩。 */
+#define IME_MODE_OFF 0   /* 不处理 */
+#define IME_MODE_CN  1   /* 强制切到中文 */
+#define IME_MODE_EN  2   /* 强制切到英文 */
+
+#define IME_KEY_CAPS   0   /* 单击 CapsLock */
+#define IME_KEY_LSHIFT 1   /* 单击左 Shift  */
+#define IME_KEY_RSHIFT 2   /* 单击右 Shift  */
+#define IME_KEY_COUNT  3
+
+/* Shift「单击」的时长上限：按下到抬起超过它就算"当修饰键用"，不切输入法。
+   Caps **不需要**这个上限 —— 它是和弦首键，松手时"本次会话没触发过任何动作"
+   就等价于单击，按多久都算。
+   放在这里而不是做成配置项：它是"点一下"这个手势的定义，不是口味旋钮
+   （与 REPEAT_FIRST_DELAY / REPEAT_INTERVAL 同一类）。 */
+#define IME_TAP_MS 300
+
 #define PROBE_KEY      VK_OEM_3    /* 按住 C 时按 ` 触发焦点探测 */
 
 /* WM_TRIG_DOWN / WM_TRIG_UP 的 lParam 快照位（钩子在**事件发生的那一刻**取的
@@ -394,7 +416,9 @@ int  ConfigGetWheelScrollMul(void);         /* [General] WheelScrollMul：Caps+�
 int  ConfigGetWheelHScrollMul(void);        /* [General] WheelHScrollMul：Caps+Shift+滚轮 横向倍数，0=关闭 */
 int  ConfigGetAutoScrollInterval(void);     /* [General] AutoScrollInterval：持续滚动初始速度(ms/格) */
 int  ConfigGetAutoScrollFastMs(void);        /* [General] AutoScrollFastMs：持续滚动最快速度(ms/格) */
-BOOL ConfigGetAllowScintillaRead(void);     /* [General] AllowScintillaRead：允许 Scintilla 通道读目标进程内存（0=关闭该通道） */
+int  ConfigGetAllowScintillaRead(void);     /* [General] AllowScintillaRead：允许 Scintilla 通道读目标进程内存（0=关闭该通道） */
+/* 单键切换输入法：key 为 IME_KEY_*，返回 IME_MODE_*（0=不处理 1=中文 2=英文） */
+int  ConfigGetImeMode(int key);
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中 [NativeWordJump] */
 BOOL ConfigIsAutoDisabled(HWND focus);      /* 前台窗口的进程是否命中 [AutoDisable]（命中 = 整段不介入） */
 BOOL ConfigIsDragBlacklisted(HWND hwnd);    /* 是否命中两份拖动黑名单之一（[DragWindowBlacklist] 按类名 / [DragProcessBlacklist] 按进程名） */
@@ -416,6 +440,7 @@ void ConfigSetAutoScrollInterval(int v);
 void ConfigSetAutoScrollFastMs(int v);
 void ConfigSetWheelHScrollMul(int v);
 void ConfigSetAllowScintillaRead(BOOL v);
+void ConfigSetImeMode(int key, int v);      /* key = IME_KEY_*，v = IME_MODE_*（越界按键忽略） */
 void        ConfigSetList(int list, const WCHAR* const* names, int n); /* 整份替换 */
 int         ConfigListCount(int list);
 const WCHAR* ConfigListAt(int list, int i);
@@ -431,6 +456,27 @@ void LogNewSession(void);            /* 开始记录时调用：新建一个以�
 void NavProbe(void);                 /* 探测当前焦点控件并写入日志 + 弹窗 */
 void NavBaseInfo(void);              /* 启动时采集系统/环境基线（不落盘，C+` 诊断时输出） */
 void NavBaseAppendLine(const WCHAR* text);   /* 往基线里追加一行（main.c 补 DPI/坐标空间自检用） */
+
+/* ================= 输入法单键切换（src/ime.c） =================
+   **单击** Caps / 左 Shift / 右 Shift 时，无视当前输入法状态强制切到中文或英文
+   （对应 KBLAutoSwitch 的"特殊热键"、InputTip 的 IME.SetInputMode）。
+
+   判"单击"在 hook.c（那里才看得到每一次按下/抬起），真正干活在**本模块的专用
+   线程**上 —— 切换要向别的进程的 IME 窗口连发 3 条 SendMessageTimeout
+   （每条最多等 200ms），跑在承载钩子的主线程上就是把键盘冻住几百毫秒，
+   那正是 act.c 存在的原因。
+
+   两条闸门（都在这条线程里判，所以钩子路径上不增加任何系统调用）：
+     · **英文键盘（主语言 0x09）一律不处理** —— 三个键都算，Caps 也一样。
+       本程序只切"当前输入法"的中/英状态，**不替用户换键盘布局**（那等于改他的
+       输入环境，与"不写注册表、不改系统设置"的边界相冲突）。所以停在英文键盘
+       上时按这三个键没反应，是刻意的行为，不是失灵。
+     · [AutoDisable] 名单：前台程序命中即不介入（与"Caps 整段不介入"同一份名单）。
+   注：这里与 KBLAutoSwitch / InputTip 的做法**不同** —— 它们会主动把键盘布局切到
+   中文（InputTip 甚至会"没装就装一个"），本项目刻意不做这一步。 */
+void ImeRequest(int key);   /* 钩子：IME_KEY_* 被单击了。**只投递，绝不阻塞** */
+void ImeLaneStart(void);    /* act.c 的 ActStart 调用 */
+void ImeLaneStop(void);     /* act.c 的 ActStop 调用 */
 
 /* ---------- 按词跳转模块 ---------- */
 int NavJump(int dir, BOOL shift);      /* 前台控件 + dir + shift(选区=F) -> 移动；返回移动格数(<0失败) */

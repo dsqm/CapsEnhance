@@ -23,6 +23,8 @@ int  ConfigGetAutoScrollFastMs(void);
 int  ConfigGetAutoScrollInterval(void);
 BOOL ConfigMatchList(int list, const WCHAR* exeName);
 BOOL ConfigGetAllowScintillaRead(void);
+int  ConfigGetImeMode(int key);
+void ConfigSetImeMode(int key, int v);
 BOOL IsRunElevated(void);
 /* 设置程序用的写回接口 */
 void ConfigSetRunAsAdmin(BOOL v);
@@ -364,6 +366,61 @@ int main(void) {
     ConfigLoadFrom(L"bin/cfgtest.ini");
     EXPECT(ConfigGetAllowScintillaRead(), "CFG: 非 General 段的 AllowScintillaRead 不生效");
 
+    /* 单键切换输入法：ImeCapsMode / ImeLShiftMode / ImeRShiftMode
+         IME_MODE_OFF(0)=不处理   IME_MODE_CN(1)=切中文   IME_MODE_EN(2)=切英文
+       三个键只差"切到哪一边"这一个维度，所以是**每键一个模式值**而不是三个
+       独立开关：加一个键只加一行常量，hook/ime 的判定代码一处不动。
+       默认值（Caps=中文 / 左Shift=英文 / 右Shift=中文）就是需求里定的行为 ——
+       这几条断言是它的保险丝（左 Shift 必须是"切英文"，写反了整个功能反着来）。 */
+    WriteIni("[General]\r\n\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_CN &&
+           ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_EN &&
+           ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_CN,
+           "CFG: 输入法键缺省为 Caps=中文 / 左Shift=英文 / 右Shift=中文");
+    WriteIni("[General]\r\nImeCapsMode = 0\r\nImeLShiftMode = 1\r\nImeRShiftMode = 2\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_OFF &&
+           ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_CN &&
+           ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_EN,
+           "CFG: 三个输入法键各自独立生效（0/1/2 互不干扰）");
+    /* 越界钳到上限 2（IME_MODE_MAX）—— 数值走的是 ClampInt，不是"非法回落默认"。
+       这里很容易写成"回落默认"，但模式值和滚轮倍数一样是**钳制**语义：
+       用户写了 9，得到的是"切英文"而不是"用缺省的中文"（后者会让人以为没生效）。 */
+    WriteIni("[General]\r\nImeCapsMode = 9\r\nImeLShiftMode = 9\r\nImeRShiftMode = 9\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_EN &&
+           ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_EN &&
+           ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_EN,
+           "CFG: 输入法模式超过 2 钳到 2（切英文）");
+    WriteIni("[General]\r\nImeCapsMode = abc\r\nImeLShiftMode =\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_CN &&
+           ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_EN &&
+           ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_CN,
+           "CFG: 输入法模式非法/空值回落各自默认值");
+    WriteIni("[Other]\r\nImeCapsMode = 0\r\nImeLShiftMode = 0\r\nImeRShiftMode = 0\r\n");
+    ConfigLoadFrom(L"bin/cfgtest.ini");
+    EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_CN &&
+           ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_EN &&
+           ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_CN,
+           "CFG: 非 General 段的输入法键不生效");
+    /* 编号越界（调用方算错 IME_KEY_*）：一律"不处理"，且绝不读越界内存。
+       "不处理"是最安全的缺省 —— 宁可什么都不做，也不要对一个错的键去切输入法。 */
+    EXPECT(ConfigGetImeMode(-1) == IME_MODE_OFF &&
+           ConfigGetImeMode(IME_KEY_COUNT) == IME_MODE_OFF,
+           "CFG: 输入法键编号越界返回 0（不处理）");
+    /* 写回接口同样走钳制，越界键号直接忽略（设置界面改值后 ConfigSaveFile
+       落盘的必须是合法值） */
+    ConfigSetImeMode(IME_KEY_CAPS, 5);
+    ConfigSetImeMode(IME_KEY_LSHIFT, 0);
+    ConfigSetImeMode(IME_KEY_RSHIFT, -3);
+    ConfigSetImeMode(IME_KEY_COUNT, 1);          /* 越界键号：应被忽略 */
+    EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_EN &&
+           ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_OFF &&
+           ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_OFF,
+           "CFG: ConfigSetImeMode 钳制到 0..2，越界键号被忽略");
+
     /* 激活键列表 EnhanceKeys / ShiftKeys 已**从配置里去掉**（它们是"和弦语法"
        的一部分，不是给用户调的旋钮）：解析器不再认这两个键名、KeyMapInit 也
        不读配置 —— 激活键固定为 cap.h 的 MODE_*_KEYS_DEFAULT（Alt+D / F）。
@@ -386,12 +443,17 @@ int main(void) {
         EXPECT(ConfigGetAutoScrollInterval() == 1500, "UPG: 补齐 AutoScrollInterval 默认值");
         EXPECT(ConfigGetWheelScrollMul() == 3, "UPG: 补齐 WheelScrollMul 默认值");
         EXPECT(ConfigGetAutoScrollFastMs() == 800, "UPG: 补齐 AutoScrollFastMs 默认值");
+        EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_CN &&
+               ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_EN &&
+               ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_CN,
+               "UPG: 补齐三个输入法键的默认值");
         KeyMapInit();
         EXPECT(ModeKeyCount(MODE_ENHANCE) == 2 && ModeKeyCount(MODE_SHIFT) == 1,
                "UPG: 激活键是编译期常量（Alt+D / F），与配置文件无关");
         FILE* fc = NULL;
         int hasLog = 0, hasSteps = 0, hasMode = 0, hasWheel = 0;
         int hasInterval = 0, hasHMul = 0, hasFast = 0;
+        int hasImeCaps = 0, hasImeL = 0, hasImeR = 0;
         if (fopen_s(&fc, "bin/cfgtest.ini", "r") == 0 && fc) {
             char line[512];
             while (fgets(line, sizeof(line), fc)) {
@@ -402,12 +464,17 @@ int main(void) {
                 if (strstr(line, "AutoScrollFastMs = 800")) hasFast = 1;
                 if (strstr(line, "AutoScrollInterval = 1500")) hasInterval = 1;
                 if (strstr(line, "WheelHScrollMul = 1")) hasHMul = 1;
+                if (strstr(line, "ImeCapsMode = 1"))   hasImeCaps = 1;
+                if (strstr(line, "ImeLShiftMode = 2")) hasImeL = 1;
+                if (strstr(line, "ImeRShiftMode = 1")) hasImeR = 1;
             }
             fclose(fc);
         }
         EXPECT(hasLog && hasSteps && hasMode && hasWheel && hasInterval
                && hasHMul && hasFast,
                "UPG: 补齐块带注释写回文件（含新增项）");
+        EXPECT(hasImeCaps && hasImeL && hasImeR,
+               "UPG: 补齐块含三个输入法键（连默认值写回）");
     }
     /* 升级的容量算式必须正交覆盖四组边界：
          BOM 有/无  ×  末尾有/无换行  ×  [General] 段有/无  ×  缺部分/缺全部键
@@ -505,6 +572,9 @@ int main(void) {
             { "autoscrollfastms",   "300" },
             { "autoscrollsmooth",   "0"   },
             { "wheelhscrollmul",    "4"   },
+            { "imecapsmode",        "2"   },
+            { "imelshiftmode",      "0"   },
+            { "imershiftmode",      "2"   },
         };
         FILE* fo = NULL;
         if (fopen_s(&fo, "bin/cfgtest.ini", "wb") == 0 && fo) {
@@ -546,6 +616,10 @@ int main(void) {
                "UPG: AutoScrollInterval 自定义值不被覆盖");
         EXPECT(ConfigGetWheelHScrollMul() == 4,
                "UPG: WheelHScrollMul 自定义值不被覆盖（默认 1、样本为 4）");
+        EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_EN &&
+               ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_OFF &&
+               ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_EN,
+               "UPG: 输入法键的自定义值不被覆盖（样本 2/0/2）");
         /* 未识别的键（含已废弃的 EnhanceKeys）不再被留存，也不影响任何取值：
            "通用字符串项"设施已随这两个键一起去掉，配置层只认上面具名解析的那些。 */
         EXPECT(ConfigGetWheelHScrollMul() == 4,
@@ -580,6 +654,9 @@ int main(void) {
         ConfigSetLogMaxKB(999999);                 /* 越界 -> 应被钳到 65536 */
         ConfigSetMaxArrowSteps(-5);                /* 越界 -> 钳到 0 */
         ConfigSetWheelHScrollMul(4);
+        ConfigSetImeMode(IME_KEY_CAPS,   IME_MODE_OFF);   /* 0 = 不处理 */
+        ConfigSetImeMode(IME_KEY_LSHIFT, IME_MODE_CN);    /* 1 = 切中文 */
+        ConfigSetImeMode(IME_KEY_RSHIFT, 7);              /* 越界 -> 钳到 2 */
         {
             static const WCHAR* names[2] = { L"New1.exe", L"  New2  " };
             ConfigSetList(CFG_LIST_NATIVE, names, 2);       /* 整份替换 + 去空白 */
@@ -593,6 +670,10 @@ int main(void) {
         EXPECT(ConfigGetLogMaxKB() == 65536, "SAVE: 越界值写回时被钳到上限 65536");
         EXPECT(ConfigGetMaxArrowSteps() == 0, "SAVE: 负数被钳到 0");
         EXPECT(ConfigGetWheelHScrollMul() == 4, "SAVE: 数值改动已落盘");
+        EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_OFF &&
+               ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_CN &&
+               ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_EN,
+               "SAVE: 输入法键改动已落盘（原本缺键则补进 [General]，越界钳到 2）");
         EXPECT(ConfigListCount(CFG_LIST_NATIVE) == 2 &&
                ConfigListAt(CFG_LIST_NATIVE, 0) &&
                _wcsicmp(ConfigListAt(CFG_LIST_NATIVE, 0), L"New1") == 0 &&
@@ -682,6 +763,9 @@ int main(void) {
        （留着会让用户去改一个没人读的开关） */
     EXPECT(!TemplateHas("AutoScrollSmooth"), "CFG: 模板不再含 AutoScrollSmooth（已废弃）");
     EXPECT(TemplateHas("AllowScintillaRead = 1"),  "CFG: 模板含 AllowScintillaRead 默认值");
+    EXPECT(TemplateHas("ImeCapsMode = 1"),   "CFG: 模板含 ImeCapsMode 默认值（切中文）");
+    EXPECT(TemplateHas("ImeLShiftMode = 2"), "CFG: 模板含 ImeLShiftMode 默认值（切英文）");
+    EXPECT(TemplateHas("ImeRShiftMode = 1"), "CFG: 模板含 ImeRShiftMode 默认值（切中文）");
     /* 激活键不再进配置：模板里**不该**再出现这两项（否则用户会以为能改） */
     EXPECT(!TemplateHas("EnhanceKeys"), "CFG: 模板不再含 EnhanceKeys（已改为编译期常量）");
     EXPECT(!TemplateHas("ShiftKeys"),   "CFG: 模板不再含 ShiftKeys（已改为编译期常量）");

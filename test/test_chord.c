@@ -13,6 +13,20 @@
 #include "cap.h"
 #include "main.c"
 #undef WinMain
+/* ---- 输入法切换桩（src/ime.c 不进本测试）----
+   真实现会向**别的进程**的 IME 窗口发 3 条消息 —— 那既不是本测试要验的东西，
+   也会让"单击 Caps"这类用例依赖机器上装了什么输入法。所以这里桩成"记账"：
+   只记收到了哪些请求，于是 hook.c 里的**单击判定**可以在没有真实输入法的前提下
+   被测到（它才是这里唯一的新逻辑）。 */
+static int g_imeReq[IME_KEY_COUNT];
+void ImeRequest(int key) {
+    if (key >= 0 && key < IME_KEY_COUNT) g_imeReq[key]++;
+}
+void ImeLaneStart(void) { }
+void ImeLaneStop(void)  { }
+static void ResetImeRec(void) {
+    for (int i = 0; i < IME_KEY_COUNT; i++) g_imeReq[i] = 0;
+}
 #include "hook.c"
 #include "send.c"      /* hook.c 的 SendActOnce 现在走统一发送模块 */
 #include "act.c"       /* 动作实际由执行线程完成：本测试要能起/停/等它 */
@@ -1165,6 +1179,88 @@ int main(void) {
         }
         ConfigLoadFrom(L"bin/__absent__.ini");   /* 复位：别影响后面的场景 */
     }
+
+    /* ---- 场景AG：单键切换输入法的"单击"判定（执行在 src/ime.c） ----
+       判定在 hook.c，干活在 ime.c 的**专用线程**上 —— 本测试桩掉了后者（真实现
+       要向别的进程的 IME 窗口发 3 条消息，既不该在单测里做，也会让用例依赖机器
+       上装了什么输入法）。这里验的是"什么算单击"：
+         · Caps 是和弦首键 -> 松手时本次会话没触发过任何动作即为单击（无时长上限）；
+         · Shift 是**真修饰键**（系统照常用它）-> 必须"期间没按别的键"**且**
+           按得够短（IME_TAP_MS）才算单击；
+         · Caps 按住期间的 Shift 属于和弦（Caps+Shift+滚轮要横向），不算单击。 */
+    ConfigLoadFrom(L"bin/__absent__.ini");
+    CHECK(ConfigGetImeMode(IME_KEY_CAPS) == IME_MODE_CN &&
+          ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_EN &&
+          ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_CN,
+          "AG: 缺省 Caps=中文 / 左Shift=英文 / 右Shift=中文");
+
+    Reset(); ResetImeRec();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Key(CLI_CAPS, FALSE); Pump(2);
+    CHECK(g_imeReq[IME_KEY_CAPS] == 1, "AG: 单击 Caps -> 投递一次切换请求");
+
+    Reset(); ResetImeRec();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Key('J', TRUE);  Pump(2);
+    Key('J', FALSE); Pump(2);
+    Key(CLI_CAPS, FALSE); Pump(2);
+    CHECK(g_imeReq[IME_KEY_CAPS] == 0, "AG: Caps+J 是和弦，松手不切输入法");
+    Drain();
+
+    Reset(); ResetImeRec();
+    Key(VK_LSHIFT, TRUE);  Pump(2);
+    Key(VK_LSHIFT, FALSE); Pump(2);
+    CHECK(g_imeReq[IME_KEY_LSHIFT] == 1, "AG: 单击左 Shift -> 投递一次");
+
+    Reset(); ResetImeRec();
+    Key(VK_RSHIFT, TRUE);  Pump(2);
+    Key(VK_RSHIFT, FALSE); Pump(2);
+    CHECK(g_imeReq[IME_KEY_RSHIFT] == 1, "AG: 单击右 Shift -> 投递一次");
+
+    Reset(); ResetImeRec();
+    Key(VK_LSHIFT, TRUE); Pump(2);
+    Key('A', TRUE);  Pump(2);
+    Key('A', FALSE); Pump(2);
+    Key(VK_LSHIFT, FALSE); Pump(2);
+    CHECK(g_imeReq[IME_KEY_LSHIFT] == 0,
+          "AG: Shift+A 不是单击 Shift（期间按了别的键）");
+
+    Reset(); ResetImeRec();
+    Key(VK_LSHIFT, TRUE); Pump(IME_TAP_MS + 80);   /* 按住超过"单击"时长上限 */
+    Key(VK_LSHIFT, FALSE); Pump(2);
+    CHECK(g_imeReq[IME_KEY_LSHIFT] == 0,
+          "AG: Shift 按住超过 IME_TAP_MS -> 当修饰键用，不切");
+
+    Reset(); ResetImeRec();
+    Key(CLI_CAPS, TRUE); Pump(2);
+    Key(VK_LSHIFT, TRUE);  Pump(2);
+    Key(VK_LSHIFT, FALSE); Pump(2);
+    Key(CLI_CAPS, FALSE); Pump(2);
+    CHECK(g_imeReq[IME_KEY_LSHIFT] == 0,
+          "AG: Caps 按住期间的 Shift 属于和弦，不算单击");
+    CHECK(g_imeReq[IME_KEY_CAPS] == 1,
+          "AG: 但 Caps 这一按没触发任何动作 -> 松手仍算单击 Caps");
+    Drain();
+
+    Reset(); ResetImeRec();
+    Key(VK_LSHIFT, TRUE);  Pump(2);
+    Key(VK_RSHIFT, TRUE);  Pump(2);        /* 两个 Shift 同时按 = 组合 */
+    Key(VK_RSHIFT, FALSE); Pump(2);
+    Key(VK_LSHIFT, FALSE); Pump(2);
+    CHECK(g_imeReq[IME_KEY_LSHIFT] == 0 && g_imeReq[IME_KEY_RSHIFT] == 0,
+          "AG: 两个 Shift 同时按 -> 不判定");
+
+    /* 配置里关掉 -> 一次都不投递（钩子路径上连配置查询都不做） */
+    WriteChordIni("[General]\r\nImeCapsMode = 0\r\nImeLShiftMode = 0\r\nImeRShiftMode = 0\r\n");
+    ConfigLoadFrom(L"bin/chordtest.ini");
+    Reset(); ResetImeRec();
+    Key(CLI_CAPS, TRUE);   Pump(2);
+    Key(CLI_CAPS, FALSE);  Pump(2);
+    Key(VK_LSHIFT, TRUE);  Pump(2);
+    Key(VK_LSHIFT, FALSE); Pump(2);
+    CHECK(g_imeReq[IME_KEY_CAPS] == 0 && g_imeReq[IME_KEY_LSHIFT] == 0,
+          "AG: 三个键都设成 0（不处理）-> 不投递任何请求");
+    ConfigLoadFrom(L"bin/__absent__.ini");   /* 复位：别影响后面的场景 */
 
     /* ---- 场景W：**先按修饰键、后按 C**（P1-1 回归） ----
        实测缺陷：按住 Alt 不放、再按 C、然后点按 J，**只发 1 次左键**（本该

@@ -64,7 +64,20 @@ static volatile DWORD g_downMask = 0;
    不触发探测（"有时要按两下"）。复位时必须能清它，所以提到文件作用域。 */
 static volatile BOOL g_probeArmed = FALSE;
 
-/* 本次 CapsLock 是否"决定不介入"（反着按：见 ChordKeyHeldBeforeCaps）。
+/* ---------- 单键切换输入法（判定在这里，干活在 src/ime.c 的专用线程） ----------
+   "单击"的判据两边不同，因为两个键的身份不同：
+     · Caps 是**和弦首键**：按下即吞、期间任何动作都由我们产生。所以"松手时
+       本次会话没触发过任何动作"就等价于单击 —— 按多久都算，不需要时间上限。
+     · Shift 是**真实的修饰键**，系统照常用它（Shift+A、Shift+点击…）。所以
+       必须同时满足"期间没按过别的键"与"按得够短"才算单击（IME_TAP_MS）。
+   判定都只动几个内存变量，真正的查询（黑名单 / 键盘布局 / 跨进程发消息）全在
+   ime.c 的工作线程上 —— 钩子路径上不为此增加任何系统调用。 */
+static BOOL      s_capsUsed = FALSE;    /* 本次 Caps 会话是否产生过动作 */
+static BOOL      s_shiftArmed = FALSE;  /* 某个 Shift 已按下、期间没别的键 */
+static int       s_shiftVk = 0;         /* 上面那个"某个 Shift"是哪个 */
+static ULONGLONG s_shiftTick = 0;       /* 它按下的时刻（判"按得够短"） */
+
+/* 本次 Caps 是否"决定不介入"（反着按：见 ChordKeyHeldBeforeCaps）。
    down 时决定一次，up 沿用 —— 与 g_cMod 一样是"一次会话一份决定"。 */
 static volatile BOOL g_capsSkip = FALSE;
 
@@ -204,6 +217,8 @@ void ModHoldReset(void) {
     g_probeArmed = FALSE;
     g_capsSkip = FALSE;
     g_swallowN = 0;
+    s_capsUsed = FALSE;
+    s_shiftArmed = FALSE;
     ModeResetAll();
 }
 
@@ -296,7 +311,31 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             DWORD bit = (vk == VK_LSHIFT) ? 1u : 2u;
             if (down) s_shiftMask |= bit; else s_shiftMask &= ~bit;
             g_shiftMod = (s_shiftMask != 0);
+            /* ---- 单击 Shift = 切输入法 ----
+               按下记下"待判定"，抬起时若①还是同一个 Shift ②期间没按过别的键
+               ③按得够短，就算一次单击 -> 投递给 ime.c。
+               两个 Shift 同时按（s_shiftArmed 已为真）-> 取消判定：那是组合键
+               的一部分，不是"点一下 Shift"（同时也免掉"松一个留一个"的歧义）。 */
+            if (down) {
+                if (s_shiftArmed) s_shiftArmed = FALSE;
+                else {
+                    s_shiftArmed = TRUE;
+                    s_shiftVk = vk;
+                    s_shiftTick = GetTickCount64();
+                }
+            } else if (s_shiftArmed && vk == s_shiftVk) {
+                int k = (vk == VK_LSHIFT) ? IME_KEY_LSHIFT : IME_KEY_RSHIFT;
+                s_shiftArmed = FALSE;
+                if (!g_cMod && !g_state.paused &&
+                    ConfigGetImeMode(k) != IME_MODE_OFF &&
+                    GetTickCount64() - s_shiftTick <= (ULONGLONG)IME_TAP_MS)
+                    ImeRequest(k);
+            }
         }
+        /* 期间按了别的键 -> 这一下 Shift 是修饰键，不是单击
+           （Shift+A / Shift+方向 之类）。两个 Shift 之间不算（上面已处理）。 */
+        if (down && s_shiftArmed && vk != VK_LSHIFT && vk != VK_RSHIFT)
+            s_shiftArmed = FALSE;
 
         /* ---- C 键（CapsLock）自身 ----
            只有"Caps 是本次和弦第一个按下的键"时才介入；否则整条会话都不处理
@@ -336,6 +375,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 }
                 g_cMod = TRUE;
                 g_downMask = 0;
+                s_capsUsed = FALSE;      /* 新一轮和弦：还没有任何动作发生 */
                 g_probeArmed = FALSE;   /* 新一轮和弦：探测键从"未按过"开始 */
                 PostMessageW(g_mainWnd, WM_CAPS_DOWN, 0, 0);   /* 通知主线程复位 */
                 return 1;
@@ -343,6 +383,13 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             if (g_cMod) {
                 g_cMod = FALSE;
                 g_downMask = 0;
+                /* 单击 Caps：本次会话没触发过任何动作 -> 强制切输入法。
+                   放在最前面：DragEnd / 打断那些是收尾动作，不影响判定。
+                   （"反着按"与"命中 [AutoDisable]"那两条路在 down 时就已放行，
+                   g_cMod 为假，根本走不到这里 —— 与"整段不介入"天然一致。） */
+                if (!s_capsUsed && ConfigGetImeMode(IME_KEY_CAPS) != IME_MODE_OFF)
+                    ImeRequest(IME_KEY_CAPS);
+                s_capsUsed = FALSE;
                 /* 必须先清探测闩锁：若用户"按着 ` 直接松开 C"，` 的 keyup
                    会在上面 `if (!g_cMod) 放行` 分支出去，没人再清闩锁 ——
                    下一次 C+` 的首次按下就哑了。 */
@@ -395,6 +442,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             if (down) SwallowNote(vk);
             else      SwallowTake(vk);           /* 这次 up 已吞，出表 */
             if (down && !g_probeArmed) {
+                if (g_cMod) s_capsUsed = TRUE;  /* 和弦确实触发了动作 */
                 g_probeArmed = TRUE;
                 PostMessageW(g_mainWnd, WM_PROBE, 0, 0);
             } else if (!down) {
@@ -409,6 +457,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             DWORD bit = (DWORD)1 << act;
             if (down) {
                 SwallowNote(vk);
+                if (g_cMod) s_capsUsed = TRUE;   /* 和弦确实触发了动作 */
                 if (!(g_downMask & bit)) {       /* 去抖：忽略系统自动重复 */
                     g_downMask |= bit;
                     /* 正在逐格输出且按下了不同触发键（改道）：立即打断 */
@@ -515,6 +564,10 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
            该放行就来不及了（down 已经没了）。 */
         const BOOL drag = (!g_state.paused && g_cMod && DragBegin(m->pt));
         g_dragSwallowUp = drag;
+        /* 和弦期间按了鼠标键 -> 本次 Caps 会话"做过事"，松手不该再切输入法；
+           Shift+点击 也不是"单击 Shift"。两者的判定都只是几次内存写。 */
+        if (g_cMod) s_capsUsed = TRUE;
+        s_shiftArmed = FALSE;
         /* 左键按下本身就是"用户的新输入"：不管这次有没有开始拖拽，
            持续滚动都要打断 —— 不能因为新功能把这条旧语义丢掉。 */
         ActAutoScrollInterrupt("鼠标键", (int)wParam);
@@ -542,6 +595,10 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
             CapLog("  滚轮 %s delta=%d paused=%d caps=%d enh=%d shift=%d",
                    vert ? "纵" : "横", delta, (int)g_state.paused, (int)g_cMod,
                    (int)ModeDown(MODE_ENHANCE), (int)g_shiftMod);
+
+        /* 按住 Caps 滚了滚轮 -> 本次和弦"做过事"（放大 / 持续 / 横向哪条路都算），
+           松开 Caps 不该再切输入法。 */
+        if (chord && delta != 0) s_capsUsed = TRUE;
 
         /* ★ **唯一的"控制杆"**：Caps + 增强修饰键（默认 Alt/D）按着时的滚轮。
            滚轮此时不是滚动器而是控制杆：同向滚 = 逐档调速（不再多滚一格）、
@@ -593,6 +650,8 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
            抬起不算 —— 那是按下动作的收尾，不是新动作。
            左键不在这里：它有自己的语义（Caps+左键 = 拖动窗口，见 DragBegin）。 */
         ActAutoScrollInterrupt("鼠标键", (int)wParam);
+        if (g_cMod) s_capsUsed = TRUE;
+        s_shiftArmed = FALSE;
     }
 
     return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);

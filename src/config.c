@@ -155,6 +155,18 @@ typedef enum {
    原生 Ctrl+方向（Notepad3 等仍能跳，只是不再是瞬跳）。 */
 #define ALLOW_SCINTILLA_READ_DEFAULT 1
 
+/* ---------- 单键切换输入法（src/ime.c） ----------
+   **单击** Caps / 左 Shift / 右 Shift 时把输入法强制切到哪一边：
+     0 = 不处理   1 = 切中文   2 = 切英文
+   默认：Caps=中文 / 左 Shift=英文 / 右 Shift=中文（与 KBLAutoSwitch 的
+   "特殊热键"默认一致：左 Shift 切英文(中文)、右 Shift 切中文）。
+   为什么是"每键一个模式值"而不是三个开关：三个键只差"切到哪一边"这一个
+   维度，做成数据之后加一个键只加一行常量，判定代码一处不动。 */
+#define IME_CAPS_MODE_DEFAULT   1
+#define IME_LSHIFT_MODE_DEFAULT 2
+#define IME_RSHIFT_MODE_DEFAULT 1
+#define IME_MODE_MAX            2
+
 /* 逐格按词跳转的最大步数：判定是"达到即改道"（n >= 该值就改发 Ctrl+方向），
    所以 4 表示"4 格及以上瞬跳、3 格以内逐格"。0 = 不限制（硬上限仍是 256）。
    为什么需要它而不一律逐格：逐格是 SendInput 一对 down/up + 两次 Sleep，
@@ -184,6 +196,12 @@ static int   g_autoScrollFastMs = AUTOSCROLL_FAST_DEFAULT;       /* 自动滚动
 static int   g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT; /* 自动滚动初始节拍(ms) */
 static int   g_wheelHMul = WHEEL_HMUL_DEFAULT; /* Caps+Shift+滚轮 的横向滚动倍数，0=关闭 */
 static BOOL  g_allowSciRead = ALLOW_SCINTILLA_READ_DEFAULT; /* Scintilla 通道读目标进程内存 */
+/* 单键切换输入法：三个键各自的模式（IME_MODE_*，见 cap.h）。
+   默认值单独一份表 —— 解析、复位、模板三处都要用同一个值，写两遍就会漂移。 */
+static const int kImeModeDefault[IME_KEY_COUNT] = {
+    IME_CAPS_MODE_DEFAULT, IME_LSHIFT_MODE_DEFAULT, IME_RSHIFT_MODE_DEFAULT
+};
+static int   g_imeMode[IME_KEY_COUNT];
 /* 注：AutoScrollSmooth（全局平滑开关）已**删除**：它要表达的是"某些程序
    不累积小数刻度"，那天然是"按程序区分"的事，做成全局开关就等于让所有程序
    一起陪着退化。现在由 [NoSmoothScroll] 名单承担（见 ActAutoScrollWheel），
@@ -270,6 +288,7 @@ static int ClampWheelMul(int v)  { return ClampInt(v, 0, WHEEL_MUL_MAX); }
 static int ClampWheelHMul(int v) { return ClampInt(v, 0, WHEEL_HMUL_MAX); }
 static int ClampInterval(int v)  { return ClampInt(v, AUTOSCROLL_INTERVAL_MIN, AUTOSCROLL_INTERVAL_MAX); }
 static int ClampFastMs(int v)    { return ClampInt(v, AUTOSCROLL_FAST_MIN, AUTOSCROLL_FAST_MAX); }
+static int ClampImeMode(int v)   { return ClampInt(v, 0, IME_MODE_MAX); }
 
 static void AddEntry(int list, const WCHAR* name) {
     if (list < 0 || list >= CFGLIST_COUNT) return;
@@ -334,6 +353,7 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT;
     g_wheelHMul = WHEEL_HMUL_DEFAULT;
     g_allowSciRead = ALLOW_SCINTILLA_READ_DEFAULT;
+    for (int i = 0; i < IME_KEY_COUNT; i++) g_imeMode[i] = kImeModeDefault[i];
 
     FILE* f = NULL;
     if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
@@ -432,6 +452,15 @@ void ConfigLoadFrom(const WCHAR* path) {
                 else if (_wcsicmp(key, L"autoscrollsmooth") == 0) { /* 忽略（已废弃） */ }
                 else if (_wcsicmp(key, L"allowscintillaread") == 0)
                     g_allowSciRead = ParseBoolW(val);
+                else if (_wcsicmp(key, L"imecapsmode") == 0)
+                    g_imeMode[IME_KEY_CAPS] =
+                        ClampImeMode(ParseIntW(val, IME_CAPS_MODE_DEFAULT));
+                else if (_wcsicmp(key, L"imelshiftmode") == 0)
+                    g_imeMode[IME_KEY_LSHIFT] =
+                        ClampImeMode(ParseIntW(val, IME_LSHIFT_MODE_DEFAULT));
+                else if (_wcsicmp(key, L"imershiftmode") == 0)
+                    g_imeMode[IME_KEY_RSHIFT] =
+                        ClampImeMode(ParseIntW(val, IME_RSHIFT_MODE_DEFAULT));
                 /* 其余 [General] 项一律忽略：本项目所有配置项都在上面具名解析。
                    不认识的键（含已废弃的旧键名）留着也只是噪音，不解析、不保存。 */
                 else { /* 忽略未知/废弃键 */ }
@@ -513,6 +542,16 @@ void ConfigLoad(void) {
             "; 设为 0 即整条通道放弃，退回 UIA / IA2 / 原生 Ctrl+方向（仍能跳，\n"
             "; 只是不再是瞬跳）。\n"
             "AllowScintillaRead = " STR(ALLOW_SCINTILLA_READ_DEFAULT) "\n"
+            ";\n"
+            "; 单键切换输入法：**单击**（按下即抬起、期间不按别的键）下面三个键时，\n"
+            "; 无视当前输入法状态强制切到中文或英文。\n"
+            ";   0 = 不处理   1 = 切中文   2 = 切英文\n"
+            "; Caps：任何时候都切（当前是英文键盘时，会先换到已安装的中文键盘）。\n"
+            "; Shift：**前台是英文键盘时不处理**（本来就是英文，切它没意义）。\n"
+            "; 三个键都遵守 [AutoDisable] 名单。\n"
+            "ImeCapsMode = " STR(IME_CAPS_MODE_DEFAULT) "\n"
+            "ImeLShiftMode = " STR(IME_LSHIFT_MODE_DEFAULT) "\n"
+            "ImeRShiftMode = " STR(IME_RSHIFT_MODE_DEFAULT) "\n"
             ";\n"
             "[NativeWordJump]\n"
             "; 命中名单的程序：Caps+N / Caps+O 不做文本探测，\n"
@@ -651,6 +690,19 @@ static const struct {
       "; 设为 0 即整条通道放弃，退回 UIA / IA2 / 原生 Ctrl+方向（仍能跳，\n"
       "; 只是不再是瞬跳）。\n"
       "AllowScintillaRead = " STR(ALLOW_SCINTILLA_READ_DEFAULT) "\n" },
+    { "imecapsmode",
+      "\n"
+      "; 单键切换输入法：**单击**（按下即抬起、期间不按别的键）下面三个键时，\n"
+      "; 无视当前输入法状态强制切到中文或英文。\n"
+      ";   0 = 不处理   1 = 切中文   2 = 切英文\n"
+      "; Caps：任何时候都切（当前是英文键盘时，会先换到已安装的中文键盘）。\n"
+      "; Shift：**前台是英文键盘时不处理**（本来就是英文，切它没意义）。\n"
+      "; 三个键都遵守 [AutoDisable] 名单。\n"
+      "ImeCapsMode = " STR(IME_CAPS_MODE_DEFAULT) "\n" },
+    { "imelshiftmode",
+      "ImeLShiftMode = " STR(IME_LSHIFT_MODE_DEFAULT) "\n" },
+    { "imershiftmode",
+      "ImeRShiftMode = " STR(IME_RSHIFT_MODE_DEFAULT) "\n" },
 };
 
 /* ---- 升级键清单的只读访问（供单元测试**自动**生成 fixture）----
@@ -805,6 +857,11 @@ int ConfigGetWheelHScrollMul(void) {
     return g_wheelHMul;
 }
 
+/* 单键切换输入法：key = IME_KEY_* -> IME_MODE_*（越界一律"不处理"） */
+int ConfigGetImeMode(int key) {
+    return (key >= 0 && key < IME_KEY_COUNT) ? g_imeMode[key] : IME_MODE_OFF;
+}
+
 /* 进程可执行文件名是否命中某份名单（完全匹配，.exe 可选） */
 BOOL ConfigMatchList(int list, const WCHAR* exeName) {
     if (ListEmpty(list) || !exeName || !exeName[0]) return FALSE;
@@ -886,6 +943,10 @@ void ConfigSetAutoScrollInterval(int v)   { g_autoScrollInterval = ClampInterval
 void ConfigSetAutoScrollFastMs(int v)     { g_autoScrollFastMs = ClampFastMs(v); }
 void ConfigSetWheelHScrollMul(int v)      { g_wheelHMul = ClampWheelHMul(v); }
 void ConfigSetAllowScintillaRead(BOOL v)  { g_allowSciRead = !!v; }
+void ConfigSetImeMode(int key, int v) {
+    if (key < 0 || key >= IME_KEY_COUNT) return;
+    g_imeMode[key] = ClampImeMode(v);
+}
 
 /* 名单整体替换（顺序 = 传入顺序）。逐条走 AddEntry 才能拿到"去空白 / 去 .exe
    / 去空行"那套规整 —— 界面里手写的名字与文件里读出来的必须是同一个样子。 */
@@ -977,6 +1038,9 @@ static int GeneralValues(KeyVal* out, int cap) {
     KV("autoscrollfastms",   "AutoScrollFastMs",   "%d", g_autoScrollFastMs);
     KV("wheelhscrollmul",    "WheelHScrollMul",    "%d", g_wheelHMul);
     KV("allowscintillaread", "AllowScintillaRead", "%d", g_allowSciRead ? 1 : 0);
+    KV("imecapsmode",        "ImeCapsMode",        "%d", g_imeMode[IME_KEY_CAPS]);
+    KV("imelshiftmode",      "ImeLShiftMode",      "%d", g_imeMode[IME_KEY_LSHIFT]);
+    KV("imershiftmode",      "ImeRShiftMode",      "%d", g_imeMode[IME_KEY_RSHIFT]);
 #undef KV
     return n;
 }
