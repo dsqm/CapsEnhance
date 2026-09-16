@@ -360,7 +360,12 @@ static void TrayCurrentHint(void) {
         TrayHint(HookMouseAvailable() ? L"正在映射" : L"正在映射（滚轮功能不可用）");
 }
 
-static void TrayAdd(void) {
+/* explorer 重建任务栏时广播的消息号。
+   ★ 必须在建窗**之前**注册：它要进 UIPI 白名单（见 WinMain 里的
+   ChangeWindowMessageFilterEx），而白名单要在建窗后立刻设。 */
+static UINT s_taskbarCreated = 0;
+
+static BOOL TrayAdd(void) {
     memset(&g_nid, 0, sizeof(g_nid));
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
     g_nid.hWnd = g_mainWnd;
@@ -368,11 +373,69 @@ static void TrayAdd(void) {
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TOGGLE_TRAY;
     g_nid.hIcon = LoadAppIcon(FALSE);       /* 通用系统图标早已让人认不出本程序 */
+    if (!g_nid.hIcon) {
+        /* 图标句柄为 NULL 时 NIM_ADD **照样返回成功**，但通知区里是一块
+           点不到、也看不出来的空白 —— 与"图标没加上"对使用者是同一个结果，
+           却是我们的重试查不出来的那种（返回值是 TRUE）。所以这里补兜底：
+           用系统图标保证至少可见，并记一条日志说明来源。 */
+        g_nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+        CapLog("托盘：加载自带图标失败，已退回系统图标（通知区仍可用）");
+    }
     wcscpy_s(g_nid.szTip, 128, APP_NAME);
-    Shell_NotifyIconW(NIM_ADD, &g_nid);
+    return Shell_NotifyIconW(NIM_ADD, &g_nid) ? TRUE : FALSE;
 }
 static void TrayRemove(void) {
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
+}
+
+/* ---------- 图标"没加上"时的定时重试 ----------
+   ★★ 为什么必须有：**计划任务的管理员自启**会在用户登录的瞬间把本程序拉起来，
+   那时 explorer 的任务栏（通知区）常常还没建好 —— Shell_NotifyIcon(NIM_ADD)
+   直接失败。而"任务栏建好了"这个信号，系统只通过一条广播 **TaskbarCreated**
+   发出来；本进程若是管理员（高完整性级别），explorer（中完整性）发来的广播会被
+   **UIPI 拦掉**（低 -> 高 默认禁止），于是再也没人通知我们重建 —— 现象就是
+   "开机后托盘图标时有时无，重启程序就好"。
+   两件事都得做，缺一个都会漏：
+     · 把 TaskbarCreated 放进 UIPI 白名单（覆盖"explorer 后来重启"）；
+     · 即便没收到广播也自己定时重试（覆盖"我们起得太早"，那条广播**早于**
+       我们存在，本来就收不到）。
+   用 SetTimer 而不是 Sleep/轮询：主线程一旦离开"等消息"状态，低级钩子会被
+   系统静默摘除（见 hook.c 顶部）—— 这条规矩在这里同样不能破。 */
+#define TRAY_RETRY_TIMER  3
+#define TRAY_RETRY_MS     1500
+#define TRAY_RETRY_MAX    120     /* ≈3 分钟：够等 explorer 起来；再久就该看日志 */
+static int  s_trayRetryN = 0;
+static BOOL s_trayRetrying = FALSE;
+
+static void TrayStartRetry(void) {
+    if (s_trayRetrying) return;
+    s_trayRetrying = TRUE;
+    s_trayRetryN = 0;
+    SetTimer(g_mainWnd, TRAY_RETRY_TIMER, TRAY_RETRY_MS, NULL);
+}
+static void TrayStopRetry(void) {
+    if (!s_trayRetrying) return;
+    s_trayRetrying = FALSE;
+    KillTimer(g_mainWnd, TRAY_RETRY_TIMER);
+}
+static void TrayRetryTick(void) {
+    s_trayRetryN++;
+    if (TrayAdd()) {
+        TrayCurrentHint();      /* 与 TaskbarCreated 那条同理：把完整提示重建出来 */
+        TrayStopRetry();
+        CapLog("托盘：图标在第 %d 次重试后添加成功（首次添加时任务栏未就绪）",
+               s_trayRetryN);
+        return;
+    }
+    if (s_trayRetryN >= TRAY_RETRY_MAX) {
+        TrayStopRetry();
+        CapLog("托盘：图标连续 %d 次添加失败（约 %d 秒），停止重试 —— 任务栏一直不可用",
+               s_trayRetryN, TRAY_RETRY_MAX * TRAY_RETRY_MS / 1000);
+    }
+}
+/* 图标（重）建：成功就顺带重建完整提示并停掉可能正在跑的重试 */
+static void TrayRebuild(void) {
+    if (TrayAdd()) { TrayCurrentHint(); TrayStopRetry(); }
 }
 /* exe 所在目录（结尾带 '\\'） */
 static void ExeDir(WCHAR* out, size_t cap) {
@@ -589,15 +652,14 @@ static BOOL EnsureSingleInstance(void) {
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    static UINT s_taskbarCreated = 0;
-    if (!s_taskbarCreated)
-        s_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     /* explorer 重启后系统清空了通知区（图标连同悬停提示一起没了），必须重新
        ADD，**并把完整提示一起重建**（只 ADD 的话 szTip 是裸 APP_NAME，
        "（管理员）""正在映射"这些全丢，而且再没有状态变化去补它 —— 用户看到的
        就是"时间一长，悬停提示里管理员那行字不见了"，实为 explorer 悄悄重启过）。
-       此时钩子早已装好，TrayCurrentHint 能读到真实状态，重建出的文案与当时一致。 */
-    if (msg == s_taskbarCreated) { TrayAdd(); TrayCurrentHint(); return 0; }
+       此时钩子早已装好，TrayCurrentHint 能读到真实状态，重建出的文案与当时一致。
+       ★ 这条广播要能被收到，前提是 WinMain 里把它放进了 UIPI 白名单 ——
+       管理员运行时 explorer 的广播本来是会被 UIPI 拦掉的（见 TrayStartRetry）。 */
+    if (msg == s_taskbarCreated && s_taskbarCreated) { TrayRebuild(); return 0; }
 
     switch (msg) {
     /* ---- 和弦引擎事件 ---- */
@@ -752,6 +814,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TIMER: {
+        if (wp == TRAY_RETRY_TIMER) { TrayRetryTick(); return 0; }
         if (wp != 2) break;
         if (!g_cMod) { ResetEngine(); return 0; }
         ULONGLONG now = GetTickCount64();
@@ -865,6 +928,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     if (!EnsureSingleInstance()) return 0;   /* 已有实例在跑：提示后退出 */
 
     /* WNDCLASSEX（不是 WNDCLASS）：小图标 hIconSm 只在 EX 版里有 */
+    /* ★ TaskbarCreated 必须在建窗前注册：它要进下面的 UIPI 白名单。 */
+    s_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = WndProc;
@@ -888,6 +953,14 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 #if WINVER >= 0x0600
     ChangeWindowMessageFilterEx(g_mainWnd, WM_RESTART_REQUEST, MSGFLT_ALLOW, NULL);
     ChangeWindowMessageFilterEx(g_mainWnd, WM_ALREADY_RUNNING, MSGFLT_ALLOW, NULL);
+    /* ★★ TaskbarCreated 也必须放行，而且它是**最要紧**的一条：
+       本程序以管理员运行（RunAsAdmin / 计划任务 /rl HIGHEST）时是高完整性级别，
+       而 explorer 是中完整性 —— 它那条"任务栏重建好了"的广播是**低 -> 高**，
+       默认被 UIPI 丢弃。放不掉它，启动那一刻若赶在任务栏建好之前
+       （计划任务自启的典型情形），图标就永远补不回来（详见 TrayStartRetry）。
+       注册消息（>= 0xC000）同样可以进白名单，与普通消息没有区别。 */
+    if (s_taskbarCreated)
+        ChangeWindowMessageFilterEx(g_mainWnd, s_taskbarCreated, MSGFLT_ALLOW, NULL);
 #endif
 
     /* 本窗口只承载托盘菜单，永不接收文字输入。禁掉 IME/TSF：
@@ -897,8 +970,13 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     ImmAssociateContext(g_mainWnd, NULL);
 
     /* 先建托盘：后面任何一步失败才有地方提示用户。此前钩子安装失败时
-       调 TrayHint，但托盘图标还没创建，提示全部落空 —— 用户看不到原因。 */
-    TrayAdd();
+       调 TrayHint，但托盘图标还没创建，提示全部落空 —— 用户看不到原因。
+       ★ 加了要**看返回值**：自启时任务栏常常还没就绪，NIM_ADD 会直接失败，
+       失败不重试就再也没人补这个图标（见 TrayStartRetry 的说明）。 */
+    if (!TrayAdd()) {
+        CapLog("托盘：首次添加图标失败（任务栏尚未就绪），开始定时重试");
+        TrayStartRetry();
+    }
 
     /* 装钩子之前的准备**必须全部做完**再装钩子 ——
        钩子一生效，C 按住期间的普通键就会被 hook.c 直接吞掉（return 1）。
