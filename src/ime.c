@@ -29,7 +29,17 @@
 
 #pragma comment(lib, "imm32.lib")
 
-/* 某些 SDK 的 imm.h 没有这几条，按标准值补上（与 IMEIndicator 同一套兜底） */
+/* 这几条不都是 imm.h 给的，**缺了就得自己补**（实测 Windows SDK 10.0.26100）：
+     · IMC_SETCONVERSIONMODE(0x2) / IMC_SETOPENSTATUS(0x6) 在 **immdev.h**
+       里 —— 那是给"写输入法的人"用的头，imm.h 不包含它，普通程序拿不到；
+     · IMC_GETCONVERSIONMODE(0x1) / IMC_GETOPENSTATUS(0x5) **整个 SDK 都没有**
+       定义（连 immdev.h 里也只有 SET 那两条）；
+     · IME_CMODE_NATIVE(0x1) 在 imm.h **间接**包含（#include <ime_cmodes.h>）
+       里，通常拿得到，这里的兜底只是保险。
+   数值本身是二十多年来 IMM32 的事实标准（KBLAutoSwitch / InputTip 等一大批
+   工具都在用同一组值），但微软的 WM_IME_CONTROL 文档页**只收录了 0x7 及以上**
+   那几条窗口/字体相关的命令，这几条中英切换命令没有正式文档 —— 这也是
+   "有些第三方输入法不认"的一部分原因（它们只需保证自己那套能用）。 */
 #ifndef IMC_GETCONVERSIONMODE
 #define IMC_GETCONVERSIONMODE 0x0001
 #endif
