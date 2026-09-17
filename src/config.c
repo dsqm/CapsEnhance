@@ -894,24 +894,44 @@ BOOL ConfigIsNoSmoothScroll(HWND focus) {
     return MatchFocus(CFGLIST_NOSMOOTH, focus);
 }
 
-/* 取焦点窗口所属进程的 exe 文件名（含后缀）；失败返回 FALSE */
-BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap) {
-    if (!focus || !out || cap == 0) return FALSE;
+/* 按 PID 取进程映像**全路径**；失败返回 FALSE。
+   "拿不到"本身是正常结果之一：更高级别的受保护进程（System / PPL）、已退出的
+   进程、UWP 那种没有独立映像的宿主，都会走到这里。 */
+BOOL ConfigGetProcessPathByPid(DWORD pid, WCHAR* out, size_t cap) {
+    if (!pid || !out || cap == 0) return FALSE;
     out[0] = 0;
+    /* 只要查询权限。名单匹配与"打开所在文件夹"都只需要路径 ——
+       不去要 PROCESS_VM_READ 那种更重的权限（那会真的被 UIPI/ACL 拦下）。 */
+    HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hp) return FALSE;
+    WCHAR path[PROC_PATH_MAX];
+    DWORD sz = PROC_PATH_MAX;
+    BOOL ok = QueryFullProcessImageNameW(hp, 0, path, &sz);
+    CloseHandle(hp);
+    if (!ok || !sz) return FALSE;
+    _snwprintf_s(out, cap, _TRUNCATE, L"%s", path);
+    return out[0] != 0;
+}
+
+/* 焦点窗口所属进程的映像全路径；失败返回 FALSE。 */
+BOOL ConfigGetProcessPath(HWND focus, WCHAR* out, size_t cap) {
+    if (!focus) return FALSE;
     DWORD pid = 0;
     GetWindowThreadProcessId(focus, &pid);
     if (!pid) return FALSE;
-    /* 只要查询权限；查不到名字就不算命中，正常走文本通道 */
-    HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!hp) return FALSE;
-    WCHAR exe[MAX_PATH];
-    DWORD sz = MAX_PATH;
-    BOOL ok = QueryFullProcessImageNameW(hp, 0, exe, &sz);
-    CloseHandle(hp);
-    if (!ok || !sz) return FALSE;
+    return ConfigGetProcessPathByPid(pid, out, cap);
+}
 
-    WCHAR* fname = exe;
-    for (WCHAR* q = exe; *q; q++) if (*q == L'\\') fname = q + 1;
+/* 取焦点窗口所属进程的 exe 文件名（含后缀、**不含目录**）；失败返回 FALSE。
+   名单匹配只需要名字，路径那一半交回 ConfigGetProcessPath —— 同一个"取路径"
+   只写一份，免得两处各写一遍 OpenProcess + QueryFullProcessImageName。 */
+BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap) {
+    if (!focus || !out || cap == 0) return FALSE;
+    out[0] = 0;
+    WCHAR path[PROC_PATH_MAX];
+    if (!ConfigGetProcessPath(focus, path, PROC_PATH_MAX)) return FALSE;
+    const WCHAR* fname = path;
+    for (const WCHAR* q = path; *q; q++) if (*q == L'\\') fname = q + 1;
     _snwprintf_s(out, cap, _TRUNCATE, L"%s", fname);
     return out[0] != 0;
 }

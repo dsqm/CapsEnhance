@@ -67,6 +67,13 @@ static void RunJob(const ActJob* j) {
                所以也在这一层执行，不走主线程。 */
             if (!WinMoveFocusedToCursor() && g_recording.load())
                 CapLog("  [窗口] 没有可挪的前台窗口（桌面/任务栏，或就是本程序自己）");
+        } else if (ActHasFlag(act, ACTF_OPENFOLDER)) {
+            /* 打开所在文件夹（C+\）：目标窗口取的是 ActJob 里的**开火快照**
+               （见 cap.h 的 ActJob.hwnd），不是现在现读前台窗口。
+               这里只投递：真正的 shell 调用在 folder.c 的一次性线程上跑，
+               所以这条分支**不会**把后面的动作堵在队列里（文件头那条"队列是
+               FIFO"的顾虑对它不成立）。 */
+            FolderOpenRequest(j->hwnd);
         } else {
             /* 诊断：按键动作"发了"与"目标程序认了"是两件事 —— 用户看到
                "按了没反应"时，只有回读光标才能区分。只在记录模式下读，

@@ -256,6 +256,11 @@ static void PostAct(int act, int fillAct, int count, BOOL keep) {
     j.shf     = g_actShf;
     j.count   = count;
     j.keep    = keep;
+    /* 需要"目标窗口"的动作（目前只有"打开所在文件夹"）在这里一并快照 ——
+       与 enh/shf 同一个时机（按下触发键的这一发）、同一个理由：执行线程是
+       异步的，等它跑到时前台窗口可能已经换了（见 cap.h 的 ActJob.hwnd）。
+       postTick 不在这里填：投递时刻由 act.c 的 ActPost 写。 */
+    j.hwnd    = ActHasFlag(act, ACTF_OPENFOLDER) ? GetForegroundWindow() : NULL;
     ActPost(&j);
 }
 
@@ -811,6 +816,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             } else StopEngine();
         }
         /* 其余情况：不是当前动作的抬起，已从栈中移除，不影响当前重复 */
+        return 0;
+    }
+    case WM_FOLDER_OPEN: {           /* 打开所在文件夹失败（folder.c 的一次性线程发来） */
+        /* 为什么绕回来：气泡要动主线程的托盘状态（g_nid），工作线程不能直接弹。
+           成功不发这条消息 —— 成功时文件管理器自己弹出来了，那本身就是反馈。 */
+        switch ((int)wp) {
+        case FOLDER_ERR_SHELLWIN:
+            TrayBalloon(L"打不开所在文件夹：前台是桌面或任务栏，它没有「所在文件夹」。");
+            break;
+        case FOLDER_ERR_SHELL:
+            TrayBalloon(L"打不开所在文件夹：系统拒绝了这次打开请求"
+                        L"（路径解析失败或被拒）。");
+            break;
+        default:   /* FOLDER_ERR_NOPATH 及任何未知码：都按"拿不到路径"说 */
+            TrayBalloon(L"打不开所在文件夹：拿不到该程序的路径（前台没有焦点窗口、"
+                        L"受保护进程、已退出，或 UWP 应用的安装目录解析不到）。");
+            break;
+        }
         return 0;
     }
     case WM_TIMER: {

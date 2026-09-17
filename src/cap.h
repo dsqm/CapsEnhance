@@ -45,6 +45,9 @@
                                        方向同浏览器：滚轮向上 = 向左。钩子已吞掉物理格。 */
 #define WM_RESTART_REQUEST (WM_APP + 12) /* 外部请求重启（--restart / 设置程序保存后） */
 #define WM_AUTODISABLE   (WM_APP + 13) /* 钩子 -> 主线程：自动屏蔽状态变化（wParam=1 命中名单） */
+#define WM_FOLDER_OPEN (WM_APP + 14) /* 打开所在文件夹**失败**：wParam=FOLDER_ERR_*（一次性线程 -> 主线程弹气泡）。
+                                        为什么必须绕回主线程：气泡走 Shell_NotifyIconW + 主线程的 g_nid，
+                                        工作线程直接调就是对它的跨线程访问。成功不发消息（不打扰）。 */
 
 /* ---------- 单键切换输入法（src/ime.c） ----------
    三个"单键"各配一个模式值（IME_MODE_*），配置里是 [General] 的
@@ -96,6 +99,7 @@
 #define ACT_WORD_R 12                /* 按词跳转向右                             */
 #define ACT_PROBE  13                /* 诊断：探测当前焦点控件                */
 #define ACT_MOVEWIN 14               /* 把焦点窗口挪到鼠标光标处（多显示器）  */
+#define ACT_OPENFOLDER 15            /* 打开焦点程序所在文件夹并选中该 exe    */
 
 #define DIR_LEFT 0
 #define DIR_RIGHT 1
@@ -109,6 +113,7 @@
 #define ACTF_PROBE       0x04   /* 诊断：交给 nav.c 的 NavProbe，不走按键发送 */
 #define ACTF_NO_SHIFT    0x08   /* 不吃选区修饰：即使选区模式生效也裸发（开关键用） */
 #define ACTF_MOVEWIN     0x10   /* 挪窗口：交给 winmove.c 的移动动作，不走按键发送 */
+#define ACTF_OPENFOLDER  0x20   /* 打开所在文件夹：交给 folder.c 的 shell 动作，不走按键发送 */
 
 /* ---------- 修饰（和弦）模式 ----------
    按住 C 期间生效的"组合修饰"。**激活键是编译期常量，不读配置**（见下面
@@ -225,6 +230,9 @@ typedef struct {
     BOOL shf;       /* 开火快照：选区模式（带 Shift）             */
     int  count;     /* fillAct 的已发送次数（补齐时用）           */
     BOOL keep;      /* 引擎复位（松开 C）时是否保留，见 act.c 的 ActClearKeepFill */
+    HWND hwnd;      /* 开火快照：目标窗口（只有 ACTF_OPENFOLDER 用）。
+                       捕获时机必须与 enh/shf 一样是"按下触发键的那一刻"（见 main.c 的 PostAct）：
+                       执行线程是异步的，等它跑到时前台窗口可能已经换了。 */
     ULONGLONG postTick; /* 投递时刻（GetTickCount64）：诊断打点用，不参与判定 */
 } ActJob;
 
@@ -247,6 +255,33 @@ BOOL WinMoveFocusedToCursor(void);
                         /* 动作入口：把焦点程序的**顶层**窗口挪到光标处 */
 BOOL WinIsShellClass(HWND hwnd);
                         /* 桌面 / 任务栏 / 通知区那类"不是普通窗口"的壳窗口（winmove 与 drag 共用） */
+
+/* ---------- 打开焦点程序所在文件夹（src/folder.c） ----------
+   C + \ ：把"前台那个程序所在文件夹"用**系统的标准接口**打开，并选中该 exe 本身
+   —— 等价于资源管理器右键的「打开文件所在的位置」。
+
+   用的是 shell 的公开接口，**不拼 explorer.exe 命令行**：
+     · `SHParseDisplayName(路径)`      路径 -> 绝对 PIDL（交给 shell 命名空间去解析）
+     · `SHOpenFolderAndSelectItems(pidl, 0, NULL, 0)`
+       官方文档写明：`cidl = 0` 时传"要选中的那一项的 PIDL"，函数会**打开它的父
+       文件夹并选中它**。于是"开哪个窗口、要不要复用已开着的窗口"全由 shell 自己
+       决定；系统换成别的文件管理器接管时这里也不用改。
+   两条硬约束：① 调用线程必须先 `CoInitialize`，否则接口直接失败；
+   ② 该调用是**同步阻塞**的（要等 explorer 响应），绝不能落在主线程 —— 所以它
+   自己开一次性线程执行，理由见 folder.c 文件头。
+
+   失败原因只用一个整数报回主线程（WM_FOLDER_OPEN）：气泡文案在主线程拼，
+   工作线程不碰托盘状态。 */
+#define FOLDER_OK           0   /* 已交给 shell：不弹气泡，只在记录模式下写日志           */
+#define FOLDER_ERR_SHELLWIN 1   /* 前台是桌面/任务栏一类壳窗口：没有"所在文件夹"可开     */
+#define FOLDER_ERR_NOPATH   2   /* 拿不到进程映像全路径（权限被拒 / 进程已退出 / UWP 解析不到） */
+#define FOLDER_ERR_SHELL    3   /* shell 接口失败（路径解析不到，或打开请求被拒）         */
+void FolderOpenRequest(HWND target);
+                        /* 动作入口：把这件事丢给一次性线程后**立刻返回**（不占 act 队列） */
+BOOL FolderProcessPathOf(HWND target, WCHAR* out, size_t cap, int* err);
+                        /* 目标窗口 -> 进程映像全路径（含 UWP 的子窗口解析）。
+                           同步、纯本地、不碰 shell —— 测试与实现共用（传本进程的窗口
+                           即得本 exe 的路径）。失败返回 FALSE 且 *err = FOLDER_ERR_* */
 
 /* ---------- 坐标空间（进程级，必须在建任何窗口之前调用一次） ----------
    ★ 根因记录：低级鼠标钩子给的 `MSLLHOOKSTRUCT.pt` **永远是物理像素**
@@ -400,6 +435,12 @@ extern HWND g_mainWnd;
 #define CFG_MAX_ENTRIES 128   /* 每份名单最多多少条 */
 #define CFG_NAME_MAX    64    /* 单条进程名的最大字符数（含结尾的 0） */
 
+/* 进程映像**全路径**的缓冲区（config.c 取路径 / folder.c 解析目标都用它）。
+   刻意**不用 MAX_PATH**：Path 里有长目录、或程序装在长路径下时 260 会截断，
+   而 QueryFullProcessImageNameW 支持更长的缓冲区 —— 拿到半截路径再去解析 PIDL
+   只会指向一个不存在的文件。放这里是为了两处用同一个长度，不各写一个数。 */
+#define PROC_PATH_MAX 1024
+
 void ConfigLoad(void);                       /* 启动时读配置；缺失则写注释模板 */
 void ConfigLoadFrom(const WCHAR* path);      /* 从指定路径加载（单测用） */
 void ConfigUpgradeFile(const WCHAR* path);   /* 老配置补齐新增键（单测用） */
@@ -424,7 +465,9 @@ BOOL ConfigIsAutoDisabled(HWND focus);      /* 前台窗口的进程是否命中
 BOOL ConfigIsDragBlacklisted(HWND hwnd);    /* 是否命中两份拖动黑名单之一（[DragWindowBlacklist] 按类名 / [DragProcessBlacklist] 按进程名） */
 BOOL ConfigIsNoSmoothScroll(HWND focus);    /* 前台窗口的进程是否命中 [NoSmoothScroll]（命中 = 持续滚动只发整格） */
 BOOL ConfigMatchList(int list, const WCHAR* exeName); /* 进程名是否命中指定名单（CFG_LIST_*） */
-BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口的进程 exe 名 */
+BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口的进程 exe 名（不含目录） */
+BOOL ConfigGetProcessPath(HWND focus, WCHAR* out, size_t cap); /* 焦点窗口的进程映像**全路径** */
+BOOL ConfigGetProcessPathByPid(DWORD pid, WCHAR* out, size_t cap); /* 同上，按 PID 取（UWP 的真实进程不是前台窗口那个） */
 BOOL IsRunElevated(void);                   /* 真实运行权限（查进程令牌） */
 
 /* ---- 设置程序（settings/settings.c）用：改值 + 增量写回 ----

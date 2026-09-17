@@ -1756,6 +1756,75 @@ int main(void) {
         }
     }
 
+    /* ---- 场景AH：打开焦点程序所在文件夹（C+\）----
+       shell 那个调用本身**测不了**：它会真的弹出文件管理器窗口、还要等 explorer
+       响应。所以只钉能离线断言的三件事：
+         ① 接线：`\` 接到这个动作，属性 = 单发 + 不吃选区 + 不发键（同 Q/W 那类表断言）；
+         ② 取路径：给一个真实窗口，解出来的就是**本进程 exe 的全路径**（UWP 那条
+            分支要有真 UWP 程序在前台才走得到，只能手工验）；
+         ③ 失败路径：拿不到目标时必须**报原因**返回，而不是崩溃或假装成功。
+       另：这里顺带守住"ConfigGetProcessName = 全路径的最后一段"—— 它刚被改成
+       复用一个取全路径的 helper，名单匹配全靠这个名字（多出个目录就会静默失配）。 */
+    {
+        CHECK(ActOfVk(VK_F3) == ACT_OPENFOLDER,
+              "AH: 触发键 F3 -> 打开所在文件夹动作");
+        CHECK(ActHasFlag(ACT_OPENFOLDER, ACTF_OPENFOLDER) &&
+              ActHasFlag(ACT_OPENFOLDER, ACTF_SINGLE_SHOT) &&
+              ActHasFlag(ACT_OPENFOLDER, ACTF_NO_SHIFT),
+              "AH: 属性 = 由 folder 执行 + 单发 + 不吃选区修饰");
+        CHECK(ActOutVk(ACT_OPENFOLDER) == 0, "AH: 该动作不发任何键");
+
+        WCHAR want[PROC_PATH_MAX];
+        DWORD wn = GetModuleFileNameW(NULL, want, PROC_PATH_MAX);
+        CHECK(wn > 0 && wn < PROC_PATH_MAX, "AH: 前置条件 —— 取到本进程 exe 路径");
+
+        WNDCLASSW wcF = {0};
+        wcF.lpfnWndProc = DefWindowProcW;
+        wcF.hInstance = GetModuleHandleW(NULL);
+        wcF.lpszClassName = L"CapsEnhanceFolderProbe";
+        RegisterClassW(&wcF);
+        HWND w = CreateWindowW(L"CapsEnhanceFolderProbe", L"folder",
+                               WS_OVERLAPPEDWINDOW,
+                               0, 0, 200, 120,
+                               NULL, NULL, GetModuleHandleW(NULL), NULL);
+        CHECK(w != NULL, "AH: 测试窗口创建成功");
+        if (w) {
+            WCHAR got[PROC_PATH_MAX];
+            got[0] = 0;
+            /* err 传 NULL：顺带守住"可以不关心原因"这条调用契约 */
+            CHECK(FolderProcessPathOf(w, got, PROC_PATH_MAX, NULL) != FALSE,
+                  "AH: 普通窗口 -> 取到进程全路径");
+            CHECK(wcsstr(got, L":\\") != NULL, "AH: 解出来是**全路径**而不是文件名");
+            CHECK(_wcsicmp(got, want) == 0,
+                  "AH: 解出来的就是本进程的 exe 全路径");
+
+            WCHAR name[CFG_NAME_MAX];
+            name[0] = 0;
+            CHECK(ConfigGetProcessName(w, name, CFG_NAME_MAX) != FALSE,
+                  "AH: 取进程名（不含目录）成功");
+            const WCHAR* slash = wcsrchr(want, L'\\');
+            CHECK(slash && _wcsicmp(name, slash + 1) == 0,
+                  "AH: 进程名 = 全路径的最后一段");
+            CHECK(wcschr(name, L'\\') == NULL, "AH: 进程名里不许出现目录分隔符");
+            CHECK(ConfigGetProcessPath(w, got, PROC_PATH_MAX) != FALSE &&
+                  _wcsicmp(got, want) == 0,
+                  "AH: 按窗口取全路径与按 PID 取走的是同一条路（去重后仍一致）");
+
+            DestroyWindow(w);
+        }
+
+        /* 失败路径：没有窗口就没有路径 —— 必须是"带原因地失败" */
+        {
+            WCHAR got[PROC_PATH_MAX];
+            got[0] = L'x';                       /* 先弄脏：失败时必须被清空 */
+            int err = 0;
+            CHECK(FolderProcessPathOf(NULL, got, PROC_PATH_MAX, &err) == FALSE,
+                  "AH: 无目标窗口 -> 取路径失败（不崩溃、不假装成功）");
+            CHECK(err == FOLDER_ERR_NOPATH, "AH: 失败原因 = 拿不到进程路径");
+            CHECK(got[0] == 0, "AH: 失败时输出被清空（不留上一次的残留）");
+        }
+    }
+
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
     return fails;
 }

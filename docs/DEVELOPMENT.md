@@ -12,6 +12,7 @@
 - [按词跳转（WordJump）实现](#按词跳转wordjump实现)
 - [WPS 文字：COM 自动化 + 降权桥](#wps-文字com-自动化--降权桥)
 - [单键切换输入法（ime.c）](#单键切换输入法imec)
+- [打开程序所在文件夹（folder.c）](#打开程序所在文件夹folderc)
 - [托盘图标"开机后时有时无"（UIPI + 启动时序）](#托盘图标开机后时有时无uipi--启动时序)
 - [滚轮三路实现要点](#滚轮三路实现要点)
 - [配置项的设计与新增清单](#配置项的设计与新增清单)
@@ -93,6 +94,7 @@
 | `winmove.c` | **把焦点窗口挪到光标处**（`C+Q`）。落点计算是纯函数（单测覆盖多显示器几何）；执行部分只碰窗口几何：前台窗口 → `GA_ROOT` 顶层 → 还原（最小化/最大化）→ `MonitorFromPoint(DEFAULTTONEAREST)` + `MONITORINFO.rcWork` 钳制 → `SetWindowPos`。不认识键位（触发键在 `keymap.c`、分派在 `act.c`） |
 | `drag.c` | **Caps+左键拖动窗口**。判定在鼠标钩子（按下那一刻决定吞不吞），执行在专用线程（"最新点 wins"，钩子每帧只写一次状态 + SetEvent）；含最大化异步还原、全屏/最小化/桌面/任务栏/黑名单的接管判定 |
 | `ime.c` | **单键强制切换输入法**。判定在键盘钩子（"单击"），执行在专用线程（跨进程 IME 消息 + 键盘布局切换）；单槽 latest-wins，见[单键切换输入法](#单键切换输入法imec) |
+| `folder.c` | **打开焦点程序所在文件夹**（`C+F3`）。走标准 shell 接口（`SHParseDisplayName` → `SHOpenFolderAndSelectItems`，**不拼 `explorer.exe` 命令行**）；目标窗口由 `ActJob.hwnd` 在开火那一刻快照；执行在自己的**一次性线程**上（MTA + `CoInitializeEx`），不占 `act.c` 的动作队列；UWP 走"宿主 `ApplicationFrameHost` → 子窗口 `Windows.UI.Core.CoreWindow` → 真实进程"；失败原因经 `WM_FOLDER_OPEN` 回主线程弹气泡 |
 
 > 分层意义：以后要支持"另一个只有 COM 才读得到的程序"（如 WPS 表格），照 `wps.c` 再写一个文件即可，`autodisp.c` 与 `bridge.c` 原样复用。
 > 激活键（`Alt/D`、`F`）**不做成配置项**：它们属于和弦语法本身，改变量级 < 配置项，历史实装成 `EnhanceKeys` / `ShiftKeys` 后已回退（改它们等于改功能）。但 `keymap.c` 那层模式抽象仍在，以后想改常量只需动 `cap.h` 一处。
@@ -340,6 +342,27 @@ WPS 置位的回读校验返回**三态**：
 - **放在执行线程**（`act.c` 的 `RunJob`）：`SetWindowPos` 要向对方窗口过程发 `WM_WINDOWPOSCHANGING`/`CHANGED`，对方卡住时同步调用能一直等下去 —— 与按词跳转/探测同一个根因（见 `act.c` 顶部）。非最大化的路径带 `SWP_ASYNCWINDOWPOS`：文档明确"调用线程与窗口所属线程不在同一输入队列时，系统把请求**投递**过去"，本线程不必陪着等。
 - **坐标系与 DPI**：本进程**没有声明 DPI 感知**，Windows 会把整个桌面按系统 DPI 统一虚拟化后交给我们 —— `GetCursorPos` / `MonitorFromPoint` / `GetWindowRect` / `SetWindowPos` 用的是**同一个**（本进程的）坐标空间，读与写自洽，所以主副屏缩放比例不同也能落到光标处（依据：MS「High DPI Desktop Application Development on Windows」——"Windows scales and converts DPI-sensitive information from some APIs to the coordinate space of the calling thread"）。将来若给本体声明 Per-Monitor 感知，这段代码不用改：那只是把同一个自洽关系挪到物理像素空间。
 - 动作**不发键**：`SINGLE_SHOT`（不进重复节奏、不做松手补齐）与 `NO_SHIFT`（不吃选区修饰）都写在键位表里，`Q` 也不参与"发 3 次"的增强语义。
+
+---
+
+## 打开程序所在文件夹（`folder.c`）
+
+一句话：`GetForegroundWindow()`（**开火那一刻**的快照）→ 取该进程的映像全路径 → `SHParseDisplayName` 转成绝对 PIDL → `SHOpenFolderAndSelectItems(pidl, 0, NULL, 0)`。
+
+为什么是这两个接口：`cidl = 0` 时官方文档写明"传一个**单项**的 PIDL，函数会打开它的父文件夹并选中它"。它就是资源管理器右键「打开文件所在的位置」背后那件事，由 shell 交给**系统当前的默认文件夹处理器**去做 —— 所以**不拼 `explorer.exe /select,` 命令行**（那等于把"文件管理器是谁"写死），用户换第三方文件管理器时这里一行都不用改。
+
+几个决定与其理由：
+
+- **目标窗口取"开火那一刻"的快照**（`ActJob.hwnd`，在 `main.c` 的 `PostAct` 里填），不是执行时现读 `GetForegroundWindow()`：执行线程是异步的，队列里排在前面的长动作（一次按词跳转能拖到数秒）会让现读拿到**已经切过去的**窗口。与修饰快照（`TRIGF_*`）是同一条规矩。
+- **执行在自己的"一次性线程"上**，两条独立理由：① 该调用**同步阻塞**（要等 shell 响应），落在承载钩子的主线程上就是那个老根因（见 `act.c` 顶部）；② **不复用 `act.c` 的动作队列** —— 队列是 FIFO，这条阻塞调用会把排在后面的按键动作一起堵住，而"打开文件夹"是纯发起的动作，没有理由占那条通道。线程 `CreateThread` 之后立刻 `CloseHandle`（线程对象在线程退出时由系统回收），不需要像 `DragLane` / `ImeLane` 那样维护生命周期。
+- **线程按 MTA 初始化**（`CoInitializeEx(NULL, COINIT_MULTITHREADED)`）：`CoInitialize` 是**线程级**状态，而 `act.c` 工作线程的套间可能已被 `nav.c` 按 STA 初始化（见其 `CoUp`）；STA 下做同步阻塞的 shell 调用要求该线程泵消息，否则可能死锁 —— MTA 里阻塞调用是允许的。本机实测这条组合三个调用全部 `S_OK`。
+- **失败反馈必须绕回主线程**（`WM_FOLDER_OPEN`，`wParam = FOLDER_ERR_*`）：气泡走 `Shell_NotifyIconW` + 主线程的 `g_nid`，工作线程直接调就是对它的跨线程访问。成功**不发**这条消息 —— 文件管理器自己弹出来了，那本身就是反馈。
+- **UWP 要先换进程**：UWP 应用在前台时 `GetForegroundWindow()` 给的是宿主 `ApplicationFrameHost.exe` 的顶层窗口，路径指向 `C:\Windows\System32`。真正的程序挂在它下面的 `Windows.UI.Core.CoreWindow` 子窗口上，**那个窗口属于应用自己的进程**，路径就是 `WindowsApps` 里的安装目录。找不到子窗口时**宁可不开**：开 `System32` 并选中 `ApplicationFrameHost.exe` 是确定无用的结果，比"没反应"更容易让人以为程序坏了。
+- **目标窗口一律先 `GetAncestor(GA_ROOT)`，并用 `WinIsShellClass` 挡掉桌面/任务栏**（与 `C+Q` 共用同一份判定）。资源管理器窗口本身**不特判**：按字面语义打开的是 `explorer.exe` 所在目录，不是它正在显示的那个目录。
+- **`PROC_PATH_MAX` 用 1024 而不是 `MAX_PATH`**：长路径下 260 会截断，而 `QueryFullProcessImageNameW` 支持更长的缓冲区 —— 半截路径解析出来会指向一个不存在的文件（静默失败）。
+- **取路径只有一份实现**：`ConfigGetProcessPathByPid` ← `ConfigGetProcessPath(HWND)` ← `ConfigGetProcessName(HWND)`（最后一层抽 basename，供名单匹配）。名单匹配与"打开所在文件夹"要的都只是路径，不该各写一遍 `OpenProcess` + `QueryFullProcessImageNameW`。
+- **单测边界**：shell 那一步**测不了**（会真的弹窗口、还要等 explorer 响应），所以它只出现在 `FolderThreadProc` 里；`FolderProcessPathOf` 是同步的、纯本地的，测试直接拿一个真窗口验"解出来的就是本进程 exe 的全路径"（`test_chord` 场景 AH）。
+- **已知限制**：目标文件夹已在别处打开时，这个接口仍可能新开一个窗口（不复用已开的那个）。这是接口的既有行为，不是这里的实现选择。
 
 ---
 
@@ -661,9 +684,9 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 | 脚本 | 内容 |
 | --- | --- |
-| `build.bat` | 生成 `bin/CapsEnhance.exe`（源文件：hook / nav / send / act / config / keymap / main / autodisp / bridge / wps） |
+| `build.bat` | 生成 `bin/CapsEnhance.exe`（源文件：hook / nav / send / act / config / keymap / main / autodisp / bridge / wps / winmove / drag / ime / folder） |
 | `test\build_nav.bat` | 按词跳转测试：算法单测（`ComputeSteps`）+ Scintilla / Edit 通道集成（`test_sci`）+ 配置解析（`test_config`） |
-| `test\build_test.bat` | 和弦引擎回归：模式修饰的顺序语义（先按修饰再按触发键）、按下即开火、长按、增强补齐、多键同按、左 Alt=增强、清卡键判定、原生按词跳转序列、快速滚动 / 持续滚动、横向滚动 |
+| `test\build_test.bat` | 和弦引擎回归：模式修饰的顺序语义（先按修饰再按触发键）、按下即开火、长按、增强补齐、多键同按、左 Alt=增强、清卡键判定、原生按词跳转序列、快速滚动 / 持续滚动、横向滚动、打开所在文件夹的键位接线与取路径 |
 | `test\build_dbg.bat` | Debug CRT（`/MTd`）config 测试：Release CRT 不校验堆块，"越界写"这类 bug 只有这里拦得住 |
 | `test\build_analyze.bat` | 静态分析（`/W4` + `/analyze`）：只编译不链接。数据流引擎能发现"按 X 分配、按 Y 读"和 Interlocked 混用这类问题 |
 | `test\build_keytest.bat` | 诊断工具：`keytest`（按键投递实测）、`uiprobe`（UIA 逐步探测）、`memtest`（UIA 内存压测）、`restarttest`（重启握手 + 单实例）、`traymemtest`（托盘菜单内存定位）、`logsmoke`（日志轮转）、`ilcheck`（打印各进程完整性级别）、`lowrun`（借 shell 令牌以普通权限启动任意程序）、`wspset`（WPS 直接置位三招实测：以普通权限跑 `lowrun.exe bin\wspset.exe`） |

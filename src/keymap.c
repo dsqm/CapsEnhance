@@ -54,6 +54,10 @@ static const ActionDef kActions[] = {
     /* 挪窗口：单发命令（不发键、与光标/选区无关）。位置由光标决定，所以
        "增强模式发 3 次"没有意义 —— SINGLE_SHOT 同时挡掉重复与松手补齐。 */
     { ACT_MOVEWIN,   'Q',        0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_MOVEWIN, "窗口→光标(Q)" },
+    /* 打开所在文件夹：单发命令（不发键、与光标/选区无关、位置由窗口决定不是光标）。
+       触发键用 F3（VK_F3）。目标窗口由 main.c 在开火那一刻快照进
+       ActJob.hwnd（这里只声明"这个动作要目标窗口"，取窗口的事不归键位表管）。 */
+    { ACT_OPENFOLDER, VK_F3,     0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_OPENFOLDER, "文件夹(F3)" },
     /* 诊断：没有触发键（由 PROBE_KEY 的特殊路径投递） */
     { ACT_PROBE,     0,          0,          -1, ACTF_PROBE, "探测" },
 };
