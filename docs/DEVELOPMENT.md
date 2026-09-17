@@ -92,10 +92,10 @@
 | `wps.c` | **专用**的 WPS 文字通道：ProgID / 进程名 / 属性链 / 直接置位，以及跑在桥上的请求-应答协议。界面在 `src/auto.h` |
 | `send.c` | **模拟按键与滚轮的唯一出口**。扩展键标志（方向键 / Home / End / Del 等必须带 `KEYEVENTF_EXTENDEDKEY`）、逐条发送节奏、Ctrl/Shift 组合键的正确按住与释放、滚轮加速的逐格补发、超限改道的判定（`SendArrows`）、`SendInput` 返回值检查（UIPI 拒绝时记录） |
 | `act.c` | **执行线程**。串行执行会阻塞的发送动作；滚轮注入与持续滚动各有一条独立通道；持续滚动的状态机在锁内维护、由工作线程按拍输出 |
-| `winmove.c` | **把焦点窗口挪到光标处**（`C+Q`）。落点计算是纯函数（单测覆盖多显示器几何）；执行部分只碰窗口几何：前台窗口 → `GA_ROOT` 顶层 → 还原（最小化/最大化）→ `MonitorFromPoint(DEFAULTTONEAREST)` + `MONITORINFO.rcWork` 钳制 → `SetWindowPos`。不认识键位（触发键在 `keymap.c`、分派在 `act.c`） |
-| `drag.c` | **Caps+左键拖动窗口**。判定在鼠标钩子（按下那一刻决定吞不吞），执行在专用线程（"最新点 wins"，钩子每帧只写一次状态 + SetEvent）；含最大化异步还原、全屏/最小化/桌面/任务栏/黑名单的接管判定 |
+| `winmove.c` | **把焦点窗口挪到光标处**（`C+Q`）。落点计算是纯函数（单测覆盖多显示器几何）；执行部分只碰窗口几何：前台窗口 → `GA_ROOT` 顶层 → **全屏窗口直接拒**（`WinIsFullscreen`）→ **最大化且光标同屏则整个不动作**（结果不会变，做了只会闪）→ 还原（最小化/最大化）→ `MonitorFromPoint(DEFAULTTONEAREST)` + `MONITORINFO.rcWork` 钳制 → `SetWindowPos`。不认识键位（触发键在 `keymap.c`、分派在 `act.c`）。另：`WinIsFullscreen` 与 `WinIsShellClass` 是本模块对外提供的**共用判定**，`drag.c` 也用 |
+| `drag.c` | **Caps+左键拖动窗口**。判定在鼠标钩子（按下那一刻决定吞不吞），执行在专用线程（"最新点 wins"，钩子每帧只写一次状态 + SetEvent）；含最大化异步还原、全屏（判据取自 `winmove.c` 的 `WinIsFullscreen`）/最小化/桌面/任务栏/黑名单的接管判定 |
 | `ime.c` | **单键强制切换输入法**。判定在键盘钩子（"单击"），执行在专用线程（跨进程 IME 消息 + 键盘布局切换）；单槽 latest-wins，见[单键切换输入法](#单键切换输入法imec) |
-| `folder.c` | **打开焦点程序所在文件夹**（`C+F3`）。走标准 shell 接口（`SHParseDisplayName` → `SHOpenFolderAndSelectItems`，**不拼 `explorer.exe` 命令行**）；目标窗口由 `ActJob.hwnd` 在开火那一刻快照；执行在自己的**一次性线程**上（MTA + `CoInitializeEx`），不占 `act.c` 的动作队列；UWP 走"宿主 `ApplicationFrameHost` → 子窗口 `Windows.UI.Core.CoreWindow` → 真实进程"；失败原因经 `WM_FOLDER_OPEN` 回主线程弹气泡 |
+| `folder.c` | **打开焦点程序所在文件夹**（`C+F3`），以及**打开日志文件所在位置**（日志结束气泡被点击时，走 `FolderRevealPath`）。走标准 shell 接口（`SHParseDisplayName` → `SHOpenFolderAndSelectItems`，**不拼 `explorer.exe` 命令行**）；目标窗口由 `ActJob.hwnd` 在开火那一刻快照；执行在自己的**一次性线程**上（MTA + `CoInitializeEx`），不占 `act.c` 的动作队列；UWP 走"宿主 `ApplicationFrameHost` → 子窗口 `Windows.UI.Core.CoreWindow` → 真实进程"；失败原因经 `WM_FOLDER_OPEN` 回主线程弹气泡。两个入口共用同一个 `FolderJob` 与线程过程 |
 | `help.c` | **按键帮助的开合（主程序侧）**（`C+F1`）：拉起同目录的 `CapsEnhanceHelp.exe`，并把"当前该显示还是该隐藏"告诉它（注册消息 + 40ms 对账重试）。窗口**不常驻**，所以每次显示都是一次冷启动 —— 而"按一下就松手"会让 SHOW/HIDE 都发在窗口出生之前，重试就是为这个竞态准备的。寿命由和弦决定：按下开、抬起关、松开 Caps（`ResetEngine`）也关 |
 | `help/help.c` | **按键帮助窗口本体**（独立 exe `CapsEnhanceHelp.exe`）。自包含：不装钩子、不初始化 COM/TSF，只做"GDI+ 起一次 + 铺底一帧 + GDI 画一遍字 + 送进分层窗口"（只读 `CapsEnhance.ini` 里那三个 `Ime*Mode`，用来决定底部三条"单击切输入法"的文案）。逐像素 alpha（32bpp DIB + `UpdateLayeredWindow`）实现半透明；文字用 **GDI + ClearType**；`WS_EX_NOACTIVATE` 保证不抢焦点；键位表从 `keymap_table.h` 编进来（不跨进程取数据）。见[按键帮助](#按键帮助helphelpc) |
 
@@ -339,9 +339,11 @@ WPS 置位的回读校验返回**三态**：
   **为什么不用"中心对齐"**：居中必须按尺寸换算落点（`左上角 = 光标 − 尺寸/2`），而尺寸是**对方的** —— 它跨屏时可能自己改尺寸（实测 CLaunch 在 125% 屏上 578x437、到 150% 屏上变 495x374），按旧尺寸算出的中心立刻就偏了（实测偏 41px），表现出来就是"按一下没完全过去、再按一下才对"。左上角对齐**不依赖尺寸**：它怎么改都不影响落点。尺寸仍然要读，但**只为钳制**（保证整窗可见），不再参与落点计算。
 - **`MONITOR_DEFAULTTONEAREST` 不是可选项**：官方文档写明它返回"离该点**最近**的显示器"，于是"光标落在两屏之间的缝里""改过分辨率/拔过屏、坐标悬空"都能兜住，而不是整条路径失败。
 - **最小化/最大化窗口必须先 `SW_RESTORE`**：最大化的窗口位置由系统按所在显示器算、传给它的 `(x,y)` 会被忽略；最小化的窗口 `GetWindowRect` 拿到的**不是**还原位置（照着算就会挪到错的地方）。最大化那条最后再 `SW_MAXIMIZE` 回去，等价于 `Win+Shift+方向` 的语义（状态不变、只换屏）。
+- **最大化 + 光标同屏 = 连还原都不做**：整套"还原 → 挪 → 最大化"落点一模一样，用户只看到小窗口闪一帧 —— 正是「最大化窗口按 `C+Q` 会抖动」的现场。判据是**两块显示器**（`MonitorFromPoint(光标)` vs `MonitorFromWindow(窗口)`）相同，只在 `wasMax && !wasMin` 时做；命中就返回 `TRUE`（动作处理完了，别让 act.c 记"没有可挪的前台窗口"）。这与 `drag.c` 的拖出阈值是同一个设计判断：**结果不会变的变化就不要发生**。
 - **"请求 → 回读锚点 → 重试"最多 3 次**（`MOVE_TRIES`）：回读只比**左上角**（右/下两边不判 —— 对方改尺寸是它的自由，左上角对了窗口就是"从这里开始"）。这一步针对的是**收到移动请求后又自己挪走**的程序（带吸附/跟随行为的启动器、面板类工具）；"自己改尺寸"那一类已经被左上角对齐免疫了。判据必须挑"能被破坏的量"：**不能**用"光标在不在窗口里" —— 窗口自己缩小之后光标仍在窗口内，那个断言恒真、测不出区别（写测试时真踩到了）。
 - **一律带 `SWP_ASYNCWINDOWPOS`**（对方线程卡住不拖住执行线程；文档：调用线程与窗口所属线程不在同一输入队列时系统把请求**投递**过去）。代价是**回读会抢在请求生效之前** → 回读前先 `Sleep(MOVE_SETTLE_MS)` 让一小会儿。顺带解决了"最大化必须等位置生效"：确认锚点就位之后才 `SW_MAXIMIZE`，否则最大化可能先执行、把窗口铺回**原来**那块屏。
 - **只挪顶层窗口**：Chromium 系 / UWP 的前台窗口往往是内容子窗口，挪它等于把它从父窗口里撕出来 → 一律 `GetAncestor(GA_ROOT)`。桌面（`Progman` / `WorkerW`）与任务栏（`Shell_TrayWnd` / `Shell_SecondaryTrayWnd`）按类名挡掉；前台是本进程自己（托盘菜单）时也直接返回。
+- **全屏窗口不动**，而且判定必须在 `SW_RESTORE` **之前**。全屏窗口在系统眼里就是"最大化铺满"，照原流程走是 `SW_RESTORE` → `SetWindowPos` → `SW_MAXIMIZE` 又铺回原处：用户看到的是"**挪跟没挪一样，只会抖动一下**"，独占全屏的程序还会因为这一来一回掉出全屏。这不只是"少做个无用功"，是**不能做**。判据抽成 `WinIsFullscreen(hwnd)`（窗口矩形 `EqualRect` 显示器 `rcMonitor`），与 `drag.c` 的 `DragBegin` **共用同一个函数** —— 两边标准必须一致，否则会出现"拖动不让动、`C+Q` 却去动"这种自相矛盾的行为。取 `rcMonitor` 而非 `rcWork`：铺满整屏、盖住任务栏那一侧的才算全屏；`MONITOR_DEFAULTTONEAREST` 让坐标悬空的窗口也能落到最近那块屏上，不会因为查不到显示器就误判。查询失败时返回 `FALSE`（当普通窗口处理）：宁可让它挪，也不要因为一次查询失败把功能整个吞掉。
 - **放在执行线程**（`act.c` 的 `RunJob`）：`SetWindowPos` 要向对方窗口过程发 `WM_WINDOWPOSCHANGING`/`CHANGED`，对方卡住时同步调用能一直等下去 —— 与按词跳转/探测同一个根因（见 `act.c` 顶部）。非最大化的路径带 `SWP_ASYNCWINDOWPOS`：文档明确"调用线程与窗口所属线程不在同一输入队列时，系统把请求**投递**过去"，本线程不必陪着等。
 - **坐标系与 DPI**：本进程**没有声明 DPI 感知**，Windows 会把整个桌面按系统 DPI 统一虚拟化后交给我们 —— `GetCursorPos` / `MonitorFromPoint` / `GetWindowRect` / `SetWindowPos` 用的是**同一个**（本进程的）坐标空间，读与写自洽，所以主副屏缩放比例不同也能落到光标处（依据：MS「High DPI Desktop Application Development on Windows」——"Windows scales and converts DPI-sensitive information from some APIs to the coordinate space of the calling thread"）。将来若给本体声明 Per-Monitor 感知，这段代码不用改：那只是把同一个自洽关系挪到物理像素空间。
 - 动作**不发键**：`SINGLE_SHOT`（不进重复节奏、不做松手补齐）与 `NO_SHIFT`（不吃选区修饰）都写在键位表里，`Q` 也不参与"发 3 次"的增强语义。
@@ -472,6 +474,7 @@ DPI 感知 = 每显示器V2(PerMonitorV2)  坐标空间 = 物理(与钩子一致
 按住 Caps 时按下左键：接管**光标下的顶层窗口**跟着鼠标走。交互借鉴 AltSnap（它默认用 Alt 键做同一件事），结构与本项目对齐：判定在鼠标钩子，执行在专用线程。
 
 - **判定必须在按下那一刻**：吞不吞这次左键只能当场决定（事后发现该放行，down 已经没了）。所以黑名单/桌面/任务栏/自己的窗口/全屏/最小化这些"不接管"的检查都写在 `DragBegin` 里，钩子只调它一次 —— `OpenProcess`/`GetClassName` 这类本地查询可以接受，但**不做跨进程消息**。
+- **全屏判定复用 `winmove.c` 的 `WinIsFullscreen`**（模块间零依赖地被 `winmove.c` 提供）：`C+Q` 那边也要拦同样的窗口，两边各写一份就会漂移。注意 `DragBegin` 里原来那次 `GetWindowRect` 是与全屏判定合用的，改成函数调用之后，"普通窗口的抓取基准"要**单独再查一次**矩形 —— 但必须在 `EnterCriticalSection` **之前**查好，否则取不到就只能带着没释的锁 `return`（那是难查的死锁）。这条路径是"用户按下 Caps+左键"的一次性开销，不在拖动的逐帧循环里。
 - **吞放配对**：接管就吞掉 down，up 也必须吞（`g_dragSwallowUp`，与键盘的 `g_swallowVk` 同一条规矩）。Caps 中途松开导致拖拽结束也**不清**这个标志 —— 那次 up 仍要吞，否则漏一个孤立抬起给目标程序。
 - **"最新点 wins" 的节流**：钩子每帧只做一次临界区写 + SetEvent，执行线程取**最新**点应用一次 —— 与 AltSnap 的 MoveRate/RezTimer 目的相同，但不需要猜采样率；中间帧自然合并。
 - **不穿透点击**：Caps+左键按下去就是拖，不传给目标程序（AltSnap 默认 PiercingClick=0 同为不穿透）。没接管（黑名单等）时左键原样透传，且仍要打断持续滚动 —— 这条语义不能因为新功能丢掉。
@@ -686,10 +689,12 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 - **别造有状态模式**：翻转类动作（`C+Tab`，`ACTF_SINGLE_SHOT`，由 `IsSingleShotAct` / `StackRemove` 处理）不进重复/补齐，否则偶数次 = 没切。
 
 ### 窗口挪动（`winmove.c`）
-- **按了 `C+Q` 没反应**只有三种原因：前台是桌面/任务栏（按类名挡掉）、前台就是本程序自己（托盘菜单）、或者该程序命中 `[AutoDisable]`（整段不介入）。记录模式下会写两行 `[窗口]`：类名、光标、显示器/工作区、尺寸、请求落点、实际矩形、尝试次数。
+- **按了 `C+Q` 没反应**有五种原因：前台是桌面/任务栏（按类名挡掉）、前台就是本程序自己（托盘菜单）、**前台是全屏窗口**（`WinIsFullscreen`，见下）、**已最大化且光标就在同一块屏**（什么都不用做，见上）、或者该程序命中 `[AutoDisable]`（整段不介入）。记录模式下会写两行 `[窗口]`：类名、光标、显示器/工作区、尺寸、请求落点、实际矩形、尝试次数；全屏那条会写 `全屏窗口不做移动`，同屏最大化那条会写 `不还原不挪`。
+- **全屏窗口"挪跟没挪一样，只会抖动一下"**：那是 `SW_RESTORE` → `SetWindowPos` → `SW_MAXIMIZE` 三步跑完的结果 —— 挪到新位置又立刻铺满回去，用户只看得到一次重绘闪烁。判定（窗口矩形 == 显示器 `rcMonitor`）必须在 **`SW_RESTORE` 之前**，`C+Q` 与 Caps+左键拖动共用 `WinIsFullscreen`，否则会出现两边行为矛盾。
 - **"要按两下才过去"**：落点改成"左上角对齐光标"之后已经不依赖窗口尺寸，所以现在只剩一种成因：**对方程序收到移动请求后又自己挪走**（带吸附/跟随行为的启动器、面板）。那里会**回读左上角**再补发（≤3 次），日志第二行会带"锚点未就位"。
 - **别把"最大化"当普通窗口挪**：它的位置由系统按所在显示器算。必须先 `SW_RESTORE` 再挪、挪完 `SW_MAXIMIZE` 回去；而且要**确认回读一致（= 位置已生效）再最大化**，否则会铺回**原来**那块屏。
-- **别用显示器全矩形**：要用 `rcWork`，否则窗口会压到任务栏下面。
+- **别把"全屏"当"最大化"拦**：两者判据不同 —— 全屏比的是 `rcMonitor`（整块显示器），最大化窗口的矩形是 `rcWork`（矮一个任务栏）。用 `rcWork` 当全屏判据会把普通最大化窗口一起误杀。
+- **别用显示器全矩形算落点**：要用 `rcWork`，否则窗口会压到任务栏下面。（`rcMonitor` 在本模块的用途只有"全屏判定"这一个。）
 
 ### 拖拽窗口（`drag.c`）
 - **拖不动 / 只对某些窗口生效 / 窗口比光标跑得快**：**先看启动基线里的"坐标空间"那一行**。
@@ -698,14 +703,29 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 - **点一下就把最大化窗口缩小了**：那说明拖出阈值没生效（还原被提前发出）。
   看记录模式的 `[拖拽] 越过拖出阈值(20px)`；纯粹点一下应该看到
   `结束（未越过拖出阈值，窗口未动）`。
-- **左键没被接管**：按顺序查 —— `[DragWindowBlacklist]`（类名）/ `[DragProcessBlacklist]`（进程名）、全屏/最小化、桌面/任务栏/本程序自己的窗口、`[AutoDisable]` 或暂停。五类都原样透传。
+- **左键没被接管**：按顺序查 —— `[DragWindowBlacklist]`（类名）/ `[DragProcessBlacklist]`（进程名）、全屏（`WinIsFullscreen`）/最小化、桌面/任务栏/本程序自己的窗口、`[AutoDisable]` 或暂停。五类都原样透传。
+- **全屏与 `C+Q` 必须同标准**：拖动的全屏判定不再自己写一遍，改调 `winmove.c` 的 `WinIsFullscreen` —— 两边各写一份时曾出现"拖动不让动、`C+Q` 却去动"。改动其中一边时另一边的测试（`test_chord` 场景 AE / AF 各有一条全屏用例）会一起红。
 - **拖动一卡一卡 / 位置跳**：记录模式下看 `[拖拽]` 两行（开始/结束 + 拍数）；"最大化还原没等到"会直接放弃本次拖动（ 宁可不动也别挪错）。
 - **`Caps+左键` 传给了目标程序**：只可能是 `[AutoDisable]` 命中或 `g_state.paused` —— 其它情况左键 down 都会被吞。
 
 ### 托盘气泡（main.c `TrayBalloon`）
 - Windows 通知区**同一图标同时只显示一条气泡**；当前气泡还在时再发 `NIM_MODIFY + NIF_INFO` 会被**排队**（Win10/11 下被转成 toast、同来源摞进队列），要等前一条超时（约 10s）才弹——表现为"开始记录的气泡还挂着，按 `C+\`` 结束的气泡迟迟不出现"。
 - **强制立即替换**：先发一条**空 `szInfo`** 把当前气泡收掉（取消排队），再发新内容。`NIF_REALTIME` 是反方向（不能立即就丢弃），**不能**用。纯应用内 API，不碰注册表/系统设置。
+- **不自动消失**：`uTimeout = 0`（本 SDK 下唯一合法名；`uTimeoutOrVersion` 由系统填版本号，写它没有意义 —— 它在 Win2000 之后就不再是超时字段了）。本程序的气泡都是"结果通知"（钩子装上没有、日志写到哪份文件），看到 = 确认；尤其"记录结束"那条要支持点击，10 秒够不上一会儿才回来处理日志的人。
+- **可点击**（`TrayBalloon` 第二参数 `clickPath`）：非空即表示这条气泡可点。做法是把路径存进 `g_balloonPath`，等托盘的 `uCallbackMessage`（本程序是 `WM_TOGGLE_TRAY`）送来 `NIN_BALLOONUSERCLICK` 时取出、执行"打开并选中"（复用 `folder.c` 的 `FolderRevealPath`）。
+  · `NIN_BALLOONUSERCLICK = WM_USER + 5`，官方文档有定义，但**不要**顺手把同族的 `NIN_BALLOONTIMEOUT` / `NIN_BALLOONSHOW` / `NIN_BALLOONHIDE` 也接上：那几条只在 balloon 被**内联绘制**进通知区时才会送到 `uCallbackMessage`，走 toast 时系统根本不发 —— 依赖它们会写出"某些机器上有效"的代码。只有 `NIN_BALLOONUSERCLICK` 两条路径都可靠。
+  · **点击与点图标必须分开**：`WM_TOGGLE_TRAY` 分支先判 `NIN_BALLOONUSERCLICK`，命中就走 `TrayBalloonClicked()` 并**直接 return**，不能再落到下面的 `WM_RBUTTONUP`/`WM_LBUTTONUP` 分支去弹托盘菜单 —— 气泡（尤其在 Win10/11 转成 toast 之后）离图标很远，把两件事接在一起会变成"点个通知，怎么跳出一个菜单"。
+  · **一次点击只生效一次**：`TrayBalloonClicked` 先拷路径再清 `g_balloonPath`，重复点同一条不会再动作。
+  · **旧图标的气泡作废**：`TrayRebuild` 里调 `TrayBalloonClearClick()`。explorer 重启后新实例不认旧通知（点了也没反应），宁可不动作，也不要"点了有反应但点错东西"。
+  · `g_balloonPath` 只由主线程读写（`TrayBalloon` / `WM_TOGGLE_TRAY` / `TrayRebuild` 都跑在主线程），所以**不加锁**。
+- **记录日志的起止提示音**（`RecBeep`）：开始 `SystemAsterisk`、结束 `SystemExclamation`，走 `PlaySoundW(SND_ALIAS | SND_ASYNC | SND_NODEFAULT)`。别名缺失（注册表被精简）时退回 `MessageBeep`。
+  · 关键是**不能用 `MB_ICONHAND` 表示"结束"**：那正是系统给**严重错误 / UAC 提权**配的音，和"未按管理员运行时弹的提示"同源。记录是常开常关的操作，每次结束都响一声"出错了"，用户会去查一个并不存在的问题。
+  · 用别名而不是硬编号：用户能在控制面板的声音方案里单独改，或在"无声"方案下安静下来（`MessageBeep` 在无声方案下同样是静音，行为一致）。
+  · 声音依赖 `mmsystem.h` + **`winmm.lib`**：`build.bat` 与 `test\build_test.bat`（`test_chord.c` 包含 `main.c`）都加了它。
 - `TrayHint`（悬停提示 `szInfo`/`szTip`）不受此限，改完立即生效。
+- **单测里换掉托盘菜单**：`test/test_chord.c` 在 include `main.c` 之前 `#define CAPS_NO_TRAY_MENU`，`main.c` 里那段 `ExeDir → LaunchSettings → TrayShowMenu`（外加后面的 `SetMenuPauseText`）被整段门控掉，测试自己提供一个只记账的 `static void TrayShowMenu(void)` 接上 `WM_TOGGLE_TRAY` 的调用点 —— 真的 `TrackPopupMenu` 会阻塞弹窗，测试既不该弹也不该被挂住。
+  · 门控必须覆盖**整条链**：那一段里每个函数的唯一调用者都在段内，只围最外面的 `TrayShowMenu` 会被 `/W4` 报一串 `C4505`（`ExeDir` / `LaunchSettings` / `SetMenuPauseText` 都浮出来）。
+  · **不要**用 `#define` 给函数改名来"顶掉"生产定义：所有 TU 都按 `/TP` 当 C++ 编，同名 static 重定义是 `C2084`（已有主体），改名那条路走不通。门控只围定义、不围调用点，才是与本项目编译方式相容的做法（这也是["源码按 C++ 编译"](#源码按-c-编译tp)那一节说的 `C4505` 会浮出来的一个实例）。
 
 ### 配置（config.c）
 - **改一个配置项要动八处**（常量 → `ConfigLoadFrom`（含钳制）→ `kTemplate` → `kUpgrades` → `ConfigGet*` / `ConfigSet*` → `GeneralValues()` → `settings.c` 的 `kFields` → README/本文；完整清单见下）。漏一处只静默不一致。改默认值务必全局搜数值（注释/模板/`kUpgrades`/测试断言里都可能写死）（详见[配置项的设计与新增清单](#配置项的设计与新增清单)）。
@@ -741,7 +761,7 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 | --- | --- |
 | `build.bat` | 生成三个 exe：`bin/CapsEnhance.exe`（源文件：hook / nav / send / act / config / keymap / main / autodisp / bridge / wps / winmove / drag / ime / folder / help）、`bin/CapsEnhanceSettings.exe`（settings/settings.c + src/config.c）、`bin/CapsEnhanceHelp.exe`（help/help.c，只吃一个共享头、不链接 src 下任何模块） |
 | `test\build_nav.bat` | 按词跳转测试：算法单测（`ComputeSteps`）+ Scintilla / Edit 通道集成（`test_sci`）+ 配置解析（`test_config`） |
-| `test\build_test.bat` | 和弦引擎回归：模式修饰的顺序语义（先按修饰再按触发键）、按下即开火、长按、增强补齐、多键同按、左 Alt=增强、清卡键判定、原生按词跳转序列、快速滚动 / 持续滚动、横向滚动、打开所在文件夹的键位接线与取路径、按键帮助的键位接线与"寿命=和弦"、键位表每条动作都有图上文案 |
+| `test\build_test.bat` | 和弦引擎回归：模式修饰的顺序语义（先按修饰再按触发键）、按下即开火、长按、增强补齐、多键同按、左 Alt=增强、清卡键判定、原生按词跳转序列、快速滚动 / 持续滚动、横向滚动、打开所在文件夹的键位接线与取路径、**全屏窗口在 `C+Q` 与 Caps+拖动两边都不动作**、**最大化窗口同屏连一次位置变化都没有**（数 `WM_WINDOWPOSCHANGED`）、按键帮助的键位接线与"寿命=和弦"、日志结束气泡的可点击接线与"点气泡不弹菜单 / 点图标才弹菜单"、键位表每条动作都有图上文案。带 `/DCAP_TEST`（让 `folder.c` 把"退成目录"这个判定结果通过可选形参带出来给断言看），链接 `winmm.lib`（`main.c` 的 `RecBeep` 用 `PlaySoundW`） |
 | `test\build_dbg.bat` | Debug CRT（`/MTd`）config 测试：Release CRT 不校验堆块，"越界写"这类 bug 只有这里拦得住 |
 | `test\build_analyze.bat` | 静态分析（`/W4` + `/analyze`）：只编译不链接。数据流引擎能发现"按 X 分配、按 Y 读"和 Interlocked 混用这类问题 |
 | `test\build_keytest.bat` | 诊断工具：`keytest`（按键投递实测）、`uiprobe`（UIA 逐步探测）、`memtest`（UIA 内存压测）、`restarttest`（重启握手 + 单实例）、`traymemtest`（托盘菜单内存定位）、`logsmoke`（日志轮转）、`ilcheck`（打印各进程完整性级别）、`lowrun`（借 shell 令牌以普通权限启动任意程序）、`wspset`（WPS 直接置位三招实测：以普通权限跑 `lowrun.exe bin\wspset.exe`） |

@@ -265,6 +265,10 @@ BOOL WinMoveFocusedToCursor(void);
                         /* 动作入口：把焦点程序的**顶层**窗口挪到光标处 */
 BOOL WinIsShellClass(HWND hwnd);
                         /* 桌面 / 任务栏 / 通知区那类"不是普通窗口"的壳窗口（winmove 与 drag 共用） */
+BOOL WinIsFullscreen(HWND hwnd);
+                        /* 窗口矩形 == 它所在显示器的**整屏**矩形（rcMonitor，不含任务栏那一侧的
+                           收缩）。判定**独占全屏/全屏游戏/全屏视频**用。drag（C+拖动）与
+                           winmove（C+Q）共用同一条标准 —— 两边都该"不做"的窗口必须一致。 */
 
 /* ---------- 打开焦点程序所在文件夹（src/folder.c） ----------
    C + \ ：把"前台那个程序所在文件夹"用**系统的标准接口**打开，并选中该 exe 本身

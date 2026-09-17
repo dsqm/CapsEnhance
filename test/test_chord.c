@@ -338,6 +338,34 @@ static void WriteChordIni(const char* body) {
                for(int __i=0;__i<g_recN;__i++) printf("%d:%d ",g_rec[__i].vk,g_rec[__i].n);\
                printf(")\n"); fails++; } } while (0)
 
+/* 场景AE 用：找一块**不是** `self` 的显示器，输出它工作区的中心点。
+   找不到（本项目最常见的单显示器机器）时 `*found = FALSE`，调用方跳过那条断言。
+   多显示器下"挪到另一块屏"才成立，单显示器上硬测就是假红。
+   上下文用**文件作用域的命名结构体**：/TP 按 C++ 编译，两处各写一个匿名
+   struct 是两个不同的类型，转换直接报错。 */
+typedef struct { HMONITOR self; POINT* out; BOOL* found; } MonOtherCtx;
+static BOOL CALLBACK MonitorOtherProc(HMONITOR hm, HDC dc, LPRECT rc, LPARAM p) {
+    (void)dc; (void)rc;
+    MonOtherCtx* st = (MonOtherCtx*)p;
+    if (st->found && *st->found) return FALSE;      /* 已经找到了 */
+    if (hm == st->self) return TRUE;
+    MONITORINFO minfo;                               /* 别叫 mi：文件里有同名全局/局部 */
+    memset(&minfo, 0, sizeof(minfo));
+    minfo.cbSize = sizeof(minfo);
+    if (!GetMonitorInfoW(hm, &minfo)) return TRUE;
+    st->out->x = minfo.rcWork.left + (minfo.rcWork.right - minfo.rcWork.left) / 2;
+    st->out->y = minfo.rcWork.top + (minfo.rcWork.bottom - minfo.rcWork.top) / 2;
+    *st->found = TRUE;
+    return FALSE;
+}
+static void EnumMonitorsForOther(HMONITOR self, POINT* out, BOOL* found) {
+    out->x = out->y = 0;
+    *found = FALSE;
+    MonOtherCtx st;
+    st.self = self; st.out = out; st.found = found;
+    EnumDisplayMonitors(NULL, NULL, MonitorOtherProc, (LPARAM)&st);
+}
+
 /* 场景AE 用：回读到的矩形是否等于"按既定规则算出的落点"。
    **期望值调用产品自己的纯函数**（`WinComputePlacement`）而不是硬写"左上角 == 光标"：
    光标贴着工作区下沿时整窗放不下，产品会按规则钳进来（实测：工作区底 706、窗口高 260、
@@ -359,8 +387,14 @@ static BOOL PlacementMatches(const RECT* work, POINT cursor, RECT got) {
    两个计数器各自只触发一次，免得无限递归。 */
 static int g_shrinkOnMove = 0;
 static int g_jumpOnMove = 0;
+/* 窗口收到过多少次"位置变化"通知。C+Q 那条"最大化窗口同屏不还原不挪"的断言
+   靠它：只看矩形的话，"还原成小窗口、挪一下、再最大化铺回去"结束时的矩形与
+   刚开始时**完全一样** —— 正是用户说的"挪跟没挪一样，只会抖一下"。
+   数通知次数才分得清"真没动"与"动了一圈又回到原样"。 */
+static int g_posChanged = 0;
 static LRESULT CALLBACK MoveProbeProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_WINDOWPOSCHANGED) {
+        g_posChanged++;
         if (g_shrinkOnMove > 0) {
             g_shrinkOnMove--;
             SetWindowPos(h, NULL, 0, 0, 360, 260,
@@ -1551,15 +1585,119 @@ int main(void) {
                   tgt.y >= wr.top && tgt.y < wr.bottom,
                   "AE: 光标仍在窗口内（伸手就能抓到）");
 
-            /* 最大化：位置由系统按显示器算、给它的 (x,y) 会被忽略，所以必须先
-               还原再挪 —— 但挪完要还回去，不能顺手取消用户的最大化状态。 */
+            /* 最大化：位置由系统按显示器算、给它的 (x,y) 会被忽略，所以挪到
+               **另一块显示器**必须先还原再挪 —— 但挪完要还回去，不能顺手取消
+               用户的最大化状态。
+               ★ 这一条必须让光标落在窗口**所在显示器之外**：光标与本窗口同屏时
+               C+Q 会直接拦下不做还原（见下一条断言），走不到这条路。 */
             ShowWindow(w, SW_MAXIMIZE);
             Pump(30);
             CHECK(IsZoomed(w) != FALSE, "AE: 前置条件 —— 窗口已最大化");
-            SetCursorPos(tgt.x, tgt.y);
-            WinMoveWindowToCursor(w);
+            {
+                /* 找一块**别的**显示器上的落点；找不到（单显示器）就跳过这一条，
+                   不假红 —— 单显示器机器上"挪到别的屏"本来就不成立。 */
+                POINT other;
+                BOOL haveOther = FALSE;
+                HMONITOR hSelfMon = MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST);
+                EnumMonitorsForOther(hSelfMon, &other, &haveOther);
+                if (haveOther) {
+                    SetCursorPos(other.x, other.y);
+                    Pump(30);
+                    WinMoveWindowToCursor(w);
+                    Pump(80);
+                    CHECK(IsZoomed(w) != FALSE, "AE: 最大化的窗口挪完仍是最大化");
+                    RECT wr2;
+                    GetWindowRect(w, &wr2);
+                    CHECK(MonitorFromRect(&wr2, MONITOR_DEFAULTTONEAREST) ==
+                          MonitorFromPoint(other, MONITOR_DEFAULTTONEAREST),
+                          "AE: 最大化窗口挪到了光标所在的另一块显示器");
+                } else {
+                    printf("       (只有一块显示器：跳过\"最大化窗口挪到另一屏\")\n");
+                }
+            }
+
+            /* ★★ 最大化 + **光标就在它自己那块屏**上：不许有任何还原/最大化动作。
+               这是 bug 现场：「最大化窗口的 C+Q 也会抖动」—— 原流程是
+               SW_RESTORE → SetWindowPos → SW_MAXIMIZE，落点其实一模一样，
+               用户只看到小窗口闪一帧。
+               判据不能只看矩形：动了一圈再铺回去，矩形**完全一样**。
+               所以数 `WM_WINDOWPOSCHANGED`（`g_posChanged`）：要求一次都没有。
+               （这条在单显示器机器上同样成立 —— 光标与窗口必然同屏。） */
+            ShowWindow(w, SW_MAXIMIZE);
+            Pump(40);
+            CHECK(IsZoomed(w) != FALSE, "AE: 前置条件 —— 窗口已最大化（同屏用例）");
+            {
+                RECT before, after;
+                GetWindowRect(w, &before);
+                POINT onSelf = { before.left + 80, before.top + 60 };
+                SetCursorPos(onSelf.x, onSelf.y);
+                Pump(30);
+                GetCursorPos(&onSelf);          /* 以实际光标为准 */
+                g_posChanged = 0;
+                WinMoveWindowToCursor(w);
+                Pump(120);
+                GetWindowRect(w, &after);
+                CHECK(EqualRect(&before, &after) != FALSE,
+                      "AE: 最大化窗口同屏 -> 矩形一点没变");
+                CHECK(g_posChanged == 0,
+                      "AE: 最大化窗口同屏 -> 连一次位置变化都没发生（不还原、不再最大化）");
+                CHECK(IsZoomed(w) != FALSE,
+                      "AE: 最大化窗口同屏 -> 最大化状态当然也还在");
+            }
+
+            /* ★ 全屏窗口：**不许动**（bug 现场：「在本窗口已经全屏时按 C+Q 不再响应，
+               挪跟没挪一样，只会抖动一下」）。
+               全屏窗口在系统眼里就是"最大化铺满"，照原流程走是
+               SW_RESTORE → SetWindowPos → SW_MAXIMIZE 又铺回原位，
+               用户只看到一次还原/最大化重绘 = "抖动一下"。
+               判据复用 drag.c 那条（WinIsFullscreen：窗口矩形 == rcMonitor）——
+               这里把窗口**真的**铺满整块显示器（用 rcMonitor，盖住任务栏那一侧），
+               然后要求：谓词认它、WinMoveWindowToCursor 返回 FALSE、且矩形**一点没变**。
+               最后一条是关键：只断言返回值的话，"动了但动了等于没动"照样能过。 */
+            ShowWindow(w, SW_RESTORE);
             Pump(30);
-            CHECK(IsZoomed(w) != FALSE, "AE: 最大化的窗口挪完仍是最大化");
+            SetWindowPos(w, NULL, mi.rcMonitor.left, mi.rcMonitor.top,
+                         (int)(mi.rcMonitor.right - mi.rcMonitor.left),
+                         (int)(mi.rcMonitor.bottom - mi.rcMonitor.top),
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            Pump(30);
+            {
+                RECT fr, fr2;
+                GetWindowRect(w, &fr);
+                CHECK(WinIsFullscreen(w) != FALSE,
+                      "AE: 前置条件 —— 窗口已铺满整块显示器（rcMonitor）");
+                SetCursorPos(tgt.x, tgt.y);
+                Pump(20);
+                BOOL moved = WinMoveWindowToCursor(w);
+                Pump(60);
+                GetWindowRect(w, &fr2);
+                CHECK(moved == FALSE, "AE: 全屏窗口 -> 不做移动（返回失败）");
+                CHECK(EqualRect(&fr, &fr2) != FALSE,
+                      "AE: 全屏窗口矩形**一点没变**（没有还原/最大化那一抖）");
+            }
+
+            /* 反向对照：**工作区大小**（rcWork，差一个任务栏）不算全屏 ——
+               那是普通最大化，必须照旧能挪。少了这一条，把谓词写成">= 工作区"
+               之类的宽松版本也能全绿。
+               注意这里只验"谓词不误杀"，不去验移动结果：Windows 会把"和 rcMonitor
+               等宽等高、只是位置不同"的窗口吸附成最大化，几何结果不稳定，
+               断言它就成了测系统行为而不是测我们的代码。 */
+            ShowWindow(w, SW_RESTORE);
+            Pump(30);
+            SetWindowPos(w, NULL, mi.rcWork.left, mi.rcWork.top,
+                         (int)(mi.rcWork.right - mi.rcWork.left),
+                         (int)(mi.rcWork.bottom - mi.rcWork.top),
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            Pump(30);
+            if (!EqualRect(&mi.rcWork, &mi.rcMonitor)) {
+                /* 本机有任务栏：工作区比整屏矮 → 必须是"不是全屏" */
+                CHECK(WinIsFullscreen(w) == FALSE,
+                      "AE: 铺满**工作区**（比全屏矮一个任务栏）不算全屏");
+            } else {
+                /* 无任务栏的机器：rcWork == rcMonitor，这个窗口本来就是全屏 */
+                CHECK(WinIsFullscreen(w) != FALSE,
+                      "AE: 无任务栏（rcWork == rcMonitor）-> 铺满即为全屏");
+            }
 
             /* ① 挪过去之后**自己改尺寸**（实测 CLaunch 跨不同缩放比例的屏就是这样：
                保持物理尺寸不变，逻辑尺寸 578x437 → 495x374）。落点改成"左上角对齐
@@ -1787,6 +1925,46 @@ int main(void) {
                 MousePt(WM_LBUTTONUP, big);
                 Pump(60);
                 Key(CLI_CAPS, FALSE); Pump(2);
+            }
+
+            /* ⑧ 全屏窗口：**不接管**（与 C+Q 共用 WinIsFullscreen 那条判据）。
+               把窗口真的铺满整块显示器，然后在它上面按 Caps+左键 ——
+               必须原样透传（返回 0）、不进入拖拽。
+               这条与场景 AE 的全屏用例是一对：同一个谓词，两个调用方都得拦住，
+               否则会出现"拖动不让动、C+Q 却去动"这种自相矛盾的行为。 */
+            {
+                MONITORINFO fmi;
+                memset(&fmi, 0, sizeof(fmi));
+                fmi.cbSize = sizeof(fmi);
+                HMONITOR fhm = MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST);
+                if (fhm && GetMonitorInfoW(fhm, &fmi)) {
+                    ShowWindow(w, SW_RESTORE);
+                    Pump(30);
+                    SetWindowPos(w, NULL, fmi.rcMonitor.left, fmi.rcMonitor.top,
+                                 (int)(fmi.rcMonitor.right - fmi.rcMonitor.left),
+                                 (int)(fmi.rcMonitor.bottom - fmi.rcMonitor.top),
+                                 SWP_NOZORDER | SWP_NOACTIVATE);
+                    Pump(40);
+                    CHECK(WinIsFullscreen(w) != FALSE,
+                          "AF: 前置条件 —— 窗口已铺满整块显示器");
+                    RECT fr0, fr1;
+                    GetWindowRect(w, &fr0);
+                    POINT inFs = { fr0.left + 40, fr0.top + 40 };
+                    Key(CLI_CAPS, TRUE); Pump(2);
+                    CHECK(MousePt(WM_LBUTTONDOWN, inFs) == 0,
+                          "AF: 全屏窗口 -> 左键原样透传（不接管）");
+                    CHECK(!DragActive(), "AF: 全屏窗口 -> 不进入拖拽");
+                    /* 鼠标位移也不该让它动：透传之后走的是窗口自己的命中测试 */
+                    POINT fs2 = { inFs.x + 120, inFs.y + 90 };
+                    MousePt(WM_MOUSEMOVE, fs2);
+                    Pump(120);
+                    GetWindowRect(w, &fr1);
+                    CHECK(EqualRect(&fr0, &fr1) != FALSE,
+                          "AF: 全屏窗口 -> 拖不动（矩形一点没变）");
+                    MousePt(WM_LBUTTONUP, fs2);
+                    Pump(60);
+                    Key(CLI_CAPS, FALSE); Pump(2);
+                }
             }
 
             Key(CLI_CAPS, FALSE); Pump(2);

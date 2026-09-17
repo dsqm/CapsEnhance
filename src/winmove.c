@@ -75,6 +75,27 @@ BOOL WinIsShellClass(HWND hwnd) {
         || wcscmp(cls, L"WorkerW") == 0;
 }
 
+/* 全屏判定（C+拖动 与 C+Q 共用；原本只在 drag.c 里，两边标准必须一致）。
+   判据：窗口矩形 == 它所在显示器的**整屏**矩形（`rcMonitor`）。
+   · 用 rcMonitor 不用 rcWork：任务栏那一侧的收缩不算 —— 铺满整屏、连任务栏都盖住的
+     才算全屏（AltSnap 的 FullScreen 默认也是这么判）。
+   · `MONITOR_DEFAULTTONEAREST`：窗口矩形哪怕部分悬空（刚拔了屏）也能落到最近那块上，
+     不会因为拿不到显示器就误判成"不是全屏"。
+   · 拿不到矩形/显示器时返回 FALSE（当作普通窗口）：宁可让它挪，也不要因为一次查询
+     失败就把功能整个吞掉 —— 挪错位置是可逆的，按了没反应却像程序坏了。 */
+BOOL WinIsFullscreen(HWND hwnd) {
+    if (!hwnd) return FALSE;
+    RECT rc;
+    if (!GetWindowRect(hwnd, &rc)) return FALSE;
+    HMONITOR hm = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    if (!hm) return FALSE;
+    MONITORINFO mi;
+    memset(&mi, 0, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(hm, &mi)) return FALSE;
+    return EqualRect(&rc, &mi.rcMonitor) != FALSE;
+}
+
 /* 类名转窄字符，只为日志（%s 比 %ls 稳，也不给分析器留口实）。 */
 static void ClassNameToAnsi(HWND hwnd, char* out, int cap) {
     WCHAR w[64] = L"";
@@ -206,14 +227,70 @@ const WCHAR* WinDpiAwarenessName(void) {
 BOOL WinMoveWindowToCursor(HWND hwnd) {
     if (!hwnd || !IsWindow(hwnd)) return FALSE;
 
+    /* ★ 全屏窗口直接不挪（复用 drag.c 那条判据，见 WinIsFullscreen）。
+       为什么必须**在还原之前**挡掉：全屏窗口（独占全屏游戏/视频、以及铺满整屏的
+       窗口）在系统眼里就是"最大化铺满"的状态。照原来的流程走是：
+         SW_RESTORE（窗口缩回还原尺寸）→ SetWindowPos 挪到工作区 → SW_MAXIMIZE 又最大化。
+       结果窗口被挪到新显示器上**又立刻最大化回去**，用户在屏幕上看不出任何变化，
+       只有一瞬间的还原/最大化重绘 —— 就是那句"挪跟没挪一样，只会抖动一下"。
+       而且更糟：独占全屏程序在来回 RESTORE/MAXIMIZE 时会掉出全屏、黑屏闪一下，
+       所以这里不是"少做个无用功"，是**不能做**。
+       全屏窗口本来也没有"挪"的意义：它铺满整块屏，挪到同一块屏上是原地不动，
+       要挪的语义是"换一块屏"，那属于全屏程序自己的显示选择，不该由这个动作代劳。 */
+    if (WinIsFullscreen(hwnd)) {
+        if (g_recording.load()) {
+            char cls8[64];
+            ClassNameToAnsi(hwnd, cls8, 64);
+            CapLog("  [窗口] 全屏窗口不做移动 cls=%s（C+Q 只挪普通/最大化窗口）",
+                   cls8[0] ? cls8 : "?");
+        }
+        return FALSE;
+    }
+
     /* 最小化/最大化的窗口"挪不动"：
        · 最大化的窗口位置由系统按所在显示器算，(x,y) 直接忽略 —— 不还原就看不出变化；
        · 最小化的窗口 GetWindowRect 不是它的还原位置，照着算会把窗口放到错的地方。
        所以先还原成普通窗口。最大化的那个最后再最大化回去：此时还原位置已经在
        目标显示器上，于是它在新屏上重新铺满（等价于 Win+Shift+方向 的语义，
-       而不是"顺手把用户的最大化取消掉"）。 */
+       而不是"顺手把用户的最大化取消掉"）。
+
+       ★★ 但**光标和目标窗口本来就在同一块显示器上**时，这整套还原/最大化都是
+       白做的，而且正是"最大化窗口按 C+Q 会抖一下"的来源：还原尺寸的小窗口
+       先在光标处闪一帧，马上又被最大化铺回原样 —— 落点其实一模一样。
+       （`C+拖动` 对同一种"看得见却没意义"的变化做的是拖出阈值：小位移连还原都
+       不发，见 drag.c 的 DRAG_OUT_THRESHOLD_PX。这里同理：既然结果不会变，
+       就连还原都不做。）
+       判据取**显示器**（光标所在那块 vs 窗口所在那块）而不比窗口矩形：最大化
+       窗口铺满整块屏，"窗口的显示器"是稳定量；只对 wasMax 生效 —— 最小化的
+       窗口 `IsZoomed` 为 FALSE，照旧走下面的还原路径（它的 GetWindowRect 不是
+       还原位置，必须先还原才能算落点）。 */
     const BOOL wasMax = IsZoomed(hwnd) != FALSE;
-    if (IsIconic(hwnd) || wasMax) ShowWindow(hwnd, SW_RESTORE);
+    const BOOL wasMin = IsIconic(hwnd) != FALSE;
+    BOOL sameMon = FALSE;
+    if (wasMax && !wasMin) {
+        POINT cur0;
+        if (GetCursorPos(&cur0)) {
+            HMONITOR hCursor = MonitorFromPoint(cur0, MONITOR_DEFAULTTONEAREST);
+            HMONITOR hWndMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            sameMon = (hCursor && hWndMon && hCursor == hWndMon);
+        }
+    }
+
+    /* 同屏且已最大化：它**已经**铺满目的显示器，什么都不用做。
+       返回 TRUE = "这条动作处理完了"（不是因为挪成功）—— act.c 只在 FALSE 时
+       记一行"没有可挪的前台窗口"。若这里返回 FALSE，日志就会变成"没有可挪的
+       前台窗口"，与事实不符，下次排查又得从头找一遍。 */
+    if (sameMon) {
+        if (g_recording.load()) {
+            char cls8[64];
+            ClassNameToAnsi(hwnd, cls8, 64);
+            CapLog("  [窗口] 最大化且已在光标所在显示器，不还原不挪（避免抖一下） cls=%s",
+                   cls8[0] ? cls8 : "?");
+        }
+        return TRUE;
+    }
+
+    if (wasMin || wasMax) ShowWindow(hwnd, SW_RESTORE);
 
     /* 声明区都放在**第一条 goto 之前**并用 C 风格赋值：`goto` 跳过"带初始化
        的局部声明"在 C++ 里是错（C2362），写成声明区就从结构上不会踩到。 */
@@ -260,7 +337,8 @@ BOOL WinMoveWindowToCursor(HWND hwnd) {
         char cls8[64];
         ClassNameToAnsi(hwnd, cls8, 64);
         CapLog("  [窗口] %s cls=%s 光标(%d,%d) 显示器[%d,%d..%d,%d] 工作区[%d,%d..%d,%d]",
-               wasMax ? "最大化→挪屏后仍最大化" : "普通",
+               wasMin ? "最小化→挪屏后还原"
+                      : (wasMax ? "最大化→挪屏后仍最大化" : "普通"),
                cls8[0] ? cls8 : "?",
                (int)cur.x, (int)cur.y,
                (int)mi.rcMonitor.left, (int)mi.rcMonitor.top,
@@ -277,7 +355,10 @@ BOOL WinMoveWindowToCursor(HWND hwnd) {
     }
 
 done:
-    if (wasMax) ShowWindow(hwnd, SW_MAXIMIZE);   /* 失败也要把最大化状态还回去 */
+    /* 把最大化状态还回去。成功路径上必须还（那是"在新屏上重新铺满"的最后一步）；
+       失败路径上更必须还 —— 否则窗口会被留在"被我们还原成小窗口"的状态。
+       但**同屏那一次拦截不走这里**（它压根没还原，详见上面那段）。 */
+    if (wasMax && !sameMon) ShowWindow(hwnd, SW_MAXIMIZE);
     return ok;
 }
 

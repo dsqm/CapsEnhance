@@ -157,16 +157,19 @@ BOOL DragBegin(POINT pt) {
     if (!IsWindowVisible(hwnd)) return FALSE;
     if (IsIconic(hwnd)) return FALSE;           /* 最小化：拖不出可见效果，点击照旧 */
 
-    /* 全屏窗口不拖（AltSnap 默认 FullScreen=0：整屏矩形 = 全屏程序，拖它没意义） */
-    RECT rc;
-    if (!GetWindowRect(hwnd, &rc)) return FALSE;
-    HMONITOR hm = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi;
-    memset(&mi, 0, sizeof(mi));
-    mi.cbSize = sizeof(mi);
-    if (hm && GetMonitorInfoW(hm, &mi) && EqualRect(&rc, &mi.rcMonitor)) return FALSE;
+    /* 全屏窗口不拖（AltSnap 默认 FullScreen=0：整屏矩形 = 全屏程序，拖它没意义）。
+       判定抽在 winmove.c 的 WinIsFullscreen 里：C+Q 也用它，两边标准必须同一条 —— 
+       否则会出现"拖动不让动、C+Q 却去动"这种自相矛盾的行为。 */
+    if (WinIsFullscreen(hwnd)) return FALSE;
 
     const BOOL wasMax = IsZoomed(hwnd) != FALSE;
+
+    /* 普通窗口的抓取基准（尺寸 + 左上角）在这里就取好：进临界区之后再取的话，
+       取不到就只能带着没释的锁 return —— 那正是难查的死锁。最大化窗口不需要
+       （等拖出阈值还原之后再量），保持 rc 为零。 */
+    RECT rc;
+    memset(&rc, 0, sizeof(rc));
+    if (!wasMax && !GetWindowRect(hwnd, &rc)) return FALSE;
 
     EnterCriticalSection(&s_cs);
     s_hwnd = hwnd;
@@ -188,7 +191,7 @@ BOOL DragBegin(POINT pt) {
     }
     s_w = s_h = 0;
     s_wndTL.x = s_wndTL.y = 0;
-    if (!wasMax) {                   /* 普通窗口：抓取基准现在就能定 */
+    if (!wasMax) {
         s_w = (int)(rc.right - rc.left);
         s_h = (int)(rc.bottom - rc.top);
         s_wndTL.x = rc.left;
