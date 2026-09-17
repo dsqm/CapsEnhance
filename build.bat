@@ -56,7 +56,7 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP ^
    /Fobin\ ^
    src\hook.c src\nav.c src\send.c src\act.c src\config.c src\keymap.c src\main.c ^
    src\autodisp.c src\bridge.c src\wps.c src\winmove.c src\drag.c src\ime.c ^
-   src\folder.c ^
+   src\folder.c src\help.c ^
    /link /OUT:bin/CapsEnhance.exe ^
    bin\app_res.obj ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib ^
@@ -80,6 +80,22 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /SUBSYSTEM:WINDOWS
 if errorlevel 1 (
     echo [ERROR] settings build failed
+    exit /b 1
+)
+
+rem Help overlay: a third exe, for the same kind of reason as the settings editor.
+rem It draws a whole keyboard with GDI+ (and keeps a 32bpp DIB for per-pixel alpha),
+rem owns its own show/hide lifetime, and is expected to start cold in tens of ms.
+rem The main program is the keyboard-hook host -- none of that belongs in it.
+rem It links nothing from src\ except the shared keymap table (a header).
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
+   /Fobin\ ^
+   help\help.c ^
+   /link /OUT:bin/CapsEnhanceHelp.exe ^
+   user32.lib gdi32.lib shell32.lib ole32.lib gdiplus.lib ^
+   /SUBSYSTEM:WINDOWS
+if errorlevel 1 (
+    echo [ERROR] help overlay build failed
     exit /b 1
 )
 

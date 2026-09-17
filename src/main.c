@@ -557,6 +557,10 @@ void ApplyPauseState(void) {
 /* ============ 窗口过程 ============ */
 static void ResetEngine(void) {
     StopEngine();
+    /* 帮助窗口跟着和弦一起收：松开 C、暂停、重启都会走到这里，一处覆盖全 —— 
+       否则"按着 C+F1 直接松 C"会让窗口一直留着（心跳断供那条路虽然也会收，
+       但那是 800ms 之后的兜底，用户当下看到的就是"松手了图还挂着"）。 */
+    HelpHide();
     NavSelTrackReset();
     /* 丢掉还没开始的"重复开火"尾流，但保留"松手补齐" —— 后者是用户本次
        点按的一部分，不能因为紧接着松开 C 就被清掉。 */
@@ -775,6 +779,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_actShf = (lp & TRIGF_SHF) != 0;
             g_btnCount = 1;
             DoFireOnce(act, TRUE);
+            /* 帮助窗口（C+F1）：**不走执行线程**，因为它不阻塞也不发键 ——
+               它只是"拉起/唤起另一个进程的窗口"，在主线程上做才是对的
+               （要按和弦的寿命开合，见 help.c）。 */
+            if (ActHasFlag(act, ACTF_HELP)) HelpShow();
             if (!IsSingleShotAct(act)) {
                 /* 开关键只切一次、也不接管重复节奏（原来那个动作继续重复） */
                 g_activeAct = act;
@@ -791,6 +799,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TRIG_UP: {               /* 触发键抬起 */
         int act = (int)wp;
         StackRemove(act);
+        /* 帮助窗口的寿命就是这个和弦：F1 一抬就隐（松开 Caps 那条走 ResetEngine，
+           两条路都收，先到的那条生效）。放在最前面：单发动作根本不进下面的
+           "停重复 + 补齐"分支（g_activeAct 从来不会指向它）。 */
+        if (ActHasFlag(act, ACTF_HELP)) HelpHide();
         if (g_recording.load())
             CapLog("  [和弦] %s 抬起 (active=%s) -> %s", ActName(act),
                    ActName(g_activeAct),
@@ -838,6 +850,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_TIMER: {
         if (wp == TRAY_RETRY_TIMER) { TrayRetryTick(); return 0; }
+        if (wp == HELP_TIMER) { HelpTick(); return 0; }
+        if (wp == HELP_KA_TIMER) { HelpKaTick(); return 0; }
         if (wp != 2) break;
         if (!g_cMod) { ResetEngine(); return 0; }
         ULONGLONG now = GetTickCount64();

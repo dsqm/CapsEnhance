@@ -11,6 +11,7 @@
    ============================================================ */
 #define WinMain __CapsEnhanceRealWinMain_Unused
 #include "cap.h"
+#include "keymap_table.h"   /* 与帮助程序共用同一份键位表：这里顺带守着"文案不缺" */
 #include "main.c"
 #undef WinMain
 /* ---- 输入法切换桩（src/ime.c 不进本测试）----
@@ -54,6 +55,18 @@ long long NavFocusCaret(void) { return -1; }   /* 光标回读只给诊断日志
 int  WpsBridgeServe(unsigned long pid, unsigned long seq) { (void)pid; (void)seq; return 0; }
 BOOL BrParseChildSwitch(DWORD* pid, DWORD* seq) { (void)pid; (void)seq; return FALSE; }
 void WpsBridgeShutdown(void) { }
+
+/* ---- 按键帮助桩（src/help.c 不进本测试）----
+   真实现会 CreateProcess 拉起 CapsEnhanceHelp.exe、还要跨进程发消息 —— 
+   本测试既不该弹窗，也不该在别人机器上找那个 exe。桩成"记账"：
+   只记开/关次数与顺序，用来钉"帮助窗口的寿命 = 这个和弦"这条语义
+   （按下开、抬起关、松开 Caps 也关）。 */
+static int g_helpShow = 0, g_helpHide = 0;
+void HelpShow(void) { g_helpShow++; }
+void HelpHide(void) { g_helpHide++; }
+void HelpTick(void) { }
+void HelpKaTick(void) { }
+static void ResetHelpRec(void) { g_helpShow = 0; g_helpHide = 0; }
 
 /* ---- 捕获钩子：记录注入的完整事件序列（按下/抬起），并可统计次数 ---- */
 typedef struct { int vk; int n; } Rec;
@@ -1768,6 +1781,8 @@ int main(void) {
     {
         CHECK(ActOfVk(VK_F3) == ACT_OPENFOLDER,
               "AH: 触发键 F3 -> 打开所在文件夹动作");
+        CHECK(ActOfVk(VK_OEM_5) == ACT_NONE,
+              "AH: 旧的 `\\` 键已不再映射（改到 F3 之后不留旧绑定）");
         CHECK(ActHasFlag(ACT_OPENFOLDER, ACTF_OPENFOLDER) &&
               ActHasFlag(ACT_OPENFOLDER, ACTF_SINGLE_SHOT) &&
               ActHasFlag(ACT_OPENFOLDER, ACTF_NO_SHIFT),
@@ -1823,6 +1838,43 @@ int main(void) {
             CHECK(err == FOLDER_ERR_NOPATH, "AH: 失败原因 = 拿不到进程路径");
             CHECK(got[0] == 0, "AH: 失败时输出被清空（不留上一次的残留）");
         }
+    }
+
+    /* ---- 场景AI：按键帮助（C+F1，窗口在独立 exe 里）----
+       帮助窗口是另一个进程、而且"只能按住才显示"，它的像素测不了。能离线钉住的
+       是两件容易在以后改坏的事：
+         ① 接线与寿命语义：F1 接到帮助动作；按下请求显示、抬起请求隐藏、
+            **松开 Caps 也请求隐藏**（窗口的寿命 = 这个和弦，不是"点一下常亮"）；
+         ② **键位表与帮助图不会各说各话**：帮助 exe 直接 include 同一张
+            keymap_table.h，这里遍历它断言"每条动作都有图上文案" —— 
+            以后加动作忘了写 label，帮助图上就会出现一张空白键帽，这条会红。 */
+    {
+        CHECK(ActOfVk(VK_F1) == ACT_HELP, "AI: 触发键 F1 -> 按键帮助（帮助窗口）");
+        CHECK(ActHasFlag(ACT_HELP, ACTF_HELP) &&
+              ActHasFlag(ACT_HELP, ACTF_SINGLE_SHOT) &&
+              ActHasFlag(ACT_HELP, ACTF_NO_SHIFT),
+              "AI: 属性 = 由 help 处理 + 单发 + 不吃选区修饰");
+        CHECK(ActOutVk(ACT_HELP) == 0, "AI: 该动作不发任何键（只是个窗口）");
+
+        int noLabel = 0;
+        for (int i = 0; i < ACT_N; i++)
+            if (!kActions[i].label || !kActions[i].label[0]) noLabel++;
+        CHECK(noLabel == 0, "AI: 键位表每条动作都有帮助图文案（不会出现空键帽）");
+
+        ResetHelpRec();
+        Sim(CLI_CAPS, TRUE);  Pump(20);
+        Sim(VK_F1, TRUE);     Pump(20);
+        CHECK(g_helpShow >= 1, "AI: 按下 C+F1 -> 请求显示帮助");
+        Sim(VK_F1, FALSE);    Pump(20);
+        CHECK(g_helpHide >= 1, "AI: 抬起 F1 -> 请求隐藏帮助");
+
+        int hideBefore = g_helpHide;
+        Sim(VK_F1, TRUE);     Pump(20);     /* 再按一次，F1 按着不放 */
+        Sim(CLI_CAPS, FALSE); Pump(20);     /* 直接松开 Caps */
+        CHECK(g_helpHide > hideBefore,
+              "AI: 松开 Caps（F1 仍按着）-> 同样请求隐藏（寿命=和弦）");
+        Sim(VK_F1, FALSE);    Pump(20);
+        Drain();
     }
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);

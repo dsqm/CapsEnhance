@@ -99,7 +99,8 @@
 #define ACT_WORD_R 12                /* 按词跳转向右                             */
 #define ACT_PROBE  13                /* 诊断：探测当前焦点控件                */
 #define ACT_MOVEWIN 14               /* 把焦点窗口挪到鼠标光标处（多显示器）  */
-#define ACT_OPENFOLDER 15            /* 打开焦点程序所在文件夹并选中该 exe    */
+#define ACT_OPENFOLDER 15            /* 打开焦点程序所在文件夹并选中该 exe（F3）  */
+#define ACT_HELP     16              /* 按键帮助（F1）：拉起/唤起独立 exe CapsEnhanceHelp */
 
 #define DIR_LEFT 0
 #define DIR_RIGHT 1
@@ -114,6 +115,7 @@
 #define ACTF_NO_SHIFT    0x08   /* 不吃选区修饰：即使选区模式生效也裸发（开关键用） */
 #define ACTF_MOVEWIN     0x10   /* 挪窗口：交给 winmove.c 的移动动作，不走按键发送 */
 #define ACTF_OPENFOLDER  0x20   /* 打开所在文件夹：交给 folder.c 的 shell 动作，不走按键发送 */
+#define ACTF_HELP        0x40   /* 按键帮助：由 main.c 直接在和弦上开合（见 help.c），不走按键发送 */
 
 /* ---------- 修饰（和弦）模式 ----------
    按住 C 期间生效的"组合修饰"。**激活键是编译期常量，不读配置**（见下面
@@ -282,6 +284,49 @@ BOOL FolderProcessPathOf(HWND target, WCHAR* out, size_t cap, int* err);
                         /* 目标窗口 -> 进程映像全路径（含 UWP 的子窗口解析）。
                            同步、纯本地、不碰 shell —— 测试与实现共用（传本进程的窗口
                            即得本 exe 的路径）。失败返回 FALSE 且 *err = FOLDER_ERR_* */
+
+/* ---------- 按键帮助（`C+F1`；窗口在**独立 exe** `CapsEnhanceHelp.exe` 里） ----------
+   为什么拆成独立 exe：键位图要一次性叠一大堆 GDI+ 绘制，还要常驻一张位图、
+   自己管半透明与生命周期；放进本体就是给它加一份常驻内存与一堆新的失败点，
+   而本体是**钩子宿主**（主线程绝不能为了画图分心）。设置程序也是同一条理由。
+
+   寿命 = 和弦的寿命：**按下 F1 显示、抬起（或松开 Caps）即隐**，窗口隐完就退出
+   （不常驻 —— 代价是每次 ~20-40ms 冷启动，换零后台占用）。
+
+   ★ 为什么需要"送达重试"（HELP_TIMER 那只定时器）：
+   冷启动意味着**每次**显示都是一次 CreateProcess —— 窗口还不存在时主程序
+   发的 SHOW/HIDE 会直接丢掉。更糟的是"按下 30ms 就松手"：SHOW 与 HIDE 都在
+   窗口出生之前发生，于是窗口起来后不知道该显示还是该消失（旧写法会让它
+   永久留在屏幕上）。所以：
+     · 帮助 exe 启动后**先建一个隐藏窗口**，等主程序告诉它当前状态；
+       1.5 秒内什么都没等到 = 主程序早就不需要它了 → 自己退出（防呆）。
+     · 主程序把"期望状态"记下来，用 40ms 的定时器反复对账，直到送达或超时
+       （1 秒）。反正状态是幂等的，重复发没有副作用。
+
+   ★★ 心跳（HELP_KA_TIMER）：显示期间主程序按期喂一条 KA，帮助 exe 到点收不到
+   就自己退。这条**取代**了原来那两条兜底（"显示超 3 分钟自动收起"与"每秒看
+   主程序窗口在不在"），因为它盯的是更根本的事实 —— **"我还被需要吗"**：
+     · HIDE 丢了 / 主程序被强杀 / 主程序卡住不动，三种情形在别处各有各的判据，
+       在这里是同一件事：喂狗停了。
+     · 响应从 3 分钟降到 800ms，且不再需要"主程序窗口类名"这种间接信号。
+   代价只有显示期间每 200ms 一次 PostMessage（找不到窗口就什么都不做）。
+   手动双击（无 `--hold`）那份没有喂狗的人，所以它仍自己兜 3 分钟上限。 */
+#define HELP_TIMER   4                    /* 主窗口定时器 id（2=和弦引擎 3=托盘重试 5=心跳） */
+#define HELP_TICK_MS 40                   /* 对账间隔 */
+#define HELP_TRIES_MAX 25                 /* 40ms x 25 ≈ 1s 内送不到就放弃（下次按下再试） */
+#define HELP_KA_TIMER 5                   /* 心跳定时器 id：只在"期望显示"期间跑 */
+#define HELP_KA_MS    200                 /* 心跳间隔 */
+#define HELP_KA_TIMEOUT_MS 800            /* 帮助 exe 侧：这么久没心跳就自己退。
+                                             4 个周期，容忍连丢两三条（消息队列瞬时拥塞） */
+#define HELP_CLASS   L"CapsEnhanceHelp"   /* 帮助窗口类名（跨进程握手靠它 FindWindow） */
+#define HELP_MSG_SHOW L"CapsEnhanceHelpShow"  /* 注册消息：让它显示 */
+#define HELP_MSG_HIDE L"CapsEnhanceHelpHide"  /* 注册消息：让它隐藏并退出 */
+#define HELP_MSG_KA   L"CapsEnhanceHelpKa"    /* 注册消息：心跳（"我还需要你"） */
+#define HELP_EXE     L"CapsEnhanceHelp.exe"
+void HelpShow(void);   /* F1 按下：让帮助窗口可见（必要时先拉起它） */
+void HelpHide(void);   /* 抬起 / 松开 Caps / 引擎复位：让它隐（它会自己退出） */
+void HelpTick(void);   /* HELP_TIMER 到点：把期望状态再送一次（见上面的说明） */
+void HelpKaTick(void); /* HELP_KA_TIMER 到点：喂一条心跳（只在显示期间有定时器） */
 
 /* ---------- 坐标空间（进程级，必须在建任何窗口之前调用一次） ----------
    ★ 根因记录：低级鼠标钩子给的 `MSLLHOOKSTRUCT.pt` **永远是物理像素**

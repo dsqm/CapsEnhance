@@ -13,6 +13,7 @@
 - [WPS 文字：COM 自动化 + 降权桥](#wps-文字com-自动化--降权桥)
 - [单键切换输入法（ime.c）](#单键切换输入法imec)
 - [打开程序所在文件夹（folder.c）](#打开程序所在文件夹folderc)
+- [按键帮助（help/help.c）](#按键帮助helphelpc)
 - [托盘图标"开机后时有时无"（UIPI + 启动时序）](#托盘图标开机后时有时无uipi--启动时序)
 - [滚轮三路实现要点](#滚轮三路实现要点)
 - [配置项的设计与新增清单](#配置项的设计与新增清单)
@@ -81,7 +82,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `keymap.c` | **键位表（数据）**。两张声明式表：动作表（触发键 → 动作 → 目标键 + 属性标志 `ACTF_*`）与模式表（修饰模式 ↔ 激活键集合，激活键取自 `cap.h` 的 `MODE_*_KEYS_DEFAULT`，编译期常量、不读配置）。hook.c / main.c 只做查询。**引擎从不判断按的是哪个键，只问"这个模式生效了吗"**，所以"把 `D` 删掉只留 `Alt`"只改一处常量。启动时由 `KeyMapInit()` 装配 |
+| `keymap.c` | **键位映射的查询与装配**。动作表本身**不在这个文件里**，而在 `keymap_table.h` —— 它是"某个键是什么意思"的唯一一份定义，键位图（`help/help.c`）也要用同一份，两边各自 include，谁都不抄第二份。本文件提供查询接口（`ActOfVk` / `ActOutVk` / `ActWordDir` / `ActHasFlag` / `ActName`）与模式表（修饰模式 ↔ 激活键集合，激活键取自 `cap.h` 的 `MODE_*_KEYS_DEFAULT`，编译期常量、不读配置）。hook.c / main.c 只做查询。**引擎从不判断按的是哪个键，只问"这个模式生效了吗"**，所以"把 `D` 删掉只留 `Alt`"只改一处常量。启动时由 `KeyMapInit()` 装配 |
 | `hook.c` | **底层输入钩子**。识别 C / 触发键 / 模式激活键，维护 `volatile` 状态与"事件时刻的修饰快照"，并**无条件跟踪真实 Shift**（横向滚动要用，且须放在"未按 C 就放行"之前）；屏蔽映射期间的无效按键；修饰键抬起使某模式失效时投 `WM_MODE_UP`。鼠标钩子只做一件事——按住 C 时把滚轮请求投递出去；**横向与持续滚动两路吞掉物理格**，只有放大档放行；回调在最热路径上，只允许几次比较 + `PostMessage` |
 | `main.c` | **消息窗口 + 消息循环**。和弦引擎（按下即开火 → 重复节奏 → 松手补齐）；路由：按词跳转动作用 `NavJump`，其余用 `SendActOnce`；滚轮 / 持续滚动 / 模式失效消息只做投递；托盘菜单（暂停 / 设置 / 重启 / 退出）；`--restart` 等命令行开关；日志 `CapLog`；启动时调用 `NavBaseInfo()` 采集环境基线、`KeyMapInit()` 装配激活键 |
 | `settings/settings.c` | **独立的设置程序**（`CapsEnhanceSettings.exe`，单独 exe，但链接 `src/config.c`）。**表单式**界面：布尔项 = 勾选框、数值项 = 数字框、五份名单各是一个可增删的列表（行内还有"选取窗口"：取到的值先填进输入框，点"添加"才入名单）；保存 = `ConfigSet*` + `ConfigSaveFile`（增量写回，保留注释/未知段/BOM/行尾） + `CapsEnhance.exe --restart`。为什么独立：本体主线程是钩子宿主，不能同时拥有设置窗口。为什么不做成文本编辑器：值域与布尔语义在 ini 里只是注释，摊开原文编辑等于允许写出"解析得出但不合理"的值。高 DPI：Per-Monitor V2 + `WM_DPICHANGED` 重排 |
@@ -95,6 +96,8 @@
 | `drag.c` | **Caps+左键拖动窗口**。判定在鼠标钩子（按下那一刻决定吞不吞），执行在专用线程（"最新点 wins"，钩子每帧只写一次状态 + SetEvent）；含最大化异步还原、全屏/最小化/桌面/任务栏/黑名单的接管判定 |
 | `ime.c` | **单键强制切换输入法**。判定在键盘钩子（"单击"），执行在专用线程（跨进程 IME 消息 + 键盘布局切换）；单槽 latest-wins，见[单键切换输入法](#单键切换输入法imec) |
 | `folder.c` | **打开焦点程序所在文件夹**（`C+F3`）。走标准 shell 接口（`SHParseDisplayName` → `SHOpenFolderAndSelectItems`，**不拼 `explorer.exe` 命令行**）；目标窗口由 `ActJob.hwnd` 在开火那一刻快照；执行在自己的**一次性线程**上（MTA + `CoInitializeEx`），不占 `act.c` 的动作队列；UWP 走"宿主 `ApplicationFrameHost` → 子窗口 `Windows.UI.Core.CoreWindow` → 真实进程"；失败原因经 `WM_FOLDER_OPEN` 回主线程弹气泡 |
+| `help.c` | **按键帮助的开合（主程序侧）**（`C+F1`）：拉起同目录的 `CapsEnhanceHelp.exe`，并把"当前该显示还是该隐藏"告诉它（注册消息 + 40ms 对账重试）。窗口**不常驻**，所以每次显示都是一次冷启动 —— 而"按一下就松手"会让 SHOW/HIDE 都发在窗口出生之前，重试就是为这个竞态准备的。寿命由和弦决定：按下开、抬起关、松开 Caps（`ResetEngine`）也关 |
+| `help/help.c` | **按键帮助窗口本体**（独立 exe `CapsEnhanceHelp.exe`）。自包含：不装钩子、不初始化 COM/TSF，只做"GDI+ 起一次 + 铺底一帧 + GDI 画一遍字 + 送进分层窗口"（只读 `CapsEnhance.ini` 里那三个 `Ime*Mode`，用来决定底部三条"单击切输入法"的文案）。逐像素 alpha（32bpp DIB + `UpdateLayeredWindow`）实现半透明；文字用 **GDI + ClearType**；`WS_EX_NOACTIVATE` 保证不抢焦点；键位表从 `keymap_table.h` 编进来（不跨进程取数据）。见[按键帮助](#按键帮助helphelpc) |
 
 > 分层意义：以后要支持"另一个只有 COM 才读得到的程序"（如 WPS 表格），照 `wps.c` 再写一个文件即可，`autodisp.c` 与 `bridge.c` 原样复用。
 > 激活键（`Alt/D`、`F`）**不做成配置项**：它们属于和弦语法本身，改变量级 < 配置项，历史实装成 `EnhanceKeys` / `ShiftKeys` 后已回退（改它们等于改功能）。但 `keymap.c` 那层模式抽象仍在，以后想改常量只需动 `cap.h` 一处。
@@ -363,6 +366,46 @@ WPS 置位的回读校验返回**三态**：
 - **取路径只有一份实现**：`ConfigGetProcessPathByPid` ← `ConfigGetProcessPath(HWND)` ← `ConfigGetProcessName(HWND)`（最后一层抽 basename，供名单匹配）。名单匹配与"打开所在文件夹"要的都只是路径，不该各写一遍 `OpenProcess` + `QueryFullProcessImageNameW`。
 - **单测边界**：shell 那一步**测不了**（会真的弹窗口、还要等 explorer 响应），所以它只出现在 `FolderThreadProc` 里；`FolderProcessPathOf` 是同步的、纯本地的，测试直接拿一个真窗口验"解出来的就是本进程 exe 的全路径"（`test_chord` 场景 AH）。
 - **已知限制**：目标文件夹已在别处打开时，这个接口仍可能新开一个窗口（不复用已开的那个）。这是接口的既有行为，不是这里的实现选择。
+
+---
+
+## 按键帮助（`help/help.c`）
+
+一句话：`C+F1` **按住**时，屏幕上浮出一张半透明键位图；松开（F1 或 Caps）即隐。窗口在**独立 exe** 里。
+
+**为什么拆成独立 exe**（与设置程序同一条理由，但更极端）：它要一次性叠上百次绘制（键帽底 + 文字两遍）、常驻一张 32bpp 位图、自己管半透明与生命周期；而本体是**钩子宿主** —— 主线程绝不能为了画图分心（见 `act.c` 顶部那个根因）。拆出去之后，本体只多了一个 `help.c`（拉起 + 报状态），帮助程序那份启动开销与内存也只在按 `C+F1` 时才存在。
+
+几个决定与其理由：
+
+- **不常驻、隐后即退**（隐完留 300ms 缓冲再退，免得"刚松手又按下"来回重启进程）。代价是每次显示 ~20-40ms 冷启动；收益是零后台占用。实测冷启动到可见在几十毫秒量级（GDI+ 起一次 + 画一帧）。
+- **显隐靠主程序发消息，而且要重试**。冷启动意味着"按下 30ms 就松手"这种操作会让 SHOW 与 HIDE **都落在窗口出生之前** —— 窗口起来后不知道该显示还是该消失。两边的对策缺一不可：
+  · 帮助 exe 启动后**先建隐藏窗口**，等主程序告诉它状态；1.5 秒等不到就自己退出（防呆，见 `TID_ARMED`）。
+  · 主程序把"期望状态"记下来，用 40ms 的定时器反复对账直到送达或超时（1s）。状态幂等，重发没有副作用。
+  另：**寿命由心跳兜着** —— 显示期间主程序每 200ms 发一条 KA，帮助 exe 800ms 收不到就自己退。这一条取代了原先的"每秒看一眼主程序窗口在不在"与"显示超 3 分钟自动收起"，因为它盯的是更根本的事实（**"我还被需要吗"**）：HIDE 丢了、主程序被强杀、主程序卡住不动，在别处是三种场景、在这里是同一件事 —— 喂狗停了。代价只是显示期间每 200ms 一次 `PostMessage`（找不到窗口就什么都不做）。手动双击那份没有喂狗的人，所以仍自己兜 3 分钟（`TID_LIFE` 只在非 `--hold` 下启动）。
+- **文字用 GDI+ 的灰阶抗锯齿（`TextRenderingHintAntiAliasGridFit`），刻意不上 ClearType**。理由是本窗口的性质：它是**逐像素 alpha 的半透明浮层**，而 ClearType 是次像素渲染 —— 它对"文字下面是什么颜色"有假设，在带透明背景的位图上支持并不完美：会留下**彩色镶边**（看着像锯齿），深底亮字还会 blooming（观感"莫名其妙地粗"）。四种渲染并排实测过（同一块 DIB、同一字号：GDI+ GridFit / GDI+ AntiAlias / GDI ClearType / GDI ANTIALIASED）：ClearType 最粗且有彩边，ANTIALIASED 偏细软，**GDI+ 的 AntiAliasGridFit 在深底亮字上最锐利、且完全没有彩边**。
+  ✗ 别加 `SetTextContrast(5)`：中文密集笔画会糊成块，"增强"两个字会粘在一起。
+- ★★ **去掉 ClearType 之后，"清不清晰"就只剩字号这一个变量了** —— 而字号的上限是**几何**的：键帽内宽 ÷ 每行字数。所以：
+  · 键帽缝隙（`CAP_GAP_K`）与标签留边（`LABEL_PAD_K`）收到最小，把空间让给字号；
+  · 字号是**逐键帽各定各的**（`PickFuncSizes`）：短文案的键用目标字号，长文案的键（F3 的"打开|程序目录"、反引号的"记录日志"）自动降一档 —— 长文案不再把所有键拖小，文案也就不必为字号让路；
+  · 实现是 `AllLabelsFit` 的按键版 `LabelLinesFit`（按 `|` 切段，每段都要装得下），从目标值往下找到第一个全通过的；绘制侧用一个小缓存按字号取 `Font`（档位最多三四档）。
+  （GDI+ 的 `MeasureString` 每侧会多算 1/6 em，是它的既有行为 —— 直接拿它当判据会让字号白白小一号，所以 `TextWidth` 按 `em/3` 把这份 padding 补回来。）
+- **逐像素 alpha，不是整窗调透明度**。`SetLayeredWindowAttributes(LWA_ALPHA)` 会把键帽、文字一起变淡（观感发虚），而这里要的是"背板半透明、内容实心"。所以走 32bpp PARGB DIB + `UpdateLayeredWindow(ULW_ALPHA)`，做法沿用本机 IMEIndicator 的 `overlay.c`（同一套 `WS_EX_LAYERED | NOACTIVATE | TOPMOST | TOOLWINDOW`）。没有要 `WS_EX_TRANSPARENT`：窗口需要收点击（点一下关闭）。
+- **不抢焦点是硬要求，也决定了关闭方式**。窗口带 `WS_EX_NOACTIVATE`、显示用 `SW_SHOWNOACTIVATE` —— 目的是"按着看的时候还能继续在原程序里操作"。代价是它永远拿不到键盘焦点，**`Esc` 关不掉**：所以关闭方式只有"松开键"与"点一下窗口"。
+- **键位布局按 ANSI 104 标准**（15u 主键区、功能行 Esc 与 F1 之间隔 1u、F 键每四个一组各隔 0.5u、功能行与数字行之间 0.25u），取自 keyboard-layout-editor 的 ANSI-104 定义 —— 只有位置对得上真键盘，这张图才能当"肌肉记忆的对照表"用。不含小键盘：它在 CapsEnhance 里零映射，画上去只是让窗口宽出三成。
+- **键帽两行：上=原键名、下=功能名**。功能名**不替代**键名 —— 先认出"这是哪个键"、再看它做什么，两行都在键帽里。没有功能的键只留键名并淡化，所以图仍能当"这是一把标准键盘"看。
+- **文案只有一份**：功能名来自 `keymap_table.h` 的 `label`（与日志用的 `name` 分开：日志要 `←(J)`，图上只要 `←`）。修饰键（Caps / D / 左 Alt）与诊断键（反引号）不是"触发键 → 动作"那一类，它们的文案在 `help.c` 的 `LabelOfVk` 里单独给出，但反引号那条**借用的仍是键位表里 `ACT_PROBE` 的 `label`**（PROBE_KEY 由 `hook.c` 特殊处理，表里 vk=0）。
+- **长文案的断点由数据决定**：`label` 里的 `|` 就是断行点（`"打开|程序目录"`）。中文没有词间空格，让程序按宽度自动断会把"打开程序目录"切成"打开程 / 序目录"——语义上难看。没写 `|` 的才走按宽度自动折行。
+- **尺寸与字号全部按 DPI 缩放**。本进程是 Per-Monitor V2，坐标与位图都是**物理**像素，而"多大算合适"是**逻辑**尺寸问题：4K@200% 的物理工作区是 3840x2160，若把单位长度 u 的上限写成 78 物理像素，图上每个键就只有 39 逻辑像素 —— 比 1080p 屏上还小一半，字自然又小又糊。所以基准刻度（u=50、边距 24/26/40/16、底部行高 24、四个字号）统一乘 `dpi/96`，任何缩放率下看起来一样大。整套刻度是**等比的**，改一个 `u` 就整体放大/缩小。
+  ★ 这些布局量由 `FitUnit` **算一次放进全局**（`g_pad / g_title / g_gap / g_foot / g_fsName..Foot`），绘制侧不再自己写第二份常量 —— 这里踩过两个真 bug：一次是开窗按 u=78、绘制按 u=64（四周留了一圈空白），一次是标题与底部字号写死成 17px/13px（高分屏上不跟着放大）。
+  ★ 功能名的字号是**几何约束**出来的（每颗键帽的内宽 ÷ 自己的每行字数），跟 u 只是间接关系 —— 所以 `FitUnit` 给的那个 `u × 0.28` 只是"上限目标"，真实值由 `PickFuncSizes` 逐键帽实测往下找。字号一律**取整**：非整数像素下同一行里每个字的 hint 结果不一致（有的胖有的瘦），看着就是"字体怪"。
+- **键帽上的颜色按对比度选，不是凭感觉挑亮/暗**。WCAG 的 AA 线是 4.5:1，十几像素的灰阶抗锯齿中文低于它就开始"看不清"：深蓝底 `#0C447C` 上键名用 `#C7DFF7`（7.3:1）；琥珀底原来是 `#BA7517`，而**那个亮度上任何浅色都到不了 4.5:1**（纯白也只有 3.8:1）—— 所以"橙色键的字母看不清"不是选色问题，是底色太亮，压到 `#96601A` 之后才站得住。
+- **键名位置统一在键帽上部**：未映射的键以前是居中的，于是同一行里两种键名的基线高低不一，扫过去是跳的。
+- ★ **GDI+ 的 `NoWrap` 在文字宽于矩形时是直接裁掉**（真机上 F3 的"程序目录"就这么变成了"程序目"—— 字直接消失，最难查）。所以 `DrawLine` 居中时把矩形**左右各放宽 10%**（对称，不改变居中位置），并且字号按实测留足余量。
+- **字体写死"微软雅黑 UI"，不跟随系统默认**：系统默认 UI 字体（`SPI_GETNONCLIENTMETRICS` 的 `lfMessageFont`）通常是 Segoe UI，中文会掉到回退字形（笔画细、像点阵），而这图上大半是中文 —— 拿系统默认只会更难看。雅黑 UI 是 Win8+ 自带的 UI 版，字形与系统界面一致；取不到再退标准雅黑。
+- **底部两栏**列出不是"某个键"的功能（滚轮、单击、鼠标拖动）。键名区的宽度取**本栏最长键名的实测宽度** + 一个间隔，而不是"半个栏宽" —— 那样键名贴最左、说明从栏中间开始，一行字会被扯成断开的两半。
+- **三条"单击 Caps / 左 Shift / 右 Shift"的文案来自配置文件**（`CapsEnhance.ini` 的 `ImeCapsMode / ImeLShiftMode / ImeRShiftMode`：0 不处理 / 1 切中文 / 2 切英文）。写死一个"切中文"在这里，用户把配置一改图就开始撒谎。
+- **读 ini 不用 `GetPrivateProfileIntW`**：本 ini 是 **UTF-8（带 BOM）**，而 Windows 的 profile API 会把带 BOM 的 UTF-8 当成 ANSI 认，BOM 那三个字节会粘在第一行的段名前面。这里只关心三个纯 ASCII 的键名与它们的十进制值，按字节扫一遍就够，也不受编码 / BOM / API 缓存那些怪癖影响；读不到就保持默认（与 `config.c` 同一条规矩）。
+- **测试边界**：窗口像素测不了（要真人按住键）。能离线钉住的是"键位接线 + 寿命语义 + 每条动作都有图上文案"（`test_chord` 场景 AI，文案那条靠遍历共享的键位表）。跨进程那份契约用一次性工具单独验过：`--hold` 起来时不显示、发 SHOW 出现、持续喂 KA 则一直显示、**停喂 800ms 后自己消失**、发 HIDE 消失并退出、手动模式下不吃心跳判据。渲染效果靠一次性抓图工具（屏幕 DC + `BitBlt`，`PrintWindow` 抓不到分层窗口）对着真机看。
 
 ---
 
@@ -684,9 +727,9 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 | 脚本 | 内容 |
 | --- | --- |
-| `build.bat` | 生成 `bin/CapsEnhance.exe`（源文件：hook / nav / send / act / config / keymap / main / autodisp / bridge / wps / winmove / drag / ime / folder） |
+| `build.bat` | 生成三个 exe：`bin/CapsEnhance.exe`（源文件：hook / nav / send / act / config / keymap / main / autodisp / bridge / wps / winmove / drag / ime / folder / help）、`bin/CapsEnhanceSettings.exe`（settings/settings.c + src/config.c）、`bin/CapsEnhanceHelp.exe`（help/help.c，只吃一个共享头、不链接 src 下任何模块） |
 | `test\build_nav.bat` | 按词跳转测试：算法单测（`ComputeSteps`）+ Scintilla / Edit 通道集成（`test_sci`）+ 配置解析（`test_config`） |
-| `test\build_test.bat` | 和弦引擎回归：模式修饰的顺序语义（先按修饰再按触发键）、按下即开火、长按、增强补齐、多键同按、左 Alt=增强、清卡键判定、原生按词跳转序列、快速滚动 / 持续滚动、横向滚动、打开所在文件夹的键位接线与取路径 |
+| `test\build_test.bat` | 和弦引擎回归：模式修饰的顺序语义（先按修饰再按触发键）、按下即开火、长按、增强补齐、多键同按、左 Alt=增强、清卡键判定、原生按词跳转序列、快速滚动 / 持续滚动、横向滚动、打开所在文件夹的键位接线与取路径、按键帮助的键位接线与"寿命=和弦"、键位表每条动作都有图上文案 |
 | `test\build_dbg.bat` | Debug CRT（`/MTd`）config 测试：Release CRT 不校验堆块，"越界写"这类 bug 只有这里拦得住 |
 | `test\build_analyze.bat` | 静态分析（`/W4` + `/analyze`）：只编译不链接。数据流引擎能发现"按 X 分配、按 Y 读"和 Interlocked 混用这类问题 |
 | `test\build_keytest.bat` | 诊断工具：`keytest`（按键投递实测）、`uiprobe`（UIA 逐步探测）、`memtest`（UIA 内存压测）、`restarttest`（重启握手 + 单实例）、`traymemtest`（托盘菜单内存定位）、`logsmoke`（日志轮转）、`ilcheck`（打印各进程完整性级别）、`lowrun`（借 shell 令牌以普通权限启动任意程序）、`wspset`（WPS 直接置位三招实测：以普通权限跑 `lowrun.exe bin\wspset.exe`） |

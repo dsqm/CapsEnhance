@@ -1,67 +1,17 @@
 #include "cap.h"
+#include "keymap_table.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
 
 /* ================= 键位映射：动作表 + 修饰模式表 =================
-   这个模块存在的理由：**"某个键是什么意思"必须只有一份定义。**
-
-   以前它是散开的：hook.c 的 kMap[]（触发键 -> 动作）、hook.c 的 ActToVk()
-   switch（动作 -> 目标键）、main.c 的 IsSingleShotAct() switch（动作属性）、
-   hook.c 里写死的 `vk == 'D' || vk == VK_LMENU`（增益修饰）、
-   hook.c 的 `vk == 'F'`（选区修饰）。
-   加一个动作要改三处、漏一处就冒出诡异现象（例如"新增的翻转键长按会切偶数次"）；
-   而"把 D 换成别的键"更是要动钩子逻辑本身。
-
-   现在全部收敛成两张声明式表，上面那些地方只剩查询：
-     · 动作表   —— 触发键 / 目标键 / 属性标志（能否重复、由谁执行）
-     · 修饰表   —— 每个模式的激活键集合（编译期常量，见 cap.h）
-
-   特别注意：**引擎从不判断具体按的是哪个键，只问"这个模式生效了吗"。**
-   所以想把增强键从 Alt+D 改成"只留 Alt"、或换成 Caps+右Ctrl，只改
-   cap.h 里 MODE_*_KEYS_DEFAULT 一行即可，不必碰任何逻辑（更不读配置：
-   这两个键属于"和弦语法"，不是给用户调的旋钮）。 */
-
-/* ================= 动作表 ================= */
-
-typedef struct {
-    int      act;    /* 动作 id（ACT_*）                          */
-    int      vk;     /* 触发键；0 = 没有触发键（只能由内部投递）    */
-    int      outVk;  /* 目标虚拟键；0 = 不发键（见 flags）         */
-    int      dir;    /* 按词跳转方向 DIR_*（仅 ACTF_WORDJUMP 有意义）  */
-    unsigned flags;
-    const char* name; /* 日志可读名（诊断打点用；不参与任何判定） */
-} ActionDef;
-
-/* 顺序不敏感，ActOfVk 线性扫（表很小，且只在按键事件里查一次）。 */
-static const ActionDef kActions[] = {
-    { ACT_LEFT,      'J',        VK_LEFT,     -1, 0,                  "←(J)" },
-    { ACT_DOWN,      'K',        VK_DOWN,     -1, 0,                  "↓(K)" },
-    { ACT_RIGHT,     'L',        VK_RIGHT,    -1, 0,                  "→(L)" },
-    { ACT_UP,        'I',        VK_UP,       -1, 0,                  "↑(I)" },
-    { ACT_HOME,      'P',        VK_HOME,     -1, 0,                  "Home(P)" },
-    { ACT_END,       VK_OEM_1,   VK_END,      -1, 0,                  "End(;)" },
-    { ACT_BACKSPACE, 'R',        VK_BACK,     -1, 0,                  "Bs(R)" },
-    { ACT_DELETE,    'W',        VK_DELETE,   -1, 0,                  "Del(W)" },
-    { ACT_ENTER,     VK_SPACE,   VK_RETURN,   -1, 0,                  "Enter" },
-    /* 开关键：翻转动作，按一次只切一次 —— 属性写在表里，见 ACTF_SINGLE_SHOT。
-       同时 ACTF_NO_SHIFT：它不是光标动作，不该被选区模式套上 Shift。 */
-    { ACT_CAPSLOCK,  VK_TAB,     VK_CAPITAL,  -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT, "Caps(Tab)" },
-    /* 按词跳转：方向写在表里，免得运行时靠 ACT_WORD_L/R 的数值去反推左右 */
-    { ACT_WORD_L,    'N',        0,          DIR_LEFT,  ACTF_WORDJUMP, "词←(N)" },
-    { ACT_WORD_R,    'O',        0,          DIR_RIGHT, ACTF_WORDJUMP, "词→(O)" },
-    /* 挪窗口：单发命令（不发键、与光标/选区无关）。位置由光标决定，所以
-       "增强模式发 3 次"没有意义 —— SINGLE_SHOT 同时挡掉重复与松手补齐。 */
-    { ACT_MOVEWIN,   'Q',        0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_MOVEWIN, "窗口→光标(Q)" },
-    /* 打开所在文件夹：单发命令（不发键、与光标/选区无关、位置由窗口决定不是光标）。
-       触发键用 F3（VK_F3）。目标窗口由 main.c 在开火那一刻快照进
-       ActJob.hwnd（这里只声明"这个动作要目标窗口"，取窗口的事不归键位表管）。 */
-    { ACT_OPENFOLDER, VK_F3,     0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_OPENFOLDER, "文件夹(F3)" },
-    /* 诊断：没有触发键（由 PROBE_KEY 的特殊路径投递） */
-    { ACT_PROBE,     0,          0,          -1, ACTF_PROBE, "探测" },
-};
-#define ACT_N ((int)(sizeof(kActions) / sizeof(kActions[0])))
+   **动作表不在本文件里**（在 keymap_table.h）：它是"某个键是什么意思"的唯一
+   一份定义，而帮助程序（独立 exe）也要拿它画键位图 —— 两边各自 include，
+   谁都不用抄一份、也就不会漂移。本文件负责的是"查询与装配"：
+     · 动作表的查询接口（ActOfVk / ActOutVk / ActWordDir / ActHasFlag / ActName）
+     · 修饰（和弦）模式表：模式 <-> 激活键集合
+   表本身的完整理由见 keymap_table.h 顶部那段注释。 */
 
 static const ActionDef* FindAct(int act) {
     for (int i = 0; i < ACT_N; i++)
