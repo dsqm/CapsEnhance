@@ -18,17 +18,20 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
 if errorlevel 1 exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Fobin\drag_chord.obj src\drag.c
-cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
+rem /DCAP_TEST: folder.c µÄ FolderResolveTarget »á°Ñ"ÍË³ÉÄ¿Â¼"Õâ¸öÅĞ¶¨½á¹û
+rem Í¨¹ı¿ÉÑ¡ĞÎ²Î´ø³öÀ´¸ø¶ÏÑÔ¿´£¨Õæ·µ»ØÖµÔÚÁ½ÖÖÇé¿öÏÂ¿ÉÄÜ³¤µÃÒ»Ñù£¬
+rem ¹â±È×Ö·û´®·Ö²»³ö×ßµÄÊÇÄÄÒ»Ö§£©¡£
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /DCAP_TEST /TP ^
    /Isrc /c /Fobin\folder_chord.obj src\folder.c
 if errorlevel 1 exit /b 1
-cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /DCAP_TEST /TP ^
    /Isrc /c /Fobin\test_chord.obj test\test_chord.c
 if errorlevel 1 exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE ^
    bin\test_chord.obj bin\config_chord.obj bin\keymap_chord.obj bin\winmove_chord.obj bin\drag_chord.obj ^
    bin\folder_chord.obj ^
    /link /OUT:bin/test_chord.exe ^
-   user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib ^
+   user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib winmm.lib ^
    /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
 rem åæ ‡ç©ºé—´ï¼ˆDPI æ„ŸçŸ¥ï¼‰æµ‹è¯•ï¼šç‹¬ç«‹ exeï¼Œå¿…é¡»æ²¡æœ‰ä»»ä½•çª—å£æ—¶è·‘

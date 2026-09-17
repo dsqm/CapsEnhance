@@ -4,6 +4,7 @@
 #include <shellapi.h>
 #include <commctrl.h>
 #include <imm.h>
+#include <mmsystem.h>   /* PlaySoundW：记录日志的起止提示音走系统事件别名 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -323,7 +324,26 @@ static void TrimWorkingSet(void) {
     SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
 }
 
+/* 记录日志的起止提示音（C+`）。两声必须**明显不同**，且都不像"出事了"：
+   原先结束用的是 MessageBeep(MB_ICONHAND)，那正是系统给**严重错误/UAC 提权**
+   配的音 —— 记录本来就常开常关，每次结束都响一声"出错了"，用户会去查一个
+   并不存在的问题；而且它和"未按管理员运行时弹窗"的提示音同源，两个语义完全
+   不同的信号共用一个声音，等于两个都没说清。
+   改用 PlaySound 直接点名系统事件别名：声音方案里可被用户单独改，也能在
+   "无声"方案下安静下来（MessageBeep 在"无声"方案下同样是静音，行为一致）。
+   取 SystemAsterisk（开始）/ SystemExclamation（结束）：前者是"注意"，后者只是
+   "提醒"，都远在错误音之外，且人耳容易分辨。
+   别名缺失（注册表被精简）时退回 MessageBeep：宁可音色退化成原来那样，也不要
+   完全没反馈 —— 结束记录时"有没有响"本身就是用户判断状态的主要依据。 */
+void RecBeep(BOOL start) {
+    const WCHAR* alias = start ? L"SystemAsterisk" : L"SystemExclamation";
+    if (PlaySoundW(alias, NULL, SND_ALIAS | SND_ASYNC | SND_NODEFAULT)) return;
+    MessageBeep(start ? MB_ICONASTERISK : MB_ICONEXCLAMATION);
+}
+
+#ifndef CAPS_NO_TRAY_MENU
 static void SetMenuPauseText(void);
+#endif
 static void ResetEngine(void);   /* 前向声明（定义在下方，TrayShowMenu 先调用） */
 static void DoRestart(void);     /* 前向声明（定义在下方，TrayShowMenu 先调用） */
 /* 切换"暂停映射"要做的全部事情（托盘菜单调用；也供单测直接调用）。
@@ -331,7 +351,14 @@ static void DoRestart(void);     /* 前向声明（定义在下方，TrayShowMen
    跳过（连"按任意键打断"都收不到），那个滚动就成了没人能停的东西。 */
 void ApplyPauseState(void);
 void TrayAddHint(const WCHAR* s);
-void TrayBalloon(const WCHAR* s);   /* 定义在下方：LaunchSettings 失败时要提示 */
+/* 托盘气泡。`clickPath` != NULL 时气泡**可点击**：用户点了它就在资源管理器里
+   打开并选中那个路径（复用 C+F3 的 shell 链路，见 folder.c 的 FolderRevealPath）。
+   `clickPath` 指向的内部缓冲区会被拷走，所以传栈上的临时变量也行。 */
+void TrayBalloon(const WCHAR* s, const WCHAR* clickPath);
+static void TrayBalloonClearClick(void);   /* 定义在下方：TrayRebuild 要作废旧目标 */
+/* 记录日志的起止提示音（开始 / 结束），定义在下方。抽成函数是为了让"两声必须
+   不同"这条约束有个单一落点，不再散在 WM_PROBE 的两个分支里各写一遍。 */
+void RecBeep(BOOL start);
 /* 托盘悬停提示统一入口：按"真实运行权限"追加管理员标注
    （查进程令牌，不看配置值，避免配置与实际不一致时误导） */
 static void TrayHint(const WCHAR* state) {
@@ -440,8 +467,23 @@ static void TrayRetryTick(void) {
 }
 /* 图标（重）建：成功就顺带重建完整提示并停掉可能正在跑的重试 */
 static void TrayRebuild(void) {
-    if (TrayAdd()) { TrayCurrentHint(); TrayStopRetry(); }
+    if (TrayAdd()) {
+        TrayCurrentHint();
+        TrayStopRetry();
+        /* 新图标 = 新身份：旧气泡连同它的点击目标一起作废（旧 explorer 的
+           通知不该再被点到，那条气泡此时也已经从屏幕上消失了）。 */
+        TrayBalloonClearClick();
+    }
 }
+/* ★ 测试替换点（test/test_chord.c 场景AJ 要用一个"只记账、不弹窗"的托盘菜单桩）：
+   从 ExeDir 一直到下面 TrayShowMenu 的结尾，整段被 `CAPS_NO_TRAY_MENU` 门控。
+   这一段里每个函数的唯一调用者都在段内（ExeDir ← LaunchSettings ← TrayShowMenu），
+   所以只要有一个不进测试 TU 就会被 /W4 报 C4505"已被删除的未引用静态函数" ——
+   门控必须覆盖整条链，不能只围最外面那个。
+   ★ 门控只围**定义**，不围 WM_TOGGLE_TRAY 里的调用点：调用点照旧写
+   `TrayShowMenu`，单测自己提供一个同名 static 函数接上，生产构建里门控不生效。 */
+#ifndef CAPS_NO_TRAY_MENU
+
 /* exe 所在目录（结尾带 '\\'） */
 static void ExeDir(WCHAR* out, size_t cap) {
     WCHAR exe[MAX_PATH] = L"";
@@ -453,13 +495,15 @@ static void ExeDir(WCHAR* out, size_t cap) {
 
 /* 拉起设置程序。找不到就明说（托盘气泡）：静默失败会让人以为"点了没反应"。
    工作目录设成 exe 目录：设置程序据此定位 CapsEnhance.ini，双击时的工作
-   目录是不确定的（快捷方式/资源管理器都可能给不一样的）。 */
+   目录是不确定的（快捷方式/资源管理器都可能给不一样的）。
+   失败时那条气泡带上设置程序的路径 —— 可点击，点了直接去那个目录看它到底在不在。 */
 static void LaunchSettings(void) {
     WCHAR dir[MAX_PATH]; ExeDir(dir, MAX_PATH);
     WCHAR path[MAX_PATH];
     _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s%s", dir, SETTINGS_EXE);
     if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
-        TrayBalloon(L"找不到设置程序：CapsEnhanceSettings.exe 应与 CapsEnhance.exe 在同一目录。");
+        TrayBalloon(L"找不到设置程序：CapsEnhanceSettings.exe 应与 CapsEnhance.exe 在同一目录。"
+                    L"点击打开本程序所在目录。", dir);
         return;
     }
     STARTUPINFOW si; PROCESS_INFORMATION pi;
@@ -475,9 +519,18 @@ static void LaunchSettings(void) {
     }
     if ((int)(INT_PTR)ShellExecuteW(NULL, L"open", path, NULL, dir, SW_SHOWNORMAL) > 32)
         return;
-    TrayBalloon(L"设置程序启动失败。");
+    TrayBalloon(L"设置程序启动失败。", NULL);
 }
 
+/* 托盘菜单（右键图标）。
+   ★ 测试替换点（test/test_chord.c 场景AJ 要用一个"只记账、不弹窗"的桩）：
+   整个定义被 `CAPS_NO_TRAY_MENU` 门控。单测 include 之前定义它，本函数就不进
+   测试 TU，`WM_TOGGLE_TRAY` 里的调用由测试自己提供的同名函数满足。
+   门控只围定义，不围调用点 —— 调用点照旧写 `TrayShowMenu`，单测提供的同名桩
+   自然接上，生产构建里门控不生效，一切照旧。
+   ★ 门控范围是**从 LaunchSettings 到本函数结束的整条菜单链**：SetMenuPauseText /
+   LaunchSettings 的唯一调用者就是下面的 TrayShowMenu，单独门控菜单会留下 C4505
+   "已被删除的未引用静态函数"。 */
 static void TrayShowMenu(void) {
     if (!g_menu) return;                 /* 菜单创建失败时不要拿 NULL 去用 */
     POINT pt;
@@ -498,15 +551,33 @@ static void TrayShowMenu(void) {
     }
     TrimWorkingSet();   /* 菜单交互会拉起 TSF/DWM 等模块，关完菜单压回 */
 }
+#endif /* CAPS_NO_TRAY_MENU */
+
 void TrayAddHint(const WCHAR* s) {
     wcscpy_s(g_nid.szTip, 128, s);
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
 
+/* 上一条**可点击**气泡要打开的路径（空 = 最近这条气泡不可点）。
+   为什么要存下来、而不是点击时现算：气泡是**异步**的 —— 用户可能几秒后才点，
+   那时 g_logPath 已经被下一次记录覆盖了（或者已经被清空）。
+   也为什么是"最近这条"而不是"每条各自一份"：通知区对同一个图标同一时刻只显示
+   一条气泡，能点到的永远是最后那条，多存没有意义。
+   只在主线程读写（发送与点击都在 WndProc 里），不需要锁。 */
+static WCHAR g_balloonPath[MAX_PATH] = { 0 };
+
+/* explorer 重启（TaskbarCreated）会把通知区的图标全清掉，**当前那条气泡也随之
+   消失**；更根本的是"新 explorer 不认识旧通知" —— 再让用户去点就是点了没反应。
+   所以重建图标时一并作废：宁可不动作，也不要"点了有反应但点错东西"。 */
+static void TrayBalloonClearClick(void) {
+    g_balloonPath[0] = 0;
+}
+
 /* 弹一次气泡通知。用于"钩子安装失败""诊断已写入日志"这类必须被看到、
    但不该打断操作的结果 —— 之前是用模态 MessageBox 弹在主线程上，
-   会把和弦引擎和键盘响应一起冻住。 */
-void TrayBalloon(const WCHAR* s) {
+   会把和弦引擎和键盘响应一起冻住。
+   `clickPath` 非空 = 这条气泡可点击（点了打开并选中它，见 TrayBalloonClicked）。 */
+void TrayBalloon(const WCHAR* s, const WCHAR* clickPath) {
     /* Windows 通知区对同一个图标"同一时刻只显示一条气泡"，且新的 NIF_INFO
        请求若赶上当前气泡还在显示，会被排队：Win10/11 下气泡被系统转成 toast，
        同来源还会被摞进队列，要等当前那条超时（约 10s）才弹 —— 现象就是
@@ -518,12 +589,45 @@ void TrayBalloon(const WCHAR* s) {
     NOTIFYICONDATAW n = g_nid;
     n.uFlags = NIF_INFO;
     n.dwInfoFlags = NIIF_INFO;
+    /* 气泡**不自动消失**：本程序的气泡都是"结果通知" —— 钩子装上没有、日志写到
+       哪份文件了。看到 = 确认，没看到就该一直挂着。默认那 10 秒对"记录结束"
+       这条尤其不够用：用户往往过一会儿才回来处理日志，那时气泡早就没了，
+       "点击打开所在位置"也无从点起。
+       0 = 永不超时（**不是** `uTimeout`：那个字段只在 Win2000 下叫这名，此后
+       这个联合体成员改叫 `uTimeoutOrVersion` 且由系统填版本号，写它没有意义）。 */
+    n.uTimeout = 0;
     wcscpy_s(n.szInfoTitle, 64, APP_NAME);
     n.szInfo[0] = L'\0';                       /* 第一步：收掉当前气泡（取消排队） */
     Shell_NotifyIconW(NIM_MODIFY, &n);
     wcscpy_s(n.szInfo, 256, s);                /* 第二步：新内容 → 立即弹出 */
     Shell_NotifyIconW(NIM_MODIFY, &n);
+
+    /* 先记目标、再复位（两条分支都要走到，见上面那张状态表） */
+    TrayBalloonClearClick();
+    if (clickPath && clickPath[0])
+        wcscpy_s(g_balloonPath, MAX_PATH, clickPath);
 }
+
+/* 气泡被点击（WndProc 从 uCallbackMessage 收到 NIN_BALLOONUSERCLICK）。
+   为什么点"气泡"与点"图标"必须分开：图标那一套是打开托盘菜单，
+   气泡被点（尤其在 Win10/11 转成 toast 之后）离图标很远，把两件事接在一起会
+   让用户"明明点的是通知，怎么弹出了菜单"。 */
+static void TrayBalloonClicked(void) {
+    if (!g_balloonPath[0]) return;      /* 最近这条不可点 / 已经被作废 */
+    WCHAR p[MAX_PATH];
+    wcscpy_s(p, MAX_PATH, g_balloonPath);
+    TrayBalloonClearClick();            /* 一次点击只做一次（同一条气泡重复点不重开） */
+    {   /* 路径进日志：排查"点了没反应"时能分清是没收到点击还是打开失败 */
+        char p8[MAX_PATH];
+        p8[0] = 0;
+        WideCharToMultiByte(CP_ACP, 0, p, -1, p8, (int)sizeof(p8), NULL, NULL);
+        CapLog("托盘：通知被点击，打开 %s", p8);
+    }
+    FolderRevealPath(p);
+}
+/* 定义在 TrayShowMenu 之后，所以不在上面那一段门控里 —— 它的唯一调用者仍是
+   TrayShowMenu，菜单被替换掉时它在本 TU 里同样没有引用者，必须一起门控。 */
+#ifndef CAPS_NO_TRAY_MENU
 static void SetMenuPauseText(void) {
     MENUITEMINFOW m;
     memset(&m, 0, sizeof(m));
@@ -532,6 +636,7 @@ static void SetMenuPauseText(void) {
     m.dwTypeData = (LPWSTR)(g_state.paused ? L"恢复映射" : L"暂停映射");
     SetMenuItemInfoW(g_menu, IDM_PAUSE, FALSE, &m);
 }
+#endif /* CAPS_NO_TRAY_MENU（整条托盘菜单链在此收口） */
 
 /* 切换暂停 / 恢复。菜单项与单测都走这一条。 */
 void ApplyPauseState(void) {
@@ -696,9 +801,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_PROBE:
         /* C+`：切换诊断记录。开始=探测当前焦点并记录；再按=结束记录。
-           用 MessageBeep 的两个不同系统事件音（走声卡，无需内置蜂鸣器），
-           并同步托盘悬停提示内容。探测结果只写日志（原来会弹一个模态
-           对话框，既冻住引擎又难以阅读/复制）。 */
+           起止各响一声不同的系统事件音（见 RecBeep），并同步托盘悬停提示内容。
+           探测结果只写日志（原来会弹一个模态对话框，既冻住引擎又难以阅读/复制）。 */
         g_recording.store(!g_recording.load());
         if (g_recording.load()) {
             /* 先开新文件，再写第一行：本次记录的日志从空文件开始 */
@@ -730,7 +834,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 CapLog("自动滚动: 起步=%dms/格 最快=%dms/格 %s", slow, fast,
                        (fast >= slow) ? "（!! 最快 >= 起步：提速已退化为恒速）" : "");
             }
-            MessageBeep(MB_ICONASTERISK);   /* 系统"星号"音：开始记录（与结束不同） */
+            RecBeep(TRUE);                  /* 开始记录：短促的"注意"音 */
             TrayHint(L"正在记录日志（C+\x60 结束）");
             /* 探测交给执行线程：NavProbe 会做跨进程 SendMsg + UIA COM 往返，
                是几百毫秒级的阻塞。留在主线程就是同一个根因 —— 期间松开 Caps
@@ -741,20 +845,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                的数据外带"，必须在开始那一刻说清；托盘悬停提示只有一行、还要
                悬停才看得到，承担不了这个提醒。 */
             TrayBalloon(L"开始记录日志。注意隐私：记录期间会写入焦点控件的文本片段"
-                        L"（前 160 字符）与按词跳转位置，敏感内容上请勿长时间开启。");
+                        L"（前 160 字符）与按词跳转位置，敏感内容上请勿长时间开启。", NULL);
         } else {
             CapLog("===== REC END =====");
-            MessageBeep(MB_ICONHAND);       /* 系统"手形"音：结束记录（低而不同） */
+            RecBeep(FALSE);                 /* 结束记录：另一声，与"出错/UAC"无关 */
             TrayHint(L"正在映射");
             /* 结束也给一次明确反馈：开始有气泡，结束若只有一声提示音，很容易
                让人以为"还在记录"，于是继续在敏感内容上操作。 */
             {   /* 结束气泡里带上实际文件名：一次记录一个文件，不给名字等于
-                   让人去 log\ 里猜哪份是刚录的。 */
+                   让人去 log\ 里猜哪份是刚录的。
+                   顺带把它做成**可点击**的：点了就在资源管理器里打开并选中这份
+                   日志（复用 C+F3 那条 shell 链路）。记录一旦结束，日志文件所在
+                   的目录就未必还找得到 —— 这是"刚录完那份"唯一的一键入口。
+                   注意传的是 g_logPath 而不是拼出来的显示文本：气泡里那行是
+                   "log\<文件名>"，是给人看的，不是能去解析的路径。 */
                 WCHAR tip[160];
                 const WCHAR* slash = wcsrchr(g_logPath, L'\\');
-                _snwprintf_s(tip, 160, _TRUNCATE, L"日志记录已结束（写入 log\\%s）",
+                _snwprintf_s(tip, 160, _TRUNCATE, L"日志记录已结束（写入 log\\%s）"
+                             L"—— 点击打开所在位置",
                              slash ? (slash + 1) : g_logPath);
-                TrayBalloon(tip);
+                TrayBalloon(tip, g_logPath);
             }
             /* 诊断期间 UIA/MSAA 等 COM 基础设施已加载，结束记录后压回工作集 */
             TrimWorkingSet();
@@ -835,15 +945,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
            成功不发这条消息 —— 成功时文件管理器自己弹出来了，那本身就是反馈。 */
         switch ((int)wp) {
         case FOLDER_ERR_SHELLWIN:
-            TrayBalloon(L"打不开所在文件夹：前台是桌面或任务栏，它没有「所在文件夹」。");
+            TrayBalloon(L"打不开所在文件夹：前台是桌面或任务栏，它没有「所在文件夹」。", NULL);
             break;
         case FOLDER_ERR_SHELL:
             TrayBalloon(L"打不开所在文件夹：系统拒绝了这次打开请求"
-                        L"（路径解析失败或被拒）。");
+                        L"（路径解析失败或被拒）。", NULL);
             break;
         default:   /* FOLDER_ERR_NOPATH 及任何未知码：都按"拿不到路径"说 */
             TrayBalloon(L"打不开所在文件夹：拿不到该程序的路径（前台没有焦点窗口、"
-                        L"受保护进程、已退出，或 UWP 应用的安装目录解析不到）。");
+                        L"受保护进程、已退出，或 UWP 应用的安装目录解析不到）。", NULL);
             break;
         }
         return 0;
@@ -901,10 +1011,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         (void)wp;
         return 0;
     /* ---- 托盘 ---- */
-    case WM_TOGGLE_TRAY:
+    case WM_TOGGLE_TRAY: {
+        /* LOWORD 取低 16 位：通知码都是 0x04xx 量级（NIN_BALLOONUSERCLICK =
+           WM_USER + 5），高位留白 —— 明确写 LOWORD 之后，"传进来的就是个干净
+           通知码"这条契约落在代码里，而不是靠调用方的自觉。
+           （图标自身的 WM_LBUTTONUP/WM_RBUTTONUP 比 0x0405 小，LOWORD 之后不变。） */
+        UINT evt = LOWORD(lp);
+
+        /* 气泡被点击：只做它的那件事，不再顺手弹托盘菜单 —— 图标（= 菜单）与气泡
+           （= 通知）是屏幕上隔着一段距离的两个东西，把两者接在一起会让用户
+           "点个通知，怎么跳出一个菜单"。 */
+        if (evt == NIN_BALLOONUSERCLICK) {
+            TrayBalloonClicked();
+            return 0;
+        }
         if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP)
             TrayShowMenu();
         return 0;
+    }
     case WM_IME_SETCONTEXT:
         /* 不给 IME 关联 UI：见 ImmAssociateContext 注释 */
         return 0;
@@ -1044,7 +1168,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     if (!HookInstall()) {
         TrayHint(L"钩子安装失败（可能被安全软件拦截）");
-        TrayBalloon(L"CapsEnhance 启动失败：键盘钩子安装失败，可能被安全软件拦截。");
+        TrayBalloon(L"CapsEnhance 启动失败：键盘钩子安装失败，可能被安全软件拦截。", NULL);
         rc = 1;
         g_quit = TRUE;
         DestroyWindow(g_mainWnd);      /* 走统一收尾，不留托盘残影 */

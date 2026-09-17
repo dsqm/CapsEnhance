@@ -27,6 +27,8 @@
 #include "cap.h"
 
 #include <shlobj.h>   /* SHParseDisplayName / SHOpenFolderAndSelectItems / ILFree */
+#include <stdio.h>    /* _snwprintf_s：cap.h 只拉进 windows.h，没有 CRT 的头 */
+#include <stdlib.h>   /* calloc / free */
 
 #pragma comment(lib, "shell32.lib")
 
@@ -134,6 +136,70 @@ BOOL FolderProcessPathOf(HWND target, WCHAR* out, size_t cap, int* err) {
     return out[0] != 0;
 }
 
+/* ================= 打开并选中一个**路径**（shell 链路，两个入口共用） =================
+
+   `SHOpenFolderAndSelectItems(pidl, 0, NULL, 0)` 的语义是"打开这一项的**父文件夹**
+   并选中这一项"，所以传进去的必须是**文件**。传一个目录会去打开它的父目录、并在
+   那里选中这个目录 —— 那是"给它找个上级"，不是用户想要的结果。 */
+
+/* 路径 -> 要交给 shell 的那个对象（纯函数：不碰 shell、不碰线程，所以可单测）。
+   · 文件（含日志这种刚建出来、可能已轮转过的）：原样返回 —— 要选中它；
+   · **文件不存在**：退回它的**目录**，至少把文件夹打开（比"没有反应"强）；
+   · 目录：只去掉尾部分隔符（`C:\dir\` 这种显式目录路径 `SHParseDisplayName`
+     解析不出 PIDL），不做上面那个降级 —— 目录自己就是要打开的东西。
+   `dirOnly`（仅 `CAP_TEST` 编出来）把这个判定结果带出去给断言看：真返回值在
+   "文件在"与"退成目录"两种情况下可能**长得一样**（同一个目录拼出来的路径），
+   光比字符串分不出走的是哪一支。 */
+BOOL FolderResolveTarget(const WCHAR* path, WCHAR* out, size_t cap
+#ifdef CAP_TEST
+                         , BOOL* dirOnly
+#endif
+                         ) {
+#ifdef CAP_TEST
+    if (dirOnly) *dirOnly = FALSE;
+#endif
+    if (!out || cap == 0) return FALSE;
+    out[0] = 0;
+    if (!path || !path[0]) return FALSE;
+    _snwprintf_s(out, cap, _TRUNCATE, L"%s", path);
+
+    DWORD attr = GetFileAttributesW(out);
+    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        /* 目录：去掉尾部分隔符（`C:\` 这种整卷路径本来就以反斜杠结尾，不能截空） */
+        size_t n = wcslen(out);
+        while (n > 3 && (out[n - 1] == L'\\' || out[n - 1] == L'/')) out[--n] = 0;
+#ifdef CAP_TEST
+        if (dirOnly) *dirOnly = TRUE;
+#endif
+        return TRUE;
+    }
+    if (attr != INVALID_FILE_ATTRIBUTES) return TRUE;      /* 文件：要选中的就是它 */
+
+    /* 文件不在（已轮转 / 解析到别处）：退回它所在的目录 */
+    WCHAR* slash = wcsrchr(out, L'\\');
+    if (!slash || slash == out) return FALSE;              /* 只是文件名：没有目录可开 */
+    *slash = 0;
+#ifdef CAP_TEST
+    if (dirOnly) *dirOnly = TRUE;
+#endif
+    return TRUE;
+}
+
+/* 路径 -> 绝对 PIDL -> 交给 shell。返回是否成功交出去。
+   调用方负责 CoInitialize（见 FolderThreadProc 的 MTA 说明）。 */
+static BOOL FolderRevealPidl(const WCHAR* path) {
+    /* 路径 -> 绝对 PIDL：交给 shell 命名空间去解析（它会做规范化，也认
+       `::{GUID}` 这类特殊项），不认的路径直接失败。 */
+    PIDLIST_ABSOLUTE pidl = NULL;
+    if (SHParseDisplayName(path, NULL, &pidl, 0, NULL) != S_OK || !pidl) return FALSE;
+    /* cidl = 0 + 单项 PIDL：文档写明这时 shell 会打开它的**父文件夹并选中它**，
+       正是我们要的语义。flags 用 0（OFASI_EDIT 会进重命名状态，
+       OFASI_OPENDESKTOP 会在桌面上选，都不是这个动作的意思）。 */
+    BOOL ok = (SHOpenFolderAndSelectItems(pidl, 0, NULL, 0) == S_OK) ? TRUE : FALSE;
+    ILFree(pidl);
+    return ok;
+}
+
 /* 失败原因的可读名（仅日志用，不参与判定）。 */
 static const char* ErrText(int err) {
     switch (err) {
@@ -145,14 +211,23 @@ static const char* ErrText(int err) {
     }
 }
 
-/* 真正干活的一次性线程：解析路径 -> 转 PIDL -> 交给 shell。
+/* 一次性线程的入参（堆上，线程自己释放）。两种请求共用一条线程 —— 它们的
+   阻塞代价、COM 套间要求、失败反馈路径完全一样，差别只在"要交给 shell 的那个
+   对象怎么来"：由窗口查进程路径，或者由调用方直接给一个路径。 */
+typedef struct {
+    HWND  target;          /* 由窗口查：非 NULL 时用它 */
+    WCHAR path[PROC_PATH_MAX];  /* 由路径查：target == NULL 时用它（实参拷贝一份 —— 调用方
+                                   的缓冲区常常是栈上的，等线程跑到时它可能已经不在了） */
+} FolderJob;
+
+/* 真正干活的一次性线程：解析目标 -> 转 PIDL -> 交给 shell。
    结束后把**失败原因**发回主线程（成功不发：弹气泡是打扰，而这条动作成功时
    本来就会弹出文件管理器，本身就是反馈）。
 
    为什么失败反馈必须绕回主线程：气泡走 Shell_NotifyIconW + 主线程的 g_nid，
    工作线程直接调就是对它的跨线程访问（托盘那一套状态全是主线程独占的）。 */
 static DWORD WINAPI FolderThreadProc(LPVOID param) {
-    HWND target = (HWND)param;
+    FolderJob* job = (FolderJob*)param;
     WCHAR path[PROC_PATH_MAX];
     path[0] = 0;
     int err = FOLDER_ERR_NOPATH;
@@ -165,23 +240,19 @@ static DWORD WINAPI FolderThreadProc(LPVOID param) {
     BOOL ownCo = SUCCEEDED(hrCo) && hrCo != S_FALSE;
 
     if (SUCCEEDED(hrCo) || hrCo == RPC_E_CHANGED_MODE) {
-        if (FolderProcessPathOf(target, path, PROC_PATH_MAX, &err)) {
-            /* 路径 -> 绝对 PIDL：交给 shell 命名空间去解析（它会做规范化，
-               也认 `::{GUID}` 这类特殊项），不认的路径直接失败。 */
-            PIDLIST_ABSOLUTE pidl = NULL;
-            if (SHParseDisplayName(path, NULL, &pidl, 0, NULL) == S_OK && pidl) {
-                /* cidl = 0 + 单项 PIDL：文档写明这时 shell 会打开它的**父文件夹
-                   并选中它**，正是我们要的语义。flags 用 0（OFASI_EDIT 会进
-                   重命名状态，OFASI_OPENDESKTOP 会在桌面上选，都不是这个动作的意思）。 */
-                if (SHOpenFolderAndSelectItems(pidl, 0, NULL, 0) == S_OK)
-                    err = FOLDER_OK;
-                else
-                    err = FOLDER_ERR_SHELL;
-                ILFree(pidl);
-            } else {
-                err = FOLDER_ERR_SHELL;
-            }
-        }
+        /* 两个入口各自在**自己的编译单元形态**下调这个函数：测试里它是带
+           `dirOnly` 的四个参数版，生产里是三个参数版（见 cap.h 的声明）。 */
+        BOOL have = job->target
+            ? FolderProcessPathOf(job->target, path, PROC_PATH_MAX, &err)
+            : FolderResolveTarget(job->path, path, PROC_PATH_MAX
+#ifdef CAP_TEST
+                                  , NULL
+#endif
+                                  );
+        if (have && !FolderRevealPidl(path))
+            err = FOLDER_ERR_SHELL;
+        else if (have)
+            err = FOLDER_OK;
     } else {
         /* 连 COM 都起不来：只能算 shell 这条通道失败（枚举里没有更贴切的码） */
         err = FOLDER_ERR_SHELL;
@@ -199,18 +270,42 @@ static DWORD WINAPI FolderThreadProc(LPVOID param) {
     if (err != FOLDER_OK) PostMessageW(g_mainWnd, WM_FOLDER_OPEN, (WPARAM)err, 0);
 
     if (ownCo) CoUninitialize();
+    free(job);
     return 0;
 }
 
-/* 动作入口（act.c 的分派）：丢给一次性线程后立刻返回 —— 这条动作不占动作队列，
-   所以 ActInFlight 不会因为它变慢（见文件头第 1 条）。
-   线程起不来时退回同步执行：与 act.c 的 ActPost 同一个取舍 —— 宁可损失响应性，
-   也不能让功能失效。 */
-void FolderOpenRequest(HWND target) {
-    HANDLE h = CreateThread(NULL, 0, FolderThreadProc, (LPVOID)target, 0, NULL);
+/* 起线程；起不来就退回同步执行（与 act.c 的 ActPost 同一个取舍 ——
+   宁可损失响应性，也不能让功能失效）。 */
+static void FolderRun(FolderJob* job) {
+    HANDLE h = CreateThread(NULL, 0, FolderThreadProc, job, 0, NULL);
     if (!h) {
-        FolderThreadProc((LPVOID)target);
+        FolderThreadProc(job);   /* 同步分支里由它自己释放 job */
         return;
     }
     CloseHandle(h);   /* 线程对象在线程退出时回收；不需要 join */
+}
+
+static FolderJob* FolderJobNew(void) {
+    FolderJob* job = (FolderJob*)calloc(1, sizeof(FolderJob));
+    return job;   /* 分配不到就什么都不做：这条动作失败也只是一次"没反应" */
+}
+
+/* 动作入口（act.c 的分派）：丢给一次性线程后立刻返回 —— 这条动作不占动作队列，
+   所以 ActInFlight 不会因为它变慢（见文件头第 1 条）。 */
+void FolderOpenRequest(HWND target) {
+    FolderJob* job = FolderJobNew();
+    if (!job) return;
+    job->target = target;
+    FolderRun(job);
+}
+
+/* 打开**指定路径**所在的位置（托盘通知被点击时用它：那条通知说的是日志文件，
+   不是"前台程序"）。用同一个 shell 链路 —— 与 C+F3 走的是同一个函数。 */
+void FolderRevealPath(const WCHAR* path) {
+    if (!path || !path[0]) return;
+    FolderJob* job = FolderJobNew();
+    if (!job) return;
+    job->target = NULL;
+    _snwprintf_s(job->path, PROC_PATH_MAX, _TRUNCATE, L"%s", path);
+    FolderRun(job);
 }

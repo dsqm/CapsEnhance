@@ -49,6 +49,14 @@
                                         为什么必须绕回主线程：气泡走 Shell_NotifyIconW + 主线程的 g_nid，
                                         工作线程直接调就是对它的跨线程访问。成功不发消息（不打扰）。 */
 
+/* 托盘气泡被**用户点击**时，uCallbackMessage（WM_TOGGLE_TRAY）收到的通知码。
+   官方文档：NIN_BALLOONUSERCLICK = WM_USER + 5 —— 用户点了气泡，程序该在这里做
+   那件事（本程序：打开并选中刚写好的日志文件）。
+   其余几个同族通知码（NIN_BALLOONTIMEOUT / NIN_BALLOONSHOW / NIN_BALLOONHIDE）
+   **不过这几条**：它们只在 balloon 被**内联绘制**进通知区时才会送到 uCallbackMessage，
+   走 toast 时系统不发，所以不能拿"NIN_BALLOONTIMEOUT 收到没有"当"气泡超时了"的判据。 */
+#define NIN_BALLOONUSERCLICK (WM_USER + 5)
+
 /* ---------- 单键切换输入法（src/ime.c） ----------
    三个"单键"各配一个模式值（IME_MODE_*），配置里是 [General] 的
    ImeCapsMode / ImeLShiftMode / ImeRShiftMode。
@@ -280,10 +288,27 @@ BOOL WinIsShellClass(HWND hwnd);
 #define FOLDER_ERR_SHELL    3   /* shell 接口失败（路径解析不到，或打开请求被拒）         */
 void FolderOpenRequest(HWND target);
                         /* 动作入口：把这件事丢给一次性线程后**立刻返回**（不占 act 队列） */
+void FolderRevealPath(const WCHAR* path);
+                        /* 同一个 shell 链路，但目标由**调用方给路径**而不是由窗口去查
+                           （"打开某份文件所在的位置"用它：日志结束的通知被点击时就是这么用的）。
+                           路径为空 / 文件不存在（没轮转过的话，记录期间刚被清空的日志文件
+                           也可能不存在）时退回**所在目录**；连目录都解析不到就什么都不做。
+                           同样是丢给一次性线程后立刻返回。 */
 BOOL FolderProcessPathOf(HWND target, WCHAR* out, size_t cap, int* err);
                         /* 目标窗口 -> 进程映像全路径（含 UWP 的子窗口解析）。
                            同步、纯本地、不碰 shell —— 测试与实现共用（传本进程的窗口
                            即得本 exe 的路径）。失败返回 FALSE 且 *err = FOLDER_ERR_* */
+BOOL FolderResolveTarget(const WCHAR* path, WCHAR* out, size_t cap
+#ifdef CAP_TEST
+                         , BOOL* dirOnly
+#endif
+                         );
+                        /* 路径 -> shell 该打开/选中的那个对象（纯函数：不碰 shell、
+                           不碰线程，所以可单测）。文件在 -> 原样返回（要选中它）；文件不在 ->
+                           改成它的父目录（`SHOpenFolderAndSelectItems` 拿目录自己当"要选中的
+                           项"时会去选中**上一级**里的那个目录，不是我们要的），目录则不需要
+                           这个降级、只去掉多余的尾部分隔符（`C:\dir\` 解析不出 PIDL）。
+                           **只给 `CAP_TEST` 编出来的断言用**的那个形参在下面说明。 */
 
 /* ---------- 按键帮助（`C+F1`；窗口在**独立 exe** `CapsEnhanceHelp.exe` 里） ----------
    为什么拆成独立 exe：键位图要一次性叠一大堆 GDI+ 绘制，还要常驻一张位图、

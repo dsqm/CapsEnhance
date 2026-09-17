@@ -12,8 +12,24 @@
 #define WinMain __CapsEnhanceRealWinMain_Unused
 #include "cap.h"
 #include "keymap_table.h"   /* 与帮助程序共用同一份键位表：这里顺带守着"文案不缺" */
+/* ---- 托盘菜单桩（生产版是 main.c 里那个 static TrayShowMenu）----
+   真实现要 CreatePopupMenu + TrackPopupMenu，会**阻塞地弹出一个真菜单**等用户点：
+   本测试既不该弹窗，也不该被它挂住消息循环，所以桩成"记账 + 立刻返回"。
+   场景AJ 靠它钉住"点气泡不许弹菜单、点图标必须弹菜单"这两条相反的接线。
+
+   做法：include main.c 之前 `#define CAPS_NO_TRAY_MENU`，main.c 里那个定义被门控
+   整段跳过，于是 `WM_TOGGLE_TRAY` 里的 `TrayShowMenu()` 调用**指的就是下面这个同名
+   static 函数**（同一个 TU，先声明先见，定义在 include 之后）。
+   不去 macro 改名的原因：所有源文件都按 /TP 当 C++ 编，而 C++ 里 static 函数
+   同名重定义是 C2084"已有主体"，改名/覆盖那条路走不通。门控只围定义，不动调用点，
+   也就没有"调用点被宏改成一个名字、桩又得叫那个名字"的连锁。 */
+#define CAPS_NO_TRAY_MENU
+static void TrayShowMenu(void);   /* 先声明：main.c 里的调用点见到的就是它 */
+static BOOL g_menuOpen = FALSE;
+
 #include "main.c"
 #undef WinMain
+static void TrayShowMenu(void) { g_menuOpen = !g_menuOpen; }
 /* ---- 输入法切换桩（src/ime.c 不进本测试）----
    真实现会向**别的进程**的 IME 窗口发 3 条消息 —— 那既不是本测试要验的东西，
    也会让"单击 Caps"这类用例依赖机器上装了什么输入法。所以这里桩成"记账"：
@@ -275,6 +291,15 @@ static void Drain(void) {
     ULONGLONG end = GetTickCount64() + 200;
     while (GetTickCount64() < end)
         SinkWait(1);
+}
+
+/* 把一条托盘回调送进主窗口（场景AJ）。
+   必须走 **PostMessage**：真的 WM_TOGGLE_TRAY 是 explorer 收到通知区的鼠标事件后
+   Post 过来的（见 test/traymemtest.c），Post 与 Send 都进同一个 WndProc，
+   但 Send **同步跑完** —— 想在"消息到达/被处理"这个观察点上做断言，
+   同步 Send 会让它恰好在断言之前消化掉，于是测出来的永远是"什么都没发生"。 */
+static void TrayClick(WPARAM lp) {
+    PostMessageW(g_mainWnd, WM_TOGGLE_TRAY, 1, lp);
 }
 
 /* 场景收尾：松开 C、泵完消息，再等执行线程把注入做完 */
@@ -1875,6 +1900,111 @@ int main(void) {
               "AI: 松开 Caps（F1 仍按着）-> 同样请求隐藏（寿命=和弦）");
         Sim(VK_F1, FALSE);    Pump(20);
         Drain();
+    }
+
+    /* ---- 场景AJ：记录日志结束的通知**可点击**（点了打开并选中那份日志）----
+       这条链路的末端（真的弹出文件管理器）与打开文件夹那条一样测不了，能离线钉住的
+       是几件容易在以后改坏的事：
+         ① **接线**：托盘回调认出 NIN_BALLOONUSERCLICK 并去开那个路径，**不**顺手弹
+            托盘菜单（"点通知却跳出菜单"是最容易犯的错）；反过来，点图标必须**照旧**
+            弹菜单 —— 只钉前一半的话，把菜单整个关掉也能蒙过。
+         ② **一次点击只生效一次**：同一条气泡重复点不该重复开，更不该在路径被下一次
+            记录覆盖之后还留着旧目标。
+         ③ 路径 -> shell 操作对象的规则（`FolderResolveTarget`）：文件要**选中它**；
+            文件不在（记录期间日志刚被轮转过就可能不在）就得退回**目录**；目录不能带
+            尾部分隔符（`C:\dir\` 这种形式 SHParseDisplayName 解析不出 PIDL）。
+         ④ 发出气泡的调用点：日志结束那条必须**把 g_logPath 交出去**（它才是可点的
+            那条），别的提示类气泡不许带目标。 */
+    {
+        WCHAR tmpDir[MAX_PATH], logF[MAX_PATH], gone[MAX_PATH];
+        tmpDir[0] = logF[0] = gone[0] = 0;
+        GetTempPathW(MAX_PATH, tmpDir);
+        {   /* 去掉 GetTempPath 一定会带的尾部分隔符：留着的话"退回目录"那条会解出
+               `...\Temp\`，把尾斜杠判定和 `C:\dir\` 那条混在一起，说不清测的是哪个。 */
+            size_t n = wcslen(tmpDir);
+            while (n > 0 && (tmpDir[n - 1] == L'\\' || tmpDir[n - 1] == L'/'))
+                tmpDir[--n] = 0;
+        }
+        _snwprintf_s(logF, MAX_PATH, _TRUNCATE, L"%s\\CapsEnhanceClickProbe.log", tmpDir);
+        _snwprintf_s(gone, MAX_PATH, _TRUNCATE,
+                     L"%s\\CapsEnhanceClickProbe__absent__.log", tmpDir);
+        DeleteFileW(gone);                       /* 前置：它必须真的不存在 */
+        FILE* fp = NULL;
+        if (_wfopen_s(&fp, logF, L"wb") == 0 && fp) { fputs("x", fp); fclose(fp); }
+        CHECK(GetFileAttributesW(logF) != INVALID_FILE_ATTRIBUTES,
+              "AJ: 前置条件 —— 造出一个真实的日志文件");
+
+        /* ③ 路径解析规则（纯函数，不碰 shell、不碰线程） */
+        {
+            WCHAR out[PROC_PATH_MAX]; BOOL dirOnly = FALSE;
+            CHECK(FolderResolveTarget(logF, out, PROC_PATH_MAX, &dirOnly) != FALSE &&
+                  !dirOnly && _wcsicmp(out, logF) == 0,
+                  "AJ: 文件在 -> 原样返回（要选中的就是它）");
+
+            CHECK(FolderResolveTarget(gone, out, PROC_PATH_MAX, &dirOnly) != FALSE &&
+                  dirOnly && _wcsicmp(out, tmpDir) == 0,
+                  "AJ: 文件不在 -> 退回它所在的目录（至少把文件夹打开）");
+            CHECK(out[0] && out[wcslen(out) - 1] != L'\\',
+                  "AJ: 退回来的目录不带尾部分隔符（tmpDir 本就去过尾斜杠）");
+
+            CHECK(FolderResolveTarget(tmpDir, out, PROC_PATH_MAX, &dirOnly) != FALSE &&
+                  dirOnly && out[wcslen(out) - 1] != L'\\',
+                  "AJ: 给的就是目录 -> 仍在（去掉尾部分隔符）");
+            CHECK(FolderResolveTarget(NULL, out, PROC_PATH_MAX, &dirOnly) == FALSE,
+                  "AJ: 空路径 -> 失败（不崩、不假装成功）");
+            CHECK(FolderResolveTarget(L"", out, PROC_PATH_MAX, &dirOnly) == FALSE,
+                  "AJ: 空字符串 -> 失败");
+            CHECK(FolderResolveTarget(L"no_dir_here.log", out, PROC_PATH_MAX, &dirOnly) == FALSE,
+                  "AJ: 只有文件名、没有目录 -> 失败（没有「所在文件夹」可开）");
+        }
+
+        /* ④ 接线：真的走一遍"开始记录 -> 结束记录"，看发出的那条气泡记了什么 */
+        {
+            CHECK(g_balloonPath[0] == 0, "AJ: 前置条件 —— 初始没有可点击的目标");
+
+            Key(CLI_CAPS, TRUE); Pump(5);
+            Sim(VK_OEM_3, TRUE); Pump(30);          /* C+` 开始记录 */
+            Sim(VK_OEM_3, FALSE); Pump(10);
+            CHECK(g_recording.load(), "AJ: 前置条件 —— 已进入记录模式");
+            CHECK(g_balloonPath[0] == 0,
+                  "AJ: 开始记录那条气泡不可点（它是隐私提示，没有「所在位置」可开）");
+
+            Sim(VK_OEM_3, TRUE); Pump(30);          /* C+` 结束记录 */
+            Sim(VK_OEM_3, FALSE); Pump(10);
+            Key(CLI_CAPS, FALSE); Pump(10);
+            CHECK(!g_recording.load(), "AJ: 前置条件 —— 已退出记录模式");
+            CHECK(g_balloonPath[0] != 0 && _wcsicmp(g_balloonPath, g_logPath) == 0,
+                  "AJ: 结束记录的气泡记下了日志文件路径（这条才是可点的）");
+        }
+
+        /* ①② 点击：认出 NIN_BALLOONUSERCLICK，且不弹托盘菜单、只生效一次 */
+        {
+            BOOL wasOpen = g_menuOpen;
+            TrayClick(NIN_BALLOONUSERCLICK);
+            Pump(30);
+            CHECK(g_balloonPath[0] == 0,
+                  "AJ: 点击后目标被清掉（一次点击只生效一次）");
+            CHECK(g_menuOpen == wasOpen,
+                  "AJ: 点气泡 -> 不弹托盘菜单（点通知跳出菜单是错的行为）");
+
+            TrayClick(NIN_BALLOONUSERCLICK);        /* 同一条气泡再点一次 */
+            Pump(30);
+            CHECK(g_menuOpen == wasOpen, "AJ: 同一条气泡重复点 -> 不重复动作");
+        }
+
+        /* ① 点图标必须**仍然**弹菜单（与上一条是相反方向） */
+        {
+            BOOL wasOpen = g_menuOpen;
+            TrayClick(WM_RBUTTONUP);
+            BOOL fired = FALSE;
+            for (int i = 0; i < 40 && !fired; i++) {   /* 最多等 400ms */
+                Pump(10);
+                fired = (g_menuOpen != wasOpen);
+            }
+            CHECK(fired, "AJ: 点图标（右键抬起）-> 仍然弹托盘菜单");
+        }
+
+        DeleteFileW(logF);
     }
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);

@@ -59,7 +59,7 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP ^
    src\folder.c src\help.c ^
    /link /OUT:bin/CapsEnhance.exe ^
    bin\app_res.obj ^
-   user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib ^
+   user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib winmm.lib ^
    /SUBSYSTEM:WINDOWS
 
 if errorlevel 1 (
