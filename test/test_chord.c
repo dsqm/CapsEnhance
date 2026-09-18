@@ -356,6 +356,122 @@ static void WriteChordIni(const char* body) {
                for(int __i=0;__i<g_recN;__i++) printf("%d:%d ",g_rec[__i].vk,g_rec[__i].n);\
                printf(")\n"); fails++; } } while (0)
 
+
+/* ---- AF 段的前置条件：探测点必须真的落在我们自己的窗口上 ----
+   drag 场景用 WindowFromPoint 找被拖对象，所以桌面上任何盖住探测点的**置顶**窗口
+   （帮助浮层、剪贴板浮层、别的工具）都会让它找到别人 —— 表现就是"拖拽相关断言
+   整片红"，而代码完全正常（本地笔记里记过这条假红）。
+   按本文件既有的做法（见 AE 段的"多显示器找不到就跳过"）：先把自己的窗口重新提到
+   置顶带最上面复测；实在被盖住就打印 [SKIP] 并跳过依赖该点的断言，而不是拿环境
+   问题报 FAIL —— 假红比不测更贵，它会让人去改没坏的代码。 */
+static HWND RootAtPoint(POINT pt) {
+    HWND h = WindowFromPoint(pt);
+    return h ? GetAncestor(h, GA_ROOT) : NULL;
+}
+
+static void ClassNameNarrow(HWND h, char* out, int cap) {
+    WCHAR w[128] = L"";
+    out[0] = 0;
+    if (!h) return;
+    if (!GetClassNameW(h, w, 128)) return;
+    WideCharToMultiByte(CP_ACP, 0, w, -1, out, cap, NULL, NULL);
+    out[cap - 1] = 0;
+}
+
+static BOOL EnsurePointOnSelf(HWND self, POINT pt, const char* what) {
+    for (int i = 0; i < 5; i++) {
+        HWND at = RootAtPoint(pt);
+        char cls[128];
+        if (at == self) return TRUE;
+        ClassNameNarrow(at, cls, 128);
+        printf("       (%s: 探测点 (%ld,%ld) 上是 %s class=[%s]，重新置顶重试 %d)\n",
+               what, (long)pt.x, (long)pt.y, at ? "别的窗口" : "桌面", cls, i + 1);
+        ShowWindow(self, SW_HIDE);
+        ShowWindow(self, SW_SHOWNOACTIVATE);
+        SetWindowPos(self, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        Pump(20);
+    }
+    {
+        HWND at = RootAtPoint(pt);
+        char cls[128];
+        if (at == self) return TRUE;
+        ClassNameNarrow(at, cls, 128);
+        printf("  [SKIP] %s：探测点 (%ld,%ld) 被 %s class=[%s] 盖住，"
+               "跳过依赖该点的拖拽断言（环境问题，不是代码坏了）\n",
+               what, (long)pt.x, (long)pt.y, at ? "别的窗口" : "桌面", cls);
+    }
+    return FALSE;
+}
+
+/* AF 的 ⑤⑥：黑名单透传 + 正常拖拽跟随位移。
+   抽成函数是为了让"探测点被盖住"时整体跳过，而不是把一大段塞进 if 里再嵌两层缩进。 */
+static void AfDragChecks(HWND w, POINT in, RECT r0) {
+    /* 准备期间窗口若被别的东西挪过（shell 整理窗口、别的工具），r0/in 就已经是
+       过时基准了 —— 以**现在**的矩形为准重算，否则断言比的是一个不存在的位置。 */
+    RECT rn;
+    if (GetWindowRect(w, &rn) && (rn.left != r0.left || rn.top != r0.top)) {
+        printf("       (AF: 准备期间窗口被挪过 (%ld,%ld)->(%ld,%ld)，按新位置重算)\n",
+               (long)r0.left, (long)r0.top, (long)rn.left, (long)rn.top);
+        in.x += (int)(rn.left - r0.left);
+        in.y += (int)(rn.top - r0.top);
+        r0 = rn;
+    }
+
+    /* ⑤ 类名条目：命中后左键**原样透传**（不接管、不进入拖拽） */
+    WriteChordIni("[DragWindowBlacklist]\r\nCapsEnhanceDragProbe\r\n");
+    ConfigLoadFrom(L"bin/chordtest.ini");
+    Key(CLI_CAPS, TRUE); Pump(2);
+    CHECK(MousePt(WM_LBUTTONDOWN, in) == 0,
+          "AF: 黑名单（类名条目）-> 左键透传，不接管");
+    CHECK(!DragActive(), "AF: 黑名单 -> 不进入拖拽");
+    Key(CLI_CAPS, FALSE); Pump(2);
+
+    /* ⑥ 正常拖拽：down 吞掉 + 窗口跟随位移 + up 吞掉并收手 */
+    WriteChordIni("[General]\r\n");      /* 清掉黑名单（回内置默认） */
+    ConfigLoadFrom(L"bin/chordtest.ini");
+    Key(CLI_CAPS, TRUE); Pump(2);
+    POINT p1 = in;
+    CHECK(MousePt(WM_LBUTTONDOWN, p1) == 1, "AF: 接管 -> 吞掉左键按下");
+    CHECK(DragActive(), "AF: 拖拽已开始");
+
+    POINT p2 = { p1.x + 100, p1.y + 80 };
+    MousePt(WM_MOUSEMOVE, p2);
+    RECT want = { r0.left + 100, r0.top + 80,
+                  r0.left + 100 + (r0.right - r0.left),
+                  r0.top + 80 + (r0.bottom - r0.top) };
+    BOOL moved = FALSE;
+    RECT r = { 0, 0, 0, 0 };   /* 给下面那条诊断打印兜底，/W4 要求 */
+    /* 上限 2s：位置一变就退出。给慢机器留余量 —— 落点由执行线程异步应用
+       （SWP_ASYNCWINDOWPOS），600ms 在负载高的 CI 机器上不够花。 */
+    for (int i = 0; i < 200 && !moved; i++) {
+        Pump(10);
+        GetWindowRect(w, &r);
+        moved = (r.left == want.left && r.top == want.top);
+    }
+    if (!moved) {
+        char cls[128];
+        ClassNameNarrow(RootAtPoint(in), cls, 128);
+        printf("       (期望左上 (%ld,%ld)，实际 (%ld,%ld)；DragActive=%d；"
+               "探测点上 class=[%s])\n",
+               (long)want.left, (long)want.top, (long)r.left, (long)r.top,
+               (int)DragActive(), cls);
+    }
+    CHECK(moved, "AF: 窗口跟随光标位移（+100,+80）");
+
+    CHECK(MousePt(WM_LBUTTONUP, p2) == 1, "AF: 吞掉左键抬起（与按下配对）");
+
+
+    Pump(200);
+    CHECK(!DragActive(), "AF: 抬起后拖拽结束");
+    GetWindowRect(w, &r);
+    CHECK(r.left == want.left && r.top == want.top,
+          "AF: 结束后停在最后一次落点上");
+
+    Pump(60);
+    Key(CLI_CAPS, FALSE); Pump(2);
+}
+
 /* 场景AE 用：找一块**不是** `self` 的显示器，输出它工作区的中心点。
    找不到（本项目最常见的单显示器机器）时 `*found = FALSE`，调用方跳过那条断言。
    多显示器下"挪到另一块屏"才成立，单显示器上硬测就是假红。
@@ -1849,48 +1965,11 @@ int main(void) {
             CHECK(!ConfigIsDragBlacklisted(w),
                   "AF: 未知段名被忽略（旧 [DragBlacklist] 不再认）");
 
-            /* ⑤ 类名条目：命中后左键**原样透传**（不接管、不进入拖拽） */
-            WriteChordIni("[DragWindowBlacklist]\r\nCapsEnhanceDragProbe\r\n");
-            ConfigLoadFrom(L"bin/chordtest.ini");
-            Key(CLI_CAPS, TRUE); Pump(2);
-            CHECK(MousePt(WM_LBUTTONDOWN, in) == 0,
-                  "AF: 黑名单（类名条目）-> 左键透传，不接管");
-            CHECK(!DragActive(), "AF: 黑名单 -> 不进入拖拽");
-            Key(CLI_CAPS, FALSE); Pump(2);
-
-            /* ⑥ 正常拖拽：down 吞掉 + 窗口跟随位移 + up 吞掉并收手 */
-            WriteChordIni("[General]\r\n");      /* 清掉黑名单（回内置默认） */
-            ConfigLoadFrom(L"bin/chordtest.ini");
-            Key(CLI_CAPS, TRUE); Pump(2);
-            POINT p1 = in;
-            CHECK(MousePt(WM_LBUTTONDOWN, p1) == 1, "AF: 接管 -> 吞掉左键按下");
-            CHECK(DragActive(), "AF: 拖拽已开始");
-
-            POINT p2 = { p1.x + 100, p1.y + 80 };
-            MousePt(WM_MOUSEMOVE, p2);
-            RECT want = { r0.left + 100, r0.top + 80,
-                          r0.left + 100 + (r0.right - r0.left),
-                          r0.top + 80 + (r0.bottom - r0.top) };
-            BOOL moved = FALSE;
-            RECT r;
-            for (int i = 0; i < 60 && !moved; i++) {
-                Pump(10);
-                GetWindowRect(w, &r);
-                moved = (r.left == want.left && r.top == want.top);
-            }
-            CHECK(moved, "AF: 窗口跟随光标位移（+100,+80）");
-
-            CHECK(MousePt(WM_LBUTTONUP, p2) == 1, "AF: 吞掉左键抬起（与按下配对）");
-
-
-            Pump(60);
-            CHECK(!DragActive(), "AF: 抬起后拖拽结束");
-            GetWindowRect(w, &r);
-            CHECK(r.left == want.left && r.top == want.top,
-                  "AF: 结束后停在最后一次落点上");
-
-            Pump(60);
-            Key(CLI_CAPS, FALSE); Pump(2);
+            /* ⑤⑥ 的探测点必须真的落在我们的窗口上：被别的置顶窗口盖住时整体
+               跳过（见 EnsurePointOnSelf 的说明），不喂鼠标事件、也不拿环境问题
+               报 FAIL。config 的重置都在 AfDragChecks 内部，跳过时状态无副作用。 */
+            if (EnsurePointOnSelf(w, in, "AF: Caps+左键拖动"))
+                AfDragChecks(w, in, r0);
 
             /* ⑦ **拖出阈值**（AltSnap 同款 DragThreshold + DragOutThresholdPx）：
                最大化窗口按下即还原会把窗口缩小，所以点一下（手没动）**必须什么都不做**。
