@@ -36,6 +36,7 @@ Windows **CapsLock** 快捷键增强程序。按住 `CapsLock` 当作修饰键�
 | `Q`     | 把当前窗口挪到鼠标光标处（支持多屏幕） |
 | `F3`    | 打开当前程序所在文件夹（并选中它的 exe） |
 | `F1`    | 按住时显示按键帮助（一张半透明键位图） |
+| `V`     | 弹出剪贴板（读 Ditto 历史最近 30 条） |
 | `Tab`   | 发送真实 CapsLock       |
 | `N`     | 按词向左跳转              |
 | `O`     | 按词向右跳转              |
@@ -100,6 +101,32 @@ Windows **CapsLock** 快捷键增强程序。按住 `CapsLock` 当作修饰键�
 - 窗口由同目录的 `CapsEnhanceHelp.exe` 负责画（**独立进程**，见开发者文档）。显示期间主程序会按 200ms 一次给它**喂心跳**，它只要 800ms 收不到就自己收起来 —— 所以「隐藏消息万一丢了」「主程序崩了/卡住」都不会留下一张关不掉的图。
 - 图上的**单击 Caps / 左 Shift / 右 Shift** 三条的功能名按 `CapsEnhance.ini` 里那三个 `Ime*Mode` 显示（`0` 会写成「不处理」），改了配置图就跟着变。
 - 想单独看这张图（不用一直按键）？直接双击 `CapsEnhanceHelp.exe`：直接显示，**点一下关闭**；没人喂心跳，所以它自己兜一个 3 分钟上限。
+
+---
+
+### 剪贴板：`V`
+
+按一下 `C + V` = 在鼠标光标旁浮出一个**不抢焦点**的剪贴板列表，列出 **Ditto** 剪贴板历史里最近的 30 条；挑一条粘到**你原来正在用的那个程序**里。
+
+- **不抢焦点**：窗口全程不是前台窗口，目标程序里的插入符原地不动 —— 弹出来、挑、粘，插入符都不跑。
+- 操作：
+  | 操作 | 效果 |
+  | --- | --- |
+  | 鼠标悬停 / `↑` `↓` / `Caps+I` `Caps+K` / `PgUp` `PgDn` / 滚轮 | 移动选中行（浮层开着时 Caps 按着也能用词跳的两个键） |
+  | 单击（默认开，可在设置关掉） | 直接粘贴 —— 挑中就上，不必"先选中再双击" |
+| `Shift`+单击 / `Shift`+双击 | **纯文本**粘贴。跟上面的开关走同一模式：开关开 = Shift+单击，开关关 = Shift+双击 |
+| 双击 / `Enter` | 粘贴（按原格式：图片、文件、富文本都原样回写） |
+  | `Shift` + 双击 / `Shift` + `Enter` | **纯文本**粘贴（只写 `CF_UNICODETEXT`） |
+  | `Alt` + `1`..`9`、`Alt` + `0` | 直接粘贴第 1..10 条 |
+  | `Esc` / 标题栏的 `X`（或 `»` 旁那颗）/ 点窗口外面 / 再按一次 `C+V` | 关闭 |
+  | 按住顶部标题栏拖动 | 移动窗口 |
+  | 双击标题栏，或点右上角 `»` | **置顶（钉住）**：粘完不关、点外面也不关，方便连粘多条（标题栏会显示「窗口置顶」） |
+- **它不自己收集剪贴板内容**，而是**只读地**读 Ditto 的数据库（`Ditto.db`，默认只读打开、绝不写） —— 所以历史以 Ditto 为准，排序也照 Ditto 自己的顺序（置顶项在前）。带图片的条目把图缩到**占满整行高度**显示（宽度按原图比例）。
+- 文字与 Ditto 同一套画法（普通窗口 + GDI `DrawText` + ClearType），不是灰阶抗锯齿 —— 分层窗口画不出这么清楚的字。整窗约 95% 不透明；顶部工具栏可以**按住拖动**挪窗口，双击置顶。
+- **不会污染 Ditto 历史**：粘贴必须把内容写进系统剪贴板（否则目标程序没法 `Ctrl+V`），而 Ditto 正盯着剪贴板。所以写入时**会额外挂一个 Ditto 的私有格式 `"Clipboard Viewer Ignore"`** —— 这是唯一一个 Ditto **无条件**尊重的屏蔽标记，看到就跳过这次变更；你不需要去 Ditto 里改任何设置。
+- 唯一的开关是 `CapsEnhance.ini` 里的 `DittoDir`（见下面配置一节）。没配就是不开：按 `C+V` 时浮层会显示一行提示。
+- 浮层干不了的活交回 Ditto 本体：点标题栏的 **Ditto** 按钮，或浮层开着时**单击 Caps** —— 浮层关闭，并用 Ditto 官方命令行 `-open` 拉起本体的快速粘贴窗口（Ditto 没在运行时该命令是安全无操作）。
+- 窗口由同目录的 `CapsEnhanceClip.exe` 负责（**独立进程**，与帮助图同理）。显示期间主程序给它喂心跳，800ms 断供即退。
 
 ---
 
@@ -203,6 +230,10 @@ ImeRShiftMode = 1   ; 右Shift -> 中文
 | `ImeCapsMode`        | `1`    | 单击 Caps 时把输入法强制切到哪：`0` = 不处理、`1` = 中文、`2` = 英文（详见[单键切换输入法](#单键切换输入法caps--左右-shift)）      |
 | `ImeLShiftMode`      | `2`    | 单击**左** Shift 同上（默认切英文）。**当前是英文键盘时三个键都不处理**                                            |
 | `ImeRShiftMode`      | `1`    | 单击**右** Shift 同上（默认切中文）。同上：**当前是英文键盘时三个键都不处理**                                        |
+| `DittoDir`           | *(空)*  | Ditto 的**文件夹**（`C+V` 用）。数据库 `<DittoDir>\Ditto.db` 和主程序 `<DittoDir>\Ditto.exe`（"转本体"按钮用）都从它派生。**留空 = 不启用**。相对路径的基准是**本程序 exe 所在目录**（也就是 ini 所在目录）；不做任何自动探测。例：`..\Ditto`、`C:\Tools\Ditto` |
+| `ClipFont`           | *(空)*  | 快速粘贴窗口的字体。留空 = 用内置的 Microsoft YaHei UI。设置界面里点「快速粘贴字体」按钮弹系统字体对话框（字体和字号在同一个对话框里选） |
+| `ClipFontSize`       | `10`    | 快速粘贴窗口的字号，单位**磅**，范围 `6..72`（由上面的字体按钮一并设置，不需要手改） |
+| `ClipClickPaste`     | `1`     | 单击条目直接上屏；`0` = 单击只选中、双击才粘 |
 
 > 想换增强键或选区键？不支持。`Alt + D` 与 `F` 属于"和弦语法"本身，改它等于改功能，所以不做成配置开关（这部分属于本项目刻意为之，具体理由见开发者文档）。
 
@@ -293,12 +324,16 @@ someapp.exe
 依赖 **MSVC x64**（Windows 10/11），工具链由 `build_env.bat` 统一定位。所有源文件按 **C++** 编译（`/TP`）：代码风格仍以 C 为主（COM 走 `CINTERFACE` 的 C 接口形态），切到 C++ 是为了能逐文件引入类型安全与资源管理的 C++ 写法，而不是一次性重写。
 
 ```bat
-build.bat    rem 生成 bin\CapsEnhance.exe 与 bin\CapsEnhanceSettings.exe
+build.bat    rem 生成 4 个 exe：CapsEnhance / CapsEnhanceSettings / CapsEnhanceHelp / CapsEnhanceClip
 ```
+
+中间产物（obj / res / 静态分析输出）全部落在 `obj\`，`bin\` 只产出 exe 与运行文件 —— 发布时直接拿走 `bin\` 即可，不会带出一堆 `.obj`。
 
 程序图标（托盘 / 窗口 / 资源管理器）来自 `res\app.ico`（16/24/32 三帧，由 `res\icon*.png` 打包，嵌入为 exe 资源 #1）。换图标：替换 `res\` 下的三张 PNG 重新跑一次 `python` 打包脚本或用任意 ICO 工具生成同名 `app.ico` 即可。
 
-两个 exe 必须放在同一目录：托盘菜单的"设置"按**同目录**找 `CapsEnhanceSettings.exe`，设置程序也按同目录找 `CapsEnhance.ini` 与 `CapsEnhance.exe`。
+四个 exe 必须放在同一目录：托盘菜单的"设置"按**同目录**找 `CapsEnhanceSettings.exe`，主程序按同目录找 `CapsEnhanceHelp.exe` / `CapsEnhanceClip.exe`，设置程序也按同目录找 `CapsEnhance.ini` 与 `CapsEnhance.exe`。
+
+剪贴板浮层（`CapsEnhanceClip.exe`）是唯一带第三方依赖的 exe：它要读 Ditto 的 SQLite 数据库，所以把 [SQLite3 Multiple Ciphers](https://github.com/utelle/SQLite3MultipleCiphers) 的 amalgamation 编了进来（`thirdparty\`，MIT 许可）。它跑在**独立的 `cl` 命令行**上：`/W0 /analyze-`（第三方代码不受本仓库"零告警"基线约束）、**不加 `/TP`**（它是 C 不是 C++）、`/bigobj`（amalgamation 是单个巨大 TU）。只链进这一个 exe，其余三个体积不变。
 
 设置程序的源码是 `settings/settings.c`：独立 exe（本体主线程是键盘钩子的宿主，不能同时拥有设置窗口），但它**链接 `src/config.c`** —— 值域、键名与钳制规则都只有一份，界面里不会写出"配置层不接受的值"。设置窗口是**高 DPI 感知**的（Per-Monitor V2，跨屏拖动会按新 DPI 重排并重建字体）。
 

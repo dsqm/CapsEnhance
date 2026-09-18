@@ -98,6 +98,8 @@
 | `folder.c` | **打开焦点程序所在文件夹**（`C+F3`），以及**打开日志文件所在位置**（日志结束气泡被点击时，走 `FolderRevealPath`）。走标准 shell 接口（`SHParseDisplayName` → `SHOpenFolderAndSelectItems`，**不拼 `explorer.exe` 命令行**）；目标窗口由 `ActJob.hwnd` 在开火那一刻快照；执行在自己的**一次性线程**上（MTA + `CoInitializeEx`），不占 `act.c` 的动作队列；UWP 走"宿主 `ApplicationFrameHost` → 子窗口 `Windows.UI.Core.CoreWindow` → 真实进程"；失败原因经 `WM_FOLDER_OPEN` 回主线程弹气泡。两个入口共用同一个 `FolderJob` 与线程过程 |
 | `help.c` | **按键帮助的开合（主程序侧）**（`C+F1`）：拉起同目录的 `CapsEnhanceHelp.exe`，并把"当前该显示还是该隐藏"告诉它（注册消息 + 40ms 对账重试）。窗口**不常驻**，所以每次显示都是一次冷启动 —— 而"按一下就松手"会让 SHOW/HIDE 都发在窗口出生之前，重试就是为这个竞态准备的。寿命由和弦决定：按下开、抬起关、松开 Caps（`ResetEngine`）也关 |
 | `help/help.c` | **按键帮助窗口本体**（独立 exe `CapsEnhanceHelp.exe`）。自包含：不装钩子、不初始化 COM/TSF，只做"GDI+ 起一次 + 铺底一帧 + GDI 画一遍字 + 送进分层窗口"（只读 `CapsEnhance.ini` 里那三个 `Ime*Mode`，用来决定底部三条"单击切输入法"的文案）。逐像素 alpha（32bpp DIB + `UpdateLayeredWindow`）实现半透明；文字用 **GDI + ClearType**；`WS_EX_NOACTIVATE` 保证不抢焦点；键位表从 `keymap_table.h` 编进来（不跨进程取数据）。见[按键帮助](#按键帮助helphelpc) |
+| `clip.c` | **剪贴板浮层的开合（主程序侧）**（`C+V`）：拉起 `CapsEnhanceClip.exe`（把 ini 里的 `DittoDb` 按**自己的** exe 目录展开成绝对路径后经 `--db` 传过去）、Show/Hide 对账重试、喂心跳、以及把钩子代收的 `Esc` / 导航键转过去。**寿命 ≠ 和弦**（松开 Caps 不关），`ClipShow` 是 toggle；`ClipIsOpen()` 被钩子用来决定"要不要吞 Esc"，所以送达超时必须把它清假。见[剪贴板浮层](#剪贴板浮层clipclipc--srcclipc) |
+| `clip/clip.c` | **剪贴板浮层本体**（独立 exe `CapsEnhanceClip.exe`）。分层窗口框架与 `help/help.c` 同源；**只读**打开 Ditto 的 SQLite 取最近 30 条（只取 `mText` 显示，正文选中时才查 `Data`）；粘贴时把该条记录的所有格式原样回写剪贴板并挂 `"Clipboard Viewer Ignore"` 防污染历史；`SetWinEventHook` 记住要粘回哪个窗口并兼做"点外面就关"。它是唯一链接第三方代码（SQLite3 Multiple Ciphers）的 exe |
 
 > 分层意义：以后要支持"另一个只有 COM 才读得到的程序"（如 WPS 表格），照 `wps.c` 再写一个文件即可，`autodisp.c` 与 `bridge.c` 原样复用。
 > 激活键（`Alt/D`、`F`）**不做成配置项**：它们属于和弦语法本身，改变量级 < 配置项，历史实装成 `EnhanceKeys` / `ShiftKeys` 后已回退（改它们等于改功能）。但 `keymap.c` 那层模式抽象仍在，以后想改常量只需动 `cap.h` 一处。
@@ -420,6 +422,65 @@ WPS 置位的回读校验返回**三态**：
 - **三条"单击 Caps / 左 Shift / 右 Shift"的文案来自配置文件**（`CapsEnhance.ini` 的 `ImeCapsMode / ImeLShiftMode / ImeRShiftMode`：0 不处理 / 1 切中文 / 2 切英文）。写死一个"切中文"在这里，用户把配置一改图就开始撒谎。
 - **读 ini 不用 `GetPrivateProfileIntW`**：本 ini 是 **UTF-8（带 BOM）**，而 Windows 的 profile API 会把带 BOM 的 UTF-8 当成 ANSI 认，BOM 那三个字节会粘在第一行的段名前面。这里只关心三个纯 ASCII 的键名与它们的十进制值，按字节扫一遍就够，也不受编码 / BOM / API 缓存那些怪癖影响；读不到就保持默认（与 `config.c` 同一条规矩）。
 - **测试边界**：窗口像素测不了（要真人按住键）。能离线钉住的是"键位接线 + 寿命语义 + 每条动作都有图上文案"（`test_chord` 场景 AI，文案那条靠遍历共享的键位表）。跨进程那份契约用一次性工具单独验过：`--hold` 起来时不显示、发 SHOW 出现、持续喂 KA 则一直显示、**停喂 800ms 后自己消失**、发 HIDE 消失并退出、手动模式下不吃心跳判据。渲染效果靠一次性抓图工具（屏幕 DC + `BitBlt`，`PrintWindow` 抓不到分层窗口）对着真机看。
+
+---
+
+## 剪贴板浮层（`clip/clip.c` + `src/clip.c`）
+
+一句话：`C + V` **按一下**就弹出一个不抢焦点的列表（Ditto 历史最近 30 条），挑一条粘回原来那个程序。窗口在**独立 exe** 里，分层窗口框架与 `help/help.c` 同源。
+
+**为什么拆成独立 exe**：与帮助图同一条理由，但更重一层 —— 它要打开并查询别人的 SQLite 数据库、把一条记录的多个剪贴板格式解码后回写进系统剪贴板，这些都属于"可能慢、可能失败"的事，绝不能发生在承载钩子的主线程上。
+
+### 与帮助窗口最关键的差别：寿命不跟和弦走
+
+帮助是"按住 F1 才显示"，寿命 = 和弦（松开 Caps 时 `ResetEngine` 会 `HelpHide`）。剪贴板**不能这样**：松开 V 之后窗口必须还在，否则用户根本来不及挑条目。所以：
+
+- 主程序侧**没有**"松开 Caps 就隐"这条路径，只有明确关闭途径；
+- `ClipShow` 是 **toggle**（窗口已在 = 再按一次关掉它）；
+- 由此多出一个必须堵的洞：`ClipIsOpen()` 直接返回 `s_want`，而钩子据此决定"要不要替浮层吞 Esc"。**送达超时时必须把 `s_want` 清掉** —— 否则窗口根本没起来，Esc 却被永久吃掉。
+
+### 键盘：浮层收不到，全部由主程序的钩子代收
+
+`WS_EX_NOACTIVATE` 意味着它一个键盘消息都收不到。所以 `hook.c` 在 `ClipIsOpen()` 期间拦截并转发：`Esc`、回车、`↑↓`、`PgUp/PgDn`、`Alt+数字`。拦的范围刻意很窄 —— **数字键只在 Alt 按着时才拦**，不带 Alt 的数字留给出路（也免得"浮层开着时打不出数字"）。
+
+### 读 Ditto 的数据库（只读）
+
+| 事实 | 出处 |
+| --- | --- |
+| 库是普通 SQLite：`Main`（`lID`/`mText`/`clipOrder`/`stickyClipOrder`/`bIsGroup`）+ `Data`（`lParentID`/`strClipBoardFormat`/`ooData`），正文在 `Data.ooData` 里**不压缩不加密** | Ditto `DatabaseUtilities.cpp` |
+| 排序照 Ditto 自己那句：`stickyClipOrder DESC, clipOrder DESC`（`clipOrder` 才是它维护的顺序，不是 `lDate`） | Ditto `QPasteWnd.cpp` |
+| 文本是 **UTF-16**（Ditto 的封装走 `sqlite3_column_text16`）→ 这里也必须 `sqlite3_column_text16` | Ditto `CppSQLite3.cpp` |
+| 格式名到剪贴板格式号的映射是"标准名查表 + 其余 `RegisterClipboardFormat`" | Ditto `Misc.cpp` 的 `GetFormatID` |
+| 默认 rollback journal（非 WAL）→ 只读打开安全，配 `busy_timeout` 扛"Ditto 正在写"的瞬间 | 同上 |
+
+落地的几条取舍：
+
+- **只取 `mText` 用作显示，正文留到选中时再查 `Data`** —— 30 条正文可能是 30 篇文章。
+- "这是文本还是图片"靠 `group_concat(strClipBoardFormat)` 一次带出来，不为它再发 30 条查询。
+- `sqlite3_open_v2` 只认 UTF-8 路径，所以宽路径先转一次；它是唯一带 flags 的打开接口，而**只读必须走它**（`sqlite3_open16` 没有 flags 参数，只能读写打开）。
+- 路径的**相对基准由主程序展开**（它自己的 exe 目录）后用 `--db` 传给浮层 —— 基准只有那个进程知道，让子进程再解一次就是同一件事的两份实现。
+
+### 粘贴：不污染历史的关键是一个私有格式
+
+粘贴必须把内容写进系统剪贴板，而 Ditto 正盯着剪贴板 —— 于是每次粘贴都会在历史里多出一条。可用的屏蔽手段实测只有一条走得通：
+
+- **`"Clipboard Viewer Ignore"`**（Ditto 私有格式）：Ditto 在 `Clip.cpp` 与 `ClipboardViewer.cpp` 里**无条件**检查它（`IsClipboardFormatAvailable` 命中就 `return FALSE`），不需要用户在 Ditto 里开任何开关。
+- `ExcludeClipboardContentFromMonitorProcessing` 需要用户先开 `m_enforceClipboardIgnoreFormats` 才生效，不能指望。
+- `CopyAppExclude`（按活动窗口进程名排除）**对我们无效**：浮层是 `NOACTIVATE`，写剪贴板时活动窗口仍是目标应用 —— 排除它就等于把正常复制也一起废掉。
+- Ditto 另有 CRC 去重（`Clip.cpp`），所以即便漏挂标记，重复也多半会被合并；但那取决于用户的"允许重复"设置，不能当保险。
+
+另外两条：
+
+- **原样回写所有格式**（图片 / `CF_HDROP` / RTF 都靠它），但要跳过 Ditto 的私有格式（`Ditto File Data`、`Ditto Remote CF_HDROP` …）和不是 `HGLOBAL` 的那几个标准格式（`CF_METAFILEPICT`、`CF_PALETTE`、`CF_ENHMETAFILE` …）。
+- **抬 Alt 必须先塞一个中性键**（`0xFF`，AHK 的 `#MenuMaskKey` 那一招，与 `src/send.c` 的 `ReleaseMod` 同源）：用户是用 `C+V` 打开的，Alt 很可能仍物理按着，不先放掉 `Ctrl+V` 会被对端理解成 `Ctrl+Alt+V`。
+
+### 焦点归还
+
+用 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)` 记住"最后一个不是自己的窗口"（clippi 的做法）。为什么不能直接现取 `GetForegroundWindow`：用户在挑条目的过程中完全可能点过别处，而他真正要粘的是**打开浮层那一刻**在用的那个程序。同一个钩子顺带承担"点击外部 / 切到别的程序就自动关"（置顶期间与粘贴进行中停用 —— 粘贴自己会调 `SetForegroundWindow`，那条事件是**我们**引起的）。
+
+### 测试边界
+
+真机才能验的是"粘出来对不对"；能离线钉住的是接线与寿命语义（`test_chord` 场景 AI2）：`C+V` 接到 `ClipShow`、松开 Caps 之后仍开着（寿命 ≠ 和弦）、这期间 `Esc` 被吞并转发、**关掉后 `Esc` 恢复放行**。
 
 ---
 
@@ -759,7 +820,7 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 | 脚本 | 内容 |
 | --- | --- |
-| `build.bat` | 生成三个 exe：`bin/CapsEnhance.exe`（源文件：hook / nav / send / act / config / keymap / main / autodisp / bridge / wps / winmove / drag / ime / folder / help）、`bin/CapsEnhanceSettings.exe`（settings/settings.c + src/config.c）、`bin/CapsEnhanceHelp.exe`（help/help.c，只吃一个共享头、不链接 src 下任何模块） |
+| `build.bat` | 生成四个 exe：`bin/CapsEnhance.exe`（源文件：hook / nav / send / act / config / keymap / main / autodisp / bridge / wps / winmove / drag / ime / folder / help / clip）、`bin/CapsEnhanceSettings.exe`（settings/settings.c + src/config.c）、`bin/CapsEnhanceHelp.exe`（help/help.c，只吃一个共享头、不链接 src 下任何模块）、`bin/CapsEnhanceClip.exe`（clip/clip.c + `thirdparty\sqlite3mc_amalgamation.c` 编出的 obj，后者走**独立的 cl 命令行**：`/W0 /analyze-`、不加 `/TP`、`/bigobj`） |
 | `test\build_nav.bat` | 按词跳转测试：算法单测（`ComputeSteps`）+ Scintilla / Edit 通道集成（`test_sci`）+ 配置解析（`test_config`） |
 | `test\build_test.bat` | 和弦引擎回归：模式修饰的顺序语义（先按修饰再按触发键）、按下即开火、长按、增强补齐、多键同按、左 Alt=增强、清卡键判定、原生按词跳转序列、快速滚动 / 持续滚动、横向滚动、打开所在文件夹的键位接线与取路径、**全屏窗口在 `C+Q` 与 Caps+拖动两边都不动作**、**最大化窗口同屏连一次位置变化都没有**（数 `WM_WINDOWPOSCHANGED`）、按键帮助的键位接线与"寿命=和弦"、日志结束气泡的可点击接线与"点气泡不弹菜单 / 点图标才弹菜单"、键位表每条动作都有图上文案。带 `/DCAP_TEST`（让 `folder.c` 把"退成目录"这个判定结果通过可选形参带出来给断言看），链接 `winmm.lib`（`main.c` 的 `RecBeep` 用 `PlaySoundW`） |
 | `test\build_dbg.bat` | Debug CRT（`/MTd`）config 测试：Release CRT 不校验堆块，"越界写"这类 bug 只有这里拦得住 |

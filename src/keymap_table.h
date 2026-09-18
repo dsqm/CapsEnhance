@@ -74,6 +74,9 @@ static const ActionDef kActions[] = {
     /* 按键帮助：单发命令，同样不发键。它由 main.c 直接在和弦上开合
        （不走执行线程，也不占动作队列 —— 见 help.c）：按下开、抬起关。 */
     { ACT_HELP,      VK_F1,      0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_HELP, "帮助(F1)", "帮助" },
+    /* 剪贴板：单发命令，不发键。窗口本体在独立 exe（clip/clip.c）里，
+       由 main.c 在和弦上直接开合。 */
+    { ACT_CLIPLIST,  'V',        0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_CLIPLIST, "剪贴板(V)", "剪贴|板" },
     /* 诊断：没有触发键（由 PROBE_KEY 的特殊路径投递，见 hook.c） */
     { ACT_PROBE,     0,          0,          -1, ACTF_PROBE, "探测", "记录日志" },
 };

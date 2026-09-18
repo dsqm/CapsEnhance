@@ -84,6 +84,24 @@ void HelpTick(void) { }
 void HelpKaTick(void) { }
 static void ResetHelpRec(void) { g_helpShow = 0; g_helpHide = 0; }
 
+/* 剪贴板浮层（C+Alt+V）：与帮助同一类"只是拉起另一个 exe 的窗口"，同样桩掉 ——
+   真去 CreateProcess 会让这条单元测试依赖 bin 里有没有那个 exe。
+   这里**故意**把 ClipIsOpen 做成跟着 ClipShow/ClipHide 走：钩子据它决定
+   "要不要替浮层吞 Esc"，所以它必须反映真实的开合，而不是恒真/恒假。 */
+static int  g_clipShow = 0, g_clipHide = 0, g_clipEsc = 0, g_clipKey = 0;
+static BOOL g_clipOpen = FALSE;
+void ClipShow(void) { g_clipShow++; g_clipOpen = TRUE; }
+void ClipHide(void) { g_clipHide++; g_clipOpen = FALSE; }
+void ClipTick(void) { }
+void ClipKaTick(void) { }
+void ClipEsc(void) { g_clipEsc++; ClipHide(); }
+void ClipKey(int vk, unsigned flags) { (void)vk; (void)flags; g_clipKey++; }
+void ClipCallDitto(void) { g_clipHide++; g_clipOpen = FALSE; }   /* 转本体先关浮层 */
+BOOL ClipIsOpen(void) { return g_clipOpen; }
+static void ResetClipRec(void) {
+    g_clipShow = 0; g_clipHide = 0; g_clipEsc = 0; g_clipKey = 0; g_clipOpen = FALSE;
+}
+
 /* ---- 捕获钩子：记录注入的完整事件序列（按下/抬起），并可统计次数 ---- */
 typedef struct { int vk; int n; } Rec;
 static Rec g_rec[256]; static int g_recN = 0;
@@ -2077,6 +2095,35 @@ int main(void) {
         CHECK(g_helpHide > hideBefore,
               "AI: 松开 Caps（F1 仍按着）-> 同样请求隐藏（寿命=和弦）");
         Sim(VK_F1, FALSE);    Pump(20);
+        Drain();
+    }
+
+    /* ---- 场景AI2：剪贴板浮层（C+V）----
+       窗口本体在另一个 exe 里，测不了；能离线钉住的是三件"改坏了很难发现"的事：
+         ① C+V 真的接到 ClipShow（不需要任何修饰键 —— 与帮助 F1 同类）。
+         ② 寿命**不等于**和弦：松开 Caps 之后浮层仍然开着（否则来不及挑条目），
+            且这期间 Esc 被吞掉并转发（它自己收不到键盘）；关掉之后 Esc 必须
+            恢复放行 —— 永久吃掉用户的 Esc 是最糟的一类 bug。 */
+    {
+        ResetClipRec();
+        Sim(CLI_CAPS, TRUE);  Pump(20);
+        Sim('V', TRUE);       Pump(20);
+        Sim('V', FALSE);      Pump(20);
+        CHECK(g_clipShow >= 1, "AI2: C+V -> 请求显示剪贴板");
+        Sim(CLI_CAPS, FALSE); Pump(20);
+        Drain();
+
+        CHECK(g_clipOpen, "AI2: 松开 Caps 之后剪贴板仍然开着（寿命 ≠ 和弦）");
+        LRESULT r1 = Sim(VK_ESCAPE, TRUE);
+        CHECK(r1 == 1, "AI2: 浮层开着时 Esc 被吞掉（代收转发，不外泄给系统）");
+        Sim(VK_ESCAPE, FALSE); Pump(20);
+        CHECK(g_clipEsc >= 1, "AI2: Esc 被转给了剪贴板浮层");
+        CHECK(!g_clipOpen, "AI2: Esc 之后浮层已关");
+        Drain();
+
+        LRESULT r2 = Sim(VK_ESCAPE, TRUE);
+        CHECK(r2 == 0, "AI2: 浮层关掉后 Esc 恢复放行（不会永久吃键）");
+        Sim(VK_ESCAPE, FALSE); Pump(20);
         Drain();
     }
 

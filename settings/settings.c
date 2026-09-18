@@ -40,11 +40,13 @@
 #include <string.h>
 #include <wchar.h>
 #include <shellapi.h>      /* ShellExecuteW（CreateProcess 失败时的兜底） */
+#include <commdlg.h>       /* ChooseFontW：系统标准字体对话框 */
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 #define APP_TITLE   L"CapsEnhance 设置"
 #define WND_CLASS   L"CapsEnhanceSettingsMain"
@@ -71,6 +73,9 @@
 #define IDC_IME_CAPS   209
 #define IDC_IME_LSHF   210
 #define IDC_IME_RSHF   211
+#define IDC_DITTO_DB   212
+#define IDC_CLIP_PICK  213   /* 按钮：显示当前字体 + 字号，点它弹系统字体对话框 */
+#define IDC_CLIP_CLICK 214   /* 勾选框：单击条目直接上屏 */
 
 /* 五份名单各一组：列表框 / 输入框 / 添加 / 删除 / 标题 / 选取窗口 */
 #define IDC_LIST0  300
@@ -88,25 +93,39 @@
 typedef struct {
     int          id;
     const WCHAR* label;
-    const WCHAR* unit;      /* 数值单位，显示在输入框右侧；勾选框为 NULL */
-    int          isBool;     /* 1 = 勾选框，0 = 整数输入框 */
+    const WCHAR* unit;      /* 数值单位，显示在输入框右侧；勾选框与文本框为 NULL */
+    int          isBool;    /* 1 = 勾选框，0 = 输入框 */
+    int          isText;    /* 1 = **文本**输入框（路径这类值）；与 isBool 互斥。
+                               之所以要单独一位：文本行没有 min/max，也不该走
+                               "只能填数字"那条校验 —— 用 isBool 的三态去编码
+                               就会在校验分支里冒出 `if (isBool == 2)` 这种暗号。 */
+    int          isBtn;     /* 1 = 按钮（label 就是按钮上的字）。
+                               按钮不承载配置值，点击行为在 WM_COMMAND 里按 id 分支。 */
     int          min, max;
 } Field;
 
 static const Field kFields[] = {
-    { IDC_RUN_ADMIN, L"以管理员身份运行（会弹 UAC）",                   NULL,      1, 0, 0 },
-    { IDC_LOG_KB,    L"日志大小上限（0 = 不限制）",                    L"KB",     0, 0, 65536 },
-    { IDC_STEPS,     L"按词跳转逐格上限（0 = 不限制，上限 256）",       L"格",     0, 0, 256 },
-    { IDC_OVER_CTRL, L"超过逐格上限时改发 Ctrl+方向（取消勾选只发一次方向键）", NULL,      1, 0, 0 },
-    { IDC_WMUL,      L"Caps+滚轮 放大倍数（0/1 = 关闭）",              L"倍",     0, 0, 16 },
-    { IDC_INTERVAL,  L"持续滚动初始速度（越大越慢）",                  L"毫秒/格", 0, 100, 60000 },
-    { IDC_FASTMS,    L"持续滚动最快速度（越小越快）",                  L"毫秒/格", 0, 20, 60000 },
-    { IDC_HMUL,      L"Caps+Shift+滚轮 横向倍数（0 = 关闭）",          L"倍",     0, 0, 16 },
-    { IDC_SCI,       L"允许读取 Scintilla 程序内存（关掉则退回逐格）", NULL,      1, 0, 0 },
+    { IDC_RUN_ADMIN, L"以管理员身份运行（会弹 UAC）",                   NULL,      1, 0, 0, 0, 0 },
+    { IDC_LOG_KB,    L"日志大小上限（0 = 不限制）",                    L"KB",     0, 0, 0, 0, 65536 },
+    { IDC_STEPS,     L"按词跳转逐格上限（0 = 不限制，上限 256）",       L"格",     0, 0, 0, 0, 256 },
+    { IDC_OVER_CTRL, L"超过逐格上限时改发 Ctrl+方向（取消勾选只发一次方向键）", NULL,      1, 0, 0, 0, 0 },
+    { IDC_WMUL,      L"Caps+滚轮 放大倍数（0/1 = 关闭）",              L"倍",     0, 0, 0, 0, 16 },
+    { IDC_INTERVAL,  L"持续滚动初始速度（越大越慢）",                  L"毫秒/格", 0, 0, 0, 100, 60000 },
+    { IDC_FASTMS,    L"持续滚动最快速度（越小越快）",                  L"毫秒/格", 0, 0, 0, 20, 60000 },
+    { IDC_HMUL,      L"Caps+Shift+滚轮 横向倍数（0 = 关闭）",          L"倍",     0, 0, 0, 0, 16 },
+    { IDC_SCI,       L"允许读取 Scintilla 程序内存（关掉则退回逐格）", NULL,      1, 0, 0, 0, 0 },
     /* 单键切换输入法：0=不处理 1=切中文 2=切英文（值域与语义只在 config.c 定义） */
-    { IDC_IME_CAPS,  L"单击 Caps 时切输入法（0=不处理 1=中文 2=英文）",  NULL,     0, 0, 2 },
-    { IDC_IME_LSHF,  L"单击左 Shift 时切输入法（同上；英文键盘下都不处理）", NULL,   0, 0, 2 },
-    { IDC_IME_RSHF,  L"单击右 Shift 时切输入法（同上；英文键盘下都不处理）", NULL,   0, 0, 2 },
+    { IDC_IME_CAPS,  L"单击 Caps 时切输入法（0=不处理 1=中文 2=英文）",  NULL,     0, 0, 0, 0, 2 },
+    { IDC_IME_LSHF,  L"单击左 Shift 时切输入法（同上；英文键盘下都不处理）", NULL,   0, 0, 0, 0, 2 },
+    { IDC_IME_RSHF,  L"单击右 Shift 时切输入法（同上；英文键盘下都不处理）", NULL,   0, 0, 0, 0, 2 },
+    /* Ditto 剪贴板数据库路径（`C+V` 读它）：**留空 = 不启用**。相对路径的
+       基准是本程序 exe 所在目录 —— 这一句写在标签里而不是让用户去猜。 */
+    { IDC_DITTO_DB,  L"Ditto 文件夹路径（含 Ditto.db 与 Ditto.exe；留空 = 不启用 Caps+V；相对路径相对本程序目录）",
+                     NULL, 0, 1, 0, 0, 0 },
+    /* 快速粘贴的字体只有一个入口：按钮上**显示当前字体 + 字号**，点它弹系统
+       字体对话框（对话框里本来就能同时选字体和字号，再给个独立字号框是重复）。 */
+    { IDC_CLIP_PICK, L"快速粘贴字体",                                   NULL, 0, 0, 1, 0, 0 },
+    { IDC_CLIP_CLICK, L"单击条目直接上屏（取消勾选则单击只选中、双击才粘）", NULL, 1, 0, 0, 0, 0 },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
 
@@ -279,6 +298,8 @@ static void FillList(HWND lb, int list) {
         SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)ConfigListAt(list, i));
 }
 
+static void UpdateClipFontBtn(void);   /* 定义在字体对话框那一节（用到 g_dpi） */
+
 static void LoadConfig(void) {
     /* 文件不存在时让 config.c 写一份带注释的模板（与本体首次启动一致），
        再来读 —— 否则界面是空的，用户不知道该填什么。 */
@@ -297,6 +318,12 @@ static void LoadConfig(void) {
             case IDC_SCI:       SetCheck(c, ConfigGetAllowScintillaRead()); break;
             default: break;
             }
+        } else if (kFields[i].isText) {
+            switch (kFields[i].id) {
+            case IDC_DITTO_DB:  SetWindowTextW(c, ConfigGetDittoDir()); break;
+
+            default: break;
+            }
         } else {
             switch (kFields[i].id) {
             case IDC_LOG_KB:   SetIntField(c, ConfigGetLogMaxKB()); break;
@@ -308,6 +335,8 @@ static void LoadConfig(void) {
             case IDC_IME_CAPS: SetIntField(c, ConfigGetImeMode(IME_KEY_CAPS)); break;
             case IDC_IME_LSHF: SetIntField(c, ConfigGetImeMode(IME_KEY_LSHIFT)); break;
             case IDC_IME_RSHF: SetIntField(c, ConfigGetImeMode(IME_KEY_RSHIFT)); break;
+            case IDC_CLIP_CLICK: SetCheck(c, ConfigGetClipClickPaste()); break;
+
             default: break;
             }
         }
@@ -316,6 +345,7 @@ static void LoadConfig(void) {
         FillList(GetDlgItem(g_hwnd, IDC_LIST0 + i * LIST_STRIDE), kLists[i].list);
         SetWindowTextW(GetDlgItem(g_hwnd, IDC_NAME0 + i * LIST_STRIDE), L"");
     }
+    UpdateClipFontBtn();   /* 按钮文字就是当前值，加载后刷一次 */
     g_loading = FALSE;
     g_dirty = FALSE;
     UpdateTitle();
@@ -327,7 +357,8 @@ static void LoadConfig(void) {
    整份重写会把它们冲掉。ConfigSaveFile 只改"我们认识的那几行"。 */
 static BOOL SaveConfig(void) {
     for (int i = 0; i < FIELD_N; i++) {
-        if (kFields[i].isBool) continue;
+        if (kFields[i].isBool || kFields[i].isText || kFields[i].isBtn) continue;
+        /* 文本框与按钮没有"值域"可校验 */
         HWND c = GetDlgItem(g_hwnd, kFields[i].id);
         if (!c) continue;
         int v = 0;
@@ -353,6 +384,13 @@ static BOOL SaveConfig(void) {
             case IDC_SCI:       ConfigSetAllowScintillaRead(GetCheck(c)); break;
             default: break;
             }
+        } else if (kFields[i].isText) {
+            WCHAR t[DITTO_DIR_MAX];
+            GetWindowTextW(c, t, DITTO_DIR_MAX);
+            switch (kFields[i].id) {
+            case IDC_DITTO_DB:  ConfigSetDittoDir(t); break;
+            default: break;
+            }
         } else {
             ReadIntField(c, &kFields[i], &v);      /* 校验已过，这里必然成功 */
             switch (kFields[i].id) {
@@ -364,7 +402,8 @@ static BOOL SaveConfig(void) {
             case IDC_HMUL:     ConfigSetWheelHScrollMul(v); break;
             case IDC_IME_CAPS: ConfigSetImeMode(IME_KEY_CAPS, v); break;
             case IDC_IME_LSHF: ConfigSetImeMode(IME_KEY_LSHIFT, v); break;
-            case IDC_IME_RSHF: ConfigSetImeMode(IME_KEY_RSHIFT, v); break;
+            case IDC_IME_RSHF:  ConfigSetImeMode(IME_KEY_RSHIFT, v); break;
+            case IDC_CLIP_CLICK: ConfigSetClipClickPaste(GetCheck(c)); break;
             default: break;
             }
         }
@@ -507,9 +546,21 @@ static void Layout(int w, int h) {
         int id = kFields[i].id;
         HWND c = GetDlgItem(g_hwnd, id);
         if (!c) continue;
-        if (kFields[i].isBool) {
+        if (kFields[i].isBtn) {
+            MoveWindow(c, x, y - off, w - x * 2, S(24), TRUE);
+            y += rowBool;
+        } else if (kFields[i].isBool) {
             MoveWindow(c, x, y - off, w - x * 2, rowBool - S(2), TRUE);
             y += rowBool;
+        } else if (kFields[i].isText) {
+            /* 文本行：**标签独占一行、输入框占满下一行**。
+               照数字行那样"框在左、标签吃剩下的"是行不通的 —— 路径要看得全，
+               框必须撑满；而标签是一整句，塞不进一行的剩余宽度。 */
+            HWND lab = GetDlgItem(g_hwnd, id + 500);
+            if (lab) MoveWindow(lab, x, y - off, w - x * 2, S(18), TRUE);
+            y += S(20);
+            MoveWindow(c, x, y - off, w - x * 2, S(22), TRUE);
+            y += S(24);
         } else {
             /* 数字框放**左边**、单位紧跟在框右侧、标签吃剩下的空间：
                标签是长句，把输入框放在标签之后的话，窗口一窄它就被挤出
@@ -985,6 +1036,99 @@ static LRESULT CALLBACK FooterProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
+/* ---- 快速粘贴字体：按钮上显示"字体名 字号" ----
+   学 CLaunch-search（settings_general.go 的 fontDesc）的做法：一个入口，
+   按钮文字就是当前值 —— 用户不需要在两个框里对"现在选的是啥"。
+   字体名留空 = 用浮层的内置默认，显示时把默认名带出来，不然按钮是空的。 */
+static void UpdateClipFontBtn(void) {
+    HWND b = GetDlgItem(g_hwnd, IDC_CLIP_PICK);
+    if (!b) return;
+    const WCHAR* name = ConfigGetClipFont();
+    WCHAR txt[CLIP_FONT_MAX + 16];
+    _snwprintf_s(txt, (size_t)(CLIP_FONT_MAX + 16), _TRUNCATE, L"%s　%d 磅",
+                 (name[0] ? name : L"Microsoft YaHei UI"), ConfigGetClipFontSize());
+    SetWindowTextW(b, txt);
+}
+
+/* ---------- 系统字体对话框（ChooseFont） ----------
+   调用方式取自本机的 CLaunch-search 项目（settings_font.go，同作者），那里踩过
+   两个坑，这里一并躲开：
+     ① 字体名留空时直接弹，家族预选会是空白 —— 先兜底成实际渲染用的默认字体。
+     ② 对话框按「字面名 + 字重」**整体**匹配；确认后写回的 lfFaceName 可能是带
+        字重后缀的 GDI 字面名（如选 MiSans 半细体 → 写回 "MiSans Medium"，字重
+        380）。第二次打开时恒传 FW_NORMAL(400) 会因字重对不上而家族预选空白。
+        所以用 EnumFontFamiliesEx 取该名字的**真实字重**再喂回去。 */
+
+struct FontFaceItem {
+    WCHAR name[LF_FACESIZE];
+    int   weight;
+};
+static FontFaceItem g_fontFaces[64];
+static int          g_fontFaceN = 0;
+
+static int CALLBACK EnumFaceProc(const LOGFONTW* lf, const TEXTMETRICW* tm,
+                                 DWORD type, LPARAM lp) {
+    (void)tm; (void)type; (void)lp;
+    if (g_fontFaceN < (int)(sizeof(g_fontFaces) / sizeof(g_fontFaces[0]))) {
+        wcsncpy_s(g_fontFaces[g_fontFaceN].name, LF_FACESIZE, lf->lfFaceName, _TRUNCATE);
+        g_fontFaces[g_fontFaceN].weight = lf->lfWeight;
+        g_fontFaceN++;
+    }
+    return 1;   /* 继续枚举 */
+}
+
+/* 取字体名的真实字重；枚举为空 = 字体未安装，返回 0（调用方兜底 FW_NORMAL）。
+   家族名与粗体字面同名的场景下，取字重最接近 400 的那个（即常规体）。 */
+static int FontFaceWeight(const WCHAR* name) {
+    if (!name || !name[0]) return 0;
+    LOGFONTW flt;
+    memset(&flt, 0, sizeof(flt));
+    wcsncpy_s(flt.lfFaceName, LF_FACESIZE, name, _TRUNCATE);
+    flt.lfCharSet = DEFAULT_CHARSET;
+    HDC dc = CreateCompatibleDC(NULL);
+    if (!dc) return 0;
+    g_fontFaceN = 0;
+    EnumFontFamiliesExW(dc, &flt, EnumFaceProc, 0, 0);
+    DeleteDC(dc);
+    if (g_fontFaceN <= 0) return 0;
+    int best = 0, bestDist = 1 << 30;
+    for (int i = 0; i < g_fontFaceN; i++) {
+        if (_wcsicmp(g_fontFaces[i].name, name) != 0) continue;
+        int dd = g_fontFaces[i].weight - 400;
+        if (dd < 0) dd = -dd;
+        if (dd < bestDist) { best = g_fontFaces[i].weight; bestDist = dd; }
+    }
+    return best ? best : g_fontFaces[0].weight;
+}
+
+/* 弹字体对话框。name / sizePt 既当初始值也当出参；用户确认返回 TRUE。 */
+static BOOL PickFont(HWND owner, WCHAR* name, int cap, int* sizePt) {
+    if (!name[0]) wcscpy_s(name, (size_t)cap, L"Microsoft YaHei UI");
+    LOGFONTW lf;
+    memset(&lf, 0, sizeof(lf));
+    wcsncpy_s(lf.lfFaceName, LF_FACESIZE, name, _TRUNCATE);
+    lf.lfHeight = -MulDiv(*sizePt, (g_dpi > 0 ? g_dpi : 96), 72);
+    lf.lfWeight = FontFaceWeight(name);
+    if (!lf.lfWeight) lf.lfWeight = FW_NORMAL;
+    lf.lfCharSet = DEFAULT_CHARSET;
+
+    CHOOSEFONTW cf;
+    memset(&cf, 0, sizeof(cf));
+    cf.lStructSize = sizeof(cf);
+    cf.hwndOwner   = owner;
+    cf.lpLogFont   = &lf;
+    cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_FORCEFONTEXIST | CF_NOSCRIPTSEL;
+    cf.nSizeMin = 6;
+    cf.nSizeMax = CLIP_FONT_SIZE_MAX;
+    if (!ChooseFontW(&cf)) return FALSE;
+
+    wcsncpy_s(name, (size_t)cap, lf.lfFaceName, _TRUNCATE);
+    int pt = cf.iPointSize / 10;
+    if (pt <= 0) pt = *sizePt;
+    *sizePt = pt;
+    return TRUE;
+}
+
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_COMMAND: {
@@ -996,6 +1140,21 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         if (id == IDC_SAVE)   { DoSave(); return 0; }
+        if (id == IDC_CLIP_PICK) {
+            WCHAR name[CLIP_FONT_MAX] = L"";
+            int size = ConfigGetClipFontSize();
+            const WCHAR* cur = ConfigGetClipFont();
+            if (cur[0]) wcscpy_s(name, CLIP_FONT_MAX, cur);
+            if (PickFont(h, name, CLIP_FONT_MAX, &size)) {
+                /* 确认即写入配置层（内存态）：ConfigSaveFile 写回时用的就是它，
+                   所以不需要"隐藏字段"来替按钮保管值。 */
+                ConfigSetClipFont(name);
+                ConfigSetClipFontSize(size);
+                UpdateClipFontBtn();
+                MarkDirty();
+            }
+            return 0;
+        }
         if (id == IDC_EXIT)   { AskSaveAndClose(); return 0; }
         if (id == IDC_RELOAD) {
             if (g_dirty && MessageBoxW(h, L"放弃未保存的改动并重新加载？", APP_TITLE,
@@ -1220,7 +1379,13 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     for (int i = 0; i < FIELD_N; i++) {
         int id = kFields[i].id;
-        if (kFields[i].isBool) {
+        if (kFields[i].isBtn) {
+            /* 按钮自己就是一行：它不承载配置值，点击行为在 WM_COMMAND 里按 id 分支 */
+            HWND b = CreateWindowExW(0, L"BUTTON", kFields[i].label,
+                                     WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
+                                     0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)id, hInst, NULL);
+            HookChild(b);
+        } else if (kFields[i].isBool) {
             HWND b = CreateWindowExW(0, L"BUTTON", kFields[i].label,
                                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX | WS_TABSTOP,
                                      0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)id, hInst, NULL);
@@ -1232,8 +1397,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
             HWND e = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | ES_AUTOHSCROLL | WS_TABSTOP,
                                      0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)id, hInst, NULL);
-            /* 数字框：限 8 位（最大值 60000 也远用不完），防止粘进一大段文本 */
-            SendMessageW(e, EM_LIMITTEXT, 8, 0);
+            /* 数字框：限 8 位（最大值 60000 也远用不完），防止粘进一大段文本。
+               文本框按配置项自己的上限来限，不是 8 —— 路径比数字长得多。 */
+            SendMessageW(e, EM_LIMITTEXT,
+                         kFields[i].isText ? (DITTO_DIR_MAX - 1) : 8, 0);
             HookChild(e);
         }
     }

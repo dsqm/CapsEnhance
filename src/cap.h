@@ -45,6 +45,11 @@
                                        方向同浏览器：滚轮向上 = 向左。钩子已吞掉物理格。 */
 #define WM_RESTART_REQUEST (WM_APP + 12) /* 外部请求重启（--restart / 设置程序保存后） */
 #define WM_AUTODISABLE   (WM_APP + 13) /* 钩子 -> 主线程：自动屏蔽状态变化（wParam=1 命中名单） */
+#define WM_CLIP_ESC      (WM_APP + 15) /* 钩子 -> 主线程：剪贴板浮层打开期间按了 Esc（代收，见 clip.c） */
+#define WM_CLIP_KEY      (WM_APP + 16) /* 钩子 -> 主线程：浮层打开期间的导航键（wParam=vk，lParam=CLIPKF_*） */
+#define WM_CLIP_DITTO    (WM_APP + 17) /* 钩子 -> 主线程：浮层开着时单击了 Caps -> 转 Ditto 本体（见 ClipCallDitto） */
+#define CLIPKF_SHIFT     0x1           /* 那一刻 Shift 按着（= 纯文本粘贴） */
+#define CLIPKF_ALT       0x2           /* 那一刻 Alt 按着（Alt+数字 才拦，见 hook.c） */
 #define WM_FOLDER_OPEN (WM_APP + 14) /* 打开所在文件夹**失败**：wParam=FOLDER_ERR_*（一次性线程 -> 主线程弹气泡）。
                                         为什么必须绕回主线程：气泡走 Shell_NotifyIconW + 主线程的 g_nid，
                                         工作线程直接调就是对它的跨线程访问。成功不发消息（不打扰）。 */
@@ -109,6 +114,7 @@
 #define ACT_MOVEWIN 14               /* 把焦点窗口挪到鼠标光标处（多显示器）  */
 #define ACT_OPENFOLDER 15            /* 打开焦点程序所在文件夹并选中该 exe（F3）  */
 #define ACT_HELP     16              /* 按键帮助（F1）：拉起/唤起独立 exe CapsEnhanceHelp */
+#define ACT_CLIPLIST 17              /* 剪贴板（V）：拉起/唤起独立 exe CapsEnhanceClip，读 Ditto 历史 */
 
 #define DIR_LEFT 0
 #define DIR_RIGHT 1
@@ -124,6 +130,7 @@
 #define ACTF_MOVEWIN     0x10   /* 挪窗口：交给 winmove.c 的移动动作，不走按键发送 */
 #define ACTF_OPENFOLDER  0x20   /* 打开所在文件夹：交给 folder.c 的 shell 动作，不走按键发送 */
 #define ACTF_HELP        0x40   /* 按键帮助：由 main.c 直接在和弦上开合（见 help.c），不走按键发送 */
+#define ACTF_CLIPLIST    0x80   /* 剪贴板：由 main.c 直接在和弦上开合（见 clip.c），不走按键发送 */
 
 /* ---------- 修饰（和弦）模式 ----------
    按住 C 期间生效的"组合修饰"。**激活键是编译期常量，不读配置**（见下面
@@ -357,6 +364,48 @@ void HelpHide(void);   /* 抬起 / 松开 Caps / 引擎复位：让它隐（它�
 void HelpTick(void);   /* HELP_TIMER 到点：把期望状态再送一次（见上面的说明） */
 void HelpKaTick(void); /* HELP_KA_TIMER 到点：喂一条心跳（只在显示期间有定时器） */
 
+/* ---------- 剪贴板浮层（`Caps+V`；窗口在**独立 exe** `CapsEnhanceClip.exe` 里） ----------
+   与帮助窗口同一条理由拆成独立 exe，但比它更重一层：它要打开 Ditto 的 SQLite
+   数据库（只读）取最近 30 条，还要在粘贴时把整条记录的多份格式回写进剪贴板 ——
+   这些都属于"可能慢、可能失败"的事，绝不能发生在承载钩子的主线程上。
+
+   ★★ 寿命与帮助窗口**不同**：帮助是"按住才显示"（寿命 = 和弦），剪贴板是
+   **按一下就开、之后自己活着** —— 按住 V 松手之后窗口还得留着让人挑条目，
+   所以这里没有"Caps 抬起就隐"，只有明确的关闭途径（见下）。主程序侧因此
+   只做三件事：拉起、喂心跳、转发 Esc。
+
+   关闭途径（浮层自己是 WS_EX_NOACTIVATE，收不到键盘，所以 Esc 只能由主程序的
+   键盘钩子代收转发）：
+     · Esc            -> 钩子拦下 -> WM_CLIP_ESC -> 主程序通知浮层关闭
+     · 点击外部 / 前台窗口变了 -> 浮层用 SetWinEventHook 自己判定
+     · 标题栏的 X     -> 浮层自绘，命中测试在它自己那里
+     · 再按一次热键   -> toggle（ClipShow 时窗口已在，直接让它关）
+   另有一条：**双击标题栏置顶（钉住）**。置顶期间停用"粘贴后自动关"与
+   "点击外部自动关"，为的是连粘多条不被打断 —— 置顶态只能靠 X / Esc / 热键退出。
+
+   心跳与帮助窗口同一套语义（800ms 断供即退）：主程序被强杀、浮层自己卡住，
+   在这里都是同一件事。代价只有显示期间每 200ms 一次 PostMessage。 */
+#define CLIP_TIMER   6                    /* 主窗口定时器 id（4=帮助对账 5=帮助心跳） */
+#define CLIP_KA_TIMER 7                   /* 剪贴板心跳定时器 id */
+#define CLIP_KA_MS    200                 /* 心跳间隔（与 HELP_KA_MS 同值：同一套语义） */
+#define CLIP_TICK_MS  40                  /* 送达重试间隔 */
+#define CLIP_TRIES_MAX 25                 /* 40ms x 25 ≈ 1s 内送不到就放弃 */
+#define CLIP_CLASS   L"CapsEnhanceClip"   /* 剪贴板窗口类名（跨进程握手靠它 FindWindow） */
+#define CLIP_MSG_SHOW L"CapsEnhanceClipShow"  /* 注册消息：让它显示 */
+#define CLIP_MSG_HIDE L"CapsEnhanceClipHide"  /* 注册消息：让它隐藏并退出 */
+#define CLIP_MSG_KA   L"CapsEnhanceClipKa"    /* 注册消息：心跳（"我还需要你"） */
+#define CLIP_MSG_ESC  L"CapsEnhanceClipEsc"   /* 注册消息：主程序代收的 Esc */
+#define CLIP_MSG_KEY  L"CapsEnhanceClipKey"   /* 注册消息：主程序代收的导航键（wParam=vk，lParam=CLIPKF_*） */
+#define CLIP_EXE     L"CapsEnhanceClip.exe"
+void ClipShow(void);    /* Caps+V 按下：显示（已在显示则 toggle 成隐藏） */
+void ClipHide(void);    /* 明确关闭（Esc / toggle / 引擎复位） */
+void ClipTick(void);    /* CLIP_TIMER 到点：把期望状态再送一次 */
+void ClipKaTick(void);  /* CLIP_KA_TIMER 到点：喂一条心跳 */
+void ClipEsc(void);     /* WM_CLIP_ESC：钩子代收的 Esc -> 通知浮层关闭 */
+void ClipCallDitto(void); /* 单击 Caps（浮层开着时）/ 浮层按钮：关浮层并拉起 Ditto 本体 -open */
+void ClipKey(int vk, unsigned flags); /* WM_CLIP_KEY：钩子代收的导航键 -> 转给浮层 */
+BOOL ClipIsOpen(void);  /* 浮层当前是否"该开着"（钩子据此决定要不要拦 Esc） */
+
 /* ---------- 坐标空间（进程级，必须在建任何窗口之前调用一次） ----------
    ★ 根因记录：低级鼠标钩子给的 `MSLLHOOKSTRUCT.pt` **永远是物理像素**
    （官方定义就是 "per-monitor-aware screen coordinates"），而**不声明 DPI 感知**的
@@ -532,6 +581,28 @@ int  ConfigGetWheelHScrollMul(void);        /* [General] WheelHScrollMul：Caps+
 int  ConfigGetAutoScrollInterval(void);     /* [General] AutoScrollInterval：持续滚动初始速度(ms/格) */
 int  ConfigGetAutoScrollFastMs(void);        /* [General] AutoScrollFastMs：持续滚动最快速度(ms/格) */
 int  ConfigGetAllowScintillaRead(void);     /* [General] AllowScintillaRead：允许 Scintilla 通道读目标进程内存（0=关闭该通道） */
+/* [General] DittoDir：Ditto 的**安装文件夹**（Caps+V 用它，两处派生）：
+     · <DittoDir>\Ditto.db   浮层只读地取最近 30 条
+     · <DittoDir>\Ditto.exe  浮层里"转 Ditto 本体"用 `-open` 拉起它的窗口
+   相对路径的基准 = **本程序 exe 所在目录**（也就是 ini 所在目录），不做任何
+   自动探测 —— 便携版 Ditto 的目录在哪，路径只有用户知道。
+   ★ 主程序**不读**它，只在拉起剪贴板 exe 时把解析好的绝对路径通过命令行
+   传过去（`--dir <绝对路径>`）—— 相对路径基准只有一个进程知道（本进程的
+   exe 目录），让子进程再解一次就是同一件事的两份实现。 */
+const WCHAR* ConfigGetDittoDir(void);       /* 返回内部缓冲（空串 = 未配置），不要写它 */
+#define DITTO_DIR_MAX 320                   /* 路径缓冲区字符数（含结尾的 0）。
+                                               比 MAX_PATH 宽一点：相对路径虽短，但拼出来的
+                                               绝对路径可能落在较深的目录里。 */
+/* [General] ClipFont / ClipFontSize：快速粘贴窗口的字体与字号（磅）。
+   ★ 字号用**磅**而不是像素：系统字体对话框（ChooseFont）给的就是磅，两边
+   不用换算 —— 存像素的话每次开对话框都要按 DPI 折回去，误差会累积。 */
+#define CLIP_FONT_MAX  64                   /* 字体名缓冲（LF_FULLFACESIZE = 64） */
+#define CLIP_FONT_SIZE_DEFAULT 10
+#define CLIP_FONT_SIZE_MAX     72
+#define CLIP_CLICK_PASTE_DEFAULT 1  /* 单击条目直接上屏（默认开） */
+const WCHAR* ConfigGetClipFont(void);       /* 空串 = 用内置默认（调用方兜底） */
+int  ConfigGetClipFontSize(void);
+BOOL ConfigGetClipClickPaste(void);         /* 单击条目直接上屏（默认开，不用双击） */
 /* 单键切换输入法：key 为 IME_KEY_*，返回 IME_MODE_*（0=不处理 1=中文 2=英文） */
 int  ConfigGetImeMode(int key);
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中 [NativeWordJump] */
@@ -557,6 +628,10 @@ void ConfigSetAutoScrollInterval(int v);
 void ConfigSetAutoScrollFastMs(int v);
 void ConfigSetWheelHScrollMul(int v);
 void ConfigSetAllowScintillaRead(BOOL v);
+void ConfigSetDittoDir(const WCHAR* v);     /* 空/NULL = 未配置；过长按 DITTO_DIR_MAX 截断 */
+void ConfigSetClipFont(const WCHAR* v);     /* 空 = 用内置默认 */
+void ConfigSetClipFontSize(int v);          /* 磅，越界按上限钳制 */
+void ConfigSetClipClickPaste(BOOL v);
 void ConfigSetImeMode(int key, int v);      /* key = IME_KEY_*，v = IME_MODE_*（越界按键忽略） */
 void        ConfigSetList(int list, const WCHAR* const* names, int n); /* 整份替换 */
 int         ConfigListCount(int list);

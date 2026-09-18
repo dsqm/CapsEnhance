@@ -7,6 +7,8 @@ call "%~dp0build_env.bat"
 if errorlevel 1 exit /b 1
 
 if not exist "bin" mkdir bin
+if not exist "obj" mkdir obj
+if not exist "obj" mkdir obj
 
 rem ---- icon resource: the exe's own icon (Explorer / taskbar / tray) ----
 rem rc.exe lives in the SDK's bin, which build_env.bat does NOT put on PATH.
@@ -18,7 +20,7 @@ if exist "%RC%" goto have_rc
 echo [ERROR] rc.exe not found under "%SDK%\bin\%SDKVER%"
 exit /b 1
 :have_rc
-"%RC%" /nologo /fo bin\app.res res\app.rc
+"%RC%" /nologo /fo obj\app.res res\app.rc
 if errorlevel 1 (
     echo [ERROR] resource compile failed
     exit /b 1
@@ -26,7 +28,7 @@ if errorlevel 1 (
 rem .res must be converted to a COFF obj for the linker. Keep the name flat
 rem ("app_res.obj"): a double extension ("app.res.obj") makes cl treat the
 rem file as C++ source when listed before /link.
-cvtres /nologo /MACHINE:X64 /OUT:bin\app_res.obj bin\app.res
+cvtres /nologo /MACHINE:X64 /OUT:obj\app_res.obj obj\app.res
 if errorlevel 1 (
     echo [ERROR] resource convert failed
     exit /b 1
@@ -53,12 +55,12 @@ rem adopt C++ where it pays off (type safety / RAII / std::string) file by
 rem file, instead of in one big-bang rewrite. Cross-checked in CI by the same
 rem /W4 + /analyze steps, which must stay at zero warnings.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP ^
-   /Fobin\ ^
+   /Foobj\ ^
    src\hook.c src\nav.c src\send.c src\act.c src\config.c src\keymap.c src\main.c ^
    src\autodisp.c src\bridge.c src\wps.c src\winmove.c src\drag.c src\ime.c ^
-   src\folder.c src\help.c ^
+   src\folder.c src\help.c src\clip.c ^
    /link /OUT:bin/CapsEnhance.exe ^
-   bin\app_res.obj ^
+   obj\app_res.obj ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib winmm.lib ^
    /SUBSYSTEM:WINDOWS
 
@@ -73,7 +75,7 @@ rem It links src\config.c: the form reads/writes config values through the
 rem same ConfigGet*/ConfigSet* the main program uses, so ranges and key names
 rem are never duplicated in the UI.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
-   /Fobin\ ^
+   /Foobj\ ^
    settings\settings.c src\config.c ^
    /link /OUT:bin/CapsEnhanceSettings.exe ^
    user32.lib gdi32.lib shell32.lib advapi32.lib ^
@@ -89,7 +91,7 @@ rem owns its own show/hide lifetime, and is expected to start cold in tens of ms
 rem The main program is the keyboard-hook host -- none of that belongs in it.
 rem It links nothing from src\ except the shared keymap table (a header).
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
-   /Fobin\ ^
+   /Foobj\ ^
    help\help.c ^
    /link /OUT:bin/CapsEnhanceHelp.exe ^
    user32.lib gdi32.lib shell32.lib ole32.lib gdiplus.lib ^
@@ -99,8 +101,42 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem Clipboard overlay: a fourth exe, for the same reason as the help overlay --
+rem it opens Ditto's SQLite database, decodes clipboard formats and writes them
+rem back to the clipboard, none of which belongs on the hook-hosting thread.
+rem
+rem The SQLite amalgamation is compiled on its OWN cl line on purpose:
+rem   - /W0 /analyze-  -- third-party code is not held to this repo's /W4 + /analyze
+rem                       zero-warning baseline (it would never pass it).
+rem   - no /TP         -- it is C, not C++; forcing C++ breaks the amalgamation.
+rem   - /bigobj        -- an amalgamation is one huge TU; the default section
+rem                       limit is exceeded otherwise.
+rem It is linked into CapsEnhanceClip.exe ONLY, so the other three exes do not
+rem grow by a single byte.
+cl /nologo /O2 /W0 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /bigobj /c ^
+   /D_CRT_SECURE_NO_WARNINGS /Ithirdparty ^
+   /Foobj\sqlite3mc.obj ^
+   thirdparty\sqlite3mc_amalgamation.c
+if errorlevel 1 (
+    echo [ERROR] sqlite3 build failed
+    exit /b 1
+)
+
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc /Ithirdparty ^
+   /Foobj\ ^
+   clip\clip.c ^
+   /link /OUT:bin/CapsEnhanceClip.exe ^
+   obj\sqlite3mc.obj ^
+   user32.lib gdi32.lib shell32.lib ole32.lib gdiplus.lib bcrypt.lib advapi32.lib ^
+   /SUBSYSTEM:WINDOWS
+if errorlevel 1 (
+    echo [ERROR] clipboard overlay build failed
+    exit /b 1
+)
+
 rem Report what actually got built, with which toolchain. Cheap here, and it
 rem turns "the two exes differ, why?" into a one-line diff of the logs.
 for %%F in (bin\CapsEnhance.exe) do echo [OK] bin/CapsEnhance.exe built. size=%%~zF bytes
 for %%F in (bin\CapsEnhanceSettings.exe) do echo [OK] bin/CapsEnhanceSettings.exe built. size=%%~zF bytes
+for %%F in (bin\CapsEnhanceClip.exe) do echo [OK] bin/CapsEnhanceClip.exe built. size=%%~zF bytes
 where certutil >nul 2>&1 && certutil -hashfile bin\CapsEnhance.exe SHA256 | findstr /R /V "SHA256 CertUtil hash" 

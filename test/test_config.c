@@ -766,6 +766,35 @@ int main(void) {
     EXPECT(TemplateHas("ImeCapsMode = 1"),   "CFG: 模板含 ImeCapsMode 默认值（切中文）");
     EXPECT(TemplateHas("ImeLShiftMode = 2"), "CFG: 模板含 ImeLShiftMode 默认值（切英文）");
     EXPECT(TemplateHas("ImeRShiftMode = 1"), "CFG: 模板含 ImeRShiftMode 默认值（切中文）");
+    /* DittoDir 是字符串配置项（Ditto 文件夹，Ditto.db/Ditto.exe 都从它派生），
+       默认值是**空**（未配置 = 功能不开），
+       所以断言的是"键在、且写成了空值"，不是"键 = 某值"。同时钉住解析与写回：
+       它是字符串，走的是与整数不同的那条路。 */
+    EXPECT(TemplateHas("DittoDir = "), "CFG: 模板含 DittoDir（默认空 = 不启用剪贴板）");
+    {
+        ConfigSetDittoDir(L"..\\Ditto");
+        const WCHAR* got = ConfigGetDittoDir();
+        EXPECT(got && wcscmp(got, L"..\\Ditto") == 0,
+               "CFG: DittoDir 原样存取（相对路径不在配置层展开）");
+        ConfigSetDittoDir(L"");
+        EXPECT(ConfigGetDittoDir()[0] == 0, "CFG: DittoDir 可清空（= 关闭该功能）");
+    }
+    /* 快速粘贴的字体/字号：字号是**磅**（与系统字体对话框一致），有钳制。
+       默认值 10 在这里写字面量（STR 宏是 config.c 的内部实现，测试不引入）——
+       改默认值时这里会失败，正好逼着人来核对。 */
+    EXPECT(TemplateHas("ClipFont = "),    "CFG: 模板含 ClipFont（默认空 = 内置字体）");
+    EXPECT(TemplateHas("ClipFontSize = 10"), "CFG: 模板含 ClipFontSize 默认值");
+    {
+        ConfigSetClipFont(L"MiSans Medium");
+        EXPECT(wcscmp(ConfigGetClipFont(), L"MiSans Medium") == 0,
+               "CFG: ClipFont 原样存取（带字重后缀的字面名不改写）");
+        ConfigSetClipFontSize(999);
+        EXPECT(ConfigGetClipFontSize() == CLIP_FONT_SIZE_MAX, "CFG: 字号超上限被钳制");
+        ConfigSetClipFontSize(1);
+        EXPECT(ConfigGetClipFontSize() == 6, "CFG: 字号低于下限被钳到 6");
+        ConfigSetClipFont(L"");
+        ConfigSetClipFontSize(CLIP_FONT_SIZE_DEFAULT);
+    }
     /* 激活键不再进配置：模板里**不该**再出现这两项（否则用户会以为能改） */
     EXPECT(!TemplateHas("EnhanceKeys"), "CFG: 模板不再含 EnhanceKeys（已改为编译期常量）");
     EXPECT(!TemplateHas("ShiftKeys"),   "CFG: 模板不再含 ShiftKeys（已改为编译期常量）");

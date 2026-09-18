@@ -6,20 +6,21 @@ call "%~dp0..\build_env.bat"
 if errorlevel 1 exit /b 1
 
 if not exist "bin" mkdir bin
+if not exist "obj" mkdir obj
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
-   /Isrc /c /Fobin\nav_test.obj src\nav.c || exit /b 1
+   /Isrc /c /Foobj\nav_test.obj src\nav.c || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
-   /Isrc /c /Fobin\send_test.obj src\send.c || exit /b 1
+   /Isrc /c /Foobj\send_test.obj src\send.c || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
-   /Isrc /c /Fobin\config_test.obj src\config.c || exit /b 1
+   /Isrc /c /Foobj\config_test.obj src\config.c || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
-   /Isrc /c /Fobin\keymap_test.obj src\keymap.c || exit /b 1
+   /Isrc /c /Foobj\keymap_test.obj src\keymap.c || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
-   /Isrc /c /Fobin\test_nav.obj test\test_nav.c || exit /b 1
+   /Isrc /c /Foobj\test_nav.obj test\test_nav.c || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
-   /Isrc /c /Fobin\test_sci.obj test\test_sci.c || exit /b 1
+   /Isrc /c /Foobj\test_sci.obj test\test_sci.c || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
-   /Isrc /c /Fobin\test_config.obj test\test_config.c || exit /b 1
+   /Isrc /c /Foobj\test_config.obj test\test_config.c || exit /b 1
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    bin\test_nav.obj bin\nav_test.obj bin\send_test.obj bin\config_test.obj ^
    /link /OUT:bin\test_nav.exe ^

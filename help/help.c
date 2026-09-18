@@ -77,29 +77,32 @@
    3 分钟 —— 没有人在喂心跳，只能自己兜一个上限。 */
 
 /* ---------- 主题色（#AARRGGBB） ----------
-   ★ 键帽上的两组文字都按**对比度**选色，不是凭感觉挑亮/暗：WCAG 的 AA 线是 4.5:1，
-   十几像素的灰阶抗锯齿中文低于它就开始"看不清"。
-   · 深蓝底 #0C447C（相对亮度 L≈0.056）上，浅蓝 #85B7EB 只有 4.7:1 —— 勉强在线，
-     所以键名提亮到 #C7DFF7（7.3:1）。
-   · 琥珀底原来用 #BA7517（L≈0.227）：这个亮度上**任何浅色都到不了 4.5:1**
-     （纯白也只有 3.8:1）—— 所以"字母看不清"不是选色问题，是底色太亮。
-     底色压暗到 #96601A（L≈0.148），键名 4.7:1、功能名 5.3:1 才站得住。 */
-#define C_PANEL      0xE82C2C2A   /* 背板：约 91% 不透明 —— "半透明"主要体现在这里 */
-#define C_BORDER     0x5AD6D6CE
-#define C_TITLE      0xFFF1EFE8
-#define C_DIM_FILL   0xFF2E2E2B   /* 未映射的键：留着位置、淡化，不抢注意力 */
-#define C_DIM_LINE   0xFF4A4A46
-#define C_DIM_TEXT   0xFF8A8A84
-#define C_ACT_FILL   0xFF0C447C   /* 已映射的"动作"键 */
-#define C_ACT_LINE   0xFF185FA5
-#define C_ACT_NAME   0xFFC7DFF7
-#define C_ACT_FUNC   0xFFE6F1FB
-#define C_MOD_FILL   0xFF96601A   /* 修饰键（Caps / D / Alt）：另一种颜色，一眼分开 */
-#define C_MOD_LINE   0xFFD9A04A
-#define C_MOD_NAME   0xFFFFF0D6
-#define C_MOD_FUNC   0xFFFFFFFF
-#define C_FOOT_KEY   0xFFB5D4F4
-#define C_FOOT_TEXT  0xFF888780
+   ★ 浅色，与剪贴板浮层（clip/clip.c）同一套视觉语言：白底、深灰字、
+   已映射键浅蓝、修饰键浅琥珀。对比度同样按 WCAG AA（4.5:1）挑：
+   浅蓝底 #DCE9F7（L≈0.82）上深字 #1A1A1A 约 14:1，功能名 #1F4E79 约 9:1 ——
+   深底浅字时代那种"底色一亮任何浅色都到不了 4.5:1"的约束在浅色下不存在，
+   所以这里的取舍简单得多。 */
+#define C_PANEL      0xFFFFFFFF   /* 背板：**不透明**。ClearType 必须画在不透明的底上，
+                                     半透明的逐像素 alpha 会让它退化成灰阶抗锯齿
+                                     （灰阶只有 256 级，横向分辨率是 ClearType 的
+                                     三分之一）—— "字发虚"就是从这里来的。
+                                     "半透明"改由整窗 LWA_ALPHA 合成期实现（见下），
+                                     观感几乎一样，字却是 ClearType 的。 */
+#define C_BORDER     0xFFC9C9C9
+#define C_TITLE      0xFF1A1A1A
+#define C_DIM_FILL   0xFFF5F5F5   /* 未映射的键：留着位置、淡化，不抢注意力 */
+#define C_DIM_LINE   0xFFE0E0E0
+#define C_DIM_TEXT   0xFF9A9A9A
+#define C_ACT_FILL   0xFFDCE9F7   /* 已映射的"动作"键：与剪贴板选中行同款浅蓝 */
+#define C_ACT_LINE   0xFF9DC0E8
+#define C_ACT_NAME   0xFF1A1A1A
+#define C_ACT_FUNC   0xFF1F4E79
+#define C_MOD_FILL   0xFFFAEBD5   /* 修饰键（Caps / D / Alt）：浅琥珀，一眼分开 */
+#define C_MOD_LINE   0xFFE0B877
+#define C_MOD_NAME   0xFF7A5210
+#define C_MOD_FUNC   0xFF7A5210
+#define C_FOOT_KEY   0xFF2B6CB0
+#define C_FOOT_TEXT  0xFF7A7A7A
 
 #define APP_TITLE L"CapsEnhance 按键帮助"
 #define KEY_RADIUS_U 0.055f       /* 键帽圆角（单位：u） */
@@ -108,6 +111,7 @@
                                      小字号下发虚，而字号的上限就是键帽内宽 ÷ 每行字数。 */
 #define LABEL_PAD_K  0.03f        /* 标签再往里收一点，别贴到键帽边 */
 #define PANEL_RADIUS 16.0f
+#define HELP_LIFE_ALPHA 242   /* 整窗不透明度（/255）：95%，与剪贴板浮层一致 */
 
 /* ---------- 键盘布局（单位 u；x/w 按 ANSI 104 实测定义） ----------
    行的竖向位置：功能行占 0..1u，与数字行之间是 **0.25u**（不是普通行距 ——
@@ -691,10 +695,11 @@ static BOOL Render(void) {
     Gdiplus::Bitmap bmp(g_pxW, g_pxH, g_pxW * 4, PixelFormat32bppPARGB, (BYTE*)g_bits);
     if (bmp.GetLastStatus() != Gdiplus::Ok) return FALSE;
     Gdiplus::Graphics g(&bmp);
-    /* 逐像素 alpha 的底必须是"全透明"，不是黑色 —— 否则整块板子会变黑。 */
+    /* 底铺成**不透明**的背板色：ClearType 只能画在不透明的底上（见 C_PANEL）。
+       旧版这里 Clear 成全透明 + 逐像素 alpha，代价就是字只能用灰阶抗锯齿。 */
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
-    g.Clear(Gdiplus::Color(0, 0, 0, 0));
+    g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+    g.Clear(Gdiplus::Color(C_PANEL));
 
     /* 字体**不跟随系统默认**：系统 UI 字体（`SPI_GETNONCLIENTMETRICS` 的 `lfMessageFont`）
        通常是 Segoe UI，中文会掉到回退字形（笔画细、像点阵），而这图上大半是中文。
@@ -739,31 +744,19 @@ static BOOL Render(void) {
     g.Flush(Gdiplus::FlushIntentionSync);
     FreeFontCache();
 
-    /* 送进分层窗口：位置 = 光标所在显示器工作区居中（物理像素 —— 本进程声明了
-       Per-Monitor V2，见 DpiAware） */
+    /* 位置 = 光标所在显示器工作区居中（物理像素 —— 本进程声明了 Per-Monitor V2） */
     RECT work;
     MonitorWork(CursorMonitor(), &work);
     int px = work.left + ((work.right - work.left) - g_pxW) / 2;
     int py = work.top + ((work.bottom - work.top) - g_pxH) / 2;
     if (px < work.left) px = work.left;
     if (py < work.top) py = work.top;
+    if (g_hwnd) MoveWindow(g_hwnd, px, py, g_pxW, g_pxH, FALSE);
 
-    HDC screen = GetDC(NULL);
-    if (!screen) return FALSE;
-    POINT dst;
-    dst.x = px; dst.y = py;
-    SIZE sz;
-    sz.cx = g_pxW; sz.cy = g_pxH;
-    POINT src;
-    src.x = 0; src.y = 0;
-    BLENDFUNCTION bf;
-    bf.BlendOp = AC_SRC_OVER;
-    bf.BlendFlags = 0;
-    bf.SourceConstantAlpha = 255;
-    bf.AlphaFormat = AC_SRC_ALPHA;
-    BOOL ok = UpdateLayeredWindow(g_hwnd, screen, &dst, &sz, g_memDC, &src, 0, &bf, ULW_ALPHA);
-    ReleaseDC(NULL, screen);
-    return ok;
+    /* 内容已画进双缓冲位图，交给 WM_PAINT 贴上去（不再走 UpdateLayeredWindow：
+       那条路必须逐像素 alpha，而逐像素 alpha 画不出 ClearType）。 */
+    InvalidateRect(g_hwnd, NULL, FALSE);
+    return TRUE;
 }
 
 static void MakeSurface(void) {
@@ -853,6 +846,19 @@ static LRESULT CALLBACK HelpProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        if (g_memDC && dc)
+            BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top,
+                   ps.rcPaint.right - ps.rcPaint.left,
+                   ps.rcPaint.bottom - ps.rcPaint.top,
+                   g_memDC, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;   /* 内容全在双缓冲位图里，别让系统先擦一遍（会白闪） */
     case WM_LBUTTONDOWN:
         /* 点一下就关（手动模式下没有别的关闭手段：窗口不抢焦点，收不到 Esc） */
         DestroyWindow(hwnd);
@@ -934,11 +940,19 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     if (!RegisterClassExW(&wc)) { Gdiplus::GdiplusShutdown(token); return 1; }
 
     /* WS_EX_NOACTIVATE：**绝不抢焦点**（本功能的核心要求）；TOOLWINDOW：不进任务栏
-       与 Alt+Tab；TOPMOST：盖在别的窗口之上，但不激活它们。 */
+       与 Alt+Tab；TOPMOST：盖在别的窗口之上，但不激活它们。
+       WS_EX_LAYERED 只用来做**整窗**透明（LWA_ALPHA）：内容照常走 GDI / WM_PAINT，
+       文字因此能用 ClearType。旧版是逐像素 alpha + UpdateLayeredWindow，那条路
+       画不出 ClearType —— 字发虚的根子在那。 */
     g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
                              HELP_CLASS, APP_TITLE, WS_POPUP,
                              0, 0, g_pxW, g_pxH, NULL, NULL, hInst, NULL);
     if (!g_hwnd) { Gdiplus::GdiplusShutdown(token); return 1; }
+    SetLayeredWindowAttributes(g_hwnd, 0, HELP_LIFE_ALPHA, LWA_ALPHA);
+    /* 圆角：内容现在是整块不透明背板，方角会露出来，用窗口区域把四角真正切掉 */
+    HRGN rgn = CreateRoundRectRgn(0, 0, g_pxW + 1, g_pxH + 1,
+                                  (int)PANEL_RADIUS * 2, (int)PANEL_RADIUS * 2);
+    if (rgn) { SetWindowRgn(g_hwnd, rgn, FALSE); DeleteObject(rgn); }
 
     if (g_holdMode) {
         /* 先**只建窗不显示**，等主程序告诉我们当前该显还是该隐 —— 

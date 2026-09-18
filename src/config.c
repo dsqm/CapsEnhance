@@ -202,6 +202,24 @@ static const int kImeModeDefault[IME_KEY_COUNT] = {
     IME_CAPS_MODE_DEFAULT, IME_LSHIFT_MODE_DEFAULT, IME_RSHIFT_MODE_DEFAULT
 };
 static int   g_imeMode[IME_KEY_COUNT];
+/* Ditto 剪贴板数据库路径（Caps+V 读它）。空串 = 未配置 —— 那不是错误，
+   而是"这个功能没开"：主程序拉起剪贴板 exe 时不带 --db，浮层自己会提示。
+   ★ 字符串值有两份了（它和 ClipFont），键名比较、模板、升级、写回四处都要
+   按字符串处理，不能套 KV 的 "%d"。 */
+static WCHAR g_dittoDir[DITTO_DIR_MAX] = L"";
+/* 快速粘贴窗口的字体与字号（磅）。字号是**磅**：系统字体对话框（ChooseFont）
+   给的就是磅，两边不用换算。空字体名 = 浮层用自己的内置默认。 */
+static WCHAR g_clipFont[CLIP_FONT_MAX] = L"";
+static int   g_clipFontSize = CLIP_FONT_SIZE_DEFAULT;
+/* 单击条目直接上屏（默认开）：Ditto 的快速粘贴也是单击即粘 —— 挑中就上，
+   不必"先选中、再双击"两步。关掉则退回"单击只选中、双击才粘"。 */
+static BOOL  g_clipClickPaste = CLIP_CLICK_PASTE_DEFAULT;
+
+static int ClampClipFontSize(int v) {
+    if (v < 6)   v = 6;
+    if (v > CLIP_FONT_SIZE_MAX) v = CLIP_FONT_SIZE_MAX;
+    return v;
+}
 /* 注：AutoScrollSmooth（全局平滑开关）已**删除**：它要表达的是"某些程序
    不累积小数刻度"，那天然是"按程序区分"的事，做成全局开关就等于让所有程序
    一起陪着退化。现在由 [NoSmoothScroll] 名单承担（见 ActAutoScrollWheel），
@@ -354,6 +372,10 @@ void ConfigLoadFrom(const WCHAR* path) {
     g_wheelHMul = WHEEL_HMUL_DEFAULT;
     g_allowSciRead = ALLOW_SCINTILLA_READ_DEFAULT;
     for (int i = 0; i < IME_KEY_COUNT; i++) g_imeMode[i] = kImeModeDefault[i];
+    g_dittoDir[0] = 0;         /* 缺省未配置（= 剪贴板功能不开） */
+    g_clipFont[0] = 0;         /* 缺省字体名空 = 浮层用自己的内置默认 */
+    g_clipFontSize = CLIP_FONT_SIZE_DEFAULT;
+    g_clipClickPaste = CLIP_CLICK_PASTE_DEFAULT;
 
     FILE* f = NULL;
     if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
@@ -461,6 +483,17 @@ void ConfigLoadFrom(const WCHAR* path) {
                 else if (_wcsicmp(key, L"imershiftmode") == 0)
                     g_imeMode[IME_KEY_RSHIFT] =
                         ClampImeMode(ParseIntW(val, IME_RSHIFT_MODE_DEFAULT));
+                /* 唯一一个字符串值：直接收下（已经 TrimW 过），不做任何路径
+                   规范化 —— 相对路径的基准由**使用者**决定（主程序按自己的
+                   exe 目录展开），在这里展开就等于把基准写在两处。 */
+                else if (_wcsicmp(key, L"dittodir") == 0)
+                    wcscpy_s(g_dittoDir, DITTO_DIR_MAX, val);
+                else if (_wcsicmp(key, L"clipfont") == 0)
+                    wcscpy_s(g_clipFont, CLIP_FONT_MAX, val);
+                else if (_wcsicmp(key, L"clipfontsize") == 0)
+                    g_clipFontSize = ClampClipFontSize(ParseIntW(val, CLIP_FONT_SIZE_DEFAULT));
+                else if (_wcsicmp(key, L"clipclickpaste") == 0)
+                    g_clipClickPaste = ParseBoolW(val);
                 /* 其余 [General] 项一律忽略：本项目所有配置项都在上面具名解析。
                    不认识的键（含已废弃的旧键名）留着也只是噪音，不解析、不保存。 */
                 else { /* 忽略未知/废弃键 */ }
@@ -552,6 +585,27 @@ void ConfigLoad(void) {
             "ImeCapsMode = " STR(IME_CAPS_MODE_DEFAULT) "\n"
             "ImeLShiftMode = " STR(IME_LSHIFT_MODE_DEFAULT) "\n"
             "ImeRShiftMode = " STR(IME_RSHIFT_MODE_DEFAULT) "\n"
+            ";\n"
+            "; Ditto 的**文件夹**（Caps+V 弹出剪贴板用，两处派生）：\n"
+            ";   <DittoDir>\\Ditto.db   浮层只读地取最近 30 条\n"
+            ";   <DittoDir>\\Ditto.exe  浮层里\"转 Ditto 本体\"用 -open 拉起它的窗口\n"
+            "; 留空 = 不启用该功能（按 Caps+V 时浮层会提示未配置）。\n"
+            "; 相对路径的基准 = 本程序 exe 所在目录（也就是本文件所在目录）：\n"
+            ";   DittoDir = ..\\Ditto          -> exe 同级的上一级里的 Ditto 文件夹\n"
+            ";   DittoDir = C:\\Tools\\Ditto   -> 绝对路径，原样使用\n"
+            "; 不做任何自动探测：便携版 Ditto 的目录在哪，只有你知道。\n"
+            "DittoDir = \n"
+            ";\n"
+            "; 快速粘贴窗口（Caps+V）的字体与字号。\n"
+            "; ClipFontSize 单位是**磅**（与系统字体对话框一致），范围 6.."
+            STR(CLIP_FONT_SIZE_MAX) "\n"
+            "; ClipFont 留空 = 用内置的 Microsoft YaHei UI。\n"
+            "ClipFont = \n"
+            "ClipFontSize = " STR(CLIP_FONT_SIZE_DEFAULT) "\n"
+            ";\n"
+            "; 单击条目直接上屏（默认开）：挑中就粘，不必先选中再双击。\n"
+            "; 0 = 关闭（单击只选中，双击才粘）\n"
+            "ClipClickPaste = " STR(CLIP_CLICK_PASTE_DEFAULT) "\n"
             ";\n"
             "[NativeWordJump]\n"
             "; 命中名单的程序：Caps+N / Caps+O 不做文本探测，\n"
@@ -703,6 +757,25 @@ static const struct {
       "ImeLShiftMode = " STR(IME_LSHIFT_MODE_DEFAULT) "\n" },
     { "imershiftmode",
       "ImeRShiftMode = " STR(IME_RSHIFT_MODE_DEFAULT) "\n" },
+    { "dittodir",
+      "\n"
+      "; Ditto 的**文件夹**（Caps+V 用：Ditto.db 读历史，Ditto.exe 转本体）。\n"
+      "; 留空 = 不启用该功能。相对路径的基准 = 本程序 exe 所在目录。\n"
+      "; 例：..\\Ditto     或     C:\\Tools\\Ditto\n"
+      "DittoDir = \n" },
+    { "clipfont",
+      "\n"
+      "; 快速粘贴窗口（Caps+V）的字体与字号。\n"
+      "; ClipFontSize 单位是**磅**（与系统字体对话框一致），范围 6.."
+      STR(CLIP_FONT_SIZE_MAX) "\n"
+      "ClipFont = \n" },
+    { "clipfontsize",
+      "ClipFontSize = " STR(CLIP_FONT_SIZE_DEFAULT) "\n" },
+    { "clipclickpaste",
+      "\n"
+      "; 单击条目直接上屏（默认开）：挑中就粘，不必先选中再双击。\n"
+      "; 0 = 关闭（单击只选中，双击才粘）\n"
+      "ClipClickPaste = " STR(CLIP_CLICK_PASTE_DEFAULT) "\n" },
 };
 
 /* ---- 升级键清单的只读访问（供单元测试**自动**生成 fixture）----
@@ -967,6 +1040,20 @@ void ConfigSetImeMode(int key, int v) {
     if (key < 0 || key >= IME_KEY_COUNT) return;
     g_imeMode[key] = ClampImeMode(v);
 }
+const WCHAR* ConfigGetDittoDir(void) { return g_dittoDir; }
+const WCHAR* ConfigGetClipFont(void) { return g_clipFont; }
+int  ConfigGetClipFontSize(void)     { return g_clipFontSize; }
+BOOL ConfigGetClipClickPaste(void)   { return g_clipClickPaste; }
+void ConfigSetClipFont(const WCHAR* v) {
+    if (!v) { g_clipFont[0] = 0; return; }
+    wcscpy_s(g_clipFont, CLIP_FONT_MAX, v);
+}
+void ConfigSetClipFontSize(int v) { g_clipFontSize = ClampClipFontSize(v); }
+void ConfigSetClipClickPaste(BOOL v) { g_clipClickPaste = !!v; }
+void ConfigSetDittoDir(const WCHAR* v) {
+    if (!v) { g_dittoDir[0] = 0; return; }
+    wcscpy_s(g_dittoDir, DITTO_DIR_MAX, v); /* 过长按缓冲截断（_TRUNCATE 语义） */
+}
 
 /* 名单整体替换（顺序 = 传入顺序）。逐条走 AddEntry 才能拿到"去空白 / 去 .exe
    / 去空行"那套规整 —— 界面里手写的名字与文件里读出来的必须是同一个样子。 */
@@ -1042,12 +1129,27 @@ static const char* const kListSec[CFGLIST_COUNT] = {
    name = **写进文件的形态**（与模板一致的大小写）—— 两者不能只留一个：
    用小写写回的话，用户文件里的 RunAsAdmin 会变成 runasadmin，解析没问题，
    但"我的配置被人改了大小写"是实打实的观感问题。 */
-typedef struct { const char* key; const char* name; char val[24]; } KeyVal;
+/* val 的容量按**最宽的那个值**定：DittoDir 是字符串值之一，UTF-8 下一个
+   汉字/非拉丁字符最多 3 字节，320 个 WCHAR 就是 960 字节上限，取 1024 留余量。
+   写成固定数组而不是指针，是为了让"值"与"键"一样留在结构里 —— 调用方拿到
+   的 KeyVal 数组在它的整个生命周期内都有效，不需要再管谁 owns 哪块内存。 */
+typedef struct { const char* key; const char* name; char val[1024]; } KeyVal;
 static int GeneralValues(KeyVal* out, int cap) {
     int n = 0;
 #define KV(k, nm, fmt, arg) do { if (n < cap) { \
         out[n].key = (k); out[n].name = (nm); \
         _snprintf_s(out[n].val, sizeof(out[n].val), _TRUNCATE, fmt, arg); \
+        n++; } } while (0)
+/* 宽字符值（DittoDir / ClipFont）：ini 文件是 UTF-8，所以这里必须显式转一次，
+   不能交给 printf 的 %ls —— 那用的是当前 locale（默认是 "C"），中文路径会被
+   换成问号。转不下就写空串：宁可丢配置，也不写半截路径。 */
+#define KVW(k, nm, wstr) do { if (n < cap) { \
+        out[n].key = (k); out[n].name = (nm); out[n].val[0] = 0; \
+        if ((wstr)[0]) { \
+            int need = WideCharToMultiByte(CP_UTF8, 0, (wstr), -1, \
+                                           out[n].val, (int)sizeof(out[n].val), NULL, NULL); \
+            if (need <= 0) out[n].val[0] = 0; \
+        } \
         n++; } } while (0)
     KV("runasadmin",         "RunAsAdmin",         "%d", g_runAsAdmin ? 1 : 0);
     KV("logmaxkb",           "LogMaxKB",           "%d", g_logMaxKB);
@@ -1061,6 +1163,11 @@ static int GeneralValues(KeyVal* out, int cap) {
     KV("imecapsmode",        "ImeCapsMode",        "%d", g_imeMode[IME_KEY_CAPS]);
     KV("imelshiftmode",      "ImeLShiftMode",      "%d", g_imeMode[IME_KEY_LSHIFT]);
     KV("imershiftmode",      "ImeRShiftMode",      "%d", g_imeMode[IME_KEY_RSHIFT]);
+    KVW("dittodir",          "DittoDir",           g_dittoDir);
+    KVW("clipfont",          "ClipFont",           g_clipFont);
+    KV("clipfontsize",       "ClipFontSize",       "%d", g_clipFontSize);
+    KV("clipclickpaste",     "ClipClickPaste",     "%d", g_clipClickPaste ? 1 : 0);
+#undef KVW
 #undef KV
     return n;
 }
@@ -1157,7 +1264,11 @@ BOOL ConfigSaveFile(const WCHAR* path) {
     size_t bodyLen = raw.size();
     if (hasBom && bodyLen >= 3) { body += 3; bodyLen -= 3; }
 
-    KeyVal kv[16];
+    /* static 不是随手加的：KeyVal 的 val 为了装得下字符串值（DittoDir 最长 320 个 WCHAR
+       的 UTF-8）是 1KB，16 条就是 ~17KB —— 放栈上会撞 /analyze 的 C6262
+       （"函数使用堆叠的 17840 字节"）。这只函数只在保存配置时跑一次、且只有
+       主线程会调（设置程序 / 主程序都不并发写 ini），静态化是安全的。 */
+    static KeyVal kv[16];
     int nkv = GeneralValues(kv, (int)(sizeof(kv) / sizeof(kv[0])));
     BOOL done[16];
     for (int i = 0; i < nkv; i++) done[i] = FALSE;

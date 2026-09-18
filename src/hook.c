@@ -275,6 +275,53 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         BOOL down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
         int  vk   = (int)p->vkCode;
 
+        /* ---- 剪贴板浮层打开期间：Esc 由主程序代收 ----
+           浮层是 WS_EX_NOACTIVATE（它存在的全部意义就是不抢焦点），代价是
+           **它自己收不到任何键盘消息** —— 连"用户按了 Esc"都看不见。所以只能
+           由本钩子替它收：吞掉 down、把 up 也吞（配对记账，见 g_swallowVk），
+           再把这件事交给主线程去通知浮层。
+           ★ 只在浮层真的开着时介入（ClipIsOpen 是一次内存读），其余时间
+           Esc 完全照常 —— 不抢用户的键是这个项目的一贯规矩。 */
+        if (ClipIsOpen() && vk == VK_ESCAPE) {
+            if (down) { SwallowNote(vk); PostMessageW(g_mainWnd, WM_CLIP_ESC, 0, 0); }
+            else      SwallowTake(vk);
+            return 1;
+        }
+        /* ---- 浮层打开期间：导航键同样代收 ----
+           回车 / ↑↓ / PgUp/PgDn / Alt+数字 都要送到浮层去，而它一个键盘消息
+           都收不到（同上）。拦的范围刻意很窄：
+             · 数字键**只在 Alt 按着时**才拦 —— 不带 Alt 的数字留给将来的搜索框，
+               也免得"浮层开着时打不出数字"这种冤枉事。
+             · 其余一切照常放行：浮层开着不等于它拥有键盘。 */
+        if (ClipIsOpen()) {
+            BOOL alt = ((GetAsyncKeyState(VK_LMENU) & 0x8000) != 0) ||
+                       ((GetAsyncKeyState(VK_RMENU) & 0x8000) != 0);
+            /* Caps 还按着时，I/K 让位给浮层：词跳的 i/k 变成 ↑↓。
+               ★ 判 g_cMod（Caps 和弦进行中）是必需的：不带 Caps 的 i/k 是普通
+               打字，浮层开着也不该抢（它不拥有键盘）。 */
+            if (g_cMod && (vk == 'I' || vk == 'K')) {
+                if (down) {
+                    SwallowNote(vk);
+                    s_capsUsed = TRUE;   /* 算动作：防止之后误触发"单击 Caps 切输入法" */
+                    PostMessageW(g_mainWnd, WM_CLIP_KEY,
+                                 (WPARAM)(vk == 'I' ? VK_UP : VK_DOWN), 0);
+                } else {
+                    SwallowTake(vk);
+                }
+                return 1;
+            }
+            BOOL nav = (vk == VK_RETURN || vk == VK_UP || vk == VK_DOWN ||
+                        vk == VK_PRIOR || vk == VK_NEXT);
+            if (nav || (alt && vk >= '0' && vk <= '9')) {
+                unsigned f = 0;
+                if (GetAsyncKeyState(VK_SHIFT) & 0x8000) f |= CLIPKF_SHIFT;
+                if (alt) f |= CLIPKF_ALT;
+                if (down) { SwallowNote(vk); PostMessageW(g_mainWnd, WM_CLIP_KEY, (WPARAM)vk, (LPARAM)f); }
+                else      SwallowTake(vk);
+                return 1;
+            }
+        }
+
         /* ---- "按任意键打断持续滚动"（2026-09-11 第二版） ----
            松手不再终止（滚起来就能松手读），所以终止条件改由"用户产生新输入"
            承担。位置很关键：放在 paused 判断与所有吞键分支**之前** —— 否则某些
@@ -387,7 +434,11 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                    放在最前面：DragEnd / 打断那些是收尾动作，不影响判定。
                    （"反着按"与"命中 [AutoDisable]"那两条路在 down 时就已放行，
                    g_cMod 为假，根本走不到这里 —— 与"整段不介入"天然一致。） */
-                if (!s_capsUsed && ConfigGetImeMode(IME_KEY_CAPS) != IME_MODE_OFF)
+                if (!s_capsUsed && ClipIsOpen())
+                    PostMessageW(g_mainWnd, WM_CLIP_DITTO, 0, 0);
+                    /* 单击 Caps 且浮层开着 -> 转 Ditto 本体（见 ClipCallDitto）。
+                       浮层的关闭由 ClipCallDitto 自己做（先关再拉本体）。 */
+                else if (!s_capsUsed && ConfigGetImeMode(IME_KEY_CAPS) != IME_MODE_OFF)
                     ImeRequest(IME_KEY_CAPS);
                 s_capsUsed = FALSE;
                 /* 必须先清探测闩锁：若用户"按着 ` 直接松开 C"，` 的 keyup
