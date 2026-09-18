@@ -78,7 +78,7 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /Foobj\ ^
    settings\settings.c src\config.c ^
    /link /OUT:bin/CapsEnhanceSettings.exe ^
-   user32.lib gdi32.lib shell32.lib advapi32.lib ^
+   user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib uuid.lib ^
    /SUBSYSTEM:WINDOWS
 if errorlevel 1 (
     echo [ERROR] settings build failed

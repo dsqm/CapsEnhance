@@ -513,6 +513,11 @@ static void LaunchSettings(void) {
        路径，覆盖率更高。两者都不行才提示 —— 不要一上来就只靠 ShellExecute，
        它对"同目录 exe"也会受当前目录影响。 */
     if (CreateProcessW(path, path, NULL, NULL, FALSE, 0, NULL, dir, &si, &pi)) {
+        /* 授权新进程"可以把自己拉到前台"：本程序自己是后台（托盘）进程，
+           按系统规则子进程的 SetForegroundWindow 会被拒 —— 表现就是"点了设置，
+           窗口弹在别的程序后面，找不着；再点一次（走单实例分支）才跑到前面来"。
+           AllowSetForegroundWindow 是这条链路上的官方授权口。 */
+        AllowSetForegroundWindow(pi.dwProcessId);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         return;

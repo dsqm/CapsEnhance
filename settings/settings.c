@@ -41,6 +41,7 @@
 #include <wchar.h>
 #include <shellapi.h>      /* ShellExecuteW（CreateProcess 失败时的兜底） */
 #include <commdlg.h>       /* ChooseFontW：系统标准字体对话框 */
+#include <shlobj.h>        /* SHBrowseForFolderW：选 Ditto 文件夹 */
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -76,6 +77,9 @@
 #define IDC_DITTO_DB   212
 #define IDC_CLIP_PICK  213   /* 按钮：显示当前字体 + 字号，点它弹系统字体对话框 */
 #define IDC_CLIP_CLICK 214   /* 勾选框：单击条目直接上屏 */
+#define IDC_DITTO_BROWSE 215 /* 按钮：选 Ditto 文件夹 */
+
+#define IDC_DITTO_CONV   216 /* 按钮：DittoDir 相对/绝对路径互转（跨盘禁用） */
 
 /* 五份名单各一组：列表框 / 输入框 / 添加 / 删除 / 标题 / 选取窗口 */
 #define IDC_LIST0  300
@@ -316,6 +320,7 @@ static void LoadConfig(void) {
             case IDC_RUN_ADMIN: SetCheck(c, ConfigGetRunAsAdmin()); break;
             case IDC_OVER_CTRL: SetCheck(c, ConfigGetOverStepCtrl()); break;
             case IDC_SCI:       SetCheck(c, ConfigGetAllowScintillaRead()); break;
+            case IDC_CLIP_CLICK: SetCheck(c, ConfigGetClipClickPaste()); break;
             default: break;
             }
         } else if (kFields[i].isText) {
@@ -335,8 +340,6 @@ static void LoadConfig(void) {
             case IDC_IME_CAPS: SetIntField(c, ConfigGetImeMode(IME_KEY_CAPS)); break;
             case IDC_IME_LSHF: SetIntField(c, ConfigGetImeMode(IME_KEY_LSHIFT)); break;
             case IDC_IME_RSHF: SetIntField(c, ConfigGetImeMode(IME_KEY_RSHIFT)); break;
-            case IDC_CLIP_CLICK: SetCheck(c, ConfigGetClipClickPaste()); break;
-
             default: break;
             }
         }
@@ -559,7 +562,18 @@ static void Layout(int w, int h) {
             HWND lab = GetDlgItem(g_hwnd, id + 500);
             if (lab) MoveWindow(lab, x, y - off, w - x * 2, S(18), TRUE);
             y += S(20);
-            MoveWindow(c, x, y - off, w - x * 2, S(22), TRUE);
+            if (id == IDC_DITTO_DB) {
+                /* Ditto 行右侧并排两颗小按钮：选取文件夹 / 相对绝对互转 */
+                int bb = S(60), bc = S(92), bg2 = S(6);
+                int aw = w - x * 2 - bb - bc - bg2 * 2;
+                MoveWindow(c, x, y - off, aw, S(22), TRUE);
+                MoveWindow(GetDlgItem(g_hwnd, IDC_DITTO_BROWSE),
+                        x + aw + bg2, y - off, bb, S(22), TRUE);
+                MoveWindow(GetDlgItem(g_hwnd, IDC_DITTO_CONV),
+                        x + aw + bg2 + bb + bg2, y - off, bc, S(22), TRUE);
+            } else {
+                MoveWindow(c, x, y - off, w - x * 2, S(22), TRUE);
+            }
             y += S(24);
         } else {
             /* 数字框放**左边**、单位紧跟在框右侧、标签吃剩下的空间：
@@ -889,6 +903,177 @@ static void DelName(int i) {
     MarkDirty();
 }
 
+/* ---------------- DittoDir：选取 / 相对绝对互转 ----------------
+   互转按钮只在"转得动"时可点：相对路径 -> 绝对永远可以（不涉及盘符）；
+   绝对 -> 相对只有与 exe **同盘**才有意义，跨盘时禁用（置灰）。 */
+
+/* 拆路径成分量："C:\a\b" -> ["C:", "a", "b"]（不分大小写比较用 _wcsicmp） */
+static int SplitComps(const WCHAR* path, WCHAR comps[][96], int max) {
+    int n = 0;
+    const WCHAR* p = path;
+    while (*p && n < max) {
+        while (*p == L'\\') p++;
+        if (!*p) break;
+        const WCHAR* s = p;
+        while (*p && *p != L'\\') p++;
+        int len = (int)(p - s);
+        if (len > 95) len = 95;
+        memcpy(comps[n], s, len * sizeof(WCHAR));
+        comps[n][len] = 0;
+        n++;
+    }
+    return n;
+}
+
+/* 就地消化分量里的 "." 与 ".."：top 之下（floorIdx，含）是根（盘符），
+   ".." 只往回退到根为止。返回消化后的分量数。 */
+static int CompsResolve(WCHAR comps[][96], int n, int floorIdx) {
+    int top = floorIdx;
+    for (int i = floorIdx + 1; i < n; i++) {
+        if (!wcscmp(comps[i], L".")) continue;
+        if (!wcscmp(comps[i], L"..")) {
+            if (top > floorIdx) top--;
+            continue;
+        }
+        if (top + 1 != i) wcscpy_s(comps[top + 1], 96, comps[i]);
+        top++;
+    }
+    return top + 1;
+}
+
+/* 分量数组 -> 路径字符串：a[0] 是盘符（"D:"），后面逐段加反斜杠。
+   不产生尾反斜杠（除非路径就是盘根）。 */
+static void CompsJoin(WCHAR comps[][96], int n, WCHAR* out, size_t cap) {
+    out[0] = 0;
+    if (n <= 0) return;
+    wcscpy_s(out, cap, comps[0]);
+    for (int i = 1; i < n; i++) {
+        wcscat_s(out, cap, L"\\");
+        wcscat_s(out, cap, comps[i]);
+    }
+}
+
+/* 互转按钮的可点状态：空串不可；相对路径可；绝对路径与 exe 同盘才可 */
+static BOOL ConvCanConvert(const WCHAR* t) {
+    if (!t || !t[0]) return FALSE;
+    if (t[0] == L'\\') return FALSE;               /* 根相对 / UNC：没有"exe 同盘"基准 */
+    if (!(t[1] == L':' )) return TRUE;              /* 相对路径：转绝对不涉及盘符 */
+    WCHAR dir[MAX_PATH];
+    wcscpy_s(dir, MAX_PATH, g_path);
+    WCHAR* s = wcsrchr(dir, L'\\');
+    if (!s) return FALSE;
+    *s = 0;
+    return towupper(t[0]) == towupper(dir[0]);
+}
+
+static void UpdateConvBtn(void) {
+    HWND e = GetDlgItem(g_hwnd, IDC_DITTO_DB);
+    HWND b = GetDlgItem(g_hwnd, IDC_DITTO_CONV);
+    if (!e || !b) return;
+    WCHAR t[DITTO_DIR_MAX] = L"";
+    GetWindowTextW(e, t, DITTO_DIR_MAX);
+    BOOL can = ConvCanConvert(t);
+    if (IsWindowEnabled(b) != can) {
+        EnableWindow(b, can);
+        InvalidateRect(b, NULL, TRUE);   /* 自绘按钮的禁用态要重画才变灰 */
+    }
+}
+
+static void BrowseDittoDir(void) {
+    HWND e = GetDlgItem(g_hwnd, IDC_DITTO_DB);
+    if (!e) return;
+    WCHAR cur[DITTO_DIR_MAX] = L"";
+    GetWindowTextW(e, cur, DITTO_DIR_MAX);
+    /* 新版对话框要求 COM；设置进程平时不用 COM，浏览前临时起一次 */
+    HRESULT hrCo = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED |
+                                         COINIT_DISABLE_OLE1DDE);
+    WCHAR path[MAX_PATH] = L"";
+    /* ★ 全项目 CINTERFACE（cap.h 的迁移桥）：COM 只能走 C 形态 lpVtbl。
+       IID/CLSID 常量由 uuid.lib 提供（链接行已加）。 */
+    IFileOpenDialog* dlg = NULL;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
+                                   IID_IFileOpenDialog, (void**)&dlg))) {
+        DWORD opts = 0;
+        if (SUCCEEDED(dlg->lpVtbl->GetOptions(dlg, &opts)))
+            dlg->lpVtbl->SetOptions(dlg, opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+        dlg->lpVtbl->SetTitle(dlg, L"选择 Ditto 的文件夹（里面要有 Ditto.db 和 Ditto.exe）");
+        /* 起始目录 = 当前值（存在才设）。用 SetDefaultFolder 而不是 SetFolder：
+           微软文档明确前者更好 —— 它只在用户没有"最近位置"时生效，不会每次
+           都强行跳走；SetFolder 会覆盖"最近使用"，导航体验差。 */
+        if (cur[0]) {
+            IShellItem* si = NULL;
+            if (SUCCEEDED(SHCreateItemFromParsingName(cur, NULL, IID_IShellItem,
+                                                      (void**)&si))) {
+                dlg->lpVtbl->SetDefaultFolder(dlg, si);
+                si->lpVtbl->Release(si);
+            }
+        }
+        if (dlg->lpVtbl->Show(dlg, g_hwnd) == S_OK) {
+            IShellItem* res = NULL;
+            if (SUCCEEDED(dlg->lpVtbl->GetResult(dlg, &res))) {
+                PWSTR p = NULL;
+                if (SUCCEEDED(res->lpVtbl->GetDisplayName(res, SIGDN_FILESYSPATH, &p))) {
+                    wcscpy_s(path, MAX_PATH, p);
+                    CoTaskMemFree(p);
+                }
+                res->lpVtbl->Release(res);
+            }
+        }
+        dlg->lpVtbl->Release(dlg);
+    }
+    if (hrCo == S_OK || hrCo == S_FALSE) CoUninitialize();
+    if (!path[0]) return;
+    SetWindowTextW(e, path);
+    MarkDirty();
+    UpdateConvBtn();
+}
+
+static void ConvertDittoDir(void) {
+    HWND e = GetDlgItem(g_hwnd, IDC_DITTO_DB);
+    if (!e) return;
+    WCHAR t[DITTO_DIR_MAX] = L"";
+    GetWindowTextW(e, t, DITTO_DIR_MAX);
+    if (!t[0]) return;
+    WCHAR dir[MAX_PATH];
+    wcscpy_s(dir, MAX_PATH, g_path);
+    WCHAR* s = wcsrchr(dir, L'\\');
+    if (!s) return;
+    *s = 0;
+    /* 分量全部就地消化（"." 与 ".."），拼出来的路径天然无 .. 也无尾反斜杠：
+       "..\Ditto" -> "D:\\Portable\\Ditto"，而不是 "D:\\Portable\\CapsEnhance\\..\\Ditto"。 */
+    static WCHAR a[24][96], b[24][96];   /* static：两组 9KB，别压栈（/analyze C6262） */
+    int na = SplitComps(dir, a, 24);
+    int nb = SplitComps(t, b, 24);
+    WCHAR out[DITTO_DIR_MAX] = L"";
+    if (t[1] == L':') {
+        /* 绝对 -> 相对：目标先归一化，再吃掉与 exe 目录的公共前缀，
+           exe 目录剩几段补几个 ".."。走到这里必然同盘（按钮可点状态保证）。 */
+        nb = CompsResolve(b, nb, 0);
+        int common = 0;
+        while (common < na && common < nb && _wcsicmp(a[common], b[common]) == 0)
+            common++;
+        out[0] = 0;
+        for (int i = common; i < na; i++)
+            wcscat_s(out, DITTO_DIR_MAX, L"..\\");
+        for (int i = common; i < nb; i++) {
+            wcscat_s(out, DITTO_DIR_MAX, b[i]);
+            if (i < nb - 1) wcscat_s(out, DITTO_DIR_MAX, L"\\");
+        }
+        if (!out[0]) wcscpy_s(out, DITTO_DIR_MAX, L".");
+    } else {
+        /* 相对 -> 绝对：目标分量接到 exe 目录后面统一消化，
+           ".." 就地弹出对应目录层。 */
+        for (int i = 0; i < nb && na < 24; i++, na++) {
+            wcscpy_s(a[na], 96, b[i]);
+        }
+        na = CompsResolve(a, na, 0);
+        CompsJoin(a, na, out, DITTO_DIR_MAX);
+    }
+    SetWindowTextW(e, out);
+    MarkDirty();
+    UpdateConvBtn();
+}
+
 /* ---------------- 选窗添加 ----------------
    Spy++ / AutoIt "Finder Tool" 的标准做法（微软 KB Q143045）：点"选窗添加"
    后 SetCapture 把鼠标输入全收归本窗口 —— 目标窗口收不到这次点击、也不会被
@@ -1171,8 +1356,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (sub == 0 && HIWORD(w) == LBN_DBLCLK) { DelName(i); return 0; }
             return 0;
         }
+        if (id == IDC_DITTO_BROWSE) { BrowseDittoDir(); return 0; }
+        if (id == IDC_DITTO_CONV)   { ConvertDittoDir(); return 0; }
         /* 勾选框 / 输入框：任何改动都算"有未保存的改动" */
         if (HIWORD(w) == BN_CLICKED || HIWORD(w) == EN_CHANGE) MarkDirty();
+        if (id == IDC_DITTO_DB && HIWORD(w) == EN_CHANGE) UpdateConvBtn();
         return 0;
     }
     case WM_MOUSEMOVE:
@@ -1302,7 +1490,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     {
         HWND prev = FindWindowW(WND_CLASS, NULL);
         if (prev) {
-            if (IsIconic(prev)) ShowWindow(prev, SW_RESTORE);
+            /* 隐藏/最小化都要先显出来再提前台 —— 否则"再点一次设置"只是
+               对着一扇看不见的窗口喊话。 */
+            if (IsIconic(prev))       ShowWindow(prev, SW_RESTORE);
+            else if (!IsWindowVisible(prev)) ShowWindow(prev, SW_SHOWNORMAL);
+            BringWindowToTop(prev);
             SetForegroundWindow(prev);
             return 0;
         }
@@ -1425,6 +1617,12 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         MakeBtn(hInst, g_hwnd, L"选取窗口", base + 5);   /* 只填输入框，还得点"添加" */
     }
 
+    /* Ditto 行右侧的两颗小按钮（落位在 Layout 的 isText 分支里）。
+       互转按钮初始禁用：加载后由 UpdateConvBtn 按当前值决定。 */
+    MakeBtn(hInst, g_hwnd, L"选取…", IDC_DITTO_BROWSE);
+    MakeBtn(hInst, g_hwnd, L"相对⇄绝对", IDC_DITTO_CONV);
+    EnableWindow(GetDlgItem(g_hwnd, IDC_DITTO_CONV), FALSE);
+
     /* 底部"窗框"最后建：z 序压在表单内容之上，滚动时挡住溢出的内容 */
     g_footer = CreateWindowExW(WS_EX_CONTROLPARENT, FOOTER_CLASS, L"",
                                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
@@ -1442,6 +1640,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         Layout(rc.right, rc.bottom);
     }
     ShowWindow(g_hwnd, SW_SHOWNORMAL);
+    /* 主动提前台：从托盘（后台进程）拉起时，系统会拒绝子进程的前台请求，
+       窗口就落在别的程序后面 —— 用户看到的是"点了设置什么都没发生"。
+       拉起方已调 AllowSetForegroundWindow 授权，这里再补一次确保落在前面。 */
+    SetForegroundWindow(g_hwnd);
+    BringWindowToTop(g_hwnd);
     UpdateWindow(g_hwnd);
 
     MSG msg;
