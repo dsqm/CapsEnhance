@@ -42,7 +42,7 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\dpitest.obj test\dpitest.c
 if errorlevel 1 exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE ^
-   bin\dpitest.obj bin\winmove_dpi.obj ^
+   obj\dpitest.obj obj\winmove_dpi.obj ^
    /link /OUT:bin/dpitest.exe user32.lib gdi32.lib shell32.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
 echo [OK] compiled. running dpitest...
