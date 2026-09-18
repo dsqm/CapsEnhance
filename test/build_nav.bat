@@ -22,18 +22,18 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\test_config.obj test\test_config.c || exit /b 1
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
-   bin\test_nav.obj bin\nav_test.obj bin\send_test.obj bin\config_test.obj ^
+   obj\test_nav.obj obj\nav_test.obj obj\send_test.obj obj\config_test.obj ^
    /link /OUT:bin\test_nav.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib ^
    /SUBSYSTEM:CONSOLE || exit /b 1
 rem test_sci.c includes nav.c / send.c / config.c directly, so link only its own obj
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
-   bin\test_sci.obj bin\config_test.obj ^
+   obj\test_sci.obj obj\config_test.obj ^
    /link /OUT:bin\test_sci.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib ^
    /SUBSYSTEM:CONSOLE || exit /b 1
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
-   bin\test_config.obj bin\config_test.obj bin\keymap_test.obj ^
+   obj\test_config.obj obj\config_test.obj obj\keymap_test.obj ^
    /link /OUT:bin\test_config.exe user32.lib advapi32.lib /SUBSYSTEM:CONSOLE || exit /b 1
 echo [OK] compiled. running test_nav (word-jump algorithm)...
 ".\bin\test_nav.exe"

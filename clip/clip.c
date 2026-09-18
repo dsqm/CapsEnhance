@@ -592,7 +592,14 @@ static void DoPaste(BOOL plain) {
     DbLoadFormats(g_items[g_sel].id);
     if (g_fmtCount <= 0) { g_pasting = FALSE; return; }
 
-    PutOnClipboard(plain);
+    if (!PutOnClipboard(plain)) {
+        /* 剪贴板被别的程序占着（OpenClipboard 失败）：此刻剪贴板里还是**上一次**
+           的内容，照发 Ctrl+V 就是把不相干的旧内容粘进用户的文档 —— "粘错东西"
+           比"什么都没发生"糟糕得多。格式表照旧释放，浮层留着让用户再试一次。 */
+        FreeFmts();
+        g_pasting = FALSE;
+        return;
+    }
 
     if (g_target && IsWindow(g_target)) {
         SetForegroundWindow(g_target);

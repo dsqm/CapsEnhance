@@ -714,7 +714,14 @@ static void DoRestart(void) {
     memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
     memset(&pi, 0, sizeof(pi));
     if (!CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-        TrayHint(L"重启失败");
+        /* 拉起新实例失败 -> 必须把执行线程**放回去**：上面已经 ActStop()
+           （s_dead = 1），直接返回就卡在"钩子还装着、投递全丢"的半死状态 ——
+           钩子照旧吞键、动作一个也不执行，用户看到的是"键盘坏了"。
+           ActStart 再失败就退回同步兜底（更慢，但不至于功能全无）。 */
+        BOOL back = ActStart();
+        TrayBalloon(back ? L"重启失败（映射已恢复到重启前）"
+                         : L"重启失败，且执行线程起不来：请退出后重新运行", NULL);
+        TrayCurrentHint();
         return;
     }
     CloseHandle(pi.hThread);
@@ -768,6 +775,29 @@ static BOOL EnsureSingleInstance(void) {
         return FALSE;
     }
     return TRUE;
+}
+
+/* ---- 会话事件（锁屏 / 切换用户 / 注销 / 断开）----
+   WM_WTSSESSION_CHANGE 与下面几个事件码都来自 wtsapi32.h。自带一份常量是为了
+   把它做成**可选**能力（见 RegisterSessionNotify）。 */
+#define WM_WTSSESSION_CHANGE    0x02B1
+#define WTS_CONSOLE_DISCONNECT  0x2
+#define WTS_REMOTE_DISCONNECT   0x4
+#define WTS_SESSION_LOGOFF      0x6
+#define WTS_SESSION_LOCK        0x7
+
+/* 注册会话通知；拿不到就返回 FALSE，退化成"靠下一次 Caps down 自愈"（旧行为）。
+   为什么动态取函数、不加 wtsapi32.lib：这条通知只对**钩子宿主**有意义，而导入表
+   里每一项都是"启动时要加载的 DLL"。取不到也不影响任何功能。
+   注册成功后不 FreeLibrary：通知有效期内 DLL 必须留着（进程退出时系统自己收）。 */
+static BOOL RegisterSessionNotify(HWND hwnd) {
+    static HMODULE s_wts = NULL;
+    if (!s_wts) s_wts = LoadLibraryW(L"wtsapi32.dll");
+    if (!s_wts) return FALSE;
+    typedef BOOL (WINAPI *PFN_WTSREG)(HWND, DWORD);
+    PFN_WTSREG reg = (PFN_WTSREG)(void*)GetProcAddress(s_wts, "WTSRegisterSessionNotification");
+    if (!reg) return FALSE;
+    return reg(hwnd, 0);            /* NOTIFY_FOR_THIS_SESSION = 0：只关心本会话 */
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -854,7 +884,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else {
             CapLog("===== REC END =====");
             RecBeep(FALSE);                 /* 结束记录：另一声，与"出错/UAC"无关 */
-            TrayHint(L"正在映射");
+            /* 悬停提示由"暂停 / 记录中 / 自动屏蔽 / 滚轮可用"共同决定，统一入口是
+               TrayCurrentHint（见那里的优先级说明）。这里直接写"正在映射"，
+               在"暂停中结束记录"时会把提示改错 —— 而托盘提示是用户判断当前
+               状态的唯一依据。 */
+            TrayCurrentHint();
             /* 结束也给一次明确反馈：开始有气泡，结束若只有一声提示音，很容易
                让人以为"还在记录"，于是继续在敏感内容上操作。 */
             {   /* 结束气泡里带上实际文件名：一次记录一个文件，不给名字等于
@@ -1048,6 +1082,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             TrayShowMenu();
         return 0;
     }
+    case WM_WTSSESSION_CHANGE:
+        /* 锁屏 / 切换用户 / 注销 / 断开会话之后，按键进的是**安全桌面**或另一个
+           会话，我们的低级钩子收不到 —— 期间松开的 Caps（或一直按着的映射键）
+           其 keyup 就永久丢了，g_cMod 卡在"按住"上：回到桌面后第一件事是按
+           j/k/l 打字，而它们全被当方向键吞掉，用户看到的是"键盘坏了"。
+           （Caps 的 down 分支也能自愈，但那要等用户再按一次 Caps —— 而他要先
+           意识到键盘"坏了"。）所以拿到通知就按"状态未知"整份复位。
+           RegisterSessionNotify 取不到通知时退回旧行为，功能不受影响。 */
+        if (wp == WTS_SESSION_LOCK || wp == WTS_SESSION_LOGOFF ||
+            wp == WTS_CONSOLE_DISCONNECT || wp == WTS_REMOTE_DISCONNECT) {
+            if (g_recording.load())
+                CapLog("会话事件 %u：按住状态已复位（期间 keyup 已丢失）", (unsigned)wp);
+            ModHoldReset();        /* 钩子侧：按住状态 + 吞键配对表 */
+            g_btnCount = 0;
+            ResetEngine();
+            /* 与暂停同一条理由：钩子收不到"按任意键打断"了，持续滚动必须显式停 */
+            if (g_recording.load() && ActAutoScrollActive())
+                CapLog("持续滚动：终止（会话锁定/断开）");
+            ActAutoScrollStop();
+            TrayCurrentHint();
+        }
+        return 0;
     case WM_IME_SETCONTEXT:
         /* 不给 IME 关联 UI：见 ImmAssociateContext 注释 */
         return 0;
@@ -1149,6 +1205,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
        上下）。禁用后这些模块不再加载。 */
     ImmAssociateContext(g_mainWnd, NULL);
 
+    /* 会话通知：锁屏 / 切用户回来时把"按住状态"复位（见 WndProc 的
+       WM_WTSSESSION_CHANGE）。失败不影响功能，只是少一条自愈路径。 */
+    if (!RegisterSessionNotify(g_mainWnd))
+        CapLog("会话通知注册失败：锁屏后若残留按住状态，按一下 Caps 即自愈");
+
     /* 先建托盘：后面任何一步失败才有地方提示用户。此前钩子安装失败时
        调 TrayHint，但托盘图标还没创建，提示全部落空 —— 用户看不到原因。
        ★ 加了要**看返回值**：自启时任务栏常常还没就绪，NIM_ADD 会直接失败，
@@ -1170,8 +1231,14 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     KeyMapInit();   /* 装配修饰激活键（编译期常量 Alt+D / F，见 cap.h） */
 
     /* 执行线程要在装钩子之前起来：装了钩子就随时可能有动作要发。 */
-    if (!ActStart())
+    if (!ActStart()) {
+        /* 退回同步兜底（见 act.c 的 ActPost）：动作改在**承载钩子的线程**上执行，
+           目标程序卡住时能把输入冻住近一秒（跨进程 COM 的限时预算见 nav.c）。
+           功能还在、代价明显，所以除了日志还要让用户看见并自己去重启。 */
         CapLog("ActStart 失败：动作退回主线程同步执行（输入响应性下降）");
+        TrayBalloon(L"执行线程创建失败：动作改在主线程执行，遇到卡住的程序会明显卡顿，"
+                    L"建议重启程序。", NULL);
+    }
 
     /* 物理状态种子也要在装钩子之前：装完之后才"补种"，会漏掉装钩瞬间
        那一小段真实按键。 */

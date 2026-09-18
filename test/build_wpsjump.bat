@@ -18,8 +18,8 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\autodisp_
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\bridge_wps.obj   src\bridge.c   || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\wpsjump.obj      test\wpsjump.c || exit /b 1
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
-   bin\wpsjump.obj bin\nav_wps.obj bin\send_wps.obj bin\cfg_wps.obj bin\km_wps.obj ^
-   bin\wps_wps.obj bin\autodisp_wps.obj bin\bridge_wps.obj ^
+   obj\wpsjump.obj obj\nav_wps.obj obj\send_wps.obj obj\cfg_wps.obj obj\km_wps.obj ^
+   obj\wps_wps.obj obj\autodisp_wps.obj obj\bridge_wps.obj ^
    /link /OUT:bin\wpsjump.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib ^
    /SUBSYSTEM:CONSOLE || exit /b 1

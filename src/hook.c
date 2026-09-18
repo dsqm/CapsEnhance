@@ -576,8 +576,9 @@ static HHOOK g_mouseHook = NULL;
 
 /* Caps+左键拖动：**down 被吞过，up 就必须吞** —— 与键盘那套 g_swallowVk 是
    同一条"吞放配对"规矩（只吞 down 会让目标程序认为按键一直按着）。
-   Caps 中途松开导致拖拽结束也不清这个标志：那次 up 仍要吞，否则就漏了一个
-   孤立的抬起给目标程序。 */
+   Caps 中途松开（拖拽提前结束）时这个标志**不清**：那次 up 仍要吞 —— 只吞
+   down 不吞 up 会把"一直按着"的左键留给目标程序（与键盘那套 SwallowNote
+   同一条规矩）。配对出表在 LowLevelMouseProc 的两处 WM_LBUTTONUP。 */
 static volatile BOOL g_dragSwallowUp = FALSE;
 
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -624,7 +625,13 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
         ActAutoScrollInterrupt("鼠标键", (int)wParam);
         if (drag) return 1;
     } else if (wParam == WM_LBUTTONUP) {
-        g_dragSwallowUp = FALSE;         /* 没在拖：清掉残留的配对标志 */
+        /* 拖拽期间 Caps 先松了（DragEnd 已提前结束拖拽）：这次 up **仍要吞** ——
+           down 是我们吞掉的，把 up 放过去就等于给目标程序留一个"一直按着"的
+           左键。真的没在拖（down 也没吞）时这个标志本就是假，直接放行。 */
+        if (g_dragSwallowUp) {
+            g_dragSwallowUp = FALSE;
+            return 1;
+        }
     }
 
     if (wParam == WM_MOUSEWHEEL || wParam == WM_MOUSEHWHEEL) {

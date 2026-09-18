@@ -90,6 +90,29 @@ static DWORD NavIpcTimeout(void) {
     return (left > NAV_IPC_TIMEOUT_MS) ? NAV_IPC_TIMEOUT_MS : (DWORD)left;
 }
 
+/* ---- 一次按词跳转的跨进程 COM 预算（UIA / IA2 / WPS-COM）----
+   上面那条预算只覆盖"窗口消息"通道（SendMessageTimeout 自己能超时）。UIA /
+   IAccessible2 / WPS 的 COM 自动化**没有任何超时参数**：目标程序的无障碍提供方
+   一卡住，"读一次文本"就是无限期等待 —— 而这类调用跑在 NavJump 的调用线程上
+   （act.c 的工作线程，ActPost 的同步兜底路径上甚至就是承载钩子的线程）。
+   后果不是"慢一下"，是整条动作队列冻住、钩子被系统摘除。
+   单次上限比消息通道宽（跨进程 UIA 冷启动 + 取整篇文本本来就慢，300ms 会把
+   正常功能也判成超时），但总预算同样有界。 */
+#define NAV_COM_MAX_MS     700   /* 单次调用上限 */
+#define NAV_COM_BUDGET_MS 1000   /* 一次 NavJump 里所有 COM 调用的总预算 */
+static __declspec(thread) ULONGLONG t_comDeadline = 0;
+static volatile LONG s_comStuck = 0;   /* 累计被放弃的调用次数（只用于日志） */
+
+static void NavComBudgetBegin(void) { t_comDeadline = GetTickCount64() + NAV_COM_BUDGET_MS; }
+static void NavComBudgetEnd(void) { t_comDeadline = 0; }
+static DWORD NavComTimeout(void) {
+    if (!t_comDeadline) return NAV_COM_MAX_MS;       /* 未开预算（诊断/测试直调） */
+    ULONGLONG now = GetTickCount64();
+    if (now >= t_comDeadline) return 0;              /* 预算耗尽：不再尝试 */
+    ULONGLONG left = t_comDeadline - now;
+    return (left > NAV_COM_MAX_MS) ? NAV_COM_MAX_MS : (DWORD)left;
+}
+
 /* ---- 跨进程发消息：取窗口过程的"真实返回值" ----
    坑：SendMessageTimeout 自己的返回值只表示"有没有发成功(非0)"，窗口过程的
    返回值写进最后一个参数 lpdwResult。之前所有调用都传 NULL，于是拿到的恒为 1
@@ -1026,6 +1049,127 @@ static BOOL MsaaGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut
     return TRUE;
 }
 
+/* ================= 跨进程 COM 调用的限时执行器 =================
+   把"这一次 COM 调用"搬到一条**一次性看门线程**上跑，调用方最多等
+   NavComTimeout() 毫秒；超时就放弃本次（走 native 兜底），线程与参数块一起作废
+   —— 它可能永远卡在目标进程里，只能随进程退出回收。
+
+   为什么是"一次调用一条线程"，而不是"常驻通道线程 + 请求/应答序号"：
+   后者要处理序号回绕、换代重建、以及"卡死线程与新线程都想应答"的归属，
+   而收益只是省下一次 CreateThread（几十微秒，相对一次跨进程 COM 往返可以
+   忽略）。不做常驻也就意味着没有任何跨请求共享状态 —— 这条链路上最贵的事故
+   （按住状态与动作队列被冻住）本来就出在"共享状态 + 无限等待"的组合里。
+
+   代价（写清不藏）：每次卡死会漏掉一条线程与一个参数块（含它读回的文本），
+   上界是"目标程序卡住的次数"，且每次都记一行日志。 */
+
+enum { COM_UIA = 0, COM_IA2 = 1, COM_WPS = 2 };
+
+typedef struct {
+    int    kind;            /* COM_* */
+    HWND   hwnd;
+    int    a1, a2;          /* 置位：活动端 / 锚端（WPS 同序） */
+    BOOL   shift;
+    BOOL   ok;              /* 读：读到文本；置位：HRESULT 成功 */
+    int    r;               /* WPS 置位三态（WPS_SET_*） */
+    WCHAR* text;            /* 读到的文本（调用方 free） */
+    int    len, caret, selEnd;
+} ComJob;
+
+/* 看门线程先自己把 COM 初始化掉。
+   UIA 那边有 UiaGet() 会顺手做，但 MSAA 通道本身不调用任何初始化函数——
+   它以前跑在 act 工作线程上，而那条线程已被同一次跳转前面的
+   UIA 通道给初始化掉了。换成一次性看门线程后这个前提没了，
+   所以必须自己补上（STA，与两条通道原来的套间一致）。 */
+static DWORD WINAPI ComJobRead(LPVOID p) {
+    ComJob* j = (ComJob*)p;
+    CoUp();
+    switch (j->kind) {
+    case COM_WPS: j->ok = WpsGetTextCaret(j->hwnd, &j->text, &j->len, &j->caret, &j->selEnd); break;
+    case COM_UIA: j->ok = UiaGetTextCaret(j->hwnd, &j->text, &j->len, &j->caret); break;
+    default:      j->ok = MsaaGetTextCaret(j->hwnd, &j->text, &j->len, &j->caret); break;
+    }
+    return 0;
+}
+
+static DWORD WINAPI ComJobSet(LPVOID p) {
+    ComJob* j = (ComJob*)p;
+    CoUp();                 /* 理由同上 */
+    switch (j->kind) {
+    case COM_WPS: j->r  = WpsSetSel(j->hwnd, j->a1, j->a2); break;
+    case COM_UIA: j->ok = UiaSetSel(j->hwnd, j->a1, j->a2, j->shift); break;
+    default:      j->ok = MsaaSetSel(j->hwnd, j->a1, j->a2, j->shift); break;
+    }
+    return 0;
+}
+
+/* 跑一次，等 ms 毫秒。返回 FALSE = 超时（参数块与线程一并作废，调用方不得再碰）。 */
+static BOOL ComRun(LPTHREAD_START_ROUTINE fn, ComJob* job, DWORD ms, const char* what) {
+    HANDLE th = CreateThread(NULL, 0, fn, job, 0, NULL);
+    if (!th) return FALSE;                  /* 建不了线程：按"没读到"处理，走兜底 */
+    DWORD w = WaitForSingleObject(th, ms);
+    CloseHandle(th);
+    if (w == WAIT_OBJECT_0) return TRUE;
+    InterlockedIncrement(&s_comStuck);
+    if (g_recording.load())
+        /* 计数器用 Interlocked 写、就必须用 Interlocked 读：混用会被 /analyze
+           判为 C28112（这条基线要求零告警）。 */
+        CapLog("  %s：跨进程调用超时 %ums（累计第 %d 次），放弃本次改走兜底",
+               what, (unsigned)ms, (int)InterlockedCompareExchange(&s_comStuck, 0, 0));
+    return FALSE;
+}
+
+/* 读文本（UIA / IA2 / WPS）。成功时 *text 由调用方 free。 */
+static BOOL ComReadTimed(int kind, HWND hwnd, WCHAR** text, int* len, int* caret,
+                         int* selEnd) {
+    DWORD ms = NavComTimeout();
+    if (!hwnd || !ms) return FALSE;         /* 预算已用尽：不再尝试 */
+    ComJob* j = (ComJob*)calloc(1, sizeof(ComJob));
+    if (!j) return FALSE;
+    j->kind = kind; j->hwnd = hwnd;
+    if (!ComRun(ComJobRead, j, ms, "读文本")) return FALSE;   /* j 有意泄漏，见上 */
+    BOOL ok = j->ok;
+    if (ok) {
+        *text = j->text; *len = j->len; *caret = j->caret;
+        if (selEnd) *selEnd = j->selEnd;
+    } else if (j->text) {
+        free(j->text);
+    }
+    free(j);
+    return ok;
+}
+
+/* 置位（UIA / IA2）。三态：超时必须与"明确失败"分开 —— 被放弃的调用**可能已经
+   在目标进程里生效了**，此时再补方向键就是两个错误叠加。 */
+enum { COM_SET_OK = 0, COM_SET_FAIL = 1, COM_SET_UNSURE = 2 };
+
+static int ComSetTimed(int kind, HWND hwnd, int caret, int tgt, BOOL shift) {
+    if (!hwnd || caret == tgt) return COM_SET_OK;
+    DWORD ms = NavComTimeout();
+    if (!ms) return COM_SET_UNSURE;
+    ComJob* j = (ComJob*)calloc(1, sizeof(ComJob));
+    if (!j) return COM_SET_UNSURE;
+    j->kind = kind; j->hwnd = hwnd; j->a1 = caret; j->a2 = tgt; j->shift = shift;
+    if (!ComRun(ComJobSet, j, ms, "直接置位")) return COM_SET_UNSURE;
+    int r = j->ok ? COM_SET_OK : COM_SET_FAIL;
+    free(j);
+    return r;
+}
+
+/* WPS 置位：同一套限时，返回的仍是 WPS_SET_* 三态（超时 = UNSURE，理由同上）。 */
+static int WpsSetTimed(HWND hwnd, int caretEnd, int anchorEnd) {
+    if (!hwnd) return WPS_SET_NONE;
+    DWORD ms = NavComTimeout();
+    if (!ms) return WPS_SET_UNSURE;
+    ComJob* j = (ComJob*)calloc(1, sizeof(ComJob));
+    if (!j) return WPS_SET_UNSURE;
+    j->kind = COM_WPS; j->hwnd = hwnd; j->a1 = caretEnd; j->a2 = anchorEnd;
+    if (!ComRun(ComJobSet, j, ms, "WPS 置位")) return WPS_SET_UNSURE;
+    int r = j->r;
+    free(j);
+    return r;
+}
+
 /* Shift 位移序列的锚点跟踪（经典 Edit 通道）：
    EM_GETSEL 只给有序两端、没有 anchor 概念。序列第一次位移时把"当时
    的活动端"定为锚并固定，其后活动端 = 另一端 —— 这样 F+N 后再 F+M，
@@ -1101,11 +1245,14 @@ static const char* ChanName(Chan c) {
 
 static int NavJumpInner(int dir, BOOL shift);
 
-/* 对外的入口只做一件事：给本次跳转开一个同步 IPC 预算（见 NavIpcBudgetBegin），
-   把"目标程序卡住时超时会叠加"的最坏情况从 ~1.8s 压到 NAV_IPC_BUDGET_MS。 */
+/* 对外的入口只做一件事：给本次跳转开两条预算 —— 窗口消息通道用
+   NavIpcBudgetBegin、跨进程 COM 通道用 NavComBudgetBegin，把"目标程序卡住时
+   超时会叠加"的最坏情况从 ~1.8s（消息）/ 无限期（COM）压到常数级。 */
 int NavJump(int dir, BOOL shift) {
     NavIpcBudgetBegin();
+    NavComBudgetBegin();        /* 两条预算各管一半：窗口消息 / 跨进程 COM */
     int r = NavJumpInner(dir, shift);
+    NavComBudgetEnd();
     NavIpcBudgetEnd();
     return r;
 }
@@ -1159,16 +1306,16 @@ static int NavJumpInner(int dir, BOOL shift) {
         if (got) path = Chan::Sci;
     }
     if (!got) {
-        got = UiaGetTextCaret(focus, &text, &len, &caret);   /* 现代控件 → UIA TextPattern */
+        got = ComReadTimed(COM_UIA, focus, &text, &len, &caret, NULL);  /* 现代控件 → UIA TextPattern */
         if (got) path = Chan::UIA;
     }
     if (!got) {
-        got = MsaaGetTextCaret(focus, &text, &len, &caret);  /* 兜底无障碍 → IAccessible2 */
+        got = ComReadTimed(COM_IA2, focus, &text, &len, &caret, NULL);  /* 兜底无障碍 → IAccessible2 */
         if (got) path = Chan::IA2;
     }
     if (!got) {
         /* WPS：既无 UIA/IA2 文本也不响应 WM_GETTEXT，只能走 COM 自动化（见上节说明） */
-        got = WpsGetTextCaret(focus, &text, &len, &caret, &selEnd);
+        got = ComReadTimed(COM_WPS, focus, &text, &len, &caret, &selEnd);
         if (got) path = Chan::WPS;
     }
     if (!got) { SendNativeWordJump(dir, shift); if (g_recording.load()) CapLog("  -> 兜底 native Ctrl+arrow"); return -1; }
@@ -1297,7 +1444,7 @@ static int NavJumpInner(int dir, BOOL shift) {
         if (wpsDirect) {
             /* 参数顺序 = (活动端, 锚)：WPS 的活动端落在**首个**参数上（见上方
                区间计算的说明）。传"有序区间"会让向右扩选后的光标停在左端。 */
-            int r = WpsSetSel(focus, caretEnd, anchorEnd);
+            int r = WpsSetTimed(focus, caretEnd, anchorEnd);
             if (r == WPS_SET_OK) {
                 direct = TRUE;
                 if (g_recording.load())
@@ -1320,13 +1467,19 @@ static int NavJumpInner(int dir, BOOL shift) {
            置位会产生错误选区 —— Shift 位移走箭头（anchor 语义天然正确）。
            无 Shift 时试一次并回读校验：HRESULT 失败 -> 退回箭头；置位发生
            但回读不符 -> 不能再叠加箭头（会双重错误），本次到此为止。 */
-        BOOL set = (path == Chan::UIA) ? UiaSetSel(focus, caret, tgt, FALSE)
-                                    : MsaaSetSel(focus, caret, tgt, FALSE);
-        if (set) {
+        int sr = ComSetTimed((path == Chan::UIA) ? COM_UIA : COM_IA2,
+                             focus, caret, tgt, FALSE);
+        if (sr == COM_SET_UNSURE) {
+            /* 限时放弃（目标进程没应答）：置位**可能已经生效**，再补箭头就是
+               两个错误叠加 —— 与下面"置位后回读不符"同等处理。 */
+            skipArrows = TRUE;
+            if (g_recording.load())
+                CapLog("  -> UIA/IA2 置位超时（光标状态不明），放弃补箭头");
+        }
+        if (sr == COM_SET_OK) {
             WCHAR* t2 = NULL; int l2 = 0, c2 = 0;
-            BOOL ok2 = (path == Chan::UIA)
-                     ? UiaGetTextCaret(focus, &t2, &l2, &c2)
-                     : MsaaGetTextCaret(focus, &t2, &l2, &c2);
+            BOOL ok2 = ComReadTimed((path == Chan::UIA) ? COM_UIA : COM_IA2,
+                                    focus, &t2, &l2, &c2, NULL);
             if (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0 && c2 == tgt) {
                 direct = TRUE;
                 NAV_LOCK();
@@ -1414,9 +1567,9 @@ static int NavJumpInner(int dir, BOOL shift) {
         && (isUA || (isWps && handedOff))) {
         WCHAR* t2 = NULL; int l2 = 0, c2 = 0;
         BOOL ok2;
-        if (isWps)                     ok2 = WpsGetTextCaret(focus, &t2, &l2, &c2, NULL);
-        else if (path == Chan::UIA)    ok2 = UiaGetTextCaret(focus, &t2, &l2, &c2);
-        else                           ok2 = MsaaGetTextCaret(focus, &t2, &l2, &c2);
+        if (isWps)                     ok2 = ComReadTimed(COM_WPS, focus, &t2, &l2, &c2, NULL);
+        else if (path == Chan::UIA)    ok2 = ComReadTimed(COM_UIA, focus, &t2, &l2, &c2, NULL);
+        else                           ok2 = ComReadTimed(COM_IA2, focus, &t2, &l2, &c2, NULL);
         /* 只在"读回的仍是同一页文本"（长度与内容都一致）时才比坐标 */
         BOOL comparable = (ok2 && t2 && l2 == len && wcscmp(t2, text) == 0);
         if (comparable && c2 == tgt) {

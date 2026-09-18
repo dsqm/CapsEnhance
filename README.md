@@ -59,6 +59,7 @@ Windows **CapsLock** 快捷键增强程序。按住 `CapsLock` 当作修饰键�
 - 例：`你好，世界1234abcd中国` → 会停在 `你好，|世界|1234abcd|中国`。
 - 跳转距离小、或程序不支持"直接置位"时，改为**逐格发送方向键**，期间可随时松开 C 或改道打断。
 - 程序读不到文本时自动退回原生 `Ctrl(+Shift)+方向键` 兜底。
+- **全程限时**：读文本 / 置光标这些跨进程调用都有上限（一次跳转合计约 1 秒；窗口消息通道另有 600ms 预算），目标程序卡住时按"读不到文本"处理、退到兜底，不会把键盘输入冻住。
 
 已支持读取文本的程序类型：经典 Edit / RichEdit / **EmEditor**、Scintilla 系（Notepad3 / Notepad++ / SciTE）、UIA（QQ、Edge 等 Chromium/WinUI 控件）、IAccessible2、以及 **WPS 文字**（走 COM 自动化）。
 

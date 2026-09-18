@@ -50,6 +50,13 @@
 /* CFG_MAX_ENTRIES / CFG_NAME_MAX 在 cap.h（设置程序也要用） */
 #define CFG_VAL_LEN     256   /* 配置值缓冲：键名短，值留宽一点，宁可截断不可越界 */
 
+/* ini 文件大小上限。**读取、升级补写、读-改-写保存三条路必须是同一个值**：
+   以前读取路径是 64KB、读改写路径是 1MB，于是 64KB~1MB 之间的 ini 在设置程序里
+   能看能改能存，主程序却整份当默认 —— 用户看到的"我改了它没反应"就是这么来的。
+   1MB 对本文件是天量（正常只有几 KB），留这么大只是为了不因为这个上限而
+   静默忽略用户的配置。 */
+#define CFG_FILE_MAX    (1024 * 1024)
+
 /* 名单编号：只在 config.c 内部使用（对外一律用具名查询函数，见文件末尾）。
    加一份名单 = 加一个枚举值 + 一个段名 + 一个查询函数，解析/存储不用改。 */
 typedef enum {
@@ -382,7 +389,7 @@ void ConfigLoadFrom(const WCHAR* path) {
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (sz <= 0 || sz > 64 * 1024) { fclose(f); return; }   /* 防呆：超大文件忽略 */
+    if (sz <= 0 || sz > CFG_FILE_MAX) { fclose(f); return; }   /* 防呆：超大文件忽略 */
 
     /* 文件内容与宽字符副本都交给容器持有：以前是两对 malloc/free，每条提前
        返回路径都得记得 free（漏一处就是泄漏），现在由析构负责。 */
@@ -576,17 +583,17 @@ void ConfigLoad(void) {
             "; 只是不再是瞬跳）。\n"
             "AllowScintillaRead = " STR(ALLOW_SCINTILLA_READ_DEFAULT) "\n"
             ";\n"
-            "; 单键切换输入法：**单击**（按下即抬起、期间不按别的键）下面三个键时，\n"
+            "; 单键切换输入法：单击（按下即抬起、期间不按别的键）下面三个键时，\n"
             "; 无视当前输入法状态强制切到中文或英文。\n"
             ";   0 = 不处理   1 = 切中文   2 = 切英文\n"
             "; Caps：任何时候都切（当前是英文键盘时，会先换到已安装的中文键盘）。\n"
-            "; Shift：**前台是英文键盘时不处理**（本来就是英文，切它没意义）。\n"
+            "; Shift：前台是英文键盘时不处理（本来就是英文，切它没意义）。\n"
             "; 三个键都遵守 [AutoDisable] 名单。\n"
             "ImeCapsMode = " STR(IME_CAPS_MODE_DEFAULT) "\n"
             "ImeLShiftMode = " STR(IME_LSHIFT_MODE_DEFAULT) "\n"
             "ImeRShiftMode = " STR(IME_RSHIFT_MODE_DEFAULT) "\n"
             ";\n"
-            "; Ditto 的**文件夹**（Caps+V 弹出剪贴板用，两处派生）：\n"
+            "; Ditto 的文件夹（Caps+V 弹出剪贴板用，两处派生）：\n"
             ";   <DittoDir>\\Ditto.db   浮层只读地取最近 30 条\n"
             ";   <DittoDir>\\Ditto.exe  浮层里\"转 Ditto 本体\"用 -open 拉起它的窗口\n"
             "; 留空 = 不启用该功能（按 Caps+V 时浮层会提示未配置）。\n"
@@ -597,7 +604,7 @@ void ConfigLoad(void) {
             "DittoDir = \n"
             ";\n"
             "; 快速粘贴窗口（Caps+V）的字体与字号。\n"
-            "; ClipFontSize 单位是**磅**（与系统字体对话框一致），范围 6.."
+            "; ClipFontSize 单位是磅（与系统字体对话框一致），范围 6.."
             STR(CLIP_FONT_SIZE_MAX) "\n"
             "; ClipFont 留空 = 用内置的 Microsoft YaHei UI。\n"
             "ClipFont = \n"
@@ -746,11 +753,11 @@ static const struct {
       "AllowScintillaRead = " STR(ALLOW_SCINTILLA_READ_DEFAULT) "\n" },
     { "imecapsmode",
       "\n"
-      "; 单键切换输入法：**单击**（按下即抬起、期间不按别的键）下面三个键时，\n"
+      "; 单键切换输入法：单击（按下即抬起、期间不按别的键）下面三个键时，\n"
       "; 无视当前输入法状态强制切到中文或英文。\n"
       ";   0 = 不处理   1 = 切中文   2 = 切英文\n"
       "; Caps：任何时候都切（当前是英文键盘时，会先换到已安装的中文键盘）。\n"
-      "; Shift：**前台是英文键盘时不处理**（本来就是英文，切它没意义）。\n"
+      "; Shift：前台是英文键盘时不处理（本来就是英文，切它没意义）。\n"
       "; 三个键都遵守 [AutoDisable] 名单。\n"
       "ImeCapsMode = " STR(IME_CAPS_MODE_DEFAULT) "\n" },
     { "imelshiftmode",
@@ -759,14 +766,14 @@ static const struct {
       "ImeRShiftMode = " STR(IME_RSHIFT_MODE_DEFAULT) "\n" },
     { "dittodir",
       "\n"
-      "; Ditto 的**文件夹**（Caps+V 用：Ditto.db 读历史，Ditto.exe 转本体）。\n"
+      "; Ditto 的文件夹（Caps+V 用：Ditto.db 读历史，Ditto.exe 转本体）。\n"
       "; 留空 = 不启用该功能。相对路径的基准 = 本程序 exe 所在目录。\n"
       "; 例：..\\Ditto     或     C:\\Tools\\Ditto\n"
       "DittoDir = \n" },
     { "clipfont",
       "\n"
       "; 快速粘贴窗口（Caps+V）的字体与字号。\n"
-      "; ClipFontSize 单位是**磅**（与系统字体对话框一致），范围 6.."
+      "; ClipFontSize 单位是磅（与系统字体对话框一致），范围 6.."
       STR(CLIP_FONT_SIZE_MAX) "\n"
       "ClipFont = \n" },
     { "clipfontsize",
@@ -816,7 +823,7 @@ void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (sz <= 0 || sz > 64 * 1024) { fclose(f); return; }
+    if (sz <= 0 || sz > CFG_FILE_MAX) { fclose(f); return; }
     std::vector<char> raw((size_t)sz + 1);
     size_t rd = fread(raw.data(), 1, (size_t)sz, f);
     fclose(f);
@@ -1179,7 +1186,7 @@ static BOOL ReadAllBytes(const WCHAR* path, std::string* out, int* hasBom) {
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (sz <= 0 || sz > 1024 * 1024) { fclose(f); return FALSE; }
+    if (sz <= 0 || sz > CFG_FILE_MAX) { fclose(f); return FALSE; }
     std::vector<char> raw((size_t)sz);
     size_t rd = fread(raw.data(), 1, (size_t)sz, f);
     fclose(f);

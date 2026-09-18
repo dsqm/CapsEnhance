@@ -28,8 +28,8 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /DCAP_TEST /TP ^
    /Isrc /c /Foobj\test_chord.obj test\test_chord.c
 if errorlevel 1 exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE ^
-   bin\test_chord.obj bin\config_chord.obj bin\keymap_chord.obj bin\winmove_chord.obj bin\drag_chord.obj ^
-   bin\folder_chord.obj ^
+   obj\test_chord.obj obj\config_chord.obj obj\keymap_chord.obj obj\winmove_chord.obj obj\drag_chord.obj ^
+   obj\folder_chord.obj ^
    /link /OUT:bin/test_chord.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib winmm.lib ^
    /SUBSYSTEM:CONSOLE
