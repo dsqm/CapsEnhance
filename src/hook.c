@@ -266,10 +266,23 @@ static BOOL IsInjected(const KBDLLHOOKSTRUCT *p) {
     return (p->flags & LLKHF_INJECTED) != 0;
 }
 
+/* 是不是**自家浮层**粘贴时注入的键（见 cap.h 的 CLIP_INJECT_MARKER）。
+   与 IsInjected 分开的理由：那一位只说"有程序注入了键"，别的工具注入的也算，
+   而我们要能在日志里把两者分开。 */
+
 /* 底层键盘钩子过程 */
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
         KBDLLHOOKSTRUCT *p = (KBDLLHOOKSTRUCT*)lParam;
+        /* ★ 自家粘贴注入放在 IsInjected **之前**：这条路径存在的意义就是
+           "永不吞"，写成显式分支后，将来即使有人把注入放行挪到和弦逻辑后面，
+           也不会把浮层的粘贴键吞掉（那表现为"点了条目没粘上"）。 */
+        if (p->dwExtraInfo == CLIP_INJECT_MARKER) {
+            if (g_recording.load())
+                CapLog("  浮层粘贴注入：vk=0x%02X %s（放行）", (int)p->vkCode,
+                       (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) ? "down" : "up");
+            return CallNextHookEx(g_hook, nCode, wParam, lParam);
+        }
         if (IsInjected(p)) return CallNextHookEx(g_hook, nCode, wParam, lParam);
 
         BOOL down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);

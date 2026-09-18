@@ -495,6 +495,8 @@ static void SendEvent(int vk, BOOL up) {
         vk == VK_PRIOR || vk == VK_NEXT || vk == VK_HOME || vk == VK_END ||
         vk == VK_DELETE || vk == VK_INSERT)
         in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    /* 打标记：主程序的钩子靠它认出"这是浮层在粘贴"（见 cap.h）。 */
+    in.ki.dwExtraInfo = CLIP_INJECT_MARKER;
     SendInput(1, &in, sizeof(in));
 }
 
@@ -512,6 +514,7 @@ static void ReleaseModFull(int vk) {
     in.ki.wVk = (WORD)vk;
     in.ki.dwFlags = KEYEVENTF_KEYUP;
     if (sc) in.ki.wScan = (WORD)sc;
+    in.ki.dwExtraInfo = CLIP_INJECT_MARKER;
     SendInput(1, &in, sizeof(in));
 }
 
@@ -520,6 +523,58 @@ static void ReleaseHeldMods(void) {
                                 VK_LSHIFT, VK_RSHIFT, VK_LWIN, VK_RWIN };
     for (int i = 0; i < (int)(sizeof(mods) / sizeof(mods[0])); i++)
         if (GetAsyncKeyState(mods[i]) & 0x8000) ReleaseModFull(mods[i]);
+}
+
+/* 目标是不是"Ctrl+V 不管用"的控制台 / 终端系窗口。
+   ★ 这不是"多支持一种粘贴方式"，是补一个真实缺口：mintty（Git Bash）、PuTTY、
+   Vim 里 Ctrl+V 要么是原样的控制字符、要么是"可视块"，浮层在这些窗口上等于废的。
+   Shift+Insert 是它们**共同**认的粘贴键（conhost / Windows Terminal / mintty /
+   PuTTY 都支持），所以命中这一类就直接用它，而不是"先试 Ctrl+V 再补救"。
+   判据用窗口**类名**：控制台类名是固定的（本机实测 conhost = ConsoleWindowClass），
+   而 WSL / cmd / PowerShell 全都跑在同一个类里 —— 比按进程名判更省事也更全。
+   名单要加直接往数组里塞，不用改别的。 */
+static BOOL TargetIsConsole(void) {
+    if (!g_target || !IsWindow(g_target)) return FALSE;
+    WCHAR cls[128] = L"";
+    if (!GetClassNameW(g_target, cls, 128) || !cls[0]) return FALSE;
+    static const WCHAR* kConsoleClasses[] = {
+        L"ConsoleWindowClass",                /* conhost：cmd / PowerShell / WSL 默认 */
+        L"CASCADIA_HOSTING_WINDOW_CLASS",     /* Windows Terminal */
+        L"mintty",                            /* Git Bash / MSYS2 */
+        L"PuTTY",                             /* PuTTY */
+        L"VirtualConsoleClass",               /* 部分终端模拟器的移植版 */
+    };
+    for (int i = 0; i < (int)(sizeof(kConsoleClasses) / sizeof(kConsoleClasses[0])); i++)
+        if (!_wcsicmp(cls, kConsoleClasses[i])) return TRUE;
+    return FALSE;
+}
+
+/* 发一次"粘贴"按键。控制台系 -> Shift+Insert；其余 -> Ctrl+V。
+   两条路径都打 CLIP_INJECT_MARKER（见 SendEvent）。 */
+static void SendPasteKeystroke(void) {
+    if (TargetIsConsole()) {
+        SendEvent(VK_SHIFT, FALSE);
+        SendEvent(VK_INSERT, FALSE);
+        Sleep(15);
+        SendEvent(VK_INSERT, TRUE);
+        SendEvent(VK_SHIFT, TRUE);
+        return;
+    }
+    SendEvent(VK_LCONTROL, FALSE);
+    Sleep(15);
+    SendEvent('V', FALSE);
+    Sleep(15);
+    SendEvent('V', TRUE);
+    Sleep(15);
+    SendEvent(VK_LCONTROL, TRUE);
+}
+
+/* 只收起窗口，不启动"优雅退出"计时：粘贴流程要先让开屏幕再去抢前台，
+   退出计时留到最后一步（见 DoHideClose）。 */
+static void HideIfVisible(void) {
+    if (!g_visible) return;
+    ShowWindow(g_hwnd, SW_HIDE);
+    g_visible = FALSE;
 }
 
 static BOOL PutOnClipboard(BOOL plain) {
@@ -601,6 +656,11 @@ static void DoPaste(BOOL plain) {
         return;
     }
 
+    /* ★ 先收起浮层，再把前台交给目标（放在"写剪贴板成功"之后：写失败时浮层
+       还留着，用户能重试）。留着它挡在目标前面，用户看不到粘贴落到哪儿；抢前台
+       时也多一个置顶窗口当对手。 */
+    if (!g_pinned) HideIfVisible();
+
     if (g_target && IsWindow(g_target)) {
         SetForegroundWindow(g_target);
         for (int i = 0; i < 40; i++) {
@@ -609,13 +669,10 @@ static void DoPaste(BOOL plain) {
         }
     }
     ReleaseHeldMods();
-    SendEvent(VK_LCONTROL, FALSE);
-    Sleep(15);
-    SendEvent('V', FALSE);
-    Sleep(15);
-    SendEvent('V', TRUE);
-    Sleep(15);
-    SendEvent(VK_LCONTROL, TRUE);
+    /* 让"释放修饰键"与"写剪贴板"各自落地再发粘贴键：两条 SendInput 挤在同一个
+       批次里时，有的程序会把 Ctrl 的按下算在修饰键释放之前，表现就是"粘不上"。 */
+    Sleep(30);
+    SendPasteKeystroke();
     FreeFmts();
     g_pasting = FALSE;
 
@@ -992,10 +1049,7 @@ static void PlaceWindow(void) {
 }
 
 static void DoHideClose(void) {
-    if (g_visible) {
-        ShowWindow(g_hwnd, SW_HIDE);
-        g_visible = FALSE;
-    }
+    HideIfVisible();
     SetTimer(g_hwnd, TID_GRACE, GRACE_MS, NULL);
 }
 

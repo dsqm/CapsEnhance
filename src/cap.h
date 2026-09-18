@@ -391,6 +391,15 @@ void HelpKaTick(void); /* HELP_KA_TIMER 到点：喂一条心跳（只在显示�
 #define CLIP_TICK_MS  40                  /* 送达重试间隔 */
 #define CLIP_TRIES_MAX 25                 /* 40ms x 25 ≈ 1s 内送不到就放弃 */
 #define CLIP_CLASS   L"CapsEnhanceClip"   /* 剪贴板窗口类名（跨进程握手靠它 FindWindow） */
+/* 浮层注入按键时打的标记（dwExtraInfo）。浮层是独立 exe，这个值就是跨进程的
+   唯一约定，两边共用这一个常量。
+   为什么要它：LLKHF_INJECTED 只说明"有程序注入了键"，分不清是谁 —— 浮层粘贴
+   发的 Ctrl+V、别的映射工具注入的键，在这一位上是同一个样子。带上标记之后，
+   钩子能**精确**认出"这是自家浮层在粘贴"，从而：① 永远不吞它（这条不变量
+   从此有代码保证，而不是靠"反正注入的键都在最前面放行"这个位置巧合）；
+   ② 记录模式下能把它与用户真实按键分开记，"粘贴没反应"这类问题第一问就是
+   "键到底发出去了没有"。 */
+#define CLIP_INJECT_MARKER 0x434C4950u    /* 'CLIP' */
 #define CLIP_MSG_SHOW L"CapsEnhanceClipShow"  /* 注册消息：让它显示 */
 #define CLIP_MSG_HIDE L"CapsEnhanceClipHide"  /* 注册消息：让它隐藏并退出 */
 #define CLIP_MSG_KA   L"CapsEnhanceClipKa"    /* 注册消息：心跳（"我还需要你"） */
