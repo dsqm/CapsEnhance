@@ -285,6 +285,14 @@
 
 同一次探测还确认了两条**走不通**的路：EmEditor 没有注册 COM 自动化（`CLSIDFromProgID("EmEditor.Application")` = `0x800401F3`）；它也不支持 `EM_POSFROMINDEX` / `EM_LINEFROMCHAR` / `EM_LINEINDEX` / `EM_GETRECT`（恒返回 0）。所以"算出目标坐标再后台点击"这条思路在它身上不成立——点击本身它是有反应的（`PostMessage` 的 `WM_LBUTTONDOWN/UP` 能让光标动），但**没有"字符 → 坐标"的来源就没法知道该点哪儿**。
 
+**2026-09-18 在 EmEditor 26.1.1（用户真机）补测了无障碍通道，结论：UIA / IA2 对它不可用**：
+
+- **UIA 没有文本 pattern**：`EmEditorView` 元素上 `IsTextPatternAvailable = no`、`TextPattern2 = no`、`TextChild = no`，只有 `IsLegacyIAccessible = YES`（标准的 MSAA→UIA 桥）；`FindAll(Subtree, IsTextPatternAvailable=true)` **命中 0 个**；UIA 焦点元素就是 `EmEditorView` 本身，同样没有 TextPattern。所以本通道的祖先链/子树三级锚定在它身上全部落空。
+- **MSAA 也没有文本接口**：`AccessibleObjectFromWindow(OBJID_CLIENT)` 成功（`accChildCount=3`、`accRole=10` = `ROLE_SYSTEM_CLIENT`），但 `QI(IAccessibleText)` = **`E_NOINTERFACE`**、`get_accValue` 回 `S_FALSE` —— IA2 通道同样拿不到。
+- ★ **整篇文本其实拿得到，缺的是"位置"**：文档有内容时，UIA 的 `CurrentName` 与 MSAA 的 `accName` **就是全文**（实测 53 字符全文原样）。但没有 caret offset、也没有可置位的 range —— 按词跳转要的正是"文本 + 光标在第几字符 + 能设过去"，缺一不可。所以这不是"读不到文本"，而是"文本没有坐标"，**别试图用 `accName` 给它补一条通道**。
+- **位置单位实测 = 字符**（不是字节）：`EM_SETSEL(0,-1)` 选全后 `EM_GETSEL` 的 end 与 `wcslen(WM_GETTEXT)` **相等**（53/53），且 `EM_SETSEL(k,k)` 逐点回读都 == k；UTF-8 带 BOM / 无 BOM、GBK、UTF-16LE 四种编码均如此。**上面"单位随文档编码变（73 字符回 181）"在 26.1.1 未复现** —— 可能是旧版行为或当时文档处在别的模式（大文件/二进制视图）。单位自检（`EM_GETSEL` 超出文本长度 ⇒ 放弃）留着当保险即可，**不要依赖它触发**。
+- 探针行为注意：EmEditor **只对"当前激活的那篇文档"回 `WM_GETTEXT` / `EM_GETSEL`**，非激活窗口的 `EmEditorView` 读回全 0。产品代码读的是有焦点的控件，天然是激活那篇，不受影响；写诊断探针时则必须先把目标窗口置前，否则会误判成"读不到"。
+
 第三个坑（`OverStepMode=1` 的改道）：**改道之后必须回读落点**。改道只是把这一跳交给目标程序自己的词导航，而**它的词切分跟我们的算法不一定一致**——实测 QQ（Chromium）的 `Ctrl+←` 按 ICU 词典切、一次只走 1 个字，而我们按"连续汉字段"整段算（一次十几字），结果光标落在整段中间、左右还不对称。所以改道后一律回读光标：与目标不符就按差额逐格补足（`SendArrowsStrict`，**不再判一次超限**，否则补正自己又被改道）；`OverStepMode=0` 的"只发一格"是既定行为，不补。
 
 ---
