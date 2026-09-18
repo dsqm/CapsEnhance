@@ -123,12 +123,22 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem colorcode.c: 色值识别（纯函数，只有剪贴板浮层用）—— 单独编一个 obj，
+rem 和 sqlite 一样只链进 CapsEnhanceClip.exe，其余三个 exe 不涨一个字节。
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc /c ^
+   /Foobj\colorcode.obj src\colorcode.c
+if errorlevel 1 (
+    echo [ERROR] colorcode build failed
+    exit /b 1
+)
+
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc /Ithirdparty ^
    /Foobj\ ^
    clip\clip.c ^
    /link /OUT:bin/CapsEnhanceClip.exe ^
-   obj\sqlite3mc.obj ^
+   obj\sqlite3mc.obj obj\colorcode.obj ^
    user32.lib gdi32.lib shell32.lib ole32.lib gdiplus.lib bcrypt.lib advapi32.lib ^
+   comctl32.lib ^
    /SUBSYSTEM:WINDOWS
 if errorlevel 1 (
     echo [ERROR] clipboard overlay build failed

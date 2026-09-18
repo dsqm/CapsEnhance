@@ -505,6 +505,27 @@ WPS 置位的回读校验返回**三态**：
 - **原样回写所有格式**（图片 / `CF_HDROP` / RTF 都靠它），但要跳过 Ditto 的私有格式（`Ditto File Data`、`Ditto Remote CF_HDROP` …）和不是 `HGLOBAL` 的那几个标准格式（`CF_METAFILEPICT`、`CF_PALETTE`、`CF_ENHMETAFILE` …）。
 - **抬 Alt 必须先塞一个中性键**（`0xFF`，AHK 的 `#MenuMaskKey` 那一招，与 `src/send.c` 的 `ReleaseMod` 同源）：用户是用 `C+V` 打开的，Alt 很可能仍物理按着，不先放掉 `Ctrl+V` 会被对端理解成 `Ctrl+Alt+V`。
 
+### 色块与悬停提示：跟随 Ditto 的设置而不是自己的开关
+
+**配置来源**：便携版 Ditto 的全部设置在 `<DittoDir>\Ditto.Settings`（UTF-16 LE 带 BOM 的 INI）。浮层启动后按需读一次（文件不存在就用默认值，**不建也不写**）：
+
+| 键 | 默认（Ditto 同款） | 用途 |
+| --- | --- | --- |
+| `DrawCopiedColorCode` | `1` | 色值前画色块；`0` = 关 |
+| `MaxToolTipCharacters` | `1000`（Ditto 源码再 +200 余量） | 悬停提示截断 |
+| `MaxToolTipLines` | `30` | 提示最大行数 |
+| `ToolTipTimeout` | `-1` = 5 秒；`0` = 关 | 提示自动消失 |
+
+色值判据照抄 Ditto `QListCtrl.cpp` 的 `DrawCopiedColorCode`（`src/colorcode.c`，纯函数、有单测 `test/test_color.c`）：先 `Trim` 掉 `»` 后缀与空白、再剥结尾 `;`，然后依次试 W3C 命名色（141 个，表从 Ditto 源码脚本化提取）、`#RGB/#RGBA/#RRGGBB/#RRGGBBAA`、无前缀 6 位 hex、`0x` 前缀、`rgb()/rgba()`（支持百分比）、`hsl()/hsla()`。alpha < 255 时先画棋盘格再 alpha 混合，同 Ditto。
+
+**悬停提示是系统 tooltip 控件 + 手动 TRACK 模式**，三个坑都是实测踩出来的：
+
+1. **cbSize 必须是 `TTTOOLINFOW_V1_SIZE`**：本进程不带清单，激活的是 comctl32 **v5**。`TTM_ADDTOOLW` 传 v6 的 `sizeof(TOOLINFOW)` 会**静默失败**（返回 0，tooltip 窗口照样创建出来，于是看起来一切正常、永远不弹）。
+2. **v5 的 `TTF_SUBCLASS` 自动计时在 NOACTIVATE 窗口上不触发**：注册成功也不弹。所以用手动 `TTF_TRACK|TTF_ABSOLUTE`：`WM_MOUSEMOVE` 里行变了就 `TTM_TRACKACTIVATE(TRUE)` + `TTM_TRACKPOSITION`，移出列表 / 滚轮 / 浮层收起就 deactivate。定位用**消息里的客户坐标** `ClientToScreen`，不要 `GetCursorPos`（消息到达与采样有延迟差，会弹到光标上一站）。
+3. **`TTM_POP` 对 TRACK 工具无效**，收起要用 `TTM_TRACKACTIVATE(FALSE)`；"自动消失"（Ditto 的 `ToolTipTimeout`）TRACK 模式也不管，自己拿 `TID_TIP` 定时器实现。
+
+文本取法：条目没被截断（≤160 字符）直接用摘要；被截断的按需回库取全文（`TipTextOf`，与缩略图同一条"用到才付"的思路）。TTN_NEEDTEXT 里同步查库只针对当前悬停那一条，单条毫秒级。
+
 ### 焦点归还
 
 用 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)` 记住"最后一个不是自己的窗口"（clippi 的做法）。为什么不能直接现取 `GetForegroundWindow`：用户在挑条目的过程中完全可能点过别处，而他真正要粘的是**打开浮层那一刻**在用的那个程序。同一个钩子顺带承担"点击外部 / 切到别的程序就自动关"（置顶期间与粘贴进行中停用 —— 粘贴自己会调 `SetForegroundWindow`，那条事件是**我们**引起的）。

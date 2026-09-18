@@ -38,6 +38,7 @@
 #pragma warning(push)
 #pragma warning(disable: 6385 28252 28253)
 #include <objidl.h>
+#include <commctrl.h>    /* 悬停提示：TOOLTIPS_CLASSW / TTM_*（照 Ditto） */
 #include <gdiplus.h>
 #pragma warning(pop)
 
@@ -47,6 +48,9 @@
 #include <stdlib.h>
 
 #include "sqlite3mc_amalgamation.h"
+
+/* 色值识别（照 Ditto 的判据）：src\colorcode.c —— 与浮层同编，不依赖主程序 */
+#include "colorcode.h"
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "user32.lib")
@@ -117,8 +121,28 @@ typedef struct {
     long long id;
     int       lines;              /* 1 或 2 */
     BOOL      hasImage;
+    BOOL      hasSwatch;          /* 这条文本本身就是个色值 -> 左侧画色块 */
+    COLORREF  swatch;
+    int       swatchAlpha;        /* <255：先画棋盘格，再按 alpha 混合 */
     WCHAR     text[2][CLIP_TEXT_MAX];
 } ClipItem;
+
+/* Ditto 的设置（便携版 <DittoDir>\Ditto.Settings）—— 定义放在这里是因为
+   读条目时就要按它决定"要不要判色值"；加载函数在下面 DsLoad()。 */
+typedef struct {
+    BOOL drawColorCode;
+    int  tipChars;
+    int  tipLines;
+    int  tipTimeoutMs;      /* 0 = 不显示；<0 = 默认 5 秒 */
+} DittoCfg;
+static DittoCfg g_dc = { TRUE, 1000, 30, -1 };
+
+/* 悬停提示自动消失的时间：0 = 关掉提示，其余 = 毫秒（Ditto 的上限是 32000） */
+static int DsTipTimeoutMs(void) {
+    if (g_dc.tipTimeoutMs == 0) return 0;
+    if (g_dc.tipTimeoutMs < 0)  return 5000;
+    return (g_dc.tipTimeoutMs > 32000) ? 32000 : g_dc.tipTimeoutMs;
+}
 
 static ClipItem g_items[CLIP_MAX_ITEMS];
 static int      g_count = 0;
@@ -158,6 +182,7 @@ static POINT     g_dragWin;            /* 按下那一刻的窗口位置 */
 #define TID_GRACE  2
 #define TID_LIFE   3
 #define TID_KA     5
+#define TID_TIP   6    /* 悬停提示的自动消失（TRACK 模式不会自己收） */
 #define GRACE_MS   300
 #define LIFE_MS    180000
 #define KA_POLL_MS 250
@@ -270,11 +295,171 @@ static void DbLoadItems(void) {
         if (src) TwoLines(src, it->text);
         else     LabelFromFormats(fm, it->text[0], CLIP_TEXT_MAX);
         it->lines    = it->text[1][0] ? 2 : 1;
+        /* 色块判定用的是**完整文本**（Ditto 也是拿整条文本判的）：
+           "#F45F01" 认，"#F45F01 这是主色" 不认 —— 后者不是"一个色值"。 */
+        if (g_dc.drawColorCode && src &&
+            CcParseColor(src, &it->swatch, &it->swatchAlpha))
+            it->hasSwatch = TRUE;
         it->hasImage = (fm && (wcsstr(fm, L"CF_DIB") || wcsstr(fm, L"PNG"))) != NULL;
         g_count++;
     }
     sqlite3_finalize(st);
     sqlite3_close(db);
+}
+
+/* ================= 悬停提示（照 Ditto：系统 tooltip 控件） =================
+   Ditto 的做法是列表控件自带 tooltip：悬停一会儿，弹出这一条的**完整**文本
+   （列表里只显示两行摘要，看不全的靠它）。我们照同一套：
+     · 载体：TOOLTIPS_CLASSW 子窗口 —— 换行交给系统，不自己画
+     · 触发：**手动 TRACK 模式**（TTF_TRACK|TTF_ABSOLUTE），由 WM_MOUSEMOVE
+       直接决定弹/收与位置。不用 TTF_SUBCLASS 的自动计时，原因有二：
+       (a) 本进程不带清单，激活的是 comctl32 **v5** —— TTM_ADDTOOLW 传
+           v6 的 sizeof(TOOLINFOW) 会**静默失败**，必须用 TTTOOLINFOW_V1_SIZE
+           （minitip 最小复现实测：72 失败、56 成功）；
+       (b) NOACTIVATE 窗口上 v5 的中继计时也不触发（同一实验：注册成功
+           也不弹）。手动模式反而更贴合：我们本来就悬停即选中，行变了
+           顺手换提示、移出列表立刻收，不需要再赌系统的计时。 */
+static HWND  g_tip = NULL;
+static WCHAR g_tipBuf[4096];
+static int   g_tipRow = -1;          /* 提示当前指向的行；-1 = 没在显示 */
+
+static void TipDestroy(void) {
+    if (g_tip) { DestroyWindow(g_tip); g_tip = NULL; }
+}
+
+/* 提示窗口只在显示路径创建一次；TRACK 模式的 tool 不占矩形区域，
+   窗口大小变化也不用更新它。 */
+static void TipUpdate(void) {
+    if (DsTipTimeoutMs() == 0) { TipDestroy(); return; }   /* Ditto: 0 = 关掉提示 */
+    if (g_tip) return;
+    INITCOMMONCONTROLSEX ic;
+    ic.dwSize = sizeof(ic);
+    ic.dwICC  = ICC_WIN95_CLASSES;
+    InitCommonControlsEx(&ic);
+    g_tip = CreateWindowExW(0, TOOLTIPS_CLASSW, NULL,
+                            WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                            CW_USEDEFAULT, CW_USEDEFAULT,
+                            CW_USEDEFAULT, CW_USEDEFAULT,
+                            g_hwnd, NULL, GetModuleHandleW(NULL), NULL);
+    if (!g_tip) return;
+    TOOLINFOW ti;
+    memset(&ti, 0, sizeof(ti));
+    /* ★ cbSize 必须是 V1_SIZE：comctl32 v5 只认旧结构，传 v6 的 sizeof
+       会让 TTM_ADDTOOLW 返回 0 且毫无声息（踩过，见注释块）。 */
+    ti.cbSize   = TTTOOLINFOW_V1_SIZE;
+    ti.uFlags   = TTF_TRACK | TTF_ABSOLUTE;
+    ti.hwnd     = g_hwnd;
+    ti.uId      = (UINT_PTR)g_hwnd;
+    ti.lpszText = LPSTR_TEXTCALLBACK;      /* 弹出前问我们要文本 */
+    SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+    /* 与 Ditto 同一个值：最宽 500px，超出的自动折行 */
+    SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 500);
+}
+
+/* 收起提示。TTM_TRACKACTIVATE(FALSE) 是 TRACK 模式的收法；
+   TTM_POP 对 TRACK 工具无效（也踩过）。 */
+static void TipHide(void) {
+    KillTimer(g_hwnd, TID_TIP);
+    if (g_tipRow < 0) return;
+    g_tipRow = -1;
+    if (!g_tip) return;
+    TOOLINFOW ti;
+    memset(&ti, 0, sizeof(ti));
+    ti.cbSize = TTTOOLINFOW_V1_SIZE;
+    ti.hwnd   = g_hwnd;
+    ti.uId    = (UINT_PTR)g_hwnd;
+    SendMessageW(g_tip, TTM_TRACKACTIVATE, FALSE, (LPARAM)&ti);
+}
+
+/* 在光标旁弹出第 row 行的提示。行没变就不动它（TTN_NEEDTEXT 只在
+   激活时问一次，反复激活会让长条目每动一下鼠标都回一次库）。 */
+static void TipShowAt(int row, POINT scr) {
+    if (DsTipTimeoutMs() == 0 || !g_tip) return;
+    if (row < 0 || row >= g_count) return;
+    if (g_tipRow == row) return;
+    g_tipRow = row;
+    TOOLINFOW ti;
+    memset(&ti, 0, sizeof(ti));
+    ti.cbSize   = TTTOOLINFOW_V1_SIZE;
+    ti.hwnd     = g_hwnd;
+    ti.uId      = (UINT_PTR)g_hwnd;
+    ti.lpszText = LPSTR_TEXTCALLBACK;
+    SendMessageW(g_tip, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
+    /* 光标右下 16/20px —— 系统默认提示也放这个位置，别压住正在看的那行 */
+    SendMessageW(g_tip, TTM_TRACKPOSITION, 0,
+                 MAKELONG(scr.x + 16, scr.y + 20));
+    /* TRACK 模式不会自动消失，AUTOPOP 兜底自己拿定时器实现（同 Ditto 的
+       ToolTipTimeout：-1 = 5 秒，0 = 关，上限 32 秒） */
+    SetTimer(g_hwnd, TID_TIP, (UINT)DsTipTimeoutMs(), NULL);
+}
+
+/* 列表里只有摘要：短条目（没被截断）直接用它，长条目按需回库取全文。 */
+static void TipTextOf(int idx) {
+    g_tipBuf[0] = 0;
+    if (idx < 0 || idx >= g_count) return;
+
+    const WCHAR* full = NULL;
+    static WCHAR fetched[4096];
+    fetched[0] = 0;
+    if (g_items[idx].lines <= 1 &&
+        (int)wcslen(g_items[idx].text[0]) < CLIP_TEXT_MAX - 1) {
+        full = g_items[idx].text[0];        /* 没被截断：摘要就是全文 */
+    } else {
+        char pathU8[DITTO_DIR_MAX * 4];
+        if (!Utf8FromW(g_dbPath, pathU8, (int)sizeof(pathU8))) return;
+        sqlite3* db = NULL;
+        if (sqlite3_open_v2(pathU8, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+            if (db) sqlite3_close(db);
+            return;
+        }
+        sqlite3_busy_timeout(db, 3000);
+        sqlite3_stmt* st = NULL;
+        if (sqlite3_prepare_v2(db, "SELECT mText, QuickPasteText FROM Main WHERE lID = ?",
+                               -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(st, 1, g_items[idx].id);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                const WCHAR* mt = (const WCHAR*)sqlite3_column_text16(st, 0);
+                const WCHAR* qt = (const WCHAR*)sqlite3_column_text16(st, 1);
+                const WCHAR* s  = (mt && mt[0]) ? mt : ((qt && qt[0]) ? qt : NULL);
+                if (s) {
+                    int n = (int)wcslen(s);
+                    int cap = (int)(sizeof(fetched) / sizeof(fetched[0])) - 1;
+                    if (n > cap) n = cap;
+                    memcpy(fetched, s, (size_t)n * sizeof(WCHAR));
+                    fetched[n] = 0;
+                    full = fetched;
+                }
+            }
+            sqlite3_finalize(st);
+        }
+        sqlite3_close(db);
+    }
+    if (!full || !full[0]) return;
+
+    /* 截断：字符上限 + 行数上限；Tab 换成两个空格（tooltip 不认 \t，Ditto 同） */
+    int cap  = (int)(sizeof(g_tipBuf) / sizeof(g_tipBuf[0])) - 1;
+    int maxC = g_dc.tipChars;  if (maxC < 1 || maxC > cap) maxC = cap;
+    int maxL = g_dc.tipLines;  if (maxL < 1) maxL = 1;
+    int o = 0, lines = 1;
+    for (int i = 0; full[i]; i++) {
+        WCHAR c = full[i];
+        if (c == L'\r') continue;
+        if (c == L'\n') {
+            if (lines >= maxL) break;
+            lines++;
+            if (o + 1 > cap) break;
+            g_tipBuf[o++] = L'\n';
+            continue;
+        }
+        if (c == L'\t') {
+            if (o + 2 > maxC) break;
+            g_tipBuf[o++] = L' '; g_tipBuf[o++] = L' ';
+            continue;
+        }
+        if (o >= maxC) break;
+        g_tipBuf[o++] = c;
+    }
+    g_tipBuf[o] = 0;
 }
 
 /* ================= 缩略图 ================= */
@@ -574,6 +759,7 @@ static void SendPasteKeystroke(void) {
    退出计时留到最后一步（见 DoHideClose）。 */
 static void HideIfVisible(void) {
     if (!g_visible) return;
+    TipHide();                                       /* 别把提示留在屏幕上 */
     ShowWindow(g_hwnd, SW_HIDE);
     g_visible = FALSE;
 }
@@ -877,6 +1063,20 @@ static void GdiText(const WCHAR* s, HFONT f, COLORREF c, float x, float y,
     SelectObject(g_memDC, old);
 }
 
+/* alpha 的通用表示法（Ditto / Photoshop 一个路子）：先铺棋盘格，再把半透明的
+   颜色压上去 —— 否则 #RRGGBBAA 里的 alpha 完全看不出来。 */
+static void DrawCheckerboard(Gdiplus::Graphics* g, float x, float y, float w, float h) {
+    Gdiplus::SolidBrush b1(Gdiplus::Color(0xFFFFFFFF));
+    Gdiplus::SolidBrush b2(Gdiplus::Color(0xFFC8C8C8));
+    float cell = (w >= 16.0f) ? 4.0f : 2.0f;
+    for (float yy = y, iy = 0.0f; yy < y + h; yy += cell, iy += 1.0f) {
+        for (float xx = x, ix = 0.0f; xx < x + w; xx += cell, ix += 1.0f) {
+            BOOL odd = (((int)ix + (int)iy) & 1) != 0;
+            g->FillRectangle(odd ? &b2 : &b1, Gdiplus::RectF(xx, yy, cell, cell));
+        }
+    }
+}
+
 static BOOL Render(void) {
     if (!g_memDC || !g_bmp) return FALSE;
 
@@ -938,6 +1138,28 @@ static BOOL Render(void) {
             }
             LeaveCriticalSection(&g_thumbLock);
         }
+        /* 色值条目：文字左侧一块颜色（照 Ditto）。
+           尺寸比 Ditto 略收：Ditto 用满行高，我们一行里可能排两行字，
+           满行高的方块太大，所以按缩略图那样上下各留一个 padding。 */
+        if (g_items[i].hasSwatch) {
+            float box = h - 2.0f * g_thumbPad;
+            float bx  = g_gutterW + 6.0f * g_k;
+            float by  = top + (h - box) * 0.5f;
+            BYTE r = GetRValue(g_items[i].swatch);
+            BYTE gg = GetGValue(g_items[i].swatch);
+            BYTE bb = GetBValue(g_items[i].swatch);
+            if (g_items[i].swatchAlpha < 255) {
+                DrawCheckerboard(&g, bx, by, box, box);
+                Gdiplus::SolidBrush br(Gdiplus::Color((BYTE)g_items[i].swatchAlpha,
+                                                      r, gg, bb));
+                g.FillRectangle(&br, Gdiplus::RectF(bx, by, box, box));
+            } else {
+                Gdiplus::SolidBrush br(Gdiplus::Color(255, r, gg, bb));
+                g.FillRectangle(&br, Gdiplus::RectF(bx, by, box, box));
+            }
+            /* 描边：白底上的白色（#FFFFFF）不描就看不见 */
+            g.DrawRectangle(&penBorder, bx, by, box, box);
+        }
     }
 
     g.ResetClip();
@@ -995,6 +1217,8 @@ static BOOL Render(void) {
         float tx = g_gutterW + 6.0f * g_k;
         if (g_items[i].hasImage)
             tx += g_thumbW[i] + 8.0f * g_k;   /* 让开缩略图**实际**的宽度 */
+        if (g_items[i].hasSwatch)
+            tx += (h - 2.0f * g_thumbPad) + 6.0f * g_k;   /* 让开色块 */
         if (g_items[i].hasImage && g_items[i].lines <= 1) {
             GdiText(g_items[i].text[0], g_fontRow, CR(C_TEXT),
                     tx, top, (float)g_pxW - tx - 8.0f * g_k, h, DT_LEFT, TRUE);
@@ -1115,6 +1339,7 @@ static void DoShow(void) {
         SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         g_visible = TRUE;
+        TipUpdate();          /* 窗口大小定下来之后才能挂 tooltip 的区域 */
     } else {
         Render();
     }
@@ -1176,6 +1401,7 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == TID_LIFE)  { DoHideClose(); return 0; }
         if (wp == TID_GRACE) { DestroyWindow(hwnd); return 0; }
+        if (wp == TID_TIP)  { TipHide(); return 0; }   /* Ditto 的 ToolTipTimeout */
         if (wp == TID_KA) {
             if (g_visible && GetTickCount64() - g_lastKa > HELP_KA_TIMEOUT_MS)
                 DestroyWindow(hwnd);
@@ -1219,6 +1445,18 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int row = RowAt(y);
         /* 只改选中，**不滚动** —— 悬停滚动会让窗口跟着光标跑 */
         if (row >= 0 && row != g_sel) { g_sel = row; Render(); }
+        /* 悬停提示跟着走：行变了换提示，移出列表就收。
+           ClientToScreen 用消息里的客户坐标，别用 GetCursorPos ——
+           两者到达时间有差，会弹到上一次经过的位置。 */
+        if (row >= 0) {
+            if (g_tipRow != row) {
+                POINT scr = { (short)LOWORD(lp), (short)HIWORD(lp) };
+                ClientToScreen(g_hwnd, &scr);
+                TipShowAt(row, scr);
+            }
+        } else if (g_tipRow >= 0) {
+            TipHide();
+        }
         return 0;
     }
     case WM_LBUTTONDOWN: {
@@ -1278,10 +1516,22 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_scrollY -= (d / WHEEL_DELTA) * (int)(g_rowH1 * 3.0f);
             ClampScroll();
             Render();
+            TipHide();                    /* 行位全变了，旧提示已经指错行 */
         }
         return 0;
     }
+    case WM_NOTIFY: {
+        NMHDR* nm = (NMHDR*)lp;
+        if (g_tip && nm->hwndFrom == g_tip && nm->code == TTN_NEEDTEXTW) {
+            NMTTDISPINFOW* di = (NMTTDISPINFOW*)lp;
+            TipTextOf(g_sel);          /* 悬停即选中，所以问的就是当前选中行 */
+            di->lpszText = g_tipBuf[0] ? g_tipBuf : NULL;   /* 空 = 不弹 */
+            return TRUE;
+        }
+        break;
+    }
     case WM_DESTROY:
+        TipDestroy();
         PostQuitMessage(0);
         return 0;
     default:
@@ -1305,6 +1555,59 @@ static void DpiAware(void) {
 static void BuildDbPath(void) {
     if (!g_dirPath[0]) return;
     _snwprintf_s(g_dbPath, DITTO_DIR_MAX, _TRUNCATE, L"%s\\Ditto.db", g_dirPath);
+}
+
+/* ================= Ditto 的设置（便携版：<DittoDir>\Ditto.Settings） =================
+   便携版 Ditto 把自己的设置写在这个文件里 —— **UTF-16 LE 带 BOM 的 INI**，
+   不是注册表。我们只读关心的四项，读不到就用 Ditto 自己的默认值：
+       DrawCopiedColorCode  1     色值条目画色块
+       MaxToolTipCharacters 1000  悬停提示的字符上限
+       MaxToolTipLines      30    悬停提示的行数上限
+       ToolTipTimeout       -1    -1 = 默认 5 秒，0 = 不显示
+   ★★ 这些键在用户的 Ditto.Settings 里通常**根本不存在**（Ditto 只在改过时才写），
+      所以"读不到"是常态，不是失败 —— 别把它记成错误。
+   ★ 不把它们做成 CapsEnhance.ini 的配置项：开关应该只有一处（在 Ditto 里改），
+      两边各有一个开关、值还不一致，是最难排查的那类问题（也省掉"八处"改动）。 */
+/* 在一段 UTF-16 文本里按行找 key=value */
+static BOOL DsFindInt(const WCHAR* txt, size_t nch, const WCHAR* key, int* out) {
+    size_t kl = wcslen(key);
+    for (size_t i = 0; i < nch; ) {
+        size_t j = i;
+        while (j < nch && txt[j] != L'\n') j++;
+        size_t s = i;
+        while (s < j && (txt[s] == L' ' || txt[s] == L'\t' || txt[s] == L'\r')) s++;
+        if (s + kl < j && _wcsnicmp(txt + s, key, kl) == 0) {
+            size_t e = s + kl;
+            while (e < j && (txt[e] == L' ' || txt[e] == L'\t')) e++;
+            if (e < j && txt[e] == L'=') { *out = _wtoi(txt + e + 1); return TRUE; }
+        }
+        i = (j < nch) ? j + 1 : nch;
+    }
+    return FALSE;
+}
+
+static void DsLoad(void) {
+    if (!g_dirPath[0]) return;
+    WCHAR path[DITTO_DIR_MAX + 32];
+    _snwprintf_s(path, (int)(sizeof(path) / sizeof(path[0])), _TRUNCATE,
+                 L"%s\\Ditto.Settings", g_dirPath);
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    static BYTE raw[262144];
+    DWORD got = 0;
+    BOOL rd = ReadFile(f, raw, (DWORD)sizeof(raw) - 2, &got, NULL);
+    CloseHandle(f);
+    if (!rd || got < 4) return;
+    if (!(raw[0] == 0xFF && raw[1] == 0xFE)) return;   /* 只认 UTF-16 LE */
+    raw[got] = 0; raw[got + 1] = 0;
+    const WCHAR* txt = (const WCHAR*)(raw + 2);
+    size_t nch = (size_t)((got - 2) / 2);
+    int v = 0;
+    if (DsFindInt(txt, nch, L"DrawCopiedColorCode", &v)) g_dc.drawColorCode = (v != 0);
+    if (DsFindInt(txt, nch, L"MaxToolTipCharacters", &v) && v > 0)  g_dc.tipChars = v;
+    if (DsFindInt(txt, nch, L"MaxToolTipLines", &v) && v > 0)       g_dc.tipLines = v;
+    if (DsFindInt(txt, nch, L"ToolTipTimeout", &v))                 g_dc.tipTimeoutMs = v;
 }
 
 /* 手动双击（不带 --dir）时兜底读一次 ini：与 help/help.c 读 ImeCapsMode 同一个
@@ -1382,6 +1685,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     }
     if (!g_dirPath[0]) LoadDbPathFromIni();
     BuildDbPath();
+    DsLoad();                       /* Ditto.Settings：读不到就全用 Ditto 的默认值 */
     /* "转 Ditto 本体"按钮只在 Ditto.exe 真的存在时才画/才响应 —— 靠猜的
        按钮点了没反应是最差的那种 UI。检测一次就够：一次会话里目录不会变。 */
     {

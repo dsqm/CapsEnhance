@@ -21,6 +21,10 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\test_sci.obj test\test_sci.c || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\test_config.obj test\test_config.c || exit /b 1
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
+   /Isrc /c /Foobj\colorcode_test.obj src\colorcode.c || exit /b 1
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
+   /Isrc /c /Foobj\test_color.obj test\test_color.c || exit /b 1
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\test_nav.obj obj\nav_test.obj obj\send_test.obj obj\config_test.obj ^
    /link /OUT:bin\test_nav.exe ^
@@ -35,6 +39,9 @@ cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\test_config.obj obj\config_test.obj obj\keymap_test.obj ^
    /link /OUT:bin\test_config.exe user32.lib advapi32.lib /SUBSYSTEM:CONSOLE || exit /b 1
+cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
+   obj\test_color.obj obj\colorcode_test.obj ^
+   /link /OUT:bin\test_color.exe /SUBSYSTEM:CONSOLE || exit /b 1
 echo [OK] compiled. running test_nav (word-jump algorithm)...
 ".\bin\test_nav.exe"
 set NAVRC=%errorlevel%
@@ -46,6 +53,11 @@ echo.
 echo [OK] running test_config (ini parsing)...
 ".\bin\test_config.exe"
 set CFGRC=%errorlevel%
+echo.
+echo [OK] running test_color (color-code parsing)...
+".\bin\test_color.exe"
+set COLORRC=%errorlevel%
 if not "%NAVRC%"=="0" exit /b %NAVRC%
 if not "%SCIRC%"=="0" exit /b %SCIRC%
-exit /b %CFGRC%
+if not "%CFGRC%"=="0" exit /b %CFGRC%
+exit /b %COLORRC%
