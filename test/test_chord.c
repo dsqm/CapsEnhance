@@ -1599,8 +1599,11 @@ int main(void) {
                   "AE: 拉回后整窗可见（完全落在工作区内）");
             CHECK(!curStable || PlacementMatches(&mi.rcWork, tgt, wr),
                   "AE: 拉回后落点 = 既定规则（左上角对齐光标，放不下就钳进工作区）");
-            CHECK(tgt.x >= wr.left && tgt.x < wr.right &&
-                  tgt.y >= wr.top && tgt.y < wr.bottom,
+            /* 同样要看 curStable：否则只要有别的进程（用户自己）动了一下鼠标，
+               tgt 就已经不是我们刚刚对准的那个点了 —— 这条断言会把用户的鼠标动作
+               当成自己的失败（CI 上没人碰鼠标，本机调试时却经常碰）。 */
+            CHECK(!curStable || (tgt.x >= wr.left && tgt.x < wr.right &&
+                  tgt.y >= wr.top && tgt.y < wr.bottom),
                   "AE: 光标仍在窗口内（伸手就能抓到）");
 
             /* 最大化：位置由系统按显示器算、给它的 (x,y) 会被忽略，所以挪到
