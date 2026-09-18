@@ -361,7 +361,8 @@ WPS 置位的回读校验返回**三态**：
 - **只挪顶层窗口**：Chromium 系 / UWP 的前台窗口往往是内容子窗口，挪它等于把它从父窗口里撕出来 → 一律 `GetAncestor(GA_ROOT)`。桌面（`Progman` / `WorkerW`）与任务栏（`Shell_TrayWnd` / `Shell_SecondaryTrayWnd`）按类名挡掉；前台是本进程自己（托盘菜单）时也直接返回。
 - **全屏窗口不动**，而且判定必须在 `SW_RESTORE` **之前**。全屏窗口在系统眼里就是"最大化铺满"，照原流程走是 `SW_RESTORE` → `SetWindowPos` → `SW_MAXIMIZE` 又铺回原处：用户看到的是"**挪跟没挪一样，只会抖动一下**"，独占全屏的程序还会因为这一来一回掉出全屏。这不只是"少做个无用功"，是**不能做**。判据抽成 `WinIsFullscreen(hwnd)`（窗口矩形 `EqualRect` 显示器 `rcMonitor`），与 `drag.c` 的 `DragBegin` **共用同一个函数** —— 两边标准必须一致，否则会出现"拖动不让动、`C+Q` 却去动"这种自相矛盾的行为。取 `rcMonitor` 而非 `rcWork`：铺满整屏、盖住任务栏那一侧的才算全屏；`MONITOR_DEFAULTTONEAREST` 让坐标悬空的窗口也能落到最近那块屏上，不会因为查不到显示器就误判。查询失败时返回 `FALSE`（当普通窗口处理）：宁可让它挪，也不要因为一次查询失败把功能整个吞掉。
 - **放在执行线程**（`act.c` 的 `RunJob`）：`SetWindowPos` 要向对方窗口过程发 `WM_WINDOWPOSCHANGING`/`CHANGED`，对方卡住时同步调用能一直等下去 —— 与按词跳转/探测同一个根因（见 `act.c` 顶部）。非最大化的路径带 `SWP_ASYNCWINDOWPOS`：文档明确"调用线程与窗口所属线程不在同一输入队列时，系统把请求**投递**过去"，本线程不必陪着等。
-- **坐标系与 DPI**：本进程**没有声明 DPI 感知**，Windows 会把整个桌面按系统 DPI 统一虚拟化后交给我们 —— `GetCursorPos` / `MonitorFromPoint` / `GetWindowRect` / `SetWindowPos` 用的是**同一个**（本进程的）坐标空间，读与写自洽，所以主副屏缩放比例不同也能落到光标处（依据：MS「High DPI Desktop Application Development on Windows」——"Windows scales and converts DPI-sensitive information from some APIs to the coordinate space of the calling thread"）。将来若给本体声明 Per-Monitor 感知，这段代码不用改：那只是把同一个自洽关系挪到物理像素空间。
+- **坐标系与 DPI**：本进程声明了 **Per-Monitor V2**（`WinInitDpiAwareness`，`WinMain` 第一件事就做，理由见[坐标空间](#坐标空间为什么主进程必须声明-dpi-感知)）—— 低级鼠标钩子给的物理像素与本进程 API 处在**同一个**空间，`GetCursorPos` / `MonitorFromPoint` / `GetWindowRect` / `SetWindowPos` 读与写自洽，主副屏缩放比例不同也能落到光标处。
+  ★ 这里原先写的是"本进程**没有**声明 DPI 感知、由系统统一虚拟化"：那是**修复前**的状态，对应的正是"只能拖有焦点的窗口""窗口比光标多跑一个缩放比"两个真实 bug。别照那个前提改代码。
 - 动作**不发键**：`SINGLE_SHOT`（不进重复节奏、不做松手补齐）与 `NO_SHIFT`（不吃选区修饰）都写在键位表里，`Q` 也不参与"发 3 次"的增强语义。
 
 ---
@@ -857,6 +858,12 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 所有构建（含 `build.bat`）统一 **`/W4`**，CI 里再跑一轮 `/analyze`：这两级都抓过真实缺陷（`act.c` 停止标志 Interlocked 混用、`config.c` "按 A 分配按 B 读"），代价只是编译时间。目前全项目 `/W4` + `/analyze` **零告警**，新增告警会立刻被看见而不是淹在已知噪音里。
 
+### 产物落点、图标、四个 exe 的同目录约定
+
+- **产物落点**：中间产物（obj / res / 静态分析输出）全落在 `obj\`，`bin\` 只产出 exe 与运行文件。发布 = 直接拿走 `bin\`。
+- **图标**：`res\app.rc` 把 `res\app.ico` 作为资源 **#1** 编进**本体** exe（`main.c` 按 `MAKEINTRESOURCEW(1)` 取，`build.bat` 只把 `obj\app_res.obj` 链进第一条链接命令，另外三个 exe 不带图标）。`app.ico` 里带 16/24/32 三帧，帧源是 `res\icon16.png` / `icon24.png` / `icon32.png`。换图标：替换三张 PNG 后自己生成同名 `app.ico`（仓库里没有打包脚本，用任意 ICO 工具即可），再构建。`app.rc` 必须保持 ASCII（`rc.exe` 按 ANSI 读它）。
+- **四个 exe 必须同目录**：托盘菜单的"设置"按**同目录**找 `CapsEnhanceSettings.exe`；主程序按同目录找 `CapsEnhanceHelp.exe` / `CapsEnhanceClip.exe`；设置程序也按同目录找 `CapsEnhance.ini` 与 `CapsEnhance.exe`。三处都只做同目录查找，**不搜索 PATH**。
+
 ---
 
 ## 可复现构建与跨机哈希差异
@@ -872,4 +879,4 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 **顺带一个容易误判的点**：exe 的节按 512 字节对齐，几百字节的代码变化可能根本不体现在文件大小上（大小相同 ≠ 内容相同）。要判断是否同源看哈希；要判断工具链是否一致看 `[ENV]` 行。
 
-> `bin` 下的 `*.obj` 是编译中间产物（已随 `*.log`、`*.exe` 一起被 `.gitignore` 忽略），可随时删除，构建会自动重新生成。
+> 编译中间产物一律落在 `obj\`（静态分析另落在 `obj\an\`），`bin\` 只有 exe 与运行文件（ini / log）—— 发布时直接拿走 `bin\` 即可，不会带出一堆 `.obj`。`bin\`、`obj\`、`*.obj`、`*.exe`、`*.log` 都在 `.gitignore` 里，可随时删除，构建会重新生成。

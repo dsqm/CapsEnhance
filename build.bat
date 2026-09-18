@@ -47,7 +47,8 @@ rem (Requires VS2019 16.6+ / MSVC 19.26+, i.e. any current toolset.)
 rem
 rem NOTE: identical *size* across two machines still requires the same MSVC
 rem toolset and Windows SDK version -- those two embed different instruction
-rem selection and CRT code. See README "build artifacts differ" section.
+rem selection and CRT code. See docs/DEVELOPMENT.md ("reproducible builds /
+rem cross-machine hash differences").
 rem
 rem /TP = compile every TU as C++. The sources are still written in C style
 rem (see src/cap.h's CINTERFACE bridge); the switch exists so the codebase can

@@ -76,7 +76,7 @@ typedef enum {
 
    **改默认值时务必全局搜这个数值**：源码注释、ini 模板、ini 升级块、以及
    test_config.c 的断言与断言消息里都可能写死它（历史上"默认从 3 改成 2"时
-   就有三处文案没跟着改，见 README 的"改默认值"小节）。 */
+   就有三处文案没跟着改，见 DEVELOPMENT.md 的"配置项的设计与新增清单"）。 */
 #define WHEEL_HMUL_DEFAULT 1
 #define STR2(x) #x
 #define STR(x)  STR2(x)
