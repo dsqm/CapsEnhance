@@ -84,7 +84,7 @@ void HelpTick(void) { }
 void HelpKaTick(void) { }
 static void ResetHelpRec(void) { g_helpShow = 0; g_helpHide = 0; }
 
-/* 剪贴板浮层（C+Alt+V）：与帮助同一类"只是拉起另一个 exe 的窗口"，同样桩掉 ——
+/* 剪贴板浮层（C+V）：与帮助同一类"只是拉起另一个 exe 的窗口"，同样桩掉 ——
    真去 CreateProcess 会让这条单元测试依赖 bin 里有没有那个 exe。
    这里**故意**把 ClipIsOpen 做成跟着 ClipShow/ClipHide 走：钩子据它决定
    "要不要替浮层吞 Esc"，所以它必须反映真实的开合，而不是恒真/恒假。 */
