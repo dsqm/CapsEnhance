@@ -260,6 +260,10 @@ static DWORD WINAPI DragThread(LPVOID p) {
         HWND hwnd = NULL;
         POINT tl, to, org, press;
         int w = 0, h = 0, ticks = 0;
+        /* 还原前的矩形（只在"最大化窗口拖过阈值"这一拍里有用，见阶段 0/1）：
+           只有执行线程读写，不进锁、不跨线程。 */
+        RECT restoreFrom;
+        BOOL haveRestoreFrom = FALSE;
         EnterCriticalSection(&s_cs);
         hwnd = s_hwnd;
         endReq = s_endReq;
@@ -293,7 +297,11 @@ static DWORD WINAPI DragThread(LPVOID p) {
                 running = FALSE;
                 continue;
             }
-            /* 越过阈值：现在才异步还原，下一拍等它落地（阶段 1 的有界轮询）。 */
+            /* 越过阈值：现在才异步还原，下一拍等它落地（阶段 1 的有界轮询）。
+               先把"还原前那份占满整屏的矩形"记下来 —— 阶段 1 要用它判断还原
+               **真的落地了**（只等 IsZoomed 不够，见那里）。取不到就没有这条
+               判据，退回只看 IsZoomed 的老行为。 */
+            haveRestoreFrom = (GetWindowRect(hwnd, &restoreFrom) != FALSE);
             PostMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE, 0);
             EnterCriticalSection(&s_cs);
             s_waitDragOut = FALSE;
@@ -343,6 +351,30 @@ static DWORD WINAPI DragThread(LPVOID p) {
                 InterlockedExchange(&s_active, 0);
                 running = FALSE;
                 continue;
+            }
+            /* ★ 只等 IsZoomed 变假**不算还原落地**：还原是"先清样式、再把窗口挪回
+               普通位置与尺寸"两步，而我们是从**别的线程**读它的 —— 中间那个瞬间
+               IsZoomed 已经为假、矩形还是最大化时那份占满整屏的。拿它当抓取基准
+               的话，整次拖拽的落点就停在屏幕角上（CI 上"AF: 还原后位置随光标"
+               挂掉即是此因；以前那个"多跑一段阈值位移"的缺陷反而把症状盖住了）。
+               所以继续等到矩形**离开了还原前那一份**为止，同样有界。 */
+            if (haveRestoreFrom) {
+                int waited2 = 0;
+                BOOL alive = TRUE;
+                while (EqualRect(&rc, &restoreFrom) && waited2 < DRAG_RESTORE_MAX) {
+                    Sleep(DRAG_SETTLE_MS);
+                    waited2 += DRAG_SETTLE_MS;
+                    if (!GetWindowRect(hwnd, &rc)) { alive = FALSE; break; }
+                }
+                if (!alive || EqualRect(&rc, &restoreFrom)) {
+                    /* 窗口没了，或还原后矩形一点没变 = 基准不可信。
+                       与"还原未落地"同一处理。 */
+                    if (g_recording.load() && alive)
+                        CapLog("  [拖拽] 还原后矩形未变，本次作废");
+                    InterlockedExchange(&s_active, 0);
+                    running = FALSE;
+                    continue;
+                }
             }
             EnterCriticalSection(&s_cs);
             s_wndTL.x = rc.left;

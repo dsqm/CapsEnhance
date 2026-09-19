@@ -1974,6 +1974,8 @@ int main(void) {
             /* ⑦ **拖出阈值**（AltSnap 同款 DragThreshold + DragOutThresholdPx）：
                最大化窗口按下即还原会把窗口缩小，所以点一下（手没动）**必须什么都不做**。
                阈值内的小位移也不动；拖过阈值才开始还原 + 跟随。 */
+            RECT normRc;
+            GetWindowRect(w, &normRc);          /* 最大化之前的普通位置：⑦-3 的落点判据 */
             ShowWindow(w, SW_MAXIMIZE);
             Pump(60);
             CHECK(IsZoomed(w) != FALSE, "AF: 前置条件 —— 窗口已最大化");
@@ -2022,6 +2024,12 @@ int main(void) {
                 GetWindowRect(w, &rr);
                 CHECK(rr.left != maxRc.left || rr.top != maxRc.top,
                       "AF: 还原后位置随光标（不再占满整屏）");
+                /* 落点的**精确**判据：还原回普通位置，且不被"拖出阈值"那段位移推走。
+                   上面那条只排除"还占满整屏"，抓不到"停在屏幕角上"或"多跑 20~100px"
+                   —— 这两个正是 drag.c 里 `org` 快照与"等 IsZoomed 就当还原落地"
+                   两处缺陷各自的症状（后者在 CI 上把窗口放到了最大化矩形那一点）。 */
+                CHECK(rr.left == normRc.left && rr.top == normRc.top,
+                      "AF: 落点 = 最大化之前的普通位置（无阈值偏移、无屏幕角错位）");
                 MousePt(WM_LBUTTONUP, big);
                 Pump(60);
                 Key(CLI_CAPS, FALSE); Pump(2);
