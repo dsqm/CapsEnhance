@@ -48,7 +48,12 @@
    占用：3 × 128 条 × 64 字符的静态数组（约 48KB），无动态增长。 */
 
 /* CFG_MAX_ENTRIES / CFG_NAME_MAX 在 cap.h（设置程序也要用） */
-#define CFG_VAL_LEN     256   /* 配置值缓冲：键名短，值留宽一点，宁可截断不可越界 */
+#define CFG_VAL_LEN     256   /* 配置值缓冲：键名短，值留宽一点。
+                                 ★ 装进更窄的目标时必须用 `_snwprintf_s(...,
+                                 _TRUNCATE, ...)`，**不能**用 `wcscpy_s`：后者把
+                                 "目标放不下"当无效参数处理 → 直接 fastfail
+                                 （0xC0000409），既不截断也不返回错误。用户手写的
+                                 ini 里一个长字体名就能让本体与设置程序一起启动即崩。 */
 
 /* ini 文件大小上限。**读取、升级补写、读-改-写保存三条路必须是同一个值**：
    以前读取路径是 64KB、读改写路径是 1MB，于是 64KB~1MB 之间的 ini 在设置程序里
@@ -494,9 +499,9 @@ void ConfigLoadFrom(const WCHAR* path) {
                    规范化 —— 相对路径的基准由**使用者**决定（主程序按自己的
                    exe 目录展开），在这里展开就等于把基准写在两处。 */
                 else if (_wcsicmp(key, L"dittodir") == 0)
-                    wcscpy_s(g_dittoDir, DITTO_DIR_MAX, val);
+                    _snwprintf_s(g_dittoDir, DITTO_DIR_MAX, _TRUNCATE, L"%s", val);
                 else if (_wcsicmp(key, L"clipfont") == 0)
-                    wcscpy_s(g_clipFont, CLIP_FONT_MAX, val);
+                    _snwprintf_s(g_clipFont, CLIP_FONT_MAX, _TRUNCATE, L"%s", val);
                 else if (_wcsicmp(key, L"clipfontsize") == 0)
                     g_clipFontSize = ClampClipFontSize(ParseIntW(val, CLIP_FONT_SIZE_DEFAULT));
                 else if (_wcsicmp(key, L"clipclickpaste") == 0)
@@ -805,6 +810,32 @@ const char* ConfigUpgradeKeyName(int i) {
    （见 776f468 与 ConfigUpgradeFile 里的 BOM 漏算）。std::string 自己管增长，
    "容量算错"这个缺陷类别直接从代码里消失，所以这层包装不再需要。 */
 
+/* 是否是 [段名] 行；sec 为空则"是否为一行段头"。
+   ★ 宽容度必须与**读端**同源（读端见 ConfigLoadFrom 的段名解析：取 [ 与 ] 之间、
+     trim、大小写不敏感，并且认 `[Auto Disable]` 这类带空格的旧写法）。写端比读端
+     严格就会造成实际发生过的损坏：`[General ]` 被当成"别的段" → 保存时另起一份
+     规范 `[General]`，而读时后段胜出 —— 用户在设置界面改的东西全落进没人读的那一份。
+   一条规则同时兜住两种宽容：**取 [ 与 ] 之间的文本、去掉全部空白、大小写不敏感
+   地等于 sec**。于是 `[General ]` / `[ General ]` / `[Auto Disable]` 都命中规范名。 */
+static BOOL LineIsSection(const char* s, size_t len, const char* sec) {
+    size_t i = 0;
+    while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) i++;
+    if (i >= len || s[i] != '[') return FALSE;
+    i++;
+    if (!sec) return TRUE;
+    size_t j = i;
+    while (j < len && s[j] != ']') j++;      /* 没有收尾的 ] 时按"到行尾"算，与读端一致 */
+    char name[CFG_NAME_MAX];
+    size_t o = 0;
+    for (size_t k = i; k < j; k++) {
+        if (s[k] == ' ' || s[k] == '\t') continue;
+        if (o + 1 >= sizeof(name)) return FALSE;   /* 名字超长 = 不是我们的段 */
+        name[o++] = s[k];
+    }
+    name[o] = 0;
+    return _stricmp(name, sec) == 0;
+}
+
 /* 复制一行到定长缓冲（结果保证以 0 结尾）。
    长度同时受**三个**约束：缓冲容量、到缓冲结尾的距离、行内长度。
    显式写出"到缓冲结尾的距离"这一项不是多余的：`ll < 159 ? ll : 159` 这种
@@ -845,8 +876,9 @@ void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
         CopyLine(line, body + bodyLen, tmp, sizeof(tmp));
         char* s = tmp;
         while (*s == ' ' || *s == '\t' || *s == '\r') s++;
-        if (*s == '[') {
-            if (_strnicmp(s, "[general]", 9) == 0 && !genStart)
+        size_t sl = strlen(s);
+        if (LineIsSection(s, sl, NULL)) {
+            if (LineIsSection(s, sl, "general") && !genStart)
                 genStart = line;
             else if (genStart) { genEnd = line; break; }
         }
@@ -1053,13 +1085,15 @@ int  ConfigGetClipFontSize(void)     { return g_clipFontSize; }
 BOOL ConfigGetClipClickPaste(void)   { return g_clipClickPaste; }
 void ConfigSetClipFont(const WCHAR* v) {
     if (!v) { g_clipFont[0] = 0; return; }
-    wcscpy_s(g_clipFont, CLIP_FONT_MAX, v);
+    /* 截断而不是 fastfail：见 CFG_VAL_LEN 处那条说明（字体名走系统对话框拿到，
+       上限本就是 LF_FULLFACESIZE，但界面之外还有手改 ini 这条路） */
+    _snwprintf_s(g_clipFont, CLIP_FONT_MAX, _TRUNCATE, L"%s", v);
 }
 void ConfigSetClipFontSize(int v) { g_clipFontSize = ClampClipFontSize(v); }
 void ConfigSetClipClickPaste(BOOL v) { g_clipClickPaste = !!v; }
 void ConfigSetDittoDir(const WCHAR* v) {
     if (!v) { g_dittoDir[0] = 0; return; }
-    wcscpy_s(g_dittoDir, DITTO_DIR_MAX, v); /* 过长按缓冲截断（_TRUNCATE 语义） */
+    _snwprintf_s(g_dittoDir, DITTO_DIR_MAX, _TRUNCATE, L"%s", v);  /* 过长按缓冲截断 */
 }
 
 /* 名单整体替换（顺序 = 传入顺序）。逐条走 AddEntry 才能拿到"去空白 / 去 .exe
@@ -1208,18 +1242,6 @@ static BOOL LineIsKey(const char* s, size_t len, const char* key) {
     i += klen;
     while (i < len && (s[i] == ' ' || s[i] == '\t')) i++;
     return (i >= len) || (s[i] == '=');
-}
-/* 是否是 [段名] 行；sec 为空则"任意段行" */
-static BOOL LineIsSection(const char* s, size_t len, const char* sec) {
-    size_t i = 0;
-    while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) i++;
-    if (i >= len || s[i] != '[') return FALSE;
-    i++;
-    if (!sec) return TRUE;
-    size_t sl = strlen(sec);
-    if (len - i < sl + 1) return FALSE;
-    if (_strnicmp(s + i, sec, sl) != 0) return FALSE;
-    return s[i + sl] == ']';
 }
 static BOOL LineIsBlankOrComment(const char* s, size_t len) {
     size_t i = 0;

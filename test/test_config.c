@@ -35,6 +35,9 @@ void ConfigSetList(int list, const WCHAR* const* names, int n);
 int  ConfigListCount(int list);
 const WCHAR* ConfigListAt(int list, int i);
 BOOL ConfigSaveFile(const WCHAR* path);
+/* 字符串值写回：ClipFont（超长必须截断，见下面那组断言） */
+void ConfigSetClipFont(const WCHAR* v);
+const WCHAR* ConfigGetClipFont(void);
 
 static int fails = 0;
 #define EXPECT(cond, name) do { \
@@ -76,6 +79,13 @@ static BOOL TemplateHas(const char* needle) {
     BOOL has = strstr(buf, needle) != NULL;
     free(buf);
     return has;
+}
+
+static int CountStr(const char* hay, const char* needle) {
+    int n = 0;
+    size_t nl = strlen(needle);
+    for (const char* p = hay; (p = strstr(p, needle)) != NULL; p += nl) n++;
+    return n;
 }
 
 int main(void) {
@@ -716,6 +726,68 @@ int main(void) {
         EXPECT(ConfigGetWheelHScrollMul() == 7, "SAVE: 新建文件里自定义值正确");
         EXPECT(ConfigMatchList(CFG_LIST_NOSMOOTH, L"a.exe"), "SAVE: 新建文件含名单段");
         DeleteFileW(L"obj/test/cfgsave.ini");
+    }
+    /* 读端宽容、写端也必须宽容到同一个程度。
+       读端认 `[General ]`（trim 之后再比）与 `[Auto Disable]`（带空格的旧写法），
+       而写端过去要求 `]` 紧贴段名 —— 于是这些写法在"保存"时被当成别的段：
+         · `[General ]` -> 另起一份规范 `[General]`，读时后段胜出，用户在设置界面
+           改的东西全落进没人读的那一份（表现为"改了永远没反应"）；
+         · `[Auto Disable]` -> 名单每 load/save 一轮复制一份，涨到 CFG_MAX_ENTRIES
+           之后新条目被静默丢弃。
+       这两条都是**用户配置文件里真实可能出现的写法**，所以钉成断言。 */
+    {
+        WriteIni("[General ]\r\nLogMaxKB = 777\r\n");
+        ConfigLoadFrom(L"obj/test/cfgtest.ini");
+        EXPECT(ConfigGetLogMaxKB() == 777, "SEC: [General ] 读端认得");
+        ConfigSetLogMaxKB(222);
+        EXPECT(ConfigSaveFile(L"obj/test/cfgtest.ini"), "SEC: [General ] 写回成功");
+        {
+            FILE* fr = NULL; char whole[8192]; size_t wn = 0;
+            if (fopen_s(&fr, "obj/test/cfgtest.ini", "rb") == 0 && fr) {
+                wn = fread(whole, 1, sizeof(whole) - 1, fr); fclose(fr);
+            }
+            whole[wn] = 0;
+            EXPECT(CountStr(whole, "[General") == 1,
+                   "SEC: [General ] 没有再补一份规范段（只有一份 General）");
+        }
+        ConfigLoadFrom(L"obj/test/cfgtest.ini");
+        EXPECT(ConfigGetLogMaxKB() == 222,
+               "SEC: [General ] 那份被就地改掉（设置界面的改动能落盘）");
+    }
+    {
+        WriteIni("[Auto Disable]\r\nProbeApp.exe\r\n");
+        for (int round = 0; round < 3; round++) {     /* 三个来回：复制会在这里现形 */
+            ConfigLoadFrom(L"obj/test/cfgtest.ini");
+            EXPECT(ConfigListCount(CFG_LIST_AUTODISABLE) == 1,
+                   "SEC: [Auto Disable] 旧写法每轮只读到一条（不累积）");
+            EXPECT(ConfigSaveFile(L"obj/test/cfgtest.ini"), "SEC: 旧段名写回成功");
+        }
+        FILE* fr = NULL; char whole[8192]; size_t wn = 0;
+        if (fopen_s(&fr, "obj/test/cfgtest.ini", "rb") == 0 && fr) {
+            wn = fread(whole, 1, sizeof(whole) - 1, fr); fclose(fr);
+        }
+        whole[wn] = 0;
+        /* 判据用"条目翻倍"：段头字样本身还会以注释的形式出现在那些说明块里
+           （注释会写 "[AutoDisable] ……"），所以数段头会假失败。
+           名字同样用自造的 ProbeApp：拖动名单的内置默认里有 mstsc，拿它当样本
+           会被那份默认值污染成"看起来翻倍了"。 */
+        EXPECT(CountStr(whole, "ProbeApp") == 1,
+               "SEC: 旧段名不复制名单（三个来回之后文件里仍只有一条）");
+    }
+    /* 超长的字符串值必须**截断**。
+       这条不是防御性的：wcscpy_s 把"目标放不下"当无效参数处理 → fastfail
+       （0xC0000409），所以一个手写的长字体名会让本体与设置程序一起启动即崩，
+       而用户唯一的自救入口（设置界面）也打不开。能跑到下面这一行就说明没崩。 */
+    {
+        WCHAR longFont[CLIP_FONT_MAX + 64];
+        for (int i = 0; i < (int)(sizeof(longFont) / sizeof(longFont[0]) - 1); i++)
+            longFont[i] = L'字';
+        longFont[sizeof(longFont) / sizeof(longFont[0]) - 1] = 0;
+        ConfigSetClipFont(longFont);
+        EXPECT(wcslen(ConfigGetClipFont()) == CLIP_FONT_MAX - 1,
+               "CFG: 超长 ClipFont 被截断存下（不是 fastfail）");
+        ConfigSetClipFont(L"");
+        EXPECT(ConfigGetClipFont()[0] == 0, "CFG: ClipFont 可清空（= 内置默认）");
     }
 
     /* '#' 开头不再算注释（只认 ';'）。可观测的差别：名单段里一行 "# Ghost.exe"

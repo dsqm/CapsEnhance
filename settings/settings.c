@@ -385,6 +385,7 @@ static BOOL SaveConfig(void) {
             case IDC_RUN_ADMIN: ConfigSetRunAsAdmin(GetCheck(c)); break;
             case IDC_OVER_CTRL: ConfigSetOverStepCtrl(GetCheck(c)); break;
             case IDC_SCI:       ConfigSetAllowScintillaRead(GetCheck(c)); break;
+            case IDC_CLIP_CLICK: ConfigSetClipClickPaste(GetCheck(c)); break;
             default: break;
             }
         } else if (kFields[i].isText) {
@@ -406,7 +407,6 @@ static BOOL SaveConfig(void) {
             case IDC_IME_CAPS: ConfigSetImeMode(IME_KEY_CAPS, v); break;
             case IDC_IME_LSHF: ConfigSetImeMode(IME_KEY_LSHIFT, v); break;
             case IDC_IME_RSHF:  ConfigSetImeMode(IME_KEY_RSHIFT, v); break;
-            case IDC_CLIP_CLICK: ConfigSetClipClickPaste(GetCheck(c)); break;
             default: break;
             }
         }
@@ -987,7 +987,7 @@ static void BrowseDittoDir(void) {
     /* 新版对话框要求 COM；设置进程平时不用 COM，浏览前临时起一次 */
     HRESULT hrCo = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED |
                                          COINIT_DISABLE_OLE1DDE);
-    WCHAR path[MAX_PATH] = L"";
+    WCHAR path[DITTO_DIR_MAX] = L"";   /* 与 DittoDir 同宽（浏览框取来的就是那个值） */
     /* ★ 全项目 CINTERFACE（cap.h 的迁移桥）：COM 只能走 C 形态 lpVtbl。
        IID/CLSID 常量由 uuid.lib 提供（链接行已加）。 */
     IFileOpenDialog* dlg = NULL;
@@ -1013,7 +1013,11 @@ static void BrowseDittoDir(void) {
             if (SUCCEEDED(dlg->lpVtbl->GetResult(dlg, &res))) {
                 PWSTR p = NULL;
                 if (SUCCEEDED(res->lpVtbl->GetDisplayName(res, SIGDN_FILESYSPATH, &p))) {
-                    wcscpy_s(path, MAX_PATH, p);
+                    /* 截断而非 wcscpy_s：文件路径可以长过 MAX_PATH，而
+                       SIGDN_FILESYSPATH 给的是 shell 的原样字符串 —— 装不下时
+                       wcscpy_s 是 fastfail（整个设置程序崩掉），不是截断。
+                       缓冲与 DittoDir 同宽，取到的值本来就要填进那个框。 */
+                    _snwprintf_s(path, DITTO_DIR_MAX, _TRUNCATE, L"%s", p);
                     CoTaskMemFree(p);
                 }
                 res->lpVtbl->Release(res);
