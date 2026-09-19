@@ -5,7 +5,7 @@ setlocal
 call "%~dp0..\build_env.bat"
 if errorlevel 1 exit /b 1
 
-if not exist "bin" mkdir bin
+if not exist "obj\test" mkdir obj\test
 if not exist "obj" mkdir obj
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\nav_test.obj src\nav.c || exit /b 1
@@ -27,35 +27,35 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\test_color.obj test\test_color.c || exit /b 1
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\test_nav.obj obj\nav_test.obj obj\send_test.obj obj\config_test.obj ^
-   /link /OUT:bin\test_nav.exe ^
+   /link /OUT:obj\test\test_nav.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib ^
    /SUBSYSTEM:CONSOLE || exit /b 1
 rem test_sci.c includes nav.c / send.c / config.c directly, so link only its own obj
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\test_sci.obj obj\config_test.obj ^
-   /link /OUT:bin\test_sci.exe ^
+   /link /OUT:obj\test\test_sci.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib ^
    /SUBSYSTEM:CONSOLE || exit /b 1
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\test_config.obj obj\config_test.obj obj\keymap_test.obj ^
-   /link /OUT:bin\test_config.exe user32.lib advapi32.lib /SUBSYSTEM:CONSOLE || exit /b 1
+   /link /OUT:obj\test\test_config.exe user32.lib advapi32.lib /SUBSYSTEM:CONSOLE || exit /b 1
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\test_color.obj obj\colorcode_test.obj ^
-   /link /OUT:bin\test_color.exe /SUBSYSTEM:CONSOLE || exit /b 1
+   /link /OUT:obj\test\test_color.exe /SUBSYSTEM:CONSOLE || exit /b 1
 echo [OK] compiled. running test_nav (word-jump algorithm)...
-".\bin\test_nav.exe"
+".\obj\test\test_nav.exe"
 set NAVRC=%errorlevel%
 echo.
 echo [OK] running test_sci (Scintilla channel)...
-".\bin\test_sci.exe"
+".\obj\test\test_sci.exe"
 set SCIRC=%errorlevel%
 echo.
 echo [OK] running test_config (ini parsing)...
-".\bin\test_config.exe"
+".\obj\test\test_config.exe"
 set CFGRC=%errorlevel%
 echo.
 echo [OK] running test_color (color-code parsing)...
-".\bin\test_color.exe"
+".\obj\test\test_color.exe"
 set COLORRC=%errorlevel%
 if not "%NAVRC%"=="0" exit /b %NAVRC%
 if not "%SCIRC%"=="0" exit /b %SCIRC%

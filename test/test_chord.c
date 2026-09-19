@@ -345,7 +345,7 @@ static int fails = 0;
    ConfigLoadFrom 会先把所有项复位成缺省再应用文件内容，所以每写必"干净"。 */
 static void WriteChordIni(const char* body) {
     FILE* f = NULL;
-    if (fopen_s(&f, "bin/chordtest.ini", "wb") == 0 && f) {
+    if (fopen_s(&f, "obj/test/chordtest.ini", "wb") == 0 && f) {
         fputs(body, f);
         fclose(f);
     }
@@ -420,7 +420,7 @@ static void AfDragChecks(HWND w, POINT in, RECT r0) {
 
     /* ⑤ 类名条目：命中后左键**原样透传**（不接管、不进入拖拽） */
     WriteChordIni("[DragWindowBlacklist]\r\nCapsEnhanceDragProbe\r\n");
-    ConfigLoadFrom(L"bin/chordtest.ini");
+    ConfigLoadFrom(L"obj/test/chordtest.ini");
     Key(CLI_CAPS, TRUE); Pump(2);
     CHECK(MousePt(WM_LBUTTONDOWN, in) == 0,
           "AF: 黑名单（类名条目）-> 左键透传，不接管");
@@ -429,7 +429,7 @@ static void AfDragChecks(HWND w, POINT in, RECT r0) {
 
     /* ⑥ 正常拖拽：down 吞掉 + 窗口跟随位移 + up 吞掉并收手 */
     WriteChordIni("[General]\r\n");      /* 清掉黑名单（回内置默认） */
-    ConfigLoadFrom(L"bin/chordtest.ini");
+    ConfigLoadFrom(L"obj/test/chordtest.ini");
     Key(CLI_CAPS, TRUE); Pump(2);
     POINT p1 = in;
     CHECK(MousePt(WM_LBUTTONDOWN, p1) == 1, "AF: 接管 -> 吞掉左键按下");
@@ -832,7 +832,7 @@ int main(void) {
 
     /* WheelScrollMul < 2 -> 放大关闭：不投递放大请求（物理格本来就没吞） */
     WriteChordIni("[General]\r\nWheelScrollMul = 1\r\n");
-    ConfigLoadFrom(L"bin/chordtest.ini");
+    ConfigLoadFrom(L"obj/test/chordtest.ini");
     CHECK(Wheel(120, 0) != 1 && !TakeWheelAccel(NULL, NULL),
           "N: WheelScrollMul=1 -> 不放大（完全按系统原本行为）");
     ConfigLoadFrom(L"bin/__absent__.ini");   /* 回缺省（2） */
@@ -953,7 +953,7 @@ int main(void) {
        真实落点要有真编辑器才能验；这里验的是发送层契约（可确定性断言）：
        哪种情形返回哪个模式、注入的键序列对不对。 */
     WriteChordIni("[General]\r\nMaxArrowSteps = 3\r\nOverStepMode = 1\r\n");
-    ConfigLoadFrom(L"bin/chordtest.ini");
+    ConfigLoadFrom(L"obj/test/chordtest.ini");
 
     ResetRec();
     int mode = SendArrows(DIR_LEFT, 5, FALSE);     /* 5 >= 3：超限 */
@@ -978,7 +978,7 @@ int main(void) {
           "O: 补正路径不因超限再改道（逐格 5 步、无 Ctrl）");
 
     WriteChordIni("[General]\r\nMaxArrowSteps = 3\r\nOverStepMode = 0\r\n");
-    ConfigLoadFrom(L"bin/chordtest.ini");
+    ConfigLoadFrom(L"obj/test/chordtest.ini");
     ResetRec();
     mode = SendArrows(DIR_LEFT, 5, FALSE);
     Pump(30);
@@ -1230,7 +1230,7 @@ int main(void) {
     /* 两端配成相等 -> 阶梯退化为恒定速度（而不是出错或反向提速） */
     WriteChordIni("[General]\r\nAutoScrollInterval = 1000\r\n"
                   "AutoScrollFastMs = 1000\r\n");
-    ConfigLoadFrom(L"bin/chordtest.ini");
+    ConfigLoadFrom(L"obj/test/chordtest.ini");
     ActAutoScrollWheel(120);
     CHECK(ActAutoScrollTick() == 1000, "R: 两端配成相等 -> 速度恒定 1000ms/格");
 
@@ -1281,7 +1281,7 @@ int main(void) {
 
     /* 倍数可配：3 -> 钩子仍然只投递一条请求（由工作线程注入 3 格） */
     WriteChordIni("[General]\r\nWheelHScrollMul = 3\r\n");
-    ConfigLoadFrom(L"bin/chordtest.ini");
+    ConfigLoadFrom(L"obj/test/chordtest.ini");
     Sink();
     int hd3 = 0, hm3 = 0;
     CHECK(Wheel(120, 0) == 1 && TakeWheelHAccel(&hd3, &hm3) && hm3 == 3,
@@ -1294,7 +1294,7 @@ int main(void) {
 
     /* 关闭（0）：不吞这一格，退回纵向语义 */
     WriteChordIni("[General]\r\nWheelHScrollMul = 0\r\n");
-    ConfigLoadFrom(L"bin/chordtest.ini");
+    ConfigLoadFrom(L"obj/test/chordtest.ini");
     Key(VK_LSHIFT, FALSE); Pump(2); Sink();
     Key(VK_LSHIFT, TRUE);  Pump(2); Sink();
     ResetWheelRec();
@@ -1330,7 +1330,7 @@ int main(void) {
        这么做之所以安全，是因为"模式"这层抽象还在 —— 引擎只问"增强模式生效
        吗"，从不判断按的是哪个键；以后真要改/删激活键，只改常量一处即可。 */
     WriteChordIni("[General]\r\nEnhanceKeys = X\r\nShiftKeys = Y\r\n");
-    ConfigLoadFrom(L"bin/chordtest.ini");
+    ConfigLoadFrom(L"obj/test/chordtest.ini");
     KeyMapInit();
     CHECK(ModeFindByVk(VK_LMENU) == MODE_ENHANCE && ModeFindByVk('D') == MODE_ENHANCE,
           "S: 配置里的 EnhanceKeys 被忽略 —— 增强键仍是固定的 Alt + D");
@@ -1372,14 +1372,14 @@ int main(void) {
         CHECK(me != NULL, "AD: 拿到本进程的窗口（代入前台窗口）");
         if (me) {
             WriteChordIni("[AutoDisable]\r\ntest_chord.exe\r\n");
-            ConfigLoadFrom(L"bin/chordtest.ini");
+            ConfigLoadFrom(L"obj/test/chordtest.ini");
             CHECK(ConfigIsAutoDisabled(me),
                   "AD: 该窗口的进程在名单里 -> 命中（它到前台时整段不介入）");
             CHECK(!ConfigIsAutoDisabled(NULL), "AD: 没有窗口 -> 不命中（NULL 防御）");
             CHECK(!ConfigIsNativeWordJump(me),
                   "AD: AutoDisable 名单不会连带命中 NativeWordJump（各名单各自独立）");
             WriteChordIni("[AutoDisable]\r\notherapp.exe\r\n");
-            ConfigLoadFrom(L"bin/chordtest.ini");
+            ConfigLoadFrom(L"obj/test/chordtest.ini");
             CHECK(!ConfigIsAutoDisabled(me), "AD: 名单里没有本进程 -> 不命中");
             DestroyWindow(me);
         }
@@ -1458,7 +1458,7 @@ int main(void) {
 
     /* 配置里关掉 -> 一次都不投递（钩子路径上连配置查询都不做） */
     WriteChordIni("[General]\r\nImeCapsMode = 0\r\nImeLShiftMode = 0\r\nImeRShiftMode = 0\r\n");
-    ConfigLoadFrom(L"bin/chordtest.ini");
+    ConfigLoadFrom(L"obj/test/chordtest.ini");
     Reset(); ResetImeRec();
     Key(CLI_CAPS, TRUE);   Pump(2);
     Key(CLI_CAPS, FALSE);  Pump(2);
@@ -1916,7 +1916,7 @@ int main(void) {
                窗口名单：任务栏（Shell_TrayWnd）是 AltSnap Windows 列表里的类名，
                用它当"必中"的样本最稳 —— 它一定存在。 */
             WriteChordIni("[General]\r\n");
-            ConfigLoadFrom(L"bin/chordtest.ini");
+            ConfigLoadFrom(L"obj/test/chordtest.ini");
             HWND tray = FindWindowW(L"Shell_TrayWnd", NULL);
             CHECK(tray != NULL && ConfigIsDragBlacklisted(tray),
                   "AF: 窗口名单内置默认命中任务栏（取自 AltSnap 的 Shell_TrayWnd）");
@@ -1927,13 +1927,13 @@ int main(void) {
                · 换成只写进程名，且进程名不是本测试进程 -> 不命中（证明是**两份**，
                  不是"任一份非空就全算命中"）。 */
             WriteChordIni("[DragWindowBlacklist]\r\nCapsEnhanceDragProbe\r\n");
-            ConfigLoadFrom(L"bin/chordtest.ini");
+            ConfigLoadFrom(L"obj/test/chordtest.ini");
             CHECK(ConfigIsDragBlacklisted(w),
                   "AF: [DragWindowBlacklist] 写窗口类 -> 命中");
             /* 窗口名单被显式写成空的（段还在）-> 该类名不再命中，
                而进程名单仍是内置默认 -> 探针进程也不在进程名单里 */
             WriteChordIni("[DragWindowBlacklist]\r\n[DragProcessBlacklist]\r\n");
-            ConfigLoadFrom(L"bin/chordtest.ini");
+            ConfigLoadFrom(L"obj/test/chordtest.ini");
             CHECK(!ConfigIsDragBlacklisted(w),
                   "AF: 两份都写成空段 -> 不再命中（段存在即以文件为准）");
             CHECK(tray != NULL && !ConfigIsDragBlacklisted(tray),
@@ -1952,7 +1952,7 @@ int main(void) {
                 char u8[1024];
                 WideCharToMultiByte(CP_UTF8, 0, ini, -1, u8, 1024, NULL, NULL);
                 WriteChordIni(u8);
-                ConfigLoadFrom(L"bin/chordtest.ini");
+                ConfigLoadFrom(L"obj/test/chordtest.ini");
                 CHECK(ConfigIsDragBlacklisted(w),
                       "AF: [DragProcessBlacklist] 写进程名 -> 命中");
             }
@@ -1961,7 +1961,7 @@ int main(void) {
                一个人用，配置随版本改即可）。用"旧段名 + 本该命中的条目"当样本：
                命中 = 兼容还在，不命中 = 真的被忽略了。 */
             WriteChordIni("[DragBlacklist]\r\nCapsEnhanceDragProbe\r\n");
-            ConfigLoadFrom(L"bin/chordtest.ini");
+            ConfigLoadFrom(L"obj/test/chordtest.ini");
             CHECK(!ConfigIsDragBlacklisted(w),
                   "AF: 未知段名被忽略（旧 [DragBlacklist] 不再认）");
 

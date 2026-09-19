@@ -55,14 +55,32 @@ static int ProcDpiAwareness(HANDLE h) {
     return v;   /* 0=不感知 1=系统级 2=每显示器 */
 }
 
+/* 测试 exe 住在 obj\test\，主程序在 <仓库根>\bin\ —— 从自身目录向上找
+   （历史版本住在 bin\ 同目录，向上查找对两种布局都成立）。 */
+static BOOL FindMainExe(WCHAR* exe, DWORD cap) {
+    WCHAR dir[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, dir, MAX_PATH);
+    if (!n || n >= MAX_PATH) return FALSE;
+    for (int up = 0; up < 5; up++) {
+        WCHAR* slash = NULL;
+        for (DWORD i = (DWORD)wcslen(dir) - 1; i > 0; i--)
+            if (dir[i] == L'\\') { slash = &dir[i]; break; }
+        if (!slash) return FALSE;
+        *slash = 0;                                  /* dir = 上一级目录 */
+        _snwprintf_s(exe, cap, _TRUNCATE, L"%s\\bin\\CapsEnhance.exe", dir);
+        if (GetFileAttributesW(exe) != INVALID_FILE_ATTRIBUTES) return TRUE;
+    }
+    return FALSE;
+}
+
+
 int main(void) {
     WCHAR exe[MAX_PATH];
-    DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
-    /* 去掉 restarttest.exe，换成 CapsEnhance.exe（同目录） */
-    WCHAR* slash = NULL;
-    for (DWORD i = 0; i < n; i++) if (exe[i] == L'\\') slash = &exe[i];
-    if (slash) *(slash + 1) = 0;
-    wcscat_s(exe, MAX_PATH, L"CapsEnhance.exe");
+    /* 测试 exe 住在 obj\test\，主程序在 <仓库根>\bin\ —— 从自身目录向上找 */
+    if (!FindMainExe(exe, MAX_PATH)) {
+        printf("cannot locate bin\\CapsEnhance.exe upward from my own dir\n");
+        return 2;
+    }
 
     /* 前置条件：**起跑时不能已有实例在跑**。否则下面的断言会成片失败，而原因只有一个
        （新进程被单实例守卫挡掉、立刻退出），看起来却像产品坏了 —— 这种误导性失败

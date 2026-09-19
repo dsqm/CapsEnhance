@@ -7,6 +7,35 @@
 #include <windows.h>
 #include <stdio.h>
 
+/* 测试 exe 住在 obj\test\，主程序与其 log\ 都在 <仓库根>\bin\ 下。
+   从自身目录向上找 bin\CapsEnhance.exe，找到的目录记进 g_root。 */
+static WCHAR g_root[MAX_PATH];
+
+static const WCHAR* logpattern(const WCHAR* pat) {
+    static WCHAR buf[MAX_PATH];
+    _snwprintf_s(buf, MAX_PATH, _TRUNCATE, L"%s\\log\\%s", g_root, pat);
+    return buf;
+}
+
+static BOOL FindMainExe(WCHAR* exe, DWORD cap) {
+    WCHAR dir[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, dir, MAX_PATH);
+    if (!n || n >= MAX_PATH) return FALSE;
+    for (int up = 0; up < 5; up++) {
+        WCHAR* slash = NULL;
+        for (DWORD i = (DWORD)wcslen(dir) - 1; i > 0; i--)
+            if (dir[i] == L'\\') { slash = &dir[i]; break; }
+        if (!slash) return FALSE;
+        *slash = 0;
+        _snwprintf_s(exe, cap, _TRUNCATE, L"%s\\bin\\CapsEnhance.exe", dir);
+        if (GetFileAttributesW(exe) != INVALID_FILE_ATTRIBUTES) {
+            _snwprintf_s(g_root, MAX_PATH, _TRUNCATE, L"%s\\bin", dir);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 /* 文件字节数（失败返回 -1） */
 static long long file_size(const WCHAR* p) {
     WIN32_FILE_ATTRIBUTE_DATA d;
@@ -22,12 +51,12 @@ static long long file_size(const WCHAR* p) {
    一份用户刚录的会话日志）。 */
 static void clear_new_logs(const FILETIME* startedFt) {
     WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW(L"bin\\log\\CapsEnhance*.log", &fd);
+    HANDLE h = FindFirstFileW(logpattern(L"CapsEnhance*.log"), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         if (CompareFileTime(&fd.ftLastWriteTime, startedFt) <= 0) continue;
         WCHAR p[MAX_PATH];
-        _snwprintf_s(p, MAX_PATH, _TRUNCATE, L"bin\\log\\%s", fd.cFileName);
+        _snwprintf_s(p, MAX_PATH, _TRUNCATE, L"%s\\log\\%s", g_root, fd.cFileName);
         DeleteFileW(p);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
@@ -36,14 +65,14 @@ static void clear_new_logs(const FILETIME* startedFt) {
 /* 找到本次记录新建的会话日志；有多份时取最后写的那份 */
 static int find_session(WCHAR* out, size_t cap) {
     WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW(L"bin\\log\\CapsEnhance-*.log", &fd);
+    HANDLE h = FindFirstFileW(logpattern(L"CapsEnhance-*.log"), &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
     FILETIME best = fd.ftLastWriteTime;
-    _snwprintf_s(out, cap, _TRUNCATE, L"bin\\log\\%s", fd.cFileName);
+    _snwprintf_s(out, cap, _TRUNCATE, L"%s\\log\\%s", g_root, fd.cFileName);
     while (FindNextFileW(h, &fd)) {
         if (CompareFileTime(&fd.ftLastWriteTime, &best) > 0) {
             best = fd.ftLastWriteTime;
-            _snwprintf_s(out, cap, _TRUNCATE, L"bin\\log\\%s", fd.cFileName);
+            _snwprintf_s(out, cap, _TRUNCATE, L"%s\\log\\%s", g_root, fd.cFileName);
         }
     }
     FindClose(h);
@@ -52,11 +81,10 @@ static int find_session(WCHAR* out, size_t cap) {
 
 int main(void) {
     WCHAR exe[MAX_PATH];
-    DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
-    WCHAR* slash = NULL;
-    for (DWORD i = 0; i < n; i++) if (exe[i] == L'\\') slash = &exe[i];
-    if (slash) *(slash + 1) = 0;
-    wcscat_s(exe, MAX_PATH, L"CapsEnhance.exe");
+    if (!FindMainExe(exe, MAX_PATH)) {
+        printf("cannot locate bin\\CapsEnhance.exe upward from my own dir\n");
+        return 2;
+    }
 
     /* 本次冒烟的时间起点：结束时只删比它新的日志（= 本次产生的），
        用户自己的记录一律不动。 */

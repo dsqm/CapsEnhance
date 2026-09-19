@@ -7,7 +7,7 @@ rem exercises the shipped code path, not a stub.
 setlocal
 call "%~dp0..\build_env.bat"
 if errorlevel 1 exit /b 1
-if not exist "bin" mkdir bin
+if not exist "obj\test" mkdir obj\test
 
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\nav_wps.obj      src\nav.c       || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\send_wps.obj     src\send.c     || exit /b 1
@@ -20,9 +20,9 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\wpsjump.o
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\wpsjump.obj obj\nav_wps.obj obj\send_wps.obj obj\cfg_wps.obj obj\km_wps.obj ^
    obj\wps_wps.obj obj\autodisp_wps.obj obj\bridge_wps.obj ^
-   /link /OUT:bin\wpsjump.exe ^
+   /link /OUT:obj\test\wpsjump.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib ^
    /SUBSYSTEM:CONSOLE || exit /b 1
 echo [OK] compiled. running...
-".\bin\wpsjump.exe"
+".\obj\test\wpsjump.exe"
 exit /b %errorlevel%

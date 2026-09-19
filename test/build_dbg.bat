@@ -13,15 +13,15 @@ setlocal
 call "%~dp0..\build_env.bat"
 if errorlevel 1 exit /b 1
 
-if not exist "bin" mkdir bin
+if not exist "obj\test" mkdir obj\test
 if not exist "obj" mkdir obj
 
 cl /nologo /Od /W4 /MTd /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /Foobj\ ^
    src\config.c src\keymap.c test\test_config.c ^
-   /link /OUT:bin\test_config_dbg.exe ^
+   /link /OUT:obj\test\test_config_dbg.exe ^
    user32.lib advapi32.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
 
 echo [OK] compiled (Debug CRT). running test_config_dbg...
-".\bin\test_config_dbg.exe"
+".\obj\test\test_config_dbg.exe"
 exit /b %errorlevel%

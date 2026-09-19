@@ -5,7 +5,7 @@ setlocal
 call "%~dp0..\build_env.bat"
 if errorlevel 1 exit /b 1
 
-if not exist "bin" mkdir bin
+if not exist "obj\test" mkdir obj\test
 rem test_chord.c includes main.c, which now also uses config.c and keymap.c
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\config_chord.obj src\config.c
@@ -30,7 +30,7 @@ if errorlevel 1 exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\test_chord.obj obj\config_chord.obj obj\keymap_chord.obj obj\winmove_chord.obj obj\drag_chord.obj ^
    obj\folder_chord.obj ^
-   /link /OUT:bin/test_chord.exe ^
+   /link /OUT:obj\test\test_chord.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib winmm.lib ^
    /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
@@ -43,11 +43,11 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
 if errorlevel 1 exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\dpitest.obj obj\winmove_dpi.obj ^
-   /link /OUT:bin/dpitest.exe user32.lib gdi32.lib shell32.lib /SUBSYSTEM:CONSOLE
+   /link /OUT:obj\test\dpitest.exe user32.lib gdi32.lib shell32.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
 echo [OK] compiled. running dpitest...
-".\bin\dpitest.exe"
+".\obj\test\dpitest.exe"
 if errorlevel 1 exit /b 1
 echo [OK] compiled. running...
-".\bin\test_chord.exe"
+".\obj\test\test_chord.exe"
 exit /b %errorlevel%

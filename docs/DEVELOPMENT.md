@@ -896,10 +896,10 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 | `test\build_test.bat` | 和弦引擎回归：模式修饰的顺序语义（先按修饰再按触发键）、按下即开火、长按、增强补齐、多键同按、左 Alt=增强、清卡键判定、原生按词跳转序列、快速滚动 / 持续滚动、横向滚动、打开所在文件夹的键位接线与取路径、**全屏窗口在 `C+Q` 与 Caps+拖动两边都不动作**、**最大化窗口同屏连一次位置变化都没有**（数 `WM_WINDOWPOSCHANGED`）、按键帮助的键位接线与"寿命=和弦"、日志结束气泡的可点击接线与"点气泡不弹菜单 / 点图标才弹菜单"、键位表每条动作都有图上文案。带 `/DCAP_TEST`（让 `folder.c` 把"退成目录"这个判定结果通过可选形参带出来给断言看），链接 `winmm.lib`（`main.c` 的 `RecBeep` 用 `PlaySoundW`） |
 | `test\build_dbg.bat` | Debug CRT（`/MTd`）config 测试：Release CRT 不校验堆块，"越界写"这类 bug 只有这里拦得住 |
 | `test\build_analyze.bat` | 静态分析（`/W4` + `/analyze`）：只编译不链接。数据流引擎能发现"按 X 分配、按 Y 读"和 Interlocked 混用这类问题 |
-| `test\build_keytest.bat` | 诊断工具：`keytest`（按键投递实测）、`uiprobe`（UIA 逐步探测）、`memtest`（UIA 内存压测）、`restarttest`（重启握手 + 单实例）、`traymemtest`（托盘菜单内存定位）、`logsmoke`（日志轮转）、`ilcheck`（打印各进程完整性级别）、`lowrun`（借 shell 令牌以普通权限启动任意程序）、`wspset`（WPS 直接置位三招实测：以普通权限跑 `lowrun.exe bin\wspset.exe`） |
+| `test\build_keytest.bat` | 诊断工具：`keytest`（按键投递实测）、`uiprobe`（UIA 逐步探测）、`memtest`（UIA 内存压测）、`restarttest`（重启握手 + 单实例）、`traymemtest`（托盘菜单内存定位）、`logsmoke`（日志轮转）、`ilcheck`（打印各进程完整性级别）、`lowrun`（借 shell 令牌以普通权限启动任意程序）、`wspset`（WPS 直接置位三招实测：以普通权限跑 `lowrun.exe obj\test\wspset.exe`） |
 | `test\build_wpsjump.bat` | WPS 通道真机检查：把 WPS 文字窗口置前直接调 `NavJump`，核对"选中的是 WPS 通道"且光标落在算出的目标上。没装 / 没开 WPS 时打印 `[SKIP]` 以 0 退出（CI 友好）。**会移动 WPS 里文档的光标**（不改内容），先存盘 |
 
-> 排障两个常用工具：`bin\ilcheck.exe` 打印各进程完整性级别（"管理员运行附不上 WPS"就是靠它定性的）；`bin\lowrun.exe <exe> [args]` 借 `explorer.exe` 令牌以普通权限启动任意程序。二者在 CI 里只编译、不运行。
+> 排障两个常用工具（都在 `obj\test\`）：`ilcheck.exe` 打印各进程完整性级别（"管理员运行附不上 WPS"就是靠它定性的）；`lowrun.exe <exe> [args]` 借 `explorer.exe` 令牌以普通权限启动任意程序。二者在 CI 里只编译、不运行。
 
 **CI（`.github/workflows/ci.yml`）**：push / PR 时在 `windows-latest` 依次执行——单测集成（`build_nav` + `build_test`）→ Debug CRT 堆越界守卫（`build_dbg`）→ 诊断工具构建 → 静态分析（`build_analyze`）→ 进程级检查（`restarttest`、`logsmoke`）→ WPS 通道编译 + 真机检查（无 WPS 自动跳过）→ `build.bat` 编译并上传 exe artifact。
 
@@ -907,7 +907,7 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 ### 产物落点、图标、四个 exe 的同目录约定
 
-- **产物落点**：中间产物（obj / res / 静态分析输出）全落在 `obj\`，`bin\` 只产出 exe 与运行文件。发布 = 直接拿走 `bin\`。
+- **产物落点**：中间产物（obj / 静态分析输出）与**全部测试/诊断 exe** 落在 `obj\`（测试在 `obj\test\`），`bin\` 只有四个发布 exe 与运行文件（ini / log / 构建指纹）。发布 = 直接拿走 `bin\`。
 - **图标**：`res\app.rc` 把 `res\app.ico` 作为资源 **#1** 编进**本体** exe（`main.c` 按 `MAKEINTRESOURCEW(1)` 取，`build.bat` 只把 `obj\app_res.obj` 链进第一条链接命令，另外三个 exe 不带图标）。`app.ico` 里带 16/24/32 三帧，帧源是 `res\icon16.png` / `icon24.png` / `icon32.png`。换图标：替换三张 PNG 后自己生成同名 `app.ico`（仓库里没有打包脚本，用任意 ICO 工具即可），再构建。`app.rc` 必须保持 ASCII（`rc.exe` 按 ANSI 读它）。
 - **四个 exe 必须同目录**：托盘菜单的"设置"按**同目录**找 `CapsEnhanceSettings.exe`；主程序按同目录找 `CapsEnhanceHelp.exe` / `CapsEnhanceClip.exe`；设置程序也按同目录找 `CapsEnhance.ini` 与 `CapsEnhance.exe`。三处都只做同目录查找，**不搜索 PATH**。
 
@@ -926,4 +926,4 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 **顺带一个容易误判的点**：exe 的节按 512 字节对齐，几百字节的代码变化可能根本不体现在文件大小上（大小相同 ≠ 内容相同）。要判断是否同源看哈希；要判断工具链是否一致看 `[ENV]` 行。
 
-> 编译中间产物一律落在 `obj\`（静态分析另落在 `obj\an\`），`bin\` 只有 exe 与运行文件（ini / log）—— 发布时直接拿走 `bin\` 即可，不会带出一堆 `.obj`。`bin\`、`obj\`、`*.obj`、`*.exe`、`*.log` 都在 `.gitignore` 里，可随时删除，构建会重新生成。
+> 编译中间产物一律落在 `obj\`（静态分析另落在 `obj\an\`），`bin\` 只有四个发布 exe 与运行文件（ini / log / BUILD-FINGERPRINT.txt）—— 测试与诊断工具在 `obj\test\`，发布时直接拿走 `bin\` 即可，不会带出一堆 `.obj`。`bin\`、`obj\`、`*.obj`、`*.exe`、`*.log` 都在 `.gitignore` 里，可随时删除，构建会重新生成。
