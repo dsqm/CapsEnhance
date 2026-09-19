@@ -124,6 +124,8 @@ typedef struct {
     BOOL      hasSwatch;          /* 这条文本本身就是个色值 -> 左侧画色块 */
     COLORREF  swatch;
     int       swatchAlpha;        /* <255：先画棋盘格，再按 alpha 混合 */
+    long long ldate;                /* Main.lDate（unix 秒），提示头部的时间行 */
+    long long lastpaste;            /* Main.lastPasteDate；0 = 没用过 */
     WCHAR     text[2][CLIP_TEXT_MAX];
 } ClipItem;
 
@@ -183,6 +185,8 @@ static POINT     g_dragWin;            /* 按下那一刻的窗口位置 */
 #define TID_LIFE   3
 #define TID_KA     5
 #define TID_TIP   6    /* 悬停提示的自动消失（TRACK 模式不会自己收） */
+#define TID_TIPSHOW 7  /* 悬停初始延迟：停稳 500ms 才弹（Ditto/系统同款） */
+#define TIP_DELAY_MS 500
 #define GRACE_MS   300
 #define LIFE_MS    180000
 #define KA_POLL_MS 250
@@ -270,7 +274,19 @@ static void DbLoadItems(void) {
     sqlite3_busy_timeout(db, 3000);
 
     sqlite3_stmt* st = NULL;
+    /* 提示头部要 lDate / lastPasteDate。lastPasteDate 在很老的库里可能没有，
+       prepare 失败就退回不带它的旧查询（lastpaste 记 0，头部显示"-"）。 */
     const char* sql =
+        "SELECT m.lID, m.mText, m.QuickPasteText, "
+        "       (SELECT group_concat(d.strClipBoardFormat, ',') FROM Data d "
+        "        WHERE d.lParentID = m.lID), "
+        "       m.lDate, m.lastPasteDate "
+        "FROM Main m "
+        "WHERE IFNULL(m.bIsGroup, 0) = 0 "
+        "ORDER BY COALESCE(m.stickyClipOrder, -2147483647) DESC, "
+        "         COALESCE(m.clipOrder, m.lDate) DESC "
+        "LIMIT 30";
+    const char* sqlOld =
         "SELECT m.lID, m.mText, m.QuickPasteText, "
         "       (SELECT group_concat(d.strClipBoardFormat, ',') FROM Data d "
         "        WHERE d.lParentID = m.lID) "
@@ -279,10 +295,14 @@ static void DbLoadItems(void) {
         "ORDER BY COALESCE(m.stickyClipOrder, -2147483647) DESC, "
         "         COALESCE(m.clipOrder, m.lDate) DESC "
         "LIMIT 30";
+    int hasDate = 1;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
-        sqlite3_close(db);
-        g_dbErr = TRUE;
-        return;
+        hasDate = 0;
+        if (sqlite3_prepare_v2(db, sqlOld, -1, &st, NULL) != SQLITE_OK) {
+            sqlite3_close(db);
+            g_dbErr = TRUE;
+            return;
+        }
     }
     while (sqlite3_step(st) == SQLITE_ROW && g_count < CLIP_MAX_ITEMS) {
         ClipItem* it = &g_items[g_count];
@@ -291,6 +311,8 @@ static void DbLoadItems(void) {
         const WCHAR* mt = (const WCHAR*)sqlite3_column_text16(st, 1);
         const WCHAR* qt = (const WCHAR*)sqlite3_column_text16(st, 2);
         const WCHAR* fm = (const WCHAR*)sqlite3_column_text16(st, 3);
+        it->ldate     = hasDate ? sqlite3_column_int64(st, 4) : 0;
+        it->lastpaste = hasDate ? sqlite3_column_int64(st, 5) : 0;
         const WCHAR* src = (mt && mt[0]) ? mt : ((qt && qt[0]) ? qt : NULL);
         if (src) TwoLines(src, it->text);
         else     LabelFromFormats(fm, it->text[0], CLIP_TEXT_MAX);
@@ -354,6 +376,14 @@ static void TipUpdate(void) {
     SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
     /* 与 Ditto 同一个值：最宽 500px，超出的自动折行 */
     SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 500);
+    /* 样式跟列表走：白底黑字。系统默认的黄底跟浮层完全不搭；这两个消息
+       在没有视觉样式激活的进程里生效（我们不带清单，正好）。 */
+    SendMessageW(g_tip, TTM_SETTIPBKCOLOR,   RGB(255, 255, 255), 0);
+    SendMessageW(g_tip, TTM_SETTIPTEXTCOLOR, RGB(0, 0, 0), 0);
+    {
+        RECT mrg = { 6, 4, 6, 4 };          /* 比系统默认的紧凑边距稍松 */
+        SendMessageW(g_tip, TTM_SETMARGIN, 0, (LPARAM)&mrg);
+    }
 }
 
 /* 收起提示。TTM_TRACKACTIVATE(FALSE) 是 TRACK 模式的收法；
@@ -391,6 +421,29 @@ static void TipShowAt(int row, POINT scr) {
     /* TRACK 模式不会自动消失，AUTOPOP 兜底自己拿定时器实现（同 Ditto 的
        ToolTipTimeout：-1 = 5 秒，0 = 关，上限 32 秒） */
     SetTimer(g_hwnd, TID_TIP, (UINT)DsTipTimeoutMs(), NULL);
+}
+
+/* Ditto 的时间行：COleDateTime::Format() 的中文面貌 —— 不补零的
+   年/月/日 时:分:秒。 */
+static void FmtDittoTime(long long t, WCHAR* out, int cap) {
+    time_t tt = (time_t)t;
+    struct tm tmv;
+    localtime_s(&tmv, &tt);
+    _snwprintf_s(out, (size_t)cap, _TRUNCATE, L"%d/%d/%d %d:%02d:%02d",
+                 tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                 tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+}
+
+/* 头部时间行（照 Ditto 的 "Added: ... | Last Used: ..."）。 */
+static void TipHeader(const ClipItem* it, WCHAR* out, int cap) {
+    out[0] = 0;
+    if (it->ldate <= 0) return;          /* 库里没有时间列：不显示头部 */
+    WCHAR a[40], b[40];
+    FmtDittoTime(it->ldate, a, 40);
+    if (it->lastpaste > 0) FmtDittoTime(it->lastpaste, b, 40);
+    else                 lstrcpyW(b, L"-");
+    /* 两行排版：单行 " | " 连接在 500px 宽下会被系统折到难看的位置，不如主动分行 */
+    _snwprintf_s(out, (size_t)cap, _TRUNCATE, L"Added: %s\nLast Used: %s", a, b);
 }
 
 /* 列表里只有摘要：短条目（没被截断）直接用它，长条目按需回库取全文。 */
@@ -460,6 +513,16 @@ static void TipTextOf(int idx) {
         g_tipBuf[o++] = c;
     }
     g_tipBuf[o] = 0;
+
+    /* 头部时间行在最前（Ditto 同款）：Added ... | Last Used ... + 空行 */
+    WCHAR hd[96];
+    TipHeader(&g_items[idx], hd, 96);
+    if (hd[0]) {
+        WCHAR body[4096];
+        lstrcpyW(body, g_tipBuf);
+        _snwprintf_s(g_tipBuf, 4096, _TRUNCATE,
+                     L"%s\n\n%s", hd, body);
+    }
 }
 
 /* ================= 缩略图 ================= */
@@ -1402,6 +1465,18 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == TID_LIFE)  { DoHideClose(); return 0; }
         if (wp == TID_GRACE) { DestroyWindow(hwnd); return 0; }
         if (wp == TID_TIP)  { TipHide(); return 0; }   /* Ditto 的 ToolTipTimeout */
+        if (wp == TID_TIPSHOW) {
+            KillTimer(g_hwnd, TID_TIPSHOW);
+            /* 延迟到了：按光标**现在**的位置定行与弹出点 —— 等待期间鼠标可能又动过 */
+            POINT c;
+            if (GetCursorPos(&c) && g_visible) {
+                POINT cl = c;
+                ScreenToClient(g_hwnd, &cl);
+                int r2 = RowAt((float)cl.y);
+                if (r2 >= 0) TipShowAt(r2, c);
+            }
+            return 0;
+        }
         if (wp == TID_KA) {
             if (g_visible && GetTickCount64() - g_lastKa > HELP_KA_TIMEOUT_MS)
                 DestroyWindow(hwnd);
@@ -1445,16 +1520,17 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int row = RowAt(y);
         /* 只改选中，**不滚动** —— 悬停滚动会让窗口跟着光标跑 */
         if (row >= 0 && row != g_sel) { g_sel = row; Render(); }
-        /* 悬停提示跟着走：行变了换提示，移出列表就收。
-           ClientToScreen 用消息里的客户坐标，别用 GetCursorPos ——
-           两者到达时间有差，会弹到上一次经过的位置。 */
+        /* 悬停提示按 Ditto 的节奏：行变了先收旧、重新计 500ms 延迟，
+           停稳才弹（TID_TIPSHOW 里真正显示）—— 划过列表不会连珠炮地弹，
+           也把 TTN_NEEDTEXT 的回库查询从"每行一次"降到"停稳才一次"。
+           等待期间鼠标继续动就一路重计时，移出列表取消并收起。 */
         if (row >= 0) {
             if (g_tipRow != row) {
-                POINT scr = { (short)LOWORD(lp), (short)HIWORD(lp) };
-                ClientToScreen(g_hwnd, &scr);
-                TipShowAt(row, scr);
+                TipHide();
+                SetTimer(g_hwnd, TID_TIPSHOW, TIP_DELAY_MS, NULL);
             }
-        } else if (g_tipRow >= 0) {
+        } else {
+            KillTimer(g_hwnd, TID_TIPSHOW);
             TipHide();
         }
         return 0;

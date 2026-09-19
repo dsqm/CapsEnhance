@@ -524,6 +524,12 @@ WPS 置位的回读校验返回**三态**：
 2. **v5 的 `TTF_SUBCLASS` 自动计时在 NOACTIVATE 窗口上不触发**：注册成功也不弹。所以用手动 `TTF_TRACK|TTF_ABSOLUTE`：`WM_MOUSEMOVE` 里行变了就 `TTM_TRACKACTIVATE(TRUE)` + `TTM_TRACKPOSITION`，移出列表 / 滚轮 / 浮层收起就 deactivate。定位用**消息里的客户坐标** `ClientToScreen`，不要 `GetCursorPos`（消息到达与采样有延迟差，会弹到光标上一站）。
 3. **`TTM_POP` 对 TRACK 工具无效**，收起要用 `TTM_TRACKACTIVATE(FALSE)`；"自动消失"（Ditto 的 `ToolTipTimeout`）TRACK 模式也不管，自己拿 `TID_TIP` 定时器实现。
 
+节奏与外观（对齐 Ditto 的体感）：
+
+- **停稳 500ms 才弹**（`TID_TIPSHOW`，与系统初始延迟一致）：行变了先收旧、重新计时；划过列表不会连珠炮地弹，`TTN_NEEDTEXT` 的回库查询也从"每行一次"降到"停稳才一次"。弹出点按延迟到期时光标的**当时**位置算。
+- **头部时间行**（Ditto 同款）：`Added: <lDate>` / `Last Used: <lastPasteDate>` 两行，unix 秒按本地时区、不补零（`COleDateTime::Format()` 的中文面貌）。`lastPasteDate` 列不存在（很老的库）时整条 SELECT 退回旧查询、头部不显示。
+- **白底黑字**：`TTM_SETTIPBKCOLOR` / `TTM_SETTIPTEXTCOLOR`，跟列表配色走，不用系统的黄底。这两个消息只在**没有视觉样式激活**的进程里生效 —— 我们不带清单，正好落在生效区。
+
 文本取法：条目没被截断（≤160 字符）直接用摘要；被截断的按需回库取全文（`TipTextOf`，与缩略图同一条"用到才付"的思路）。TTN_NEEDTEXT 里同步查库只针对当前悬停那一条，单条毫秒级。
 
 ### 焦点归还
