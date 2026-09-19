@@ -173,6 +173,7 @@ static float     g_k = 1.0f;
 static float     g_headerH, g_gutterW, g_rowH1, g_rowH2, g_thumbPad;
 static float     g_lineH = 20.0f;   /* 一行文字的行高（按字号算，见 FitMetrics） */
 static HFONT     g_fontRow = NULL, g_fontSmall = NULL;
+static HFONT     g_tipFont = NULL;        /* 提示字体：比列表小一档（Ditto 的提示也不用列表字号） */
 static HWND      g_target = NULL;
 static HWINEVENTHOOK g_evHook = NULL;
 static HHOOK     g_mouseHook = NULL;
@@ -396,7 +397,11 @@ static BOOL TipBuild(int row) {
     if (!g_tipBuf[0]) return FALSE;
 
     HDC m = CreateCompatibleDC(NULL);
-    HGDIOBJ of = SelectObject(m, g_fontRow);
+    HGDIOBJ of = SelectObject(m, g_tipFont);
+    TEXTMETRICW tmv;
+    GetTextMetricsW(m, &tmv);
+    int lineH = tmv.tmHeight + tmv.tmExternalLeading;   /* 自然行距 */
+    if (lineH < tmv.tmHeight + 2) lineH = tmv.tmHeight + 2;
     int maxW = (int)(500 * g_k + 0.5f);
     TipLine ln[240];
     int n = TipWrapInPlace(g_tipBuf, m, maxW, ln, 240);
@@ -410,9 +415,9 @@ static BOOL TipBuild(int row) {
     DeleteDC(m);
     if (n <= 0) return FALSE;
 
-    int padX = (int)(10 * g_k + 0.5f), padY = (int)(7 * g_k + 0.5f);
+    int padX = (int)(10 * g_k + 0.5f), padY = (int)(6 * g_k + 0.5f);
     int newW = textW + (padX + 1) * 2;
-    int newH = (int)(n * g_lineH + 0.5f) + (padY + 1) * 2;
+    int newH = n * lineH + (padY + 1) * 2;
 
     if (g_tipDC && (newW != g_tipW || newH != g_tipH)) {
         DeleteDC(g_tipDC);  DeleteObject(g_tipBmp);
@@ -455,9 +460,9 @@ static BOOL TipBuild(int row) {
 
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(0, 0, 0));
-    HGDIOBJ ofont = SelectObject(dc, g_fontRow);
+    HGDIOBJ ofont = SelectObject(dc, g_tipFont);
     for (int i = 0; i < n; i++)
-        TextOutW(dc, padX + 1, padY + 1 + (int)(i * g_lineH), ln[i].s, ln[i].len);
+        TextOutW(dc, padX + 1, padY + 1 + i * lineH, ln[i].s, ln[i].len);
     SelectObject(dc, ofont);
 
     /* alpha：圆角内 255、边缘 1.5px 羽化；RGB 按 a 预乘（ULW 要求）。
@@ -1149,6 +1154,7 @@ static void FitMetrics(void) {
     g_pxH = (int)(g_headerH + ROWS_VISIBLE * g_rowH1);
 
     if (g_fontRow)   DeleteObject(g_fontRow);
+    if (g_tipFont)   DeleteObject(g_tipFont);
     if (g_fontSmall) DeleteObject(g_fontSmall);
     /* 字号是**磅**：按当前显示器 DPI 折成像素（lfHeight 负值 = 按字形高度）。
        用户在设置里选的字体名/字号经主程序用 --font/--size 传进来。 */
@@ -1156,6 +1162,7 @@ static void FitMetrics(void) {
     if (rowPx < 8) rowPx = 8;
     g_fontRow   = MakeFont(g_fontName, rowPx, FW_NORMAL);
     g_fontSmall = MakeFont(g_fontName, rowPx * 3 / 4, FW_NORMAL);
+    g_tipFont   = MakeFont(g_fontName, rowPx * 7 / 8, FW_NORMAL);   /* 提示：小一档 */
     /* 行高按字号走（约 1.4 倍）：两行文本的行距必须跟字号联动，
        拿"行高 ÷ 2"当行距会让字与字之间隔出一大条空白。 */
     g_lineH = (float)(int)(rowPx * 1.4f);
@@ -2041,6 +2048,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     if (g_mouseHook) UnhookWindowsHookEx(g_mouseHook);
     if (g_evHook) UnhookWinEvent(g_evHook);
     if (g_fontRow)   DeleteObject(g_fontRow);
+    if (g_tipFont)   DeleteObject(g_tipFont);
     if (g_fontSmall) DeleteObject(g_fontSmall);
     FreeThumbs();
     DeleteCriticalSection(&g_thumbLock);
