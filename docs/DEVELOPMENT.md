@@ -526,8 +526,9 @@ WPS 置位的回读校验返回**三态**：
 
 节奏与外观（对齐 Ditto 的体感）：
 
-- **停稳 500ms 才弹**（`TID_TIPSHOW`，与系统初始延迟一致）：行变了先收旧、重新计时；划过列表不会连珠炮地弹，`TTN_NEEDTEXT` 的回库查询也从"每行一次"降到"停稳才一次"。弹出点按延迟到期时光标的**当时**位置算。
-- **头部时间行**（Ditto 同款）：`Added: <lDate>` / `Last Used: <lastPasteDate>` 两行，unix 秒按本地时区、不补零（`COleDateTime::Format()` 的中文面貌）。`lastPasteDate` 列不存在（很老的库）时整条 SELECT 退回旧查询、头部不显示。
+- **两段式节奏**（Ditto 体感）：**停稳 500ms 才弹**（`TID_TIPSHOW`，与系统初始延迟一致）—— 行变了就重计延迟，划过列表不会连珠炮地弹，`TTN_NEEDTEXT` 的回库查询也只有停稳那一次；**已显示后上下移动 = 立即切换**到新行（换文本 + 跟手移位），不收起、不重计。弹出点一律按"当下"光标位置算。
+- **淡入**：系统提示自带的轻微淡入在手动 TRACK 模式里没有，`TTN_SHOW` 里补一个 `AnimateWindow(120ms, AW_BLEND)`（失败无害）；TRACKPOSITION 必须在激活**之前**发，否则动画会播在旧位置上再跳过来。
+- **时间行在最下面**（用户反馈）：`Added: <lDate>` / `Last Used: <lastPasteDate>` 两行收尾，unix 秒按本地时区、不补零（`COleDateTime::Format()` 的中文面貌）。`lastPasteDate` 列不存在（很老的库）时整条 SELECT 退回旧查询、时间行不显示。
 - **白底黑字**：`TTM_SETTIPBKCOLOR` / `TTM_SETTIPTEXTCOLOR`，跟列表配色走，不用系统的黄底。这两个消息只在**没有视觉样式激活**的进程里生效 —— 我们不带清单，正好落在生效区。
 
 文本取法：条目没被截断（≤160 字符）直接用摘要；被截断的按需回库取全文（`TipTextOf`，与缩略图同一条"用到才付"的思路）。TTN_NEEDTEXT 里同步查库只针对当前悬停那一条，单条毫秒级。

@@ -414,10 +414,11 @@ static void TipShowAt(int row, POINT scr) {
     ti.hwnd     = g_hwnd;
     ti.uId      = (UINT_PTR)g_hwnd;
     ti.lpszText = LPSTR_TEXTCALLBACK;
-    SendMessageW(g_tip, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
-    /* 光标右下 16/20px —— 系统默认提示也放这个位置，别压住正在看的那行 */
+    /* 先定位再激活：TTN_SHOW 在激活时同步触发，那里要做淡入 ——
+       位置必须已经就位，否则动画会播在旧位置上再跳过来。 */
     SendMessageW(g_tip, TTM_TRACKPOSITION, 0,
                  MAKELONG(scr.x + 16, scr.y + 20));
+    SendMessageW(g_tip, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
     /* TRACK 模式不会自动消失，AUTOPOP 兜底自己拿定时器实现（同 Ditto 的
        ToolTipTimeout：-1 = 5 秒，0 = 关，上限 32 秒） */
     SetTimer(g_hwnd, TID_TIP, (UINT)DsTipTimeoutMs(), NULL);
@@ -434,7 +435,7 @@ static void FmtDittoTime(long long t, WCHAR* out, int cap) {
                  tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
 }
 
-/* 头部时间行（照 Ditto 的 "Added: ... | Last Used: ..."）。 */
+/* 时间行（Ditto 同款 "Added: ... / Last Used: ..."，放提示最下面）。 */
 static void TipHeader(const ClipItem* it, WCHAR* out, int cap) {
     out[0] = 0;
     if (it->ldate <= 0) return;          /* 库里没有时间列：不显示头部 */
@@ -514,14 +515,12 @@ static void TipTextOf(int idx) {
     }
     g_tipBuf[o] = 0;
 
-    /* 头部时间行在最前（Ditto 同款）：Added ... | Last Used ... + 空行 */
+    /* 时间行放**最下面**（用户反馈）：正文在上，Added/Last Used 收尾 */
     WCHAR hd[96];
     TipHeader(&g_items[idx], hd, 96);
-    if (hd[0]) {
-        WCHAR body[4096];
-        lstrcpyW(body, g_tipBuf);
+    if (hd[0] && g_tipBuf[0]) {
         _snwprintf_s(g_tipBuf, 4096, _TRUNCATE,
-                     L"%s\n\n%s", hd, body);
+                     L"%s\n\n%s", g_tipBuf, hd);
     }
 }
 
@@ -1520,14 +1519,20 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int row = RowAt(y);
         /* 只改选中，**不滚动** —— 悬停滚动会让窗口跟着光标跑 */
         if (row >= 0 && row != g_sel) { g_sel = row; Render(); }
-        /* 悬停提示按 Ditto 的节奏：行变了先收旧、重新计 500ms 延迟，
-           停稳才弹（TID_TIPSHOW 里真正显示）—— 划过列表不会连珠炮地弹，
-           也把 TTN_NEEDTEXT 的回库查询从"每行一次"降到"停稳才一次"。
-           等待期间鼠标继续动就一路重计时，移出列表取消并收起。 */
+        /* 悬停提示按 Ditto 的节奏分两段：
+           · 没显示时：行变了就重计 500ms 延迟 —— 停稳才弹（TID_TIPSHOW），
+             划过列表不会连珠炮地弹，NEEDTEXT 的回库查询也只有停稳那一次；
+           · 已显示时：上下移动**立即切换**到新行（换文本 + 跟手移位），
+             不收起、不重计 —— 和 Ditto 一样"弹一次，之后跟着选区走"。 */
         if (row >= 0) {
             if (g_tipRow != row) {
-                TipHide();
-                SetTimer(g_hwnd, TID_TIPSHOW, TIP_DELAY_MS, NULL);
+                if (g_tipRow < 0) {
+                    SetTimer(g_hwnd, TID_TIPSHOW, TIP_DELAY_MS, NULL);
+                } else {
+                    POINT scr = { (short)LOWORD(lp), (short)HIWORD(lp) };
+                    ClientToScreen(g_hwnd, &scr);
+                    TipShowAt(row, scr);
+                }
             }
         } else {
             KillTimer(g_hwnd, TID_TIPSHOW);
@@ -1598,6 +1603,12 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_NOTIFY: {
         NMHDR* nm = (NMHDR*)lp;
+        if (g_tip && nm->hwndFrom == g_tip && nm->code == TTN_SHOW) {
+            /* 系统提示弹出本来就带一点淡入；手动 TRACK 模式没有，自己补：
+               AnimateWindow 失败（返回 0）也不影响 —— 那时窗口已经可见。 */
+            AnimateWindow(g_tip, 120, AW_BLEND);
+            return TRUE;              /* 定位我们自己用 TRACKPOSITION 管 */
+        }
         if (g_tip && nm->hwndFrom == g_tip && nm->code == TTN_NEEDTEXTW) {
             NMTTDISPINFOW* di = (NMTTDISPINFOW*)lp;
             TipTextOf(g_sel);          /* 悬停即选中，所以问的就是当前选中行 */
