@@ -92,6 +92,11 @@ void ClipKaTick(void) {
         PostMessageW(w, s_msgKa, 0, 0);
         return;
     }
+    /* 还没送达过 = 窗口仍在冷启动的路上，"找不到"不是"它死了"。心跳的容忍
+       （3 拍 = 600ms）比送达重试的预算（25×40ms = 1000ms）还短，不关掉这一段
+       判活就会在窗口出生之前先把这次按键判死 —— 表现是"杀软扫得慢的时候
+       Caps+V 得按两次"。真正拉不起来由 ClipTick 的超时负责清 s_want。 */
+    if (s_delivered != 1) return;
     /* ★ 浮层会**自己**退出（点 X / 点外面 / 粘贴后 / 它那边的心跳超时），而它
        死的时候不会通知我们 —— 心跳本来就只是单向的"我还活着"。
        所以这里必须自己发现：连续几拍找不到窗口 = 它已经没了。
@@ -237,8 +242,8 @@ void ClipEsc(void) {
 /* 把 Ditto 的快速粘贴窗口拉到前台（原理见 clip/clip.c 同名注释：Ditto 自己的
    SetForegroundWindow 会因前台转移规则失败，但它启动时 ASFW_ANY 授权了任何
    进程可代劳）。-open 子进程等本体显示完才退出，所以先等它，通常一击即中。
-   ★ 本函数跑在主线程（LL 钩子所在线程），等待是有上限的（正常几十到
-   两百毫秒 = 本体显示耗时；上限 1.5s 只在 Ditto 卡死时出现）。 */
+   ★ 本函数**只能在一次性线程上跑**（见 DittoThreadProc）：最坏 1500ms + 20×30ms
+     ≈ 2.1 秒，而主线程是低级钩子的宿主。 */
 static void RaiseDittoWindow(HANDLE hProc) {
     if (hProc) WaitForSingleObject(hProc, 1500);
     for (int i = 0; i < 20; i++) {
@@ -263,6 +268,42 @@ static void RaiseDittoWindow(HANDLE hProc) {
        不会替用户把 Ditto 拉起来 —— 它的历史都没在收集，拉起来也没意义）。
      · 浮层是 NOACTIVATE，前台一直是目标应用，这里不需要归还焦点；
        先关浮层再拉本体，两窗短暂的共存期也不抢焦点。 */
+/* 一次性线程的入参：Ditto.exe 与它的目录（ResolveDittoDir 已在主线程算好，
+   工作线程不碰配置 —— 与 folder.c 的 FolderJob 同形）。 */
+typedef struct {
+    WCHAR exe[MAX_PATH];
+    WCHAR dir[DITTO_DIR_MAX];
+} DittoJob;
+
+/* 拉起 Ditto 本体并等它的窗口出来。
+   ★ 为什么必须离开主线程：这一段最坏 1500ms + 20×30ms ≈ 2.1 秒，而主线程是
+     低级钩子的宿主 —— 它不在"等消息"状态期间系统会把到达的钩子事件**直接跳过**
+     （见 cap.h 与 main.c 的 WM_WHEEL_ACCEL 说明）。漏掉的若是某个修饰模式的
+     抬起，keymap.c 的 ModeDown 只看按住位图、不现读核对，于是增强模式粘住：
+     之后每个物理滚轮被吞、每次点按都被补齐成 3 次，直到暂停/重启才恢复。
+     这条动作是"单击 Caps"触发的（钩子里 PostMessage 过来），主线程一挡就把
+     用户最直接的按键反馈弄丢了，所以退回同步也不行 —— 起不来线程就什么都不做。 */
+static DWORD WINAPI DittoThreadProc(LPVOID param) {
+    DittoJob* job = (DittoJob*)param;
+    WCHAR cmd[MAX_PATH + 16];
+    _snwprintf_s(cmd, (size_t)(MAX_PATH + 16), _TRUNCATE, L"\"%s\" -open", job->exe);
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    memset(&pi, 0, sizeof(pi));
+    si.cb = sizeof(si);
+    if (CreateProcessW(job->exe, cmd, NULL, NULL, FALSE, 0, NULL, job->dir, &si, &pi)) {
+        RaiseDittoWindow(pi.hProcess);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        if (g_recording.load()) CapLog("  [剪贴板] 已转交 Ditto 本体");
+    } else if (g_recording.load()) {
+        CapLog("  [剪贴板] CreateProcess(Ditto) 失败");
+    }
+    free(job);
+    return 0;
+}
+
 void ClipCallDitto(void) {
     WCHAR dittoExe[MAX_PATH] = L"";
     WCHAR dd[DITTO_DIR_MAX]  = L"";
@@ -277,21 +318,13 @@ void ClipCallDitto(void) {
         return;
     }
     ClipHide();
-    WCHAR cmd[MAX_PATH + 16];
-    _snwprintf_s(cmd, (size_t)(MAX_PATH + 16), _TRUNCATE, L"\"%s\" -open", dittoExe);
-    STARTUPINFOW si;
-    PROCESS_INFORMATION pi;
-    memset(&si, 0, sizeof(si));
-    memset(&pi, 0, sizeof(pi));
-    si.cb = sizeof(si);
-    if (CreateProcessW(dittoExe, cmd, NULL, NULL, FALSE, 0, NULL, dd, &si, &pi)) {
-        RaiseDittoWindow(pi.hProcess);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        if (g_recording.load()) CapLog("  [剪贴板] 已转交 Ditto 本体");
-    } else if (g_recording.load()) {
-        CapLog("  [剪贴板] CreateProcess(Ditto) 失败");
-    }
+    DittoJob* job = (DittoJob*)calloc(1, sizeof(DittoJob));
+    if (!job) return;      /* 分配不到 = 一次"没反应"，与 folder.c 同一取舍 */
+    _snwprintf_s(job->exe, MAX_PATH, _TRUNCATE, L"%s", dittoExe);
+    _snwprintf_s(job->dir, DITTO_DIR_MAX, _TRUNCATE, L"%s", dd);
+    HANDLE h = CreateThread(NULL, 0, DittoThreadProc, job, 0, NULL);
+    if (!h) { free(job); return; }
+    CloseHandle(h);        /* 线程对象在线程退出时回收；不需要 join */
 }
 
 /* 导航键转发：浮层是 NOACTIVATE，键盘消息根本到不了它 —— 回车 / 方向键 /
