@@ -38,6 +38,9 @@
    拖动的两份黑名单）。分页是结构性的：配置项全在常规页、名单全在名单页，
    页签只决定"显示哪些控件" —— 控件仍全是主窗口的子窗口，Load / Save 与
    WM_COMMAND 照旧按 id 找、不分页（见 kTabNames / g_curTab / Layout）。
+   页签**外观自绘**（PaintTab：comctl 默认的浮凸小块太旧，改成"文本 +
+   强调色下划线"的现代样式，行为不动）；常规页的配置项按 group 列**分段**
+   渲染半粗段头（见 kFields 的 group 列 / InitGroups）。
    ============================================================ */
 #define WIN32_LEAN_AND_MEAN
 #include "cap.h"
@@ -70,6 +73,8 @@
 #define IDC_RELOAD  103
 #define IDC_EXIT    104
 #define IDC_TAB     120   /* 页签条（换页在 WndProc 的 WM_NOTIFY / TCN_SELCHANGE） */
+#define IDC_GROUP0  400   /* 常规页段头（每段一个 STATIC，见 kFields 的 group 列） */
+#define GROUP_MAX   8     /* 段数上限；超出的段不带头（数据里目前 5 段，纯保底） */
 
 #define IDC_RUN_ADMIN  200
 #define IDC_LOG_KB     201
@@ -110,7 +115,9 @@ static const WCHAR* const kTabNames[TAB_N] = { L"常规", L"名单" };
    界面的每个输入框都从这里取标签、类型与范围；加一个配置项 = 加一行 +
    Load / Save 里各加一个分支（键名与值域仍只在 config.c 定义一次）。
    标签只写中文说明 —— ini 里的键名属于配置文件的内部拼法，界面不重复；
-   数值单位（KB / 毫秒 …）单独一列，显示在输入框右侧。 */
+   数值单位（KB / 毫秒 …）单独一列，显示在输入框右侧。
+   group 一列是**归属段**（Ditto 路径 / 快速粘贴显然是「剪贴板」这类）：
+   每段第一行渲染一个半粗段头，同一段的行必须连排（段头按"换段"渲染）。 */
 typedef struct {
     int          id;
     const WCHAR* label;
@@ -123,32 +130,54 @@ typedef struct {
     int          isBtn;     /* 1 = 按钮（label 就是按钮上的字）。
                                按钮不承载配置值，点击行为在 WM_COMMAND 里按 id 分支。 */
     int          min, max;
+    const WCHAR* group;     /* 归属段名（见上方说明；段头文字就是它） */
 } Field;
 
 static const Field kFields[] = {
-    { IDC_RUN_ADMIN, L"以管理员身份运行（会弹 UAC）",                   NULL,      1, 0, 0, 0, 0 },
-    { IDC_LOG_KB,    L"日志大小上限（0 = 不限制）",                    L"KB",     0, 0, 0, 0, 65536 },
-    { IDC_STEPS,     L"按词跳转逐格上限（0 = 不限制，上限 256）",       L"格",     0, 0, 0, 0, 256 },
-    { IDC_OVER_CTRL, L"超过逐格上限时改发 Ctrl+方向（取消勾选只发一次方向键）", NULL,      1, 0, 0, 0, 0 },
-    { IDC_WMUL,      L"Caps+滚轮 放大倍数（0/1 = 关闭）",              L"倍",     0, 0, 0, 0, 16 },
-    { IDC_INTERVAL,  L"持续滚动初始速度（越大越慢）",                  L"毫秒/格", 0, 0, 0, 100, 60000 },
-    { IDC_FASTMS,    L"持续滚动最快速度（越小越快）",                  L"毫秒/格", 0, 0, 0, 20, 60000 },
-    { IDC_HMUL,      L"Caps+Shift+滚轮 横向倍数（0 = 关闭）",          L"倍",     0, 0, 0, 0, 16 },
-    { IDC_SCI,       L"允许读取 Scintilla 程序内存（关掉则退回逐格）", NULL,      1, 0, 0, 0, 0 },
+    { IDC_RUN_ADMIN, L"以管理员身份运行（会弹 UAC）",                   NULL,      1, 0, 0, 0, 0,      L"通用" },
+    { IDC_LOG_KB,    L"日志大小上限（0 = 不限制）",                    L"KB",     0, 0, 0, 0, 65536,  L"通用" },
+    { IDC_STEPS,     L"按词跳转逐格上限（0 = 不限制，上限 256）",       L"格",     0, 0, 0, 0, 256,    L"按词跳转" },
+    { IDC_OVER_CTRL, L"超过逐格上限时改发 Ctrl+方向（取消勾选只发一次方向键）", NULL,      1, 0, 0, 0, 0,      L"按词跳转" },
+    { IDC_SCI,       L"允许读取 Scintilla 程序内存（关掉则退回逐格）", NULL,      1, 0, 0, 0, 0,      L"按词跳转" },
+    { IDC_WMUL,      L"Caps+滚轮 放大倍数（0/1 = 关闭）",              L"倍",     0, 0, 0, 0, 16,     L"滚动" },
+    { IDC_INTERVAL,  L"持续滚动初始速度（越大越慢）",                  L"毫秒/格", 0, 0, 0, 100, 60000, L"滚动" },
+    { IDC_FASTMS,    L"持续滚动最快速度（越小越快）",                  L"毫秒/格", 0, 0, 0, 20, 60000,  L"滚动" },
+    { IDC_HMUL,      L"Caps+Shift+滚轮 横向倍数（0 = 关闭）",          L"倍",     0, 0, 0, 0, 16,     L"滚动" },
     /* 单键切换输入法：0=不处理 1=切中文 2=切英文（值域与语义只在 config.c 定义） */
-    { IDC_IME_CAPS,  L"单击 Caps 时切输入法（0=不处理 1=中文 2=英文）",  NULL,     0, 0, 0, 0, 2 },
-    { IDC_IME_LSHF,  L"单击左 Shift 时切输入法（同上；英文键盘下都不处理）", NULL,   0, 0, 0, 0, 2 },
-    { IDC_IME_RSHF,  L"单击右 Shift 时切输入法（同上；英文键盘下都不处理）", NULL,   0, 0, 0, 0, 2 },
+    { IDC_IME_CAPS,  L"单击 Caps 时切输入法（0=不处理 1=中文 2=英文）",  NULL,     0, 0, 0, 0, 2,      L"输入法" },
+    { IDC_IME_LSHF,  L"单击左 Shift 时切输入法（同上；英文键盘下都不处理）", NULL,   0, 0, 0, 0, 2,      L"输入法" },
+    { IDC_IME_RSHF,  L"单击右 Shift 时切输入法（同上；英文键盘下都不处理）", NULL,   0, 0, 0, 0, 2,      L"输入法" },
     /* Ditto 剪贴板数据库路径（`C+V` 读它）：**留空 = 不启用**。相对路径的
        基准是本程序 exe 所在目录 —— 这一句写在标签里而不是让用户去猜。 */
     { IDC_DITTO_DB,  L"Ditto 文件夹路径（含 Ditto.db 与 Ditto.exe；留空 = 不启用 Caps+V；相对路径相对本程序目录）",
-                     NULL, 0, 1, 0, 0, 0 },
+                     NULL, 0, 1, 0, 0, 0, L"剪贴板" },
     /* 快速粘贴的字体只有一个入口：按钮上**显示当前字体 + 字号**，点它弹系统
        字体对话框（对话框里本来就能同时选字体和字号，再给个独立字号框是重复）。 */
-    { IDC_CLIP_PICK, L"快速粘贴字体",                                   NULL, 0, 0, 1, 0, 0 },
-    { IDC_CLIP_CLICK, L"单击条目直接上屏（取消勾选则单击只选中、双击才粘）", NULL, 1, 0, 0, 0, 0 },
+    { IDC_CLIP_PICK, L"快速粘贴字体",                                   NULL, 0, 0, 1, 0, 0, L"剪贴板" },
+    { IDC_CLIP_CLICK, L"单击条目直接上屏（取消勾选则单击只选中、双击才粘）", NULL, 1, 0, 0, 0, 0, L"剪贴板" },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
+
+/* ---------- 段头映射 ----------
+   group 列按"换段"渲染段头：这里把每行映射到它的段头控件 id（0 = 不带头，
+   沿用上一段的头）。段头 STATIC 在建控件时按这张表创建（WinMain），字体走
+   FontApplyCb 的半粗分支，落位与显隐在 Layout。 */
+static int g_grpHead[FIELD_N];
+
+static void InitGroups(void) {
+    const WCHAR* cur = NULL;
+    int n = 0;
+    for (int i = 0; i < FIELD_N; i++) {
+        const WCHAR* g = kFields[i].group;
+        if (g && (!cur || wcscmp(g, cur) != 0)) {
+            cur = g;
+            g_grpHead[i] = (n < GROUP_MAX) ? IDC_GROUP0 + n : 0;
+            n++;
+        } else {
+            g_grpHead[i] = 0;
+        }
+    }
+}
 
 /* 选窗时该取什么：进程名单取进程名（`xxx.exe`）；**窗口类名单要取类名**
    —— 把进程名填进"窗口类"名单里永远匹配不上。取到的类名**原样**填进输入框
@@ -185,11 +214,13 @@ static BOOL   g_dirty   = FALSE;
 static BOOL   g_loading = FALSE;         /* 装载期屏蔽 EN_CHANGE，否则一打开就"未保存" */
 static int    g_dpi     = 96;            /* 当前窗口 DPI（96 = 100%） */
 static HFONT  g_font    = NULL;
+static HFONT  g_fontBold = NULL;         /* 半粗体：段头 / 选中页签（建不出就与 g_font 同柄） */
 static int    g_viewH    = 0;            /* 内容可视区高度（底部按钮/状态栏不算） */
 static int    g_contentH = 0;            /* 内容总高；比可视区高就出滚动条 */
 static int    g_laidScroll = -1;         /* 子控件当前是按哪个滚动位置排的 */
 static HWND   g_tab     = NULL;          /* 页签条（comctl32 页签控件；建失败则退回单页滚动） */
 static int    g_curTab  = TAB_GENERAL;   /* 当前页：换页 = 改它 + Layout（显隐在 Layout 里） */
+static int    g_tabPadDpi = 0;           /* 页签内边距是按哪个 DPI 设的（变了就重设） */
 
 /* 像素按 DPI 缩放：所有尺寸常量都必须过一遍它，否则高分屏上控件挤成一团
    （96 DPI 下量出来的坐标在 200% 屏上只有一半大）。 */
@@ -292,9 +323,10 @@ static UINT QueryDpi(void) {
 }
 
 /* 按当前 DPI 建字体：优先用系统为这个 DPI 算好的消息字体（NONCLIENTMETRICS
-   里的 lfMessageFont 已经缩放过），拿不到就按 DPI 自己算一个字号。 */
+   里的 lfMessageFont 已经缩放过），拿不到就按 DPI 自己算一个字号。
+   半粗体与正体同源（只改字重），给段头与选中页签做强调用。 */
 static void MakeFont(void) {
-    HFONT nf = NULL;
+    HFONT nf = NULL, bf = NULL;
     HMODULE u = GetModuleHandleW(L"user32.dll");
     if (u) {
         PFN_SystemParametersInfoForDpi p =
@@ -303,21 +335,36 @@ static void MakeFont(void) {
             NONCLIENTMETRICSW ncm;
             memset(&ncm, 0, sizeof(ncm));
             ncm.cbSize = sizeof(ncm);
-            if (p(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, (UINT)g_dpi))
+            if (p(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, (UINT)g_dpi)) {
                 nf = CreateFontIndirectW(&ncm.lfMessageFont);
+                LOGFONTW lb = ncm.lfMessageFont;
+                lb.lfWeight = FW_SEMIBOLD;
+                bf = CreateFontIndirectW(&lb);
+            }
         }
     }
-    if (!nf)
+    if (!nf) {
         nf = CreateFontW(-MulDiv(12, g_dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                          DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    if (!nf) nf = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        bf = CreateFontW(-MulDiv(12, g_dpi, 96), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                         DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    }
+    if (!nf) { nf = (HFONT)GetStockObject(DEFAULT_GUI_FONT); bf = nf; }
+    if (!bf) bf = nf;
     if (g_font && g_font != nf) DeleteObject(g_font);
     g_font = nf;
+    /* bf 可能与 nf 同柄（兜底路径），同柄时绝不能在这里删掉 */
+    if (g_fontBold && g_fontBold != bf && g_fontBold != g_font) DeleteObject(g_fontBold);
+    g_fontBold = bf;
 }
 
 static BOOL CALLBACK FontApplyCb(HWND h, LPARAM lp) {
-    SendMessageW(h, WM_SETFONT, (WPARAM)g_font, TRUE);
+    /* 段头走半粗体，其余控件统一消息字体 */
+    int id = GetDlgCtrlID(h);
+    HFONT f = (id >= IDC_GROUP0 && id < IDC_GROUP0 + GROUP_MAX) ? g_fontBold : g_font;
+    SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE);
     (void)lp;
     return TRUE;
 }
@@ -561,10 +608,14 @@ static void Layout(int w, int h) {
 
     /* 页签条：住在顶部"窗框"（g_header）里，坐标是窗框内的。高度跟着字体走
        —— 页签自身的实际高度从 TCM_GETITEMRECT 取（换字体 / 换 DPI 都会变），
-       控件高度再补一点内边距。 */
+       控件高度再补一点内边距。页签内边距也按 DPI 重设（comctl 默认太挤）。 */
     int tabTop = S(6), tabH = S(30);
     if (g_tab) {
         RECT tr;
+        if (g_tabPadDpi != g_dpi) {
+            g_tabPadDpi = g_dpi;
+            SendMessageW(g_tab, TCM_SETPADDING, 0, MAKELPARAM(S(14), S(7)));
+        }
         if (TabCtrl_GetItemRect(g_tab, 0, &tr))
             tabH = tr.bottom + S(6);
         MoveWindow(g_tab, x, tabTop, w - x * 2, tabH, TRUE);
@@ -598,6 +649,7 @@ static void Layout(int w, int h) {
         ShowCtrl(GetDlgItem(g_hwnd, id), fieldPage);
         ShowCtrl(GetDlgItem(g_hwnd, id + 500), fieldPage);
         ShowCtrl(GetDlgItem(g_hwnd, id + 600), fieldPage);
+        ShowCtrl(GetDlgItem(g_hwnd, g_grpHead[i]), fieldPage);  /* 段头随段显隐 */
         if (id == IDC_DITTO_DB) {         /* Ditto 行右侧两颗小按钮随行显隐 */
             ShowCtrl(GetDlgItem(g_hwnd, IDC_DITTO_BROWSE), fieldPage);
             ShowCtrl(GetDlgItem(g_hwnd, IDC_DITTO_CONV), fieldPage);
@@ -612,6 +664,12 @@ static void Layout(int w, int h) {
     int y = viewTop + S(4);
     for (int i = 0; i < FIELD_N; i++) {
         if (!fieldPage) break;            /* 名单页：配置项一行都不排 */
+        if (g_grpHead[i]) {               /* 换段：先排段头。首段不额外加空 ——
+                                             页签条下面已经留了呼吸感 */
+            if (i) y += S(12);
+            MoveWindow(GetDlgItem(g_hwnd, g_grpHead[i]), x, y - off, w - x * 2, S(20), TRUE);
+            y += S(26);
+        }
         int id = kFields[i].id;
         HWND c = GetDlgItem(g_hwnd, id);
         if (!c) continue;
@@ -747,6 +805,7 @@ static void SetScroll(int pos) {
 #define BTNPROP_PRIMARY L"capPrimary"
 #define BTNPROP_HOVER   L"capHover"
 #define BTNPROP_PRESSED L"capPressed"
+#define TABPROP_HOT     L"capTabHot"   /* 页签悬停项下标 +1（属性不存在 = -1） */
 
 static BOOL BtnFlag(HWND h, const WCHAR* prop) {
     return (BOOL)(INT_PTR)GetPropW(h, prop);
@@ -840,6 +899,78 @@ static BOOL BtnIsPush(HWND h) {
     return st == BS_PUSHBUTTON || st == BS_DEFPUSHBUTTON;
 }
 
+/* 页签条也是自绘的（见 PaintTab）：按类名认出它 */
+static BOOL TabIsTab(HWND h) {
+    WCHAR cls[24];
+    return GetClassNameW(h, cls, 24) > 0 && _wcsicmp(cls, L"SysTabControl32") == 0;
+}
+
+/* 页签条自绘：comctl 页签的默认样式还是 Win95 的浮凸小块，整个接管它的
+   WM_PAINT —— 平底、一条浅灰分隔线贯穿脚下；选中页 = 半粗强调色文本 +
+   压在分隔线上的强调条（现代设置页的"下划线页签"）；悬停 = 淡蓝圆角底
+   （与次级按钮悬停同色）。
+   **行为不动**：点击、方向键、TCN_SELCHANGE 仍走控件默认过程 —— 点击判定
+   用的 TCM_GETITEMRECT 与这里画的是同一组矩形，画得到的就是点得到的。 */
+static void PaintTab(HWND h, HDC dc) {
+    RECT rc;
+    GetClientRect(h, &rc);
+    {   /* 先铺底色（与父窗口/窗框同色，整条看起来是"平"的） */
+        HBRUSH bg = CreateSolidBrush(GetSysColor(COLOR_BTNFACE));
+        FillRect(dc, &rc, bg);
+        DeleteObject(bg);
+    }
+    int n   = (int)SendMessageW(h, TCM_GETITEMCOUNT, 0, 0);
+    int sel = (int)SendMessageW(h, TCM_GETCURSEL, 0, 0);
+    int hot = (int)(INT_PTR)GetPropW(h, TABPROP_HOT) - 1;
+    {   /* 分隔线：贯穿整条，所有页签都"站"在它上面 */
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(214, 214, 214));
+        HGDIOBJ op = SelectObject(dc, pen);
+        MoveToEx(dc, rc.left, rc.bottom - 1, NULL);
+        LineTo(dc, rc.right, rc.bottom - 1);
+        SelectObject(dc, op);
+        DeleteObject(pen);
+    }
+    for (int i = 0; i < n; i++) {
+        RECT tr;
+        if (!TabCtrl_GetItemRect(h, i, &tr)) continue;
+        WCHAR txt[64];
+        TCITEMW ti;
+        memset(&ti, 0, sizeof(ti));
+        ti.mask = TCIF_TEXT;
+        ti.pszText = txt;
+        ti.cchTextMax = 64;
+        SendMessageW(h, TCM_GETITEMW, (WPARAM)i, (LPARAM)&ti);
+
+        if (i == sel) {
+            /* 选中页：强调条从页签脚下长出来，贴住分隔线 */
+            RECT br = { tr.left + S(6), rc.bottom - S(4),
+                        tr.right - S(6), rc.bottom - 1 };
+            HBRUSH ab = CreateSolidBrush(RGB(0, 120, 215));
+            FillRect(dc, &br, ab);
+            DeleteObject(ab);
+        } else if (i == hot) {
+            HBRUSH hb = CreateSolidBrush(RGB(229, 241, 251));
+            HGDIOBJ ob = SelectObject(dc, hb);
+            HGDIOBJ open = SelectObject(dc, GetStockObject(NULL_PEN));
+            RoundRect(dc, tr.left + 1, tr.top + 1, tr.right - 1, tr.bottom - 1,
+                      S(8), S(8));
+            SelectObject(dc, open);
+            SelectObject(dc, ob);
+            DeleteObject(hb);
+        }
+
+        HFONT f = (i == sel) ? g_fontBold
+                             : (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+        if (!f) f = g_font;
+        HGDIOBJ of = SelectObject(dc, f);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, i == sel ? RGB(0, 90, 158)
+                                  : i == hot ? RGB(0, 0, 0) : RGB(84, 84, 84));
+        DrawTextW(dc, txt, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, of);
+    }
+}
+
 /* 表单子控件的子类，干三件事：
    1. 接 Ctrl+S / Ctrl+回车 —— 焦点多半在某个子控件上，主窗口收不到按键；
    2. 把滚轮转给主窗口 —— 滚轮默认落在**焦点**控件头上，不转的话页面永远
@@ -856,6 +987,45 @@ static LRESULT CALLBACK ChildProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_MOUSEWHEEL) {
         SendMessageW(g_hwnd, m, w, l);
         return 0;
+    }
+    if (TabIsTab(h)) {
+        /* 页签：只接管外观相关的消息（见 PaintTab），其余落回默认过程 ——
+           点击/键盘换页、TCN_SELCHANGE 全是控件自己干的。悬停项存窗口属性
+           （GWLP_USERDATA 已被子类过程占用），变了就整条重画（面积很小）。 */
+        switch (m) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(h, &ps);
+            if (dc) PaintTab(h, dc);
+            EndPaint(h, &ps);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;                    /* 整块自画，先擦一遍只会闪 */
+        case WM_MOUSEMOVE: {
+            TCHITTESTINFO hi;
+            memset(&hi, 0, sizeof(hi));
+            hi.pt.x = (SHORT)(short)LOWORD(l);
+            hi.pt.y = (SHORT)(short)HIWORD(l);
+            int idx = (int)SendMessageW(h, TCM_HITTEST, 0, (LPARAM)&hi);
+            int cur = (int)(INT_PTR)GetPropW(h, TABPROP_HOT) - 1;
+            if (idx != cur) {
+                SetPropW(h, TABPROP_HOT, (HANDLE)(INT_PTR)(idx + 1));
+                InvalidateRect(h, NULL, TRUE);
+                UpdateWindow(h);
+            }
+            TrackBtnHover(h);            /* 注册/续期 LEAVE */
+            break;
+        }
+        case WM_MOUSELEAVE:
+            if (GetPropW(h, TABPROP_HOT)) {
+                SetPropW(h, TABPROP_HOT, (HANDLE)(INT_PTR)0);
+                InvalidateRect(h, NULL, TRUE);
+            }
+            break;
+        default:
+            break;
+        }
     }
     if (BtnIsPush(h)) {
         switch (m) {
@@ -1602,6 +1772,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     InitDpiAwareness();      /* 必须在任何窗口创建之前 */
 
+    InitGroups();            /* 段头映射：纯表数据，建控件前算好 */
+
     /* 页签控件是 comctl32 的通用控件：先注册它的窗口类，CreateWindow 找得到。
        拿不到（极老系统）也只退回"没有页签的单页滚动"，其余功能照常。 */
     {
@@ -1705,6 +1877,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     for (int i = 0; i < FIELD_N; i++) {
         int id = kFields[i].id;
+        if (g_grpHead[i])                 /* 段头：普通 STATIC，字体走 FontApplyCb 的半粗分支 */
+            MakeLabel(hInst, g_hwnd, kFields[i].group, g_grpHead[i]);
         if (kFields[i].isBtn) {
             /* 按钮自己就是一行：它不承载配置值，点击行为在 WM_COMMAND 里按 id 分支 */
             HWND b = CreateWindowExW(0, L"BUTTON", kFields[i].label,
