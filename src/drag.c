@@ -350,6 +350,9 @@ static DWORD WINAPI DragThread(LPVOID p) {
             s_w = (int)(rc.right - rc.left);
             s_h = (int)(rc.bottom - rc.top);
             s_origin = to;                     /* 重新锚定：从"现在"开始跟随 */
+            org = to;                          /* 本地快照必须同步换：阶段 2 用的是
+                                                  org，不换就等于把刚抹掉的"拖出阈值
+                                                  位移"又加回落点（窗口先跳一下再回来） */
             tl = s_wndTL;
             w = s_w; h = s_h;
             LeaveCriticalSection(&s_cs);
