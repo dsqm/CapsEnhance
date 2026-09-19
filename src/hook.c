@@ -206,6 +206,14 @@ static BOOL ChordKeyHeldBeforeCaps(void) {
     return FALSE;
 }
 
+/* Caps+左键拖动：**down 被吞过，up 就必须吞** —— 与键盘那套 g_swallowVk 是
+   同一条"吞放配对"规矩（只吞 down 会让目标程序认为按键一直按着）。
+   Caps 中途松开（拖拽提前结束）时这个标志**不清**：那次 up 仍要吞 —— 只吞
+   down 不吞 up 会把"一直按着"的左键留给目标程序（与键盘那套 SwallowNote
+   同一条规矩）。配对出表在 LowLevelMouseProc 的两处 WM_LBUTTONUP。
+   定义在 ModHoldReset 之上：暂停/重启那条路必须能清它。 */
+static volatile BOOL g_dragSwallowUp = FALSE;
+
 /* 清"按住状态"。暂停/重启时会漏掉抬起事件（钩子被跳过），留着就会粘住 ——
    比如暂停期间松开 Shift，恢复后 g_shiftMod 还是 TRUE，Caps+滚轮会莫名变成
    横向滚动；` 的按下沿闩锁、吞放记账同理。所以复位时主动清掉。 */
@@ -220,6 +228,17 @@ void ModHoldReset(void) {
     s_capsUsed = FALSE;
     s_shiftArmed = FALSE;
     ModeResetAll();
+    /* 拖拽也在这里收手：暂停/重启会跳过钩子回调，"松开 Caps 结束拖拽"那条
+       路径（键盘钩子里的 DragEnd）可能根本收不到事件，留着就是恢复之后窗口
+       还在跟手、而左键的抬起被吞掉。DragEnd 不依赖拖拽是否在进行。 */
+    DragEnd();
+    g_dragSwallowUp = FALSE;
+    /* ★ g_phys 必须**重新播种**，不是"留着不动"：暂停期间钩子在记录它之前就
+       早退了（见本文件 paused 分支），所以"暂停时按住、恢复以后才松"的
+       Alt/Ctrl/Shift 从没进过这张表。恢复后按下 Caps 时 ChordKeyHeldBeforeCaps
+       查表认定"没有键先按过"→ 开始介入 → 那一下抬起被无条件吞掉，目标程序
+       从此认为该修饰键一直按着 —— 正是 g_swallowVk 那套配对规矩要防的事故。 */
+    PhysSeedFromLogical();
 }
 
 /* 发一次动作。目标键与属性都来自键位表（src/keymap.c）：
@@ -586,13 +605,6 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
    注：这也意味着主线程若被长时间占住会拖慢鼠标输入 —— 这正是"动作发送
    移到执行线程"（act.c）要解决的问题，两者是同一根因的两个面。 */
 static HHOOK g_mouseHook = NULL;
-
-/* Caps+左键拖动：**down 被吞过，up 就必须吞** —— 与键盘那套 g_swallowVk 是
-   同一条"吞放配对"规矩（只吞 down 会让目标程序认为按键一直按着）。
-   Caps 中途松开（拖拽提前结束）时这个标志**不清**：那次 up 仍要吞 —— 只吞
-   down 不吞 up 会把"一直按着"的左键留给目标程序（与键盘那套 SwallowNote
-   同一条规矩）。配对出表在 LowLevelMouseProc 的两处 WM_LBUTTONUP。 */
-static volatile BOOL g_dragSwallowUp = FALSE;
 
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode != HC_ACTION) return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
