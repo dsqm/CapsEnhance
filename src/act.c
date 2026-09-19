@@ -35,6 +35,9 @@ static volatile LONG s_stop = 0;
 static volatile LONG s_dead = 0;         /* 1 = 已停止：投递一律丢弃     */
 static volatile LONG s_busy = 0;         /* 1 = 正在执行某个动作         */
 static BOOL    s_init = FALSE;
+/* ActStop 等线程退出超时 = 工作线程还在用旧的锁与事件（只有主线程读写这一位，
+   与 s_init 同级）。见 ActStop 的超时分支与 ActStart 开头的拒绝。 */
+static BOOL    s_zombie = FALSE;
 
 /* 统一的 Interlocked 读：s_stop / s_wStop / s_asStop 只在 ActStart/ActStop
    这类"线程还没跑或已经 join"的时刻用普通赋值，其它地方一律走 Interlocked
@@ -656,6 +659,11 @@ static void AutoScrollLaneStop(void) {
 }
 
 BOOL ActStart(void) {
+    /* 上一次 ActStop 等到超时（线程还在用旧的锁与事件）：再起一次就是
+       重复 InitializeCriticalSection（对一个仍被持有的锁 = 未定义），
+       而且会把还没关的两个事件句柄直接覆盖掉。
+       返回 FALSE = 调用方按"线程起不来"处理（退回同步兜底），与既有语义一致。 */
+    if (s_zombie) return FALSE;
     if (s_init) return TRUE;
     memset(s_q, 0, sizeof(s_q));
     s_head = s_tail = s_n = 0;
@@ -709,9 +717,23 @@ void ActStop(void) {
            SendMsg 超时。加超时兜底，避免退出流程被卡死。
            必须等它退出 —— 之后 SendClearStuckModifiers 要读 send.c 的
            g_injectedDown，那是工作线程会写的状态。 */
-        WaitForSingleObject(s_thread, 5000);
-        CloseHandle(s_thread);
+        DWORD wr = WaitForSingleObject(s_thread, 5000);
+        CloseHandle(s_thread);           /* 关掉本进程的引用即可，线程对象由系统回收 */
         s_thread = NULL;
+        if (wr != WAIT_OBJECT_0) {
+            /* 超时：线程还活着。**绝不能拆它仍在用的共享对象** —— 删掉的临界区
+               会被它再次 EnterCriticalSection（未定义），关掉的两个事件句柄可能
+               被系统复用给别的对象，而它照样 SetEvent 过去 = 搅动别人的信令。
+               留着不关是这里代价最小的选择：进程马上就退，内核对象随之回收。
+               s_zombie 让 ActStart 不再重起一次（重启失败的回滚路径会调它）。
+               （退出流程不因此挂住：本函数返回后主线程照常往下走。） */
+            if (g_recording.load())
+                CapLog("  !! 动作线程 5s 未退出，跳过共享对象销毁（防拆正在使用的锁/事件）");
+            s_zombie = TRUE;
+            s_init = FALSE;
+            return;
+        }
+        s_zombie = FALSE;            /* 正常 join 到了：共享对象可以照旧销毁 */
     }
     s_init = FALSE;
     if (s_evWork) { CloseHandle(s_evWork); s_evWork = NULL; }
