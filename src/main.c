@@ -924,6 +924,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                不是现在现读 ModeDown —— 钩子回调与本处理是异步的，详见 hook.c
                的 ModeSnapFlags。这也是"修饰键必须先按住、再按触发键"这条顺序
                语义的落地：J 按下那一刻 Alt 有没有按住，就决定这一发带不带增强。 */
+            BOOL  single = IsSingleShotAct(act);
+            BOOL  oldEnh = g_actEnh, oldShf = g_actShf;
+            int   oldCnt = g_btnCount;
             g_actEnh = (lp & TRIGF_ENH) != 0;
             g_actShf = (lp & TRIGF_SHF) != 0;
             g_btnCount = 1;
@@ -935,11 +938,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             /* 剪贴板（Caps+V）：同样不走执行线程 —— 它只是"拉起/唤起另一个
                进程的窗口"。toggle 语义在 ClipShow 里（再按一次 = 关掉）。 */
             if (ActHasFlag(act, ACTF_CLIPLIST)) ClipShow();
-            if (!IsSingleShotAct(act)) {
+            if (!single) {
                 /* 开关键只切一次、也不接管重复节奏（原来那个动作继续重复） */
                 g_activeAct = act;
                 g_activeNext = GetTickCount64() + REPEAT_FIRST_DELAY;
             } else {
+                /* 单发键不接管节奏，所以**它自己的快照也必须只用于它自己这一发**：
+                   不放回去的话，仍在重复的那个动作从这里开始每一发（以及它的松手
+                   补齐）都改用这一发的 enh/shf 与 count=1 —— 长按 C+F+J 扩展选区的
+                   中途按一下 V，选区当场就不再扩展了。 */
+                g_actEnh = oldEnh; g_actShf = oldShf; g_btnCount = oldCnt;
                 /* 已经切过了：从"仍按着"的栈里摘掉，否则之后松开别的键时
                    "退回上一个"会把它再切一次（两次切换 = 又切回原状态） */
                 StackRemove(act);
