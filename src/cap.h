@@ -538,6 +538,8 @@ void SendKeyOnce(int vk, BOOL shift);        /* 单击一个键，shift 全程�
 int  SendArrows(int dir, int n, BOOL shift); /* n 个左/右箭头，返回 ARROW_SEND_* */
 void SendArrowsStrict(int dir, int n, BOOL shift); /* 同上但绝不改道（补正专用） */
 void SendArrowsRequestInterrupt(void);       /* 请求打断正在进行的逐格输出（主线程：钩子回调 / ActStop） */
+BOOL SendArrowsWasInterrupted(void);         /* 刚刚那次逐格输出是否被打断 —— 补正阶段据此跳过：
+                                                打断 = 和弦已经松手，再发箭头就是在用户松手之后注键 */
 BOOL SendArrowsConflicts(int act);           /* act 是否与正在逐格输出的方向冲突 */
 void SendNativeWordJump(int dir, BOOL shift);/* 原生 Ctrl(+Shift)+方向：按词跳转兜底 */
 void SendWheelAccel(int delta, int mul);     /* 纵向放大：补发 (mul-1) 个同值刻度 */

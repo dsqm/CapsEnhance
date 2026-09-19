@@ -108,6 +108,10 @@ void SendKeyOnce(int vk, BOOL shift) {
      2) 按下与当前输出方向不同的触发键 —— 改道（如正在 ← 时按 L）（hook.c）。
    打断后循环立即退出，循环外的收尾（抬起 Shift）照常执行；
    改道按键的 TRIG_DOWN 已在主线程队列里，循环结束后自然开火衔接。
+   ★ 打断点**只能落在一对键之外**（抬起之后）。原先在按下与抬起之间也判一次，
+     落在 KEY_GAP 那 5ms 里的打断就把方向键留在"逻辑按下"状态出了循环 ——
+     而 SendClearStuckModifiers 只补修饰键，补不回方向键：目标程序从此认为
+     VK_LEFT 一直按着，光标自己往前跑。
 
    ★ g_arrBusy / g_arrDir / g_arrBreak 是本项目**第三组真正跨线程**的标志
      （前两个工作线程写、主线程钩子读；g_arrBreak 主线程写、工作线程读，
@@ -117,8 +121,16 @@ void SendKeyOnce(int vk, BOOL shift) {
 static volatile BOOL g_arrBusy = FALSE;    /* 正在逐格输出 */
 static volatile int  g_arrDir  = -1;       /* 当前输出方向 (DIR_*) */
 static volatile BOOL g_arrBreak = FALSE;   /* 打断请求 */
+/* 上一次逐格输出是否"被打断结束"。补正阶段读它：打断意味着和弦已经松手，
+   那时候再发箭头就是在用户松手之后继续注键（见 SendArrowsWasInterrupted）。
+   只在工作线程读写（发完即读），不跨线程。 */
+static volatile BOOL g_arrBroke = FALSE;
 
 void SendArrowsRequestInterrupt(void) { g_arrBreak = TRUE; }
+
+/* 本次（刚刚那次）逐格输出是否被打断。仅在 SendArrows / SendArrowsStrict
+   返回后、同一工作线程内读取，用来决定还要不要做回读补正。 */
+BOOL SendArrowsWasInterrupted(void) { return g_arrBroke; }
 
 /* act 是否与正在逐格输出的方向冲突（不同触发键即改道） */
 BOOL SendArrowsConflicts(int act) {
@@ -134,15 +146,15 @@ BOOL SendArrowsConflicts(int act) {
 /* 真正的逐格发送：不做任何超限判定，n 步就是 n 步。 */
 static void ArrowsEmit(int dir, int n, BOOL shift) {
     int vk = (dir == DIR_LEFT) ? VK_LEFT : VK_RIGHT;
-    g_arrDir = dir; g_arrBusy = TRUE; g_arrBreak = FALSE;
+    g_arrDir = dir; g_arrBusy = TRUE; g_arrBreak = FALSE; g_arrBroke = FALSE;
     if (shift) { SendEvent(VK_LSHIFT, FALSE); Sleep(COMBO_GAP); }
     for (int i = 0; i < n && i < MAX_ARROW_STEPS; i++) {
-        if (g_arrBreak) break;
+        if (g_arrBreak) { g_arrBroke = TRUE; break; }
         SendEvent(vk, FALSE);
         Sleep(KEY_GAP);
-        if (g_arrBreak) break;
-        SendEvent(vk, TRUE);
-        if (g_arrBreak) break;
+        SendEvent(vk, TRUE);           /* 抬起无条件发完：见上面"打断点只能落在
+                                          一对键之外"的说明 */
+        if (g_arrBreak) { g_arrBroke = TRUE; break; }
         Sleep(ARROW_GAP);
     }
     g_arrBusy = FALSE;
@@ -158,6 +170,9 @@ void SendArrowsStrict(int dir, int n, BOOL shift) {
 }
 
 int SendArrows(int dir, int n, BOOL shift) {
+    /* 本次调用的"有没有被打断"从零开始算：改道那条分支不进 ArrowsEmit，
+       不清就会拿上一发的结果来决定本次要不要补正。 */
+    g_arrBroke = FALSE;
     /* 发送处统一判定：本次要发的步数达到 MaxArrowSteps 就改为
          OverStepMode=1 -> 发原生 Ctrl+方向（目标程序自己的按词跳转，瞬时）
          OverStepMode=0 -> 只发一个方向键（跳一格即停）

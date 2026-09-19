@@ -285,10 +285,15 @@ static BOOL SciGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut,
     w[nw] = 0;
 
     LONGLONG cb = 0, ab = 0;
-    SendMsg(hwnd, SCI_GETCURRENTPOS, 0, 0, &cb);
+    /* 这两条的返回值**必须判**：600ms 的 IPC 预算可能在 SCI_GETTEXT 之后才耗尽，
+       不判就是"读到了、光标在 0" —— 通道报成功，于是把光标瞬移到文档开头的词
+       边界（带 F 时从文档头一路选到目标），比失败更糟。 */
+    if (!SendMsg(hwnd, SCI_GETCURRENTPOS, 0, 0, &cb)) goto done;
     if (cb < 0) cb = 0;
     if (cb > got) cb = got;
-    SendMsg(hwnd, SCI_GETANCHOR, 0, 0, &ab);
+    /* 锚读不到不等于整条通道失败：按"没有选区"（锚=光标）继续，逐格跳转本来就
+       不需要锚，只有直接置位的选区路径才用它。 */
+    if (!SendMsg(hwnd, SCI_GETANCHOR, 0, 0, &ab)) ab = cb;
     if (ab < 0) ab = cb;
     if (ab > got) ab = got;   /* 与 cb 同一处理：以读到的文本长度为准。越界只可能
                                  是两次调用之间文档被改过，钳回长度比把越界值
@@ -1525,6 +1530,9 @@ static int NavJumpInner(int dir, BOOL shift) {
     if (!direct && !skipArrows) sendMode = SendArrows(dir, steps, shift);
     BOOL handedOff = (sendMode == ARROW_SEND_HANDOFF);
     BOOL oneStep   = (sendMode == ARROW_SEND_ONE);
+    /* 被打断（松开 C / 改道按键）时**不再补正**：打断就是"这一和弦已经结束"，
+       补正那几发会落在用户松手之后。 */
+    BOOL broke     = SendArrowsWasInterrupted();
     /* 自校验补正：经典 Edit 通道能读回光标。实测 EmEditor 会在直接置位后
        吞掉第一支箭头（虚拟机里也可能丢键），导致逐格跳少走一格——
        读回实际位置，按差值补发（只补一轮、差值不超过原步数，防打转）。
@@ -1533,7 +1541,7 @@ static int NavJumpInner(int dir, BOOL shift) {
        就又改道一次、又落不到目标，而改道之后没人再校验。
        Scintilla 通道暂不做补正（SCI_GETCURRENTPOS 是字节域，回读后要反向
        换算成 UTF-16 才能和 tgt 比，现无该方向的换算函数）；记此备查。 */
-    if (!direct && !oneStep && !shift && path == Chan::Edit && focus) {
+    if (!direct && !oneStep && !broke && !shift && path == Chan::Edit && focus) {
         LONGLONG now = EditGetCaret(focus);
         if (now >= 0 && now == (LONGLONG)tgt) {
             if (handedOff && g_recording.load())
@@ -1563,7 +1571,7 @@ static int NavJumpInner(int dir, BOOL shift) {
        每次回读是因为它们的坐标本身不可靠。 */
     BOOL isUA  = (path == Chan::UIA || path == Chan::IA2);
     BOOL isWps = (path == Chan::WPS);
-    if (!direct && !skipArrows && !oneStep && !shift && focus
+    if (!direct && !skipArrows && !oneStep && !broke && !shift && focus
         && (isUA || (isWps && handedOff))) {
         WCHAR* t2 = NULL; int l2 = 0, c2 = 0;
         BOOL ok2;
