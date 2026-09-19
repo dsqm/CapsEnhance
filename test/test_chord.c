@@ -835,7 +835,7 @@ int main(void) {
     ConfigLoadFrom(L"obj/test/chordtest.ini");
     CHECK(Wheel(120, 0) != 1 && !TakeWheelAccel(NULL, NULL),
           "N: WheelScrollMul=1 -> 不放大（完全按系统原本行为）");
-    ConfigLoadFrom(L"bin/__absent__.ini");   /* 回缺省（2） */
+    ConfigLoadFrom(L"obj/test/__absent__.ini");   /* 回缺省（2） */
 
     Key(CLI_CAPS, FALSE); Pump(2);
 
@@ -987,7 +987,7 @@ int main(void) {
 
     /* 复位成缺省：本场景是最后一个，但别给以后新加的场景留坑
        （SendArrows 的行为受 MaxArrowSteps/OverStepMode 影响） */
-    ConfigLoadFrom(L"bin/__absent__.ini");         /* 文件不存在 -> 全部回缺省 */
+    ConfigLoadFrom(L"obj/test/__absent__.ini");         /* 文件不存在 -> 全部回缺省 */
 
     /* ---- 场景R：Caps+增强修饰+滚轮 = 持续滚动 ----
        "滚一下就一直滚、继续同向滚提速、反向滚/松开修饰/松开 C 立即停"，
@@ -1235,7 +1235,7 @@ int main(void) {
     CHECK(ActAutoScrollTick() == 1000, "R: 两端配成相等 -> 速度恒定 1000ms/格");
 
     /* 端到端：钩子路由与吞格（横向 / 持续滚动都吞，只有放大档放行） */
-    ConfigLoadFrom(L"bin/__absent__.ini");        /* 回缺省 */
+    ConfigLoadFrom(L"obj/test/__absent__.ini");        /* 回缺省 */
     Reset();
     Key(CLI_CAPS, TRUE); Pump(2);
     KeyAlt(VK_LMENU, TRUE); Pump(2);
@@ -1246,7 +1246,7 @@ int main(void) {
     CHECK(ActAutoScrollActive() && ActAutoScrollDir() == 1 && g_wheelInj >= 1,
           "R: 经钩子路由 -> 启动持续滚动");
     END_SCENE();
-    ConfigLoadFrom(L"bin/__absent__.ini");
+    ConfigLoadFrom(L"obj/test/__absent__.ini");
 
     /* ---- 场景T：Caps+Shift+滚轮 = 横向滚动 ----
        只需真实 Shift（与 keymap 的"选区模式 F"无关）；速度 WheelHScrollMul 默认 1。
@@ -1290,7 +1290,7 @@ int main(void) {
     ActWheelPostH(120, 3);
     Pump(100); Drain();
     CHECK(g_whInj == 3 && g_whSum < 0, "T: 倍数 3 -> 注入 3 格、方向仍向左");
-    ConfigLoadFrom(L"bin/__absent__.ini");        /* 回缺省（1） */
+    ConfigLoadFrom(L"obj/test/__absent__.ini");        /* 回缺省（1） */
 
     /* 关闭（0）：不吞这一格，退回纵向语义 */
     WriteChordIni("[General]\r\nWheelHScrollMul = 0\r\n");
@@ -1301,7 +1301,7 @@ int main(void) {
     CHECK(Wheel(120, 0) != 1, "T: WheelHScrollMul=0 -> 改由纵向接管（放大档，不吞物理格）");
     CHECK(!TakeWheelHAccel(NULL, NULL), "T: 关闭时不再投递横向请求");
     CHECK(TakeWheelAccel(NULL, NULL), "T: 关闭横向后退回纵向放大");
-    ConfigLoadFrom(L"bin/__absent__.ini");
+    ConfigLoadFrom(L"obj/test/__absent__.ini");
 
     /* 松开 Shift 就回到纵向；Caps+Shift 之外不受影响 */
     Key(VK_LSHIFT, FALSE); Pump(2); Sink();
@@ -1357,7 +1357,7 @@ int main(void) {
     CHECK(CountVk(VK_LEFT) == 3, "S: C+D+J 同样补齐到 3 次左键（D 仍是增强键）");
 
     /* 复位默认键位（别给以后新增的场景留坑） */
-    ConfigLoadFrom(L"bin/__absent__.ini");
+    ConfigLoadFrom(L"obj/test/__absent__.ini");
     KeyMapInit();
 
     /* ---- 场景AD：[AutoDisable] 名单（自动屏蔽） ----
@@ -1383,7 +1383,7 @@ int main(void) {
             CHECK(!ConfigIsAutoDisabled(me), "AD: 名单里没有本进程 -> 不命中");
             DestroyWindow(me);
         }
-        ConfigLoadFrom(L"bin/__absent__.ini");   /* 复位：别影响后面的场景 */
+        ConfigLoadFrom(L"obj/test/__absent__.ini");   /* 复位：别影响后面的场景 */
     }
 
     /* ---- 场景AG：单键切换输入法的"单击"判定（执行在 src/ime.c） ----
@@ -1394,7 +1394,7 @@ int main(void) {
          · Shift 是**真修饰键**（系统照常用它）-> 必须"期间没按别的键"**且**
            按得够短（IME_TAP_MS）才算单击；
          · Caps 按住期间的 Shift 属于和弦（Caps+Shift+滚轮要横向），不算单击。 */
-    ConfigLoadFrom(L"bin/__absent__.ini");
+    ConfigLoadFrom(L"obj/test/__absent__.ini");
     CHECK(ConfigGetImeMode(IME_KEY_CAPS) == IME_MODE_CN &&
           ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_EN &&
           ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_CN,
@@ -1466,7 +1466,7 @@ int main(void) {
     Key(VK_LSHIFT, FALSE); Pump(2);
     CHECK(g_imeReq[IME_KEY_CAPS] == 0 && g_imeReq[IME_KEY_LSHIFT] == 0,
           "AG: 三个键都设成 0（不处理）-> 不投递任何请求");
-    ConfigLoadFrom(L"bin/__absent__.ini");   /* 复位：别影响后面的场景 */
+    ConfigLoadFrom(L"obj/test/__absent__.ini");   /* 复位：别影响后面的场景 */
 
     /* ---- 场景W：**先按修饰键、后按 C**（P1-1 回归） ----
        实测缺陷：按住 Alt 不放、再按 C、然后点按 J，**只发 1 次左键**（本该
