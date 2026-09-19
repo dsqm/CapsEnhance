@@ -73,6 +73,9 @@
 #define IDC_RELOAD  103
 #define IDC_EXIT    104
 #define IDC_TAB     120   /* 页签条（换页在 WndProc 的 WM_NOTIFY / TCN_SELCHANGE） */
+#define IDC_HEADER  121   /* 顶部"窗框"托盘 */
+#define IDC_FOOTER  122   /* 底部"窗框"托盘（hMenu 传 NULL 的窗口控件 ID 是 0，
+                             会撞上"段头 id 为 0"这类查询 —— 必须给正式 ID） */
 #define IDC_GROUP0  400   /* 常规页段头（每段一个 STATIC，见 kFields 的 group 列） */
 #define GROUP_MAX   8     /* 段数上限；超出的段不带头（数据里目前 5 段，纯保底） */
 
@@ -649,7 +652,12 @@ static void Layout(int w, int h) {
         ShowCtrl(GetDlgItem(g_hwnd, id), fieldPage);
         ShowCtrl(GetDlgItem(g_hwnd, id + 500), fieldPage);
         ShowCtrl(GetDlgItem(g_hwnd, id + 600), fieldPage);
-        ShowCtrl(GetDlgItem(g_hwnd, g_grpHead[i]), fieldPage);  /* 段头随段显隐 */
+        /* 段头随段显隐。id == 0 必须跳过：两个"窗框"曾经以 hMenu=NULL 创建
+           （控件 ID = 0），GetDlgItem(..., 0) 会命中它们 —— 名单页把底部
+           窗框（按钮托盘）当段头藏掉，按钮整条消失（实测踩过）。窗框现在
+           有正式 ID，这里再加 id 判断双保险。 */
+        if (g_grpHead[i])
+            ShowCtrl(GetDlgItem(g_hwnd, g_grpHead[i]), fieldPage);
         if (id == IDC_DITTO_DB) {         /* Ditto 行右侧两颗小按钮随行显隐 */
             ShowCtrl(GetDlgItem(g_hwnd, IDC_DITTO_BROWSE), fieldPage);
             ShowCtrl(GetDlgItem(g_hwnd, IDC_DITTO_CONV), fieldPage);
@@ -1857,7 +1865,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
        （与底部窗框同一思路，落位与钉顶都在 Layout）。 */
     g_header = CreateWindowExW(WS_EX_CONTROLPARENT, FOOTER_CLASS, L"",
                                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                               0, 0, 10, 10, g_hwnd, NULL, hInst, NULL);
+                               0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)IDC_HEADER, hInst, NULL);
     /* 页签条：只决定"显示哪些控件"（显隐轮在 Layout）—— 控件本体仍是
        主窗口的（孙）子窗口，Load / Save / WM_COMMAND 全按 id 找，不分页。
        换页的 WM_NOTIFY 由窗框原样转给主窗口（见 FooterProc）。 */
@@ -1934,7 +1942,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     /* 底部"窗框"最后建：z 序压在表单内容之上，滚动时挡住溢出的内容 */
     g_footer = CreateWindowExW(WS_EX_CONTROLPARENT, FOOTER_CLASS, L"",
                                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                               0, 0, 10, 10, g_hwnd, NULL, hInst, NULL);
+                               0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)IDC_FOOTER, hInst, NULL);
     g_status = MakeLabel(hInst, g_footer, L"", IDC_STATUS);
     MakeBtn(hInst, g_footer, L"重新加载", IDC_RELOAD);
     MakeBtn(hInst, g_footer, L"保存", IDC_SAVEONLY);
