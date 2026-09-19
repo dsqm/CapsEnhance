@@ -518,18 +518,29 @@ WPS 置位的回读校验返回**三态**：
 
 色值判据照抄 Ditto `QListCtrl.cpp` 的 `DrawCopiedColorCode`（`src/colorcode.c`，纯函数、有单测 `test/test_color.c`）：先 `Trim` 掉 `»` 后缀与空白、再剥结尾 `;`，然后依次试 W3C 命名色（141 个，表从 Ditto 源码脚本化提取）、`#RGB/#RGBA/#RRGGBB/#RRGGBBAA`、无前缀 6 位 hex、`0x` 前缀、`rgb()/rgba()`（支持百分比）、`hsl()/hsla()`。alpha < 255 时先画棋盘格再 alpha 混合，同 Ditto。
 
-**悬停提示是系统 tooltip 控件 + 手动 TRACK 模式**，三个坑都是实测踩出来的：
+**悬停提示是自绘分层窗口**（照 Ditto 的 CToolTipEx 架构 —— 它也不是 tooltip 控件，
+而是自绘 WS_POPUP）。圆角白底 + #CCC 边框 + 浮层行字体，`UpdateLayeredWindow`
+逐像素 alpha、边缘 1.5px 羽化；显示 ~90ms 渐显、收起渐隐（`TID_TIPFADE` 步进，
+每步重发一次 ULW，`SourceConstantAlpha` 当全局乘数，不用改位图）。窗口带
+`WS_EX_TRANSPARENT`（鼠标穿透），压到光标也不打断悬停选中。
+几个要点：
 
-1. **cbSize 必须是 `TTTOOLINFOW_V1_SIZE`**：本进程不带清单，激活的是 comctl32 **v5**。`TTM_ADDTOOLW` 传 v6 的 `sizeof(TOOLINFOW)` 会**静默失败**（返回 0，tooltip 窗口照样创建出来，于是看起来一切正常、永远不弹）。
-2. **v5 的 `TTF_SUBCLASS` 自动计时在 NOACTIVATE 窗口上不触发**：注册成功也不弹。所以用手动 `TTF_TRACK|TTF_ABSOLUTE`：`WM_MOUSEMOVE` 里行变了就 `TTM_TRACKACTIVATE(TRUE)` + `TTM_TRACKPOSITION`，移出列表 / 滚轮 / 浮层收起就 deactivate。定位用**消息里的客户坐标** `ClientToScreen`，不要 `GetCursorPos`（消息到达与采样有延迟差，会弹到光标上一站）。
-3. **`TTM_POP` 对 TRACK 工具无效**，收起要用 `TTM_TRACKACTIVATE(FALSE)`；"自动消失"（Ditto 的 `ToolTipTimeout`）TRACK 模式也不管，自己拿 `TID_TIP` 定时器实现。
+- **节奏两段式**：没显示时行变就重计 500ms（`TID_TIPSHOW`）—— 停稳才弹；
+  已显示时行变 = 立即换内容并跟手移位（不收起、不重计）。弹出点按"当下"光标算。
+- **时间行在最下面**：`Added: <lDate>` / `Last Used: <lastPasteDate>`（unix 秒、
+  本地时区、不补零）。`lastPasteDate` 列不存在（很老的库）时整条 SELECT 退回旧
+  查询、时间行不显示。
+- **换行自己写**（`TipWrapInPlace`）：CJK 无空格按字断；ASCII 词内不断（超长词
+  硬断）；空格断行时空格不进行尾。
+- **GDI 不写 alpha**：文字和底色画完后再按圆角几何给整个 DIB 补 alpha，
+  并按 a 预乘 RGB（`AC_SRC_ALPHA` 要求）。alpha 几何必须与 `RoundRect` 同一半径。
+- **ULW 与 SLWA 互斥**：一旦调过 `SetLayeredWindowAttributes`，ULW 会失败 ——
+  渐变只能走"重发 ULW + SourceConstantAlpha"这条路。
+- 历史（系统 tooltip 控件路线，已弃）留档：无清单进程 = comctl32 v5，
+  `TTM_ADDTOOLW` 传 v6 `sizeof(TOOLINFOW)` 静默失败（须 `TTTOOLINFOW_V1_SIZE`）；
+  v5 的 `TTF_SUBCLASS` 在 NOACTIVATE 窗口上不触发；`TTM_POP` 对 TRACK 工具无效。
+  弃用它就是因为观感"硬"：弹/收/切换全是瞬时的，调不出 Ditto 的"软"。
 
-节奏与外观（对齐 Ditto 的体感）：
-
-- **两段式节奏**（Ditto 体感）：**停稳 500ms 才弹**（`TID_TIPSHOW`，与系统初始延迟一致）—— 行变了就重计延迟，划过列表不会连珠炮地弹，`TTN_NEEDTEXT` 的回库查询也只有停稳那一次；**已显示后上下移动 = 立即切换**到新行（换文本 + 跟手移位），不收起、不重计。弹出点一律按"当下"光标位置算。
-- **淡入**：系统提示自带的轻微淡入在手动 TRACK 模式里没有，`TTN_SHOW` 里补一个 `AnimateWindow(120ms, AW_BLEND)`（失败无害）；TRACKPOSITION 必须在激活**之前**发，否则动画会播在旧位置上再跳过来。
-- **时间行在最下面**（用户反馈）：`Added: <lDate>` / `Last Used: <lastPasteDate>` 两行收尾，unix 秒按本地时区、不补零（`COleDateTime::Format()` 的中文面貌）。`lastPasteDate` 列不存在（很老的库）时整条 SELECT 退回旧查询、时间行不显示。
-- **白底黑字**：`TTM_SETTIPBKCOLOR` / `TTM_SETTIPTEXTCOLOR`，跟列表配色走，不用系统的黄底。这两个消息只在**没有视觉样式激活**的进程里生效 —— 我们不带清单，正好落在生效区。
 
 文本取法：条目没被截断（≤160 字符）直接用摘要；被截断的按需回库取全文（`TipTextOf`，与缩略图同一条"用到才付"的思路）。TTN_NEEDTEXT 里同步查库只针对当前悬停那一条，单条毫秒级。
 

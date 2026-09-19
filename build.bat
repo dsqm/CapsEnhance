@@ -138,7 +138,6 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc /Ithirdpart
    /link /OUT:bin/CapsEnhanceClip.exe ^
    obj\sqlite3mc.obj obj\colorcode.obj ^
    user32.lib gdi32.lib shell32.lib ole32.lib gdiplus.lib bcrypt.lib advapi32.lib ^
-   comctl32.lib ^
    /SUBSYSTEM:WINDOWS
 if errorlevel 1 (
     echo [ERROR] clipboard overlay build failed

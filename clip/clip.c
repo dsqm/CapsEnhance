@@ -38,7 +38,7 @@
 #pragma warning(push)
 #pragma warning(disable: 6385 28252 28253)
 #include <objidl.h>
-#include <commctrl.h>    /* 悬停提示：TOOLTIPS_CLASSW / TTM_*（照 Ditto） */
+#include <math.h>       /* sqrt：提示圆角羽化的距离场 */
 #include <gdiplus.h>
 #pragma warning(pop)
 
@@ -186,6 +186,7 @@ static POINT     g_dragWin;            /* 按下那一刻的窗口位置 */
 #define TID_KA     5
 #define TID_TIP   6    /* 悬停提示的自动消失（TRACK 模式不会自己收） */
 #define TID_TIPSHOW 7  /* 悬停初始延迟：停稳 500ms 才弹（Ditto/系统同款） */
+#define TID_TIPFADE 8  /* 提示窗口渐显/渐隐的步进时钟 */
 #define TIP_DELAY_MS 500
 #define GRACE_MS   300
 #define LIFE_MS    180000
@@ -329,99 +330,253 @@ static void DbLoadItems(void) {
     sqlite3_close(db);
 }
 
-/* ================= 悬停提示（照 Ditto：系统 tooltip 控件） =================
-   Ditto 的做法是列表控件自带 tooltip：悬停一会儿，弹出这一条的**完整**文本
-   （列表里只显示两行摘要，看不全的靠它）。我们照同一套：
-     · 载体：TOOLTIPS_CLASSW 子窗口 —— 换行交给系统，不自己画
-     · 触发：**手动 TRACK 模式**（TTF_TRACK|TTF_ABSOLUTE），由 WM_MOUSEMOVE
-       直接决定弹/收与位置。不用 TTF_SUBCLASS 的自动计时，原因有二：
-       (a) 本进程不带清单，激活的是 comctl32 **v5** —— TTM_ADDTOOLW 传
-           v6 的 sizeof(TOOLINFOW) 会**静默失败**，必须用 TTTOOLINFOW_V1_SIZE
-           （minitip 最小复现实测：72 失败、56 成功）；
-       (b) NOACTIVATE 窗口上 v5 的中继计时也不触发（同一实验：注册成功
-           也不弹）。手动模式反而更贴合：我们本来就悬停即选中，行变了
-           顺手换提示、移出列表立刻收，不需要再赌系统的计时。 */
+/* ================= 悬停提示（照 Ditto 的 CToolTipEx：自绘窗口） =================
+   前两版用系统 tooltip 控件（TTF_TRACK 手动模式），能用，但观感"硬"：
+   弹/收是瞬时的，文本切换也是硬切。Ditto 自己的提示（CToolTipEx，参考
+   仓库 1665 行）根本不是 tooltip 控件，而是一个自绘 WS_POPUP 窗口 ——
+   这才是它"软"的来源。本版照同一架构：
+     · 载体：自绘分层窗口（WS_EX_LAYERED），圆角白底 + #CCC 边框，
+       UpdateLayeredWindow 逐像素 alpha，边缘 1.5px 羽化；
+     · 字体：浮层的行字体（Ditto 的 CToolTipEx 同样用列表字体）；
+     · 软感：显示 ~90ms 渐显、收起渐隐（TID_TIPFADE 步进，每步重发一次
+       ULW，BLENDFUNCTION.SourceConstantAlpha 当全局乘数，不用改位图）；
+     · 文本：TipTextOf 产出的"正文 + 尾部时间行"（含按需回库取全文）；
+     · 节奏：停稳 500ms 才弹（TID_TIPSHOW）；已显示时上下移动立即切换；
+       超时（TID_TIP，Ditto 的 ToolTipTimeout）渐隐收场。
+   系统 tooltip 路线的教训留档：无清单进程 = comctl32 v5，TTM_ADDTOOLW
+   传 v6 sizeof 静默失败（须 V1_SIZE）；v5 的 TTF_SUBCLASS 在 NOACTIVATE
+   窗口上不触发；TTM_POP 对 TRACK 工具无效。 */
 static HWND  g_tip = NULL;
-static WCHAR g_tipBuf[4096];
+static int   g_tipAlpha = 0;         /* 0..255，渐显渐隐的当前值 */
+static int   g_tipAlphaDir = 0;      /* 0 不动；+1 渐显；-1 渐隐 */
 static int   g_tipRow = -1;          /* 提示当前指向的行；-1 = 没在显示 */
+static int   g_tipW = 0, g_tipH = 0;
+static HDC     g_tipDC = NULL;       /* 内容 DIB（含 alpha），ULW 的源 */
+static HBITMAP g_tipBmp = NULL;
+static void*  g_tipBits = NULL;
+static POINT  g_tipPos = { 0, 0 };   /* 当前显示位置（屏幕） */
+static WCHAR  g_tipBuf[4096];
+typedef struct { const WCHAR* s; int len; } TipLine;
+
+static LRESULT CALLBACK TipWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    return DefWindowProcW(h, m, w, l);   /* 内容全走 ULW，窗口没有绘制职责 */
+}
+
+static int  TipWrapInPlace(const WCHAR* text, HDC dc, int maxW, TipLine* ln, int maxLn);
+static void TipTextOf(int idx);
+static void MonitorWork(HMONITOR mon, RECT* out);   /* 定义在 winmove 段 */
+
+static void TipEnsureWindow(void) {
+    if (g_tip) return;
+    WNDCLASSW wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.lpfnWndProc   = TipWndProc;
+    wc.hInstance     = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"CapsEnhanceClipTip";
+    RegisterClassW(&wc);
+    /* TRANSPARENT：鼠标穿透 —— 提示万一压到光标，悬停选中也不中断 */
+    g_tip = CreateWindowExW(WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW |
+                            WS_EX_TOPMOST | WS_EX_TRANSPARENT,
+                            wc.lpszClassName, NULL, WS_POPUP,
+                            0, 0, 0, 0, NULL, NULL, wc.hInstance, NULL);
+}
 
 static void TipDestroy(void) {
-    if (g_tip) { DestroyWindow(g_tip); g_tip = NULL; }
+    if (g_tipDC)  { DeleteDC(g_tipDC);    g_tipDC  = NULL; }
+    if (g_tipBmp) { DeleteObject(g_tipBmp); g_tipBmp = NULL; }
+    g_tipBits = NULL; g_tipW = g_tipH = 0; g_tipAlpha = 0; g_tipAlphaDir = 0;
+    if (g_tip)    { DestroyWindow(g_tip);  g_tip    = NULL; }
+    g_tipRow = -1;
 }
 
-/* 提示窗口只在显示路径创建一次；TRACK 模式的 tool 不占矩形区域，
-   窗口大小变化也不用更新它。 */
-static void TipUpdate(void) {
-    if (DsTipTimeoutMs() == 0) { TipDestroy(); return; }   /* Ditto: 0 = 关掉提示 */
-    if (g_tip) return;
-    INITCOMMONCONTROLSEX ic;
-    ic.dwSize = sizeof(ic);
-    ic.dwICC  = ICC_WIN95_CLASSES;
-    InitCommonControlsEx(&ic);
-    g_tip = CreateWindowExW(0, TOOLTIPS_CLASSW, NULL,
-                            WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
-                            CW_USEDEFAULT, CW_USEDEFAULT,
-                            CW_USEDEFAULT, CW_USEDEFAULT,
-                            g_hwnd, NULL, GetModuleHandleW(NULL), NULL);
-    if (!g_tip) return;
-    TOOLINFOW ti;
-    memset(&ti, 0, sizeof(ti));
-    /* ★ cbSize 必须是 V1_SIZE：comctl32 v5 只认旧结构，传 v6 的 sizeof
-       会让 TTM_ADDTOOLW 返回 0 且毫无声息（踩过，见注释块）。 */
-    ti.cbSize   = TTTOOLINFOW_V1_SIZE;
-    ti.uFlags   = TTF_TRACK | TTF_ABSOLUTE;
-    ti.hwnd     = g_hwnd;
-    ti.uId      = (UINT_PTR)g_hwnd;
-    ti.lpszText = LPSTR_TEXTCALLBACK;      /* 弹出前问我们要文本 */
-    SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
-    /* 与 Ditto 同一个值：最宽 500px，超出的自动折行 */
-    SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 500);
-    /* 样式跟列表走：白底黑字。系统默认的黄底跟浮层完全不搭；这两个消息
-       在没有视觉样式激活的进程里生效（我们不带清单，正好）。 */
-    SendMessageW(g_tip, TTM_SETTIPBKCOLOR,   RGB(255, 255, 255), 0);
-    SendMessageW(g_tip, TTM_SETTIPTEXTCOLOR, RGB(0, 0, 0), 0);
-    {
-        RECT mrg = { 6, 4, 6, 4 };          /* 比系统默认的紧凑边距稍松 */
-        SendMessageW(g_tip, TTM_SETMARGIN, 0, (LPARAM)&mrg);
+/* 把内容画进 DIB：白底圆角 + #CCC 边框 + 黑字（浮层行字体），
+   alpha 按几何后处理 —— GDI 不写 alpha，且 ULW(AC_SRC_ALPHA) 要求预乘。 */
+static BOOL TipBuild(int row) {
+    TipTextOf(row);
+    if (!g_tipBuf[0]) return FALSE;
+
+    HDC m = CreateCompatibleDC(NULL);
+    HGDIOBJ of = SelectObject(m, g_fontRow);
+    int maxW = (int)(500 * g_k + 0.5f);
+    TipLine ln[240];
+    int n = TipWrapInPlace(g_tipBuf, m, maxW, ln, 240);
+    int textW = 0;
+    for (int i = 0; i < n; i++) {
+        SIZE sz;
+        GetTextExtentPoint32W(m, ln[i].s, ln[i].len, &sz);
+        if (sz.cx > textW) textW = sz.cx;
     }
+    SelectObject(m, of);
+    DeleteDC(m);
+    if (n <= 0) return FALSE;
+
+    int padX = (int)(10 * g_k + 0.5f), padY = (int)(7 * g_k + 0.5f);
+    int newW = textW + (padX + 1) * 2;
+    int newH = (int)(n * g_lineH + 0.5f) + (padY + 1) * 2;
+
+    if (g_tipDC && (newW != g_tipW || newH != g_tipH)) {
+        DeleteDC(g_tipDC);  DeleteObject(g_tipBmp);
+        g_tipDC = NULL;     g_tipBmp = NULL;
+    }
+    g_tipW = newW;  g_tipH = newH;
+    if (!g_tipDC) {
+        BITMAPINFO bi;
+        memset(&bi, 0, sizeof(bi));
+        bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth       = g_tipW;
+        bi.bmiHeader.biHeight      = -g_tipH;      /* 自上而下 */
+        bi.bmiHeader.biPlanes      = 1;
+        bi.bmiHeader.biBitCount    = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        g_tipDC  = CreateCompatibleDC(NULL);
+        g_tipBmp = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &g_tipBits, NULL, 0);
+        if (!g_tipBmp || !g_tipBits) {
+            if (g_tipDC)  { DeleteDC(g_tipDC);      g_tipDC  = NULL; }
+            if (g_tipBmp) { DeleteObject(g_tipBmp); g_tipBmp = NULL; }
+            g_tipBits = NULL;
+            return FALSE;
+        }
+        SelectObject(g_tipDC, g_tipBmp);
+    }
+
+    HDC dc = g_tipDC;
+    RECT rc = { 0, 0, g_tipW, g_tipH };
+    HBRUSH bg = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(dc, &rc, bg);
+    DeleteObject(bg);
+    int rad = (int)(5 * g_k + 0.5f);  if (rad < 2) rad = 2;
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(204, 204, 204));
+    HGDIOBJ open_ = SelectObject(dc, pen);
+    HGDIOBJ obr  = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    RoundRect(dc, 0, 0, g_tipW, g_tipH, rad * 2, rad * 2);
+    SelectObject(dc, open_);
+    SelectObject(dc, obr);
+    DeleteObject(pen);
+
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(0, 0, 0));
+    HGDIOBJ ofont = SelectObject(dc, g_fontRow);
+    for (int i = 0; i < n; i++)
+        TextOutW(dc, padX + 1, padY + 1 + (int)(i * g_lineH), ln[i].s, ln[i].len);
+    SelectObject(dc, ofont);
+
+    /* alpha：圆角内 255、边缘 1.5px 羽化；RGB 按 a 预乘（ULW 要求）。
+       注意与上面 RoundRect 用同一个 rad，几何必须一致。 */
+    BYTE* base = (BYTE*)g_tipBits;
+    for (int y = 0; y < g_tipH; y++) {
+        BYTE* row8 = base + (size_t)y * (size_t)g_tipW * 4;
+        for (int x = 0; x < g_tipW; x++) {
+            double dX = (double)((x + 0.5 < g_tipW - 0.5 - x) ? (x + 0.5) : (g_tipW - 0.5 - x));
+            double dY = (double)((y + 0.5 < g_tipH - 0.5 - y) ? (y + 0.5) : (g_tipH - 0.5 - y));
+            double d  = (dX < dY) ? dX : dY;
+            double cx = (x < rad) ? rad : ((x >= g_tipW - rad) ? (g_tipW - 1 - rad) : x);
+            double cy = (y < rad) ? rad : ((y >= g_tipH - rad) ? (g_tipH - 1 - rad) : y);
+            double dcorn = (double)(x - cx) * (x - cx) + (double)(y - cy) * (y - cy);
+            double dc2 = (double)rad - sqrt(dcorn);
+            if (dc2 < d) d = dc2;
+            int a = (int)((d + 0.5) / 1.5 * 255.0 + 0.5);
+            if (a < 0) a = 0;
+            if (a > 255) a = 255;
+            BYTE* px = row8 + (size_t)x * 4;   /* BGRA */
+            px[0] = (BYTE)(px[0] * a / 255);
+            px[1] = (BYTE)(px[1] * a / 255);
+            px[2] = (BYTE)(px[2] * a / 255);
+            px[3] = (BYTE)a;
+        }
+    }
+    return TRUE;
 }
 
-/* 收起提示。TTM_TRACKACTIVATE(FALSE) 是 TRACK 模式的收法；
-   TTM_POP 对 TRACK 工具无效（也踩过）。 */
+/* 定位 + 把当前内容按当前 alpha 发给系统。 */
+static void TipApply(POINT scr) {
+    if (!g_tip || !g_tipDC) return;
+    BLENDFUNCTION bf;
+    bf.BlendOp             = AC_SRC_OVER;
+    bf.BlendFlags          = 0;
+    bf.SourceConstantAlpha = (BYTE)g_tipAlpha;
+    bf.AlphaFormat         = AC_SRC_ALPHA;
+    POINT src = { 0, 0 };
+    SIZE  sz  = { g_tipW, g_tipH };
+    HDC sdc = GetDC(NULL);
+    UpdateLayeredWindow(g_tip, sdc, &scr, &sz, g_tipDC, &src, 0, &bf, ULW_ALPHA);
+    ReleaseDC(NULL, sdc);
+}
+
+/* 收起：渐隐（TID_TIPFADE 步进到 0 后由 WM_TIMER 藏窗）。 */
 static void TipHide(void) {
     KillTimer(g_hwnd, TID_TIP);
+    KillTimer(g_hwnd, TID_TIPSHOW);
     if (g_tipRow < 0) return;
     g_tipRow = -1;
-    if (!g_tip) return;
-    TOOLINFOW ti;
-    memset(&ti, 0, sizeof(ti));
-    ti.cbSize = TTTOOLINFOW_V1_SIZE;
-    ti.hwnd   = g_hwnd;
-    ti.uId    = (UINT_PTR)g_hwnd;
-    SendMessageW(g_tip, TTM_TRACKACTIVATE, FALSE, (LPARAM)&ti);
+    if (!g_tip || !IsWindowVisible(g_tip)) return;
+    g_tipAlphaDir = -1;
+    SetTimer(g_hwnd, TID_TIPFADE, 15, NULL);
 }
 
-/* 在光标旁弹出第 row 行的提示。行没变就不动它（TTN_NEEDTEXT 只在
-   激活时问一次，反复激活会让长条目每动一下鼠标都回一次库）。 */
+/* 显示/切换第 row 行。首次显示从 alpha 0 渐显；已显示时直接换内容
+   并跟手移位（不收起、不重计）。位置在光标右下 16/20px，越界翻面。 */
 static void TipShowAt(int row, POINT scr) {
-    if (DsTipTimeoutMs() == 0 || !g_tip) return;
+    if (DsTipTimeoutMs() == 0) return;
     if (row < 0 || row >= g_count) return;
     if (g_tipRow == row) return;
+    if (!TipBuild(row)) return;
+    TipEnsureWindow();
+    BOOL wasVisible = (g_tipRow >= 0);
     g_tipRow = row;
-    TOOLINFOW ti;
-    memset(&ti, 0, sizeof(ti));
-    ti.cbSize   = TTTOOLINFOW_V1_SIZE;
-    ti.hwnd     = g_hwnd;
-    ti.uId      = (UINT_PTR)g_hwnd;
-    ti.lpszText = LPSTR_TEXTCALLBACK;
-    /* 先定位再激活：TTN_SHOW 在激活时同步触发，那里要做淡入 ——
-       位置必须已经就位，否则动画会播在旧位置上再跳过来。 */
-    SendMessageW(g_tip, TTM_TRACKPOSITION, 0,
-                 MAKELONG(scr.x + 16, scr.y + 20));
-    SendMessageW(g_tip, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
-    /* TRACK 模式不会自动消失，AUTOPOP 兜底自己拿定时器实现（同 Ditto 的
-       ToolTipTimeout：-1 = 5 秒，0 = 关，上限 32 秒） */
+    g_tipPos.x = scr.x + 16;
+    g_tipPos.y = scr.y + 20;
+    RECT work;
+    MonitorWork(MonitorFromPoint(g_tipPos, MONITOR_DEFAULTTONEAREST), &work);
+    if (g_tipPos.x + g_tipW > work.right)  g_tipPos.x = scr.x - g_tipW - 16;
+    if (g_tipPos.y + g_tipH > work.bottom) g_tipPos.y = work.bottom - g_tipH;
+    if (g_tipPos.x < work.left)   g_tipPos.x = work.left;
+    if (g_tipPos.y < work.top)    g_tipPos.y = work.top;
+    if (!wasVisible) {
+        g_tipAlpha = 0;
+        g_tipAlphaDir = +1;
+        TipApply(g_tipPos);                       /* 先定位 + 铺内容 */
+        ShowWindow(g_tip, SW_SHOWNOACTIVATE);
+        SetTimer(g_hwnd, TID_TIPFADE, 15, NULL);  /* 再渐显 */
+    } else {
+        g_tipAlphaDir = 0;  g_tipAlpha = 255;     /* 切换不闪，直接换 */
+        TipApply(g_tipPos);
+        SetWindowPos(g_tip, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
     SetTimer(g_hwnd, TID_TIP, (UINT)DsTipTimeoutMs(), NULL);
+}
+
+/* 逐词换行：CJK 无空格按字断；ASCII 词内不断（超长词硬断）；
+   空格断行时空格不进行尾。返回行数。 */
+static int TipWrapInPlace(const WCHAR* text, HDC dc, int maxW, TipLine* ln, int maxLn) {
+    int n = 0;
+    const WCHAR* p = text;
+    while (*p && n < maxLn) {
+        int w = 0, curlen = 0, outLen = -1, lastSp = -1;
+        const WCHAR* q = p;
+        while (*q && *q != L'\n') {
+            SIZE sz;
+            GetTextExtentPoint32W(dc, q, 1, &sz);
+            if (w + sz.cx > maxW && q > p) {
+                outLen = (lastSp > 0) ? lastSp : curlen;
+                break;
+            }
+            w += sz.cx;  curlen++;
+            if (*q == L' ') lastSp = curlen;
+            q++;
+        }
+        if (outLen < 0) outLen = curlen;              /* 自然结束（\n 或串尾） */
+        ln[n].s = p;  ln[n].len = outLen;  n++;
+        if (outLen < curlen) {                        /* 断在空格：吃掉它 */
+            p = p + outLen;
+            if (*p == L' ') p++;
+        } else if (*q == L'\n') {
+            p = q + 1;
+        } else {
+            p = q;                                    /* 硬断或串尾 */
+        }
+    }
+    return n;
 }
 
 /* Ditto 的时间行：COleDateTime::Format() 的中文面貌 —— 不补零的
@@ -1401,7 +1556,6 @@ static void DoShow(void) {
         SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         g_visible = TRUE;
-        TipUpdate();          /* 窗口大小定下来之后才能挂 tooltip 的区域 */
     } else {
         Render();
     }
@@ -1464,6 +1618,18 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == TID_LIFE)  { DoHideClose(); return 0; }
         if (wp == TID_GRACE) { DestroyWindow(hwnd); return 0; }
         if (wp == TID_TIP)  { TipHide(); return 0; }   /* Ditto 的 ToolTipTimeout */
+        if (wp == TID_TIPFADE) {
+            /* 渐显/渐隐步进：每步重发一次 ULW，SourceConstantAlpha 当乘数 */
+            g_tipAlpha += g_tipAlphaDir * 48;
+            if (g_tipAlpha >= 255) { g_tipAlpha = 255; g_tipAlphaDir = 0; KillTimer(g_hwnd, TID_TIPFADE); }
+            if (g_tipAlpha <= 0) {
+                g_tipAlpha = 0; g_tipAlphaDir = 0;
+                KillTimer(g_hwnd, TID_TIPFADE);
+                ShowWindow(g_tip, SW_HIDE);
+            }
+            if (g_tipAlphaDir || g_tipAlpha) TipApply(g_tipPos);
+            return 0;
+        }
         if (wp == TID_TIPSHOW) {
             KillTimer(g_hwnd, TID_TIPSHOW);
             /* 延迟到了：按光标**现在**的位置定行与弹出点 —— 等待期间鼠标可能又动过 */
@@ -1600,22 +1766,6 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             TipHide();                    /* 行位全变了，旧提示已经指错行 */
         }
         return 0;
-    }
-    case WM_NOTIFY: {
-        NMHDR* nm = (NMHDR*)lp;
-        if (g_tip && nm->hwndFrom == g_tip && nm->code == TTN_SHOW) {
-            /* 系统提示弹出本来就带一点淡入；手动 TRACK 模式没有，自己补：
-               AnimateWindow 失败（返回 0）也不影响 —— 那时窗口已经可见。 */
-            AnimateWindow(g_tip, 120, AW_BLEND);
-            return TRUE;              /* 定位我们自己用 TRACKPOSITION 管 */
-        }
-        if (g_tip && nm->hwndFrom == g_tip && nm->code == TTN_NEEDTEXTW) {
-            NMTTDISPINFOW* di = (NMTTDISPINFOW*)lp;
-            TipTextOf(g_sel);          /* 悬停即选中，所以问的就是当前选中行 */
-            di->lpszText = g_tipBuf[0] ? g_tipBuf : NULL;   /* 空 = 不弹 */
-            return TRUE;
-        }
-        break;
     }
     case WM_DESTROY:
         TipDestroy();
