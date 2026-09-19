@@ -28,10 +28,16 @@
    当前 DPI 取系统消息字体，所有像素尺寸经 S() 缩放；拖到不同缩放的显示器
    上时按 WM_DPICHANGED 重建字体并重排（见 MakeFont / Layout）。
 
-   滚动：内容（数值项 + 五份名单）比窗口高时出竖向滚动条，滚轮和滚动条
+   滚动：一页的内容（数值项 + 名单）比窗口高时出竖向滚动条，滚轮和滚动条
    都能滚；底部按钮与状态栏是"窗框"，不参与滚动（见 SetScroll / Layout）。
    滚轮若停在**某个列表框上**，滚的是那个列表框而不是整个表单
    （见 WndProc 的 WM_MOUSEWHEEL / ScrollListBy）。
+
+   页签：表单分两页 —— 「常规」（数值 / 开关 / 路径这些配置项）与
+   「名单」（五份按程序 / 窗口生效的名单：按词跳转 / 自动屏蔽 / 整格滚动 /
+   拖动的两份黑名单）。分页是结构性的：配置项全在常规页、名单全在名单页，
+   页签只决定"显示哪些控件" —— 控件仍全是主窗口的子窗口，Load / Save 与
+   WM_COMMAND 照旧按 id 找、不分页（见 kTabNames / g_curTab / Layout）。
    ============================================================ */
 #define WIN32_LEAN_AND_MEAN
 #include "cap.h"
@@ -42,12 +48,14 @@
 #include <shellapi.h>      /* ShellExecuteW（CreateProcess 失败时的兜底） */
 #include <commdlg.h>       /* ChooseFontW：系统标准字体对话框 */
 #include <shlobj.h>        /* SHBrowseForFolderW：选 Ditto 文件夹 */
+#include <commctrl.h>      /* 页签控件（WC_TABCONTROL / TCM_* / TCN_SELCHANGE） */
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "comctl32.lib")
 
 #define APP_TITLE   L"CapsEnhance 设置"
 #define WND_CLASS   L"CapsEnhanceSettingsMain"
@@ -61,6 +69,7 @@
 #define IDC_SAVE    102    /* 保存并重启 */
 #define IDC_RELOAD  103
 #define IDC_EXIT    104
+#define IDC_TAB     120   /* 页签条（换页在 WndProc 的 WM_NOTIFY / TCN_SELCHANGE） */
 
 #define IDC_RUN_ADMIN  200
 #define IDC_LOG_KB     201
@@ -88,6 +97,14 @@
 #define IDC_DEL0   303
 #define IDC_LAB0   304
 #define LIST_STRIDE 10
+
+/* ---- 页签 ----
+   两页：常规 = 全部配置项（kFields），名单 = 全部名单（kLists）。分页是
+   **结构性的**（按程序 / 窗口生效的东西全在名单页，见文件头"页签"段），
+   所以两张表里不需要页签列。页签只决定显隐：控件本体不分家，Load / Save /
+   WM_COMMAND 照旧按 id 找 —— 显隐的落点在 Layout 的"显隐轮"。 */
+enum { TAB_GENERAL = 0, TAB_LISTS = 1, TAB_N = 2 };
+static const WCHAR* const kTabNames[TAB_N] = { L"常规", L"名单" };
 
 /* ---------- 字段表：控件的"是什么"，不是"长什么样" ----------
    界面的每个输入框都从这里取标签、类型与范围；加一个配置项 = 加一行 +
@@ -159,6 +176,7 @@ static const ListGroup kLists[] = {
 #define LIST_N ((int)(sizeof(kLists) / sizeof(kLists[0])))
 
 static HWND   g_hwnd    = NULL;
+static HWND   g_header  = NULL;         /* 顶部"窗框"：页签条的实底托盘（挡住滚上来的内容） */
 static HWND   g_footer  = NULL;         /* 底部"窗框"：状态栏 + 按钮的实底托盘 */
 static HWND   g_status  = NULL;
 static WCHAR  g_dir[MAX_PATH]  = L"";    /* exe 所在目录（结尾带 '\'） */
@@ -170,6 +188,8 @@ static HFONT  g_font    = NULL;
 static int    g_viewH    = 0;            /* 内容可视区高度（底部按钮/状态栏不算） */
 static int    g_contentH = 0;            /* 内容总高；比可视区高就出滚动条 */
 static int    g_laidScroll = -1;         /* 子控件当前是按哪个滚动位置排的 */
+static HWND   g_tab     = NULL;          /* 页签条（comctl32 页签控件；建失败则退回单页滚动） */
+static int    g_curTab  = TAB_GENERAL;   /* 当前页：换页 = 改它 + Layout（显隐在 Layout 里） */
 
 /* 像素按 DPI 缩放：所有尺寸常量都必须过一遍它，否则高分屏上控件挤成一团
    （96 DPI 下量出来的坐标在 200% 屏上只有一半大）。 */
@@ -225,6 +245,15 @@ static void SetCheck(HWND btn, BOOL on) {
 }
 static BOOL GetCheck(HWND btn) {
     return SendMessageW(btn, BM_GETCHECK, 0, 0) == BST_CHECKED;
+}
+
+/* 页签显隐：按 WS_VISIBLE **风格位**判断，状态没变就不发 ShowWindow。
+   不用 IsWindowVisible —— 初次 Layout 跑在主窗口 ShowWindow 之前，那时
+   IsWindowVisible 把风格上可见的控件也判成隐藏，判断依据就是错的。 */
+static void ShowCtrl(HWND h, BOOL show) {
+    if (!h) return;
+    BOOL vis = (GetWindowLongW(h, GWL_STYLE) & WS_VISIBLE) != 0;
+    if (vis != show) ShowWindow(h, show ? SW_SHOW : SW_HIDE);
 }
 
 /* ---------------- 字体 / DPI ---------------- */
@@ -521,16 +550,31 @@ static void UpdateScrollBar(int pos) {
 }
 
 /* 行高是固定的，位置按"从上往下排"算 —— 比手填坐标不容易错位。
-   每次都全量落位（虚拟 y − 滚动位置），见"滚动"一节的总注释。 */
+   每次都全量落位（虚拟 y − 滚动位置），见"滚动"一节的总注释。
+   显隐也在这一轮（"显隐轮"）：先把两页的控件按当前页藏好/放开，再只给
+   当前页落位 —— 显隐的**唯一事实来源**是这里，别处只改 g_curTab，
+   不自己动 ShowWindow。 */
 static void Layout(int w, int h) {
-    int x = S(12), y = S(10);
+    int x = S(12);
     int rowBool = S(24), rowInt = S(26), gap = S(4);
     int editW = S(92);
 
-    /* 内容可视区 = 客户区高度减掉底部固定区（状态栏 + 按钮 + 空隙）。
+    /* 页签条：住在顶部"窗框"（g_header）里，坐标是窗框内的。高度跟着字体走
+       —— 页签自身的实际高度从 TCM_GETITEMRECT 取（换字体 / 换 DPI 都会变），
+       控件高度再补一点内边距。 */
+    int tabTop = S(6), tabH = S(30);
+    if (g_tab) {
+        RECT tr;
+        if (TabCtrl_GetItemRect(g_tab, 0, &tr))
+            tabH = tr.bottom + S(6);
+        MoveWindow(g_tab, x, tabTop, w - x * 2, tabH, TRUE);
+    }
+    int viewTop = tabTop + tabH + S(4);   /* 内容可视区的上沿 */
+
+    /* 内容可视区 = 页签条以下、底部固定区（状态栏 + 按钮 + 空隙）以上。
        窗口被拖得很矮时内容区保底 S(120)，此时底部窗框会被挤得薄于 S(60)、
        按钮会被裁掉一截 —— 本窗口没有最小尺寸保护（见下方 footer 注释）。 */
-    g_viewH = h - S(60);
+    g_viewH = (h - S(60)) - viewTop;
     if (g_viewH < S(120)) g_viewH = S(120);
 
     /* 滚动量以滚动条为准；窗口变矮后原位置可能越界，先钳位写回 */
@@ -545,7 +589,29 @@ static void Layout(int w, int h) {
         SetScrollInfo(g_hwnd, SB_VERT, &si, TRUE);
     }
 
+    /* 显隐轮：分页是结构性的（配置项 <-> 名单，见 kTabNames 处的说明），
+       所以按"控件属于哪张表"整批显隐，不逐项记状态 —— 每次全量重排的
+       同一个道理：状态与布局不脱节。 */
+    BOOL fieldPage = (g_curTab == TAB_GENERAL);
     for (int i = 0; i < FIELD_N; i++) {
+        int id = kFields[i].id;
+        ShowCtrl(GetDlgItem(g_hwnd, id), fieldPage);
+        ShowCtrl(GetDlgItem(g_hwnd, id + 500), fieldPage);
+        ShowCtrl(GetDlgItem(g_hwnd, id + 600), fieldPage);
+        if (id == IDC_DITTO_DB) {         /* Ditto 行右侧两颗小按钮随行显隐 */
+            ShowCtrl(GetDlgItem(g_hwnd, IDC_DITTO_BROWSE), fieldPage);
+            ShowCtrl(GetDlgItem(g_hwnd, IDC_DITTO_CONV), fieldPage);
+        }
+    }
+    for (int i = 0; i < LIST_N; i++) {
+        int base = IDC_LIST0 + i * LIST_STRIDE;
+        for (int k = 0; k <= 5; k++)      /* 组内控件占 0..5 六个 id */
+            ShowCtrl(GetDlgItem(g_hwnd, base + k), !fieldPage);
+    }
+
+    int y = viewTop + S(4);
+    for (int i = 0; i < FIELD_N; i++) {
+        if (!fieldPage) break;            /* 名单页：配置项一行都不排 */
         int id = kFields[i].id;
         HWND c = GetDlgItem(g_hwnd, id);
         if (!c) continue;
@@ -593,7 +659,7 @@ static void Layout(int w, int h) {
         y += gap;
     }
 
-    /* 名单高度固定（约五行，再多名单自己有滚动条），三组顺序往下排 */
+    /* 名单高度固定（约五行，再多名单自己有滚动条），五组顺序往下排 */
     y += S(6);
     int listH = S(84);
     /* 名单列表框**定宽**，不跟窗口拉伸：进程名撑死几十个字符，宽列表框
@@ -602,6 +668,7 @@ static void Layout(int w, int h) {
     int listW = w - x * 2;
     if (listW > S(328)) listW = S(328);
     for (int i = 0; i < LIST_N; i++) {
+        if (fieldPage) break;             /* 常规页：名单一组都不排 */
         int base = IDC_LIST0 + i * LIST_STRIDE;
         MoveWindow(GetDlgItem(g_hwnd, base + 4), x, y - off, w - x * 2, S(18), TRUE);  /* 标题 */
         y += S(20);
@@ -613,14 +680,24 @@ static void Layout(int w, int h) {
         MoveWindow(GetDlgItem(g_hwnd, base + 5), x + S(380), y - off, S(88), S(24), TRUE);  /* 选取窗口 */
         y += S(28) + S(8);
     }
-    g_contentH = y + S(6);
+    /* 内容总高**相对可视区上沿**算：MaxScroll = contentH − viewH，
+       滚到头时内容底正好贴可视区底（可视区不在客户区顶部，而是页签条下面） */
+    g_contentH = (y + S(6)) - viewTop;
 
+    /* 顶部"窗框"：从客户区顶一直盖到内容可视区上沿，页签条是它的子控件 ——
+       滚动中爬到可视区上方的内容滑到它底下被挡住，不会盖到页签条上。
+       z 序与底部窗框同一待遇：每次布局显式钉到顶（谁上谁下并不可靠）。 */
+    if (g_header) {
+        MoveWindow(g_header, 0, 0, w, viewTop, TRUE);
+        SetWindowPos(g_header, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
     /* 底部固定区：一块实底"窗框"从可视内容区一直盖到客户区底，状态栏与
        按钮是它的子控件 —— 滚动中溢出的内容滑到它底下就被挡住，不会从
        按钮周围的缝隙里露出来。窗口高度正常时窗框高恒为 S(60)，内部坐标
        因此是常量；**矮窗口下会被内容区下限挤薄**（见 Layout 开头）。 */
     if (g_footer) {
-        MoveWindow(g_footer, 0, g_viewH, w, h - g_viewH, TRUE);
+        MoveWindow(g_footer, 0, viewTop + g_viewH, w, h - (viewTop + g_viewH), TRUE);
         /* 窗框的职责就是压住表单内容：每次布局都把 z 序重新钉到顶。
            （子窗口创建/移动后谁在上谁在下并不可靠，实测本机上"最后建的
            反而在底下"，所以这里不赌，显式钉。） */
@@ -1212,13 +1289,14 @@ static void PickFinish(void) {
     }
 }
 
-/* 底部"窗框"：一块不透明的实底子窗口，状态栏与按钮放在它上面。
-   为什么要它：表单内容滚动时，滑出可视区的部分不会被自动裁掉，会从
-   状态栏/按钮周围的缝隙里露出来；窗框在 z 序上压住它们，就挡住了。
-   带 WS_EX_CONTROLPARENT，Tab 焦点能进到它里面的按钮；
-   子控件的通知（按钮点击）原样转给主窗口，处理逻辑不分家。 */
+/* "窗框"（顶部与底部共用的实底子窗口类）：状态栏/按钮/页签条放在它上面。
+   为什么要它：表单内容滚动时，滑出可视区的部分不会被自动裁掉 —— 底部会从
+   状态栏/按钮周围的缝隙里露出来，顶部则直接盖到页签条上；窗框在 z 序上
+   压住它们，就挡住了。
+   带 WS_EX_CONTROLPARENT，Tab 焦点能进到它里面的按钮/页签；
+   子控件的通知（按钮点击、页签的 WM_NOTIFY）原样转给主窗口，处理逻辑不分家。 */
 static LRESULT CALLBACK FooterProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    if (m == WM_COMMAND) {
+    if (m == WM_COMMAND || m == WM_NOTIFY) {
         SendMessageW(g_hwnd, m, w, l);
         return 0;
     }
@@ -1367,6 +1445,24 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id == IDC_DITTO_DB && HIWORD(w) == EN_CHANGE) UpdateConvBtn();
         return 0;
     }
+    case WM_NOTIFY: {
+        /* 页签切换（TCN_SELCHANGE 在选完之后发，取当前页即可）：改 g_curTab
+           再 SetScroll(0) —— 换页后内容总高变了，旧滚动位置没有意义；
+           SetScroll 会走 Layout，显隐轮与全量重排都在那里。 */
+        NMHDR* nm = (NMHDR*)l;
+        if (nm->idFrom == IDC_TAB && nm->code == TCN_SELCHANGE) {
+            int t = (int)SendMessageW(g_tab, TCM_GETCURSEL, 0, 0);
+            if (t >= 0 && t < TAB_N) g_curTab = t;
+            SetScroll(0);
+            /* 本窗口的 WM_PAINT 只 Validate、从不擦底（见 WM_PAINT 分支）：
+               换页藏掉一批控件后，露出来的区域必须自己擦一遍，否则旧页
+               控件会留影。RDW_ERASE 让父窗口按类底色重铺，子窗口全部重画。 */
+            RedrawWindow(h, NULL, NULL, RDW_INVALIDATE | RDW_ERASE |
+                                        RDW_ALLCHILDREN | RDW_UPDATENOW);
+            return 0;
+        }
+        break;
+    }
     case WM_MOUSEMOVE:
         if (g_pickList >= 0) {          /* 捕获生效期间所有移动都归我们 */
             PickTrack();
@@ -1506,6 +1602,16 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     InitDpiAwareness();      /* 必须在任何窗口创建之前 */
 
+    /* 页签控件是 comctl32 的通用控件：先注册它的窗口类，CreateWindow 找得到。
+       拿不到（极老系统）也只退回"没有页签的单页滚动"，其余功能照常。 */
+    {
+        INITCOMMONCONTROLSEX icc;
+        memset(&icc, 0, sizeof(icc));
+        icc.dwSize = sizeof(icc);
+        icc.dwICC = ICC_TAB_CLASSES;
+        InitCommonControlsEx(&icc);
+    }
+
     /* 配置文件的路径 = **本 exe 同目录**，不是当前工作目录：
        用户可能从任意地方（快捷方式 / 资源管理器）启动它。 */
     {
@@ -1539,12 +1645,14 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     if (g_dpi < 96) g_dpi = 96;
 
     /* 初始大小按 DPI 缩放，并**钳到工作区以内**：高 DPI 笔记本（150% + 768 高）
-       上按 96 DPI 算出来的 780 像素窗口会超出屏幕底部，底部的按钮与状态栏
+       上按 96 DPI 算出来的窗口会超出屏幕底部，底部的按钮与状态栏
        就永远看不见了。 */
+    /* 高度按**名单页**给：五份名单竖排约 740 逻辑像素，加上页签条与底部窗框
+       一屏放得下（切过去不用滚）；常规页的配置项更矮，天然富余。 */
     /* 宽度贴着内容走：最宽的是名单区标题句（约 490）和"输入框 + 单位 +
        说明标签"一行（约 500），再留滚动条与边框的余量 —— 再宽的话
        名单框右侧就是一大块用不上的空白 */
-    int winW = S(560), winH = S(780);
+    int winW = S(560), winH = S(880);
     int winX = CW_USEDEFAULT, winY = CW_USEDEFAULT;
     {
         RECT wa;
@@ -1572,6 +1680,28 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     g_dpi = (int)QueryDpi();
     if (g_dpi < 96) g_dpi = 96;
     MakeFont();
+
+    /* 顶部"窗框"先建：一块实底托盘，页签条住在里面，z 序压住滚上来的内容
+       （与底部窗框同一思路，落位与钉顶都在 Layout）。 */
+    g_header = CreateWindowExW(WS_EX_CONTROLPARENT, FOOTER_CLASS, L"",
+                               WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                               0, 0, 10, 10, g_hwnd, NULL, hInst, NULL);
+    /* 页签条：只决定"显示哪些控件"（显隐轮在 Layout）—— 控件本体仍是
+       主窗口的（孙）子窗口，Load / Save / WM_COMMAND 全按 id 找，不分页。
+       换页的 WM_NOTIFY 由窗框原样转给主窗口（见 FooterProc）。 */
+    g_tab = CreateWindowExW(0, WC_TABCONTROLW, L"",
+                            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
+                            0, 0, 10, 10, g_header, (HMENU)(INT_PTR)IDC_TAB, hInst, NULL);
+    if (g_tab) {
+        for (int i = 0; i < TAB_N; i++) {
+            TCITEMW ti;
+            memset(&ti, 0, sizeof(ti));
+            ti.mask = TCIF_TEXT;
+            ti.pszText = (LPWSTR)kTabNames[i];   /* 字符串常量，控件只读 */
+            SendMessageW(g_tab, TCM_INSERTITEMW, (WPARAM)i, (LPARAM)&ti);
+        }
+        HookChild(g_tab);    /* 滚轮转发 / Ctrl+S：与其它子控件同一待遇 */
+    }
 
     for (int i = 0; i < FIELD_N; i++) {
         int id = kFields[i].id;
