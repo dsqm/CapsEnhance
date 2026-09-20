@@ -162,6 +162,7 @@ static BOOL     g_dbErr = FALSE;
 /* ---------- 窗口与绘制 ---------- */
 static HWND      g_hwnd = NULL;
 static UINT      g_msgShow = 0, g_msgHide = 0, g_msgKa = 0, g_msgEsc = 0, g_msgKey = 0;
+static UINT      g_msgClosed = 0;
 static BOOL      g_visible = FALSE;
 static ULONGLONG g_lastKa = 0;
 static HDC       g_memDC = NULL;
@@ -984,6 +985,11 @@ static void HideIfVisible(void) {
     TipHide();                                       /* 别把提示留在屏幕上 */
     ShowWindow(g_hwnd, SW_HIDE);
     g_visible = FALSE;
+    /* ★ 告诉主程序"我关了"：否则 s_want 残留，钩子继续吞回车 —— 宽限期内
+       按键进隐藏窗口（再粘一次），销毁后凭空消失（用户实测：回车粘贴后
+       第二下回车又粘一次、真回车永远发不出）。 */
+    HWND host = FindWindowW(L"CapsEnhanceMain", NULL);
+    if (host && g_msgClosed) PostMessageW(host, g_msgClosed, 0, 0);
 }
 
 static BOOL PutOnClipboard(BOOL plain) {
@@ -1606,6 +1612,7 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (g_msgEsc  && msg == g_msgEsc)  { DoHideClose(); return 0; }
     if (msg == WM_THUMB_READY) { Render(); return 0; }
     if (g_msgKey  && msg == g_msgKey) {
+        if (!g_visible) return 0;   /* 已收起、销毁宽限期内：忽略残留按键 */
         int vk = (int)wp;
         BOOL shift = (lp & 0x1) != 0;
         if (vk == VK_RETURN)      { DoPaste(shift); return 0; }
@@ -1912,6 +1919,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     g_msgKa   = RegisterWindowMessageW(CLIP_MSG_KA);
     g_msgEsc  = RegisterWindowMessageW(CLIP_MSG_ESC);
     g_msgKey  = RegisterWindowMessageW(CLIP_MSG_KEY);
+    g_msgClosed = RegisterWindowMessageW(CLIP_MSG_CLOSED);
 
     if (cmdLine) {
         const WCHAR* p = wcsstr(cmdLine, L"--dir");

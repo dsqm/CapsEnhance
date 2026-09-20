@@ -405,6 +405,8 @@ void HelpKaTick(void); /* HELP_KA_TIMER 到点：喂一条心跳（只在显示�
 #define CLIP_MSG_KA   L"CapsEnhanceClipKa"    /* 注册消息：心跳（"我还需要你"） */
 #define CLIP_MSG_ESC  L"CapsEnhanceClipEsc"   /* 注册消息：主程序代收的 Esc */
 #define CLIP_MSG_KEY  L"CapsEnhanceClipKey"   /* 注册消息：主程序代收的导航键（wParam=vk，lParam=CLIPKF_*） */
+#define CLIP_MSG_CLOSED L"CapsEnhanceClipClosed" /* 注册消息：浮层自行关闭（粘贴/Esc/超时收起）-> 主程序清 s_want */
+#define CLIP_MSG_CLOSED L"CapsEnhanceClipClosed" /* 注册消息：浮层自行关闭（粘贴/Esc/超时收起）-> 主程序清 s_want */
 #define CLIP_EXE     L"CapsEnhanceClip.exe"
 void ClipShow(void);    /* Caps+V 按下：显示（已在显示则 toggle 成隐藏） */
 void ClipHide(void);    /* 明确关闭（Esc / toggle / 引擎复位） */
@@ -414,6 +416,10 @@ void ClipEsc(void);     /* WM_CLIP_ESC：钩子代收的 Esc -> 通知浮层关�
 void ClipCallDitto(void); /* 单击 Caps（浮层开着时）/ 浮层按钮：关浮层并拉起 Ditto 本体 -open */
 void ClipKey(int vk, unsigned flags); /* WM_CLIP_KEY：钩子代收的导航键 -> 转给浮层 */
 BOOL ClipIsOpen(void);  /* 浮层当前是否"该开着"（钩子据此决定要不要拦 Esc） */
+BOOL ClipIsClosedMsg(UINT msg); /* 主窗口收到这条注册消息 = 浮层自行关闭了 */
+void ClipClosed(void);  /* 收到 CLIP_MSG_CLOSED：清 s_want + 停心跳，恢复按键放行 */
+BOOL ClipIsClosedMsg(UINT msg); /* 主窗口收到这条注册消息 = 浮层自行关闭了 */
+void ClipClosed(void);  /* 收到 CLIP_MSG_CLOSED：清 s_want + 停心跳，恢复按键放行 */
 
 /* ---------- 坐标空间（进程级，必须在建任何窗口之前调用一次） ----------
    ★ 根因记录：低级鼠标钩子给的 `MSLLHOOKSTRUCT.pt` **永远是物理像素**

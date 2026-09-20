@@ -47,6 +47,7 @@ static UINT  s_msgHide = 0;
 static UINT  s_msgKa   = 0;
 static UINT  s_msgEsc  = 0;
 static UINT  s_msgKey  = 0;
+static UINT  s_msgClosed = 0;
 static BOOL  s_want    = FALSE;   /* 期望：可见？ */
 static int   s_delivered = 0;     /* 已送达：-1 未知 / 0 已隐 / 1 已显 */
 static BOOL  s_spawned = FALSE;   /* 本轮是否已经 CreateProcess 过 */
@@ -60,6 +61,7 @@ static void EnsureMsgs(void) {
     if (!s_msgKa)   s_msgKa   = RegisterWindowMessageW(CLIP_MSG_KA);
     if (!s_msgEsc)  s_msgEsc  = RegisterWindowMessageW(CLIP_MSG_ESC);
     if (!s_msgKey)  s_msgKey  = RegisterWindowMessageW(CLIP_MSG_KEY);
+    if (!s_msgClosed) s_msgClosed = RegisterWindowMessageW(CLIP_MSG_CLOSED);
 }
 
 BOOL ClipIsOpen(void) {
@@ -237,6 +239,23 @@ void ClipEsc(void) {
     HWND w = FindWindowW(CLIP_CLASS, NULL);
     if (w && s_msgEsc) PostMessageW(w, s_msgEsc, 0, 0);
     if (s_want) ClipHide();
+}
+
+/* 浮层自行关闭（粘贴后收起 / ✕ / 超时）的通知：清 s_want + 停心跳。
+   ★ 不清的后果（实测）：钩子继续替一个已隐藏的窗口吞回车 —— 宽限期内
+   WM_CLIP_KEY 进隐藏浮层（= 再粘一次），窗口销毁后按键凭空消失
+   （= 回车永远发不出去）。 */
+void ClipClosed(void) {
+    if (!s_want) return;
+    s_want = FALSE;
+    KaStop();
+    if (g_recording.load())
+        CapLog("  [剪贴板] 浮层自行关闭，恢复按键放行");
+}
+
+BOOL ClipIsClosedMsg(UINT msg) {
+    EnsureMsgs();
+    return s_msgClosed && msg == s_msgClosed;
 }
 
 /* 把 Ditto 的快速粘贴窗口拉到前台（原理见 clip/clip.c 同名注释：Ditto 自己的
