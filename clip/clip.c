@@ -165,7 +165,6 @@ static UINT      g_msgShow = 0, g_msgHide = 0, g_msgKa = 0, g_msgEsc = 0, g_msgK
 static UINT      g_msgClosed = 0;
 static BOOL      g_visible = FALSE;
 static ULONGLONG g_lastKa = 0;
-static ULONGLONG g_lastLoadTick = 0;   /* 上次读库时刻（驻留期显示按需刷新） */
 static HDC       g_memDC = NULL;
 static HBITMAP   g_bmp = NULL;
 static void*     g_bits = NULL;
@@ -261,7 +260,15 @@ static void LabelFromFormats(const WCHAR* fmts, WCHAR* out, int cap) {
     wcscpy_s(out, (size_t)cap, L"[无描述]");
 }
 
+static void FreeThumbs(void);   /* 706 行：DbLoadItems 重载条目后按需作废缩略图 */
+
 static void DbLoadItems(void) {
+    /* 旧条目的 lID 序列：加载完对比 —— 条目集没变就复用缩略图缓存
+       （驻留期每次显示都重读文本，图片解码贵，没变就不重解）。 */
+    long long oldIds[CLIP_MAX_ITEMS];
+    int oldCount = g_count;
+    for (int i = 0; i < oldCount; i++) oldIds[i] = g_items[i].id;
+
     g_count = 0;
     g_dbErr = FALSE;
     if (!g_dbPath[0]) { g_dbErr = TRUE; return; }
@@ -331,7 +338,14 @@ static void DbLoadItems(void) {
     }
     sqlite3_finalize(st);
     sqlite3_close(db);
-    g_lastLoadTick = GetTickCount64();
+    BOOL same = (oldCount == g_count);
+    if (same)
+        for (int i = 0; i < g_count; i++)
+            if (g_items[i].id != oldIds[i]) { same = FALSE; break; }
+    if (!same) {
+        FreeThumbs();
+        g_sel = 0;  g_scrollY = 0;
+    }
 }
 
 /* ================= 悬停提示（照 Ditto 的 CToolTipEx：自绘窗口） =================
@@ -1564,15 +1578,10 @@ static void DoShow(void) {
     g_lastKa = GetTickCount64();
     SetTimer(g_hwnd, TID_KA, KA_POLL_MS, NULL);
     if (!g_visible) {
-        /* 驻留期间 Ditto 可能又复制了新内容：距上次加载超过 30s 就重读一次。
-           同步读（此刻窗口还没 SHOW，无闪烁）；只读本地库 + LIMIT 30，毫秒级。
-           缩略图按条目下标缓存，条目重读后必须整体作废，否则错位。 */
-        if (g_lastLoadTick == 0 ||
-            GetTickCount64() - g_lastLoadTick > 30 * 1000) {
-            FreeThumbs();
-            g_sel = 0;  g_scrollY = 0;
-            DbLoadItems();
-        }        PlaceWindow();                 /* ★ 只在这里定位 */
+        /* 驻留期间 Ditto 可能又复制了新内容：每次显示都重读一次（此刻窗口
+           还没 SHOW，无闪烁；只读本地库 + LIMIT 30，毫秒级）。缩略图在
+           DbLoadItems 里按 lID 序列对比决定去留，条目集没变就不重解。 */
+        DbLoadItems();        PlaceWindow();                 /* ★ 只在这里定位 */
         MoveWindow(g_hwnd, g_px, g_py, g_pxW, g_pxH, FALSE);
         Render();
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
@@ -1580,6 +1589,7 @@ static void DoShow(void) {
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         g_visible = TRUE;
     } else {
+        DbLoadItems();                 /* 可见时重复触发：同样刷新（置顶模式） */
         Render();
     }
 }
@@ -1667,7 +1677,10 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (wp == TID_KA) {
-            if (g_visible && GetTickCount64() - g_lastKa > HELP_KA_TIMEOUT_MS)
+            /* 看门狗对驻留期同样生效：主程序退出/被杀 -> 心跳断 -> 800ms 内自杀。
+               ★ 条件里不能带 g_visible —— 驻留（隐藏待命）期正是最需要它的时候
+               （实测漏了它：主程序退了，驻留的浮层进程成了孤儿永生）。 */
+            if (GetTickCount64() - g_lastKa > HELP_KA_TIMEOUT_MS)
                 DestroyWindow(hwnd);
             return 0;
         }
