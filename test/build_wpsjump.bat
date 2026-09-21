@@ -10,6 +10,7 @@ if errorlevel 1 exit /b 1
 if not exist "obj\test" mkdir obj\test
 
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\nav_wps.obj      src\nav.c       || exit /b 1
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\navword_wps.obj  src\nav_word.c  || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\send_wps.obj     src\send.c     || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\cfg_wps.obj      src\config.c   || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\km_wps.obj       src\keymap.c   || exit /b 1
@@ -18,7 +19,8 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\autodisp_
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\bridge_wps.obj   src\bridge.c   || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\wpsjump.obj      test\wpsjump.c || exit /b 1
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
-   obj\wpsjump.obj obj\nav_wps.obj obj\send_wps.obj obj\cfg_wps.obj obj\km_wps.obj ^
+   obj\wpsjump.obj obj\nav_wps.obj obj\navword_wps.obj obj\send_wps.obj ^
+   obj\cfg_wps.obj obj\km_wps.obj ^
    obj\wps_wps.obj obj\autodisp_wps.obj obj\bridge_wps.obj ^
    /link /OUT:obj\test\wpsjump.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib ^

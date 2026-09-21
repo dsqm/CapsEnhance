@@ -9,6 +9,9 @@ if not exist "obj\test" mkdir obj\test
 if not exist "obj" mkdir obj
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\nav_test.obj src\nav.c || exit /b 1
+rem nav_word.c: the pure word-boundary algorithm nav.c links against
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
+   /Isrc /c /Foobj\navword_test.obj src\nav_word.c || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\send_test.obj src\send.c || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
@@ -28,13 +31,14 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\test_child.obj test\test_child.c || exit /b 1
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
-   obj\test_nav.obj obj\nav_test.obj obj\send_test.obj obj\config_test.obj ^
+   obj\test_nav.obj obj\nav_test.obj obj\navword_test.obj obj\send_test.obj ^
+   obj\config_test.obj ^
    /link /OUT:obj\test\test_nav.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib ^
    /SUBSYSTEM:CONSOLE || exit /b 1
 rem test_sci.c includes nav.c / send.c / config.c directly, so link only its own obj
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
-   obj\test_sci.obj obj\config_test.obj ^
+   obj\test_sci.obj obj\config_test.obj obj\navword_test.obj ^
    /link /OUT:obj\test\test_sci.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib ^
    /SUBSYSTEM:CONSOLE || exit /b 1

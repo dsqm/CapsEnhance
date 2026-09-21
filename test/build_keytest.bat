@@ -17,9 +17,12 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Foobj\ ^
    test\uiprobe.c /link /OUT:obj\test\uiprobe.exe user32.lib ole32.lib oleaut32.lib oleacc.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 
-rem memtest: include nav.c/send.c directly, link only its own obj
+rem memtest: include nav.c/send.c directly, link only its own obj (+ nav_word.obj,
+rem which nav.c calls into)
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /c /Foobj\navword_mem.obj src\nav_word.c
+if errorlevel 1 goto fail
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Isrc /Foobj\ ^
-   test\memtest.c /link /OUT:obj\test\memtest.exe user32.lib gdi32.lib advapi32.lib ole32.lib oleaut32.lib oleacc.lib psapi.lib /SUBSYSTEM:CONSOLE
+   test\memtest.c /link /OUT:obj\test\memtest.exe obj\navword_mem.obj user32.lib gdi32.lib advapi32.lib ole32.lib oleaut32.lib oleacc.lib psapi.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Foobj\ ^

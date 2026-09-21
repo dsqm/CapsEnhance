@@ -1,5 +1,6 @@
 src\hook.c
 src\nav.c
+src\nav_word.c
 src\send.c
 src\act.c
 src\config.c
