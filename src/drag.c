@@ -50,6 +50,7 @@
    根上消灭；拖动一拍一次，开销远小于一次 SetWindowPos。） */
 
 #include "cap.h"
+#include "lane.h"
 
 #include <string.h>
 
@@ -65,9 +66,7 @@
    2=总是设；3=缩放时也设。我们还没有“吸附”，所以等价于 1。普通窗口按下即跟手。） */
 #define DRAG_OUT_THRESHOLD_PX 20
 
-#define DRAG_STOPPED(p) (InterlockedCompareExchange((p), 0, 0) != 0)
-
-static DWORD WINAPI DragThread(LPVOID p);   /* 前置声明：LaneStart 要先建线程 */
+static DWORD WINAPI DragThread(LPVOID p);   /* 前置声明：LaneStart 要先拿到它 */
 
 /* ---- 状态（钩子线程写、执行线程读，全部在临界区里过手） ----
    钩子路径上每次鼠标移动都要过一次临界区：这是刻意的 —— 持续滚动那次的
@@ -85,10 +84,12 @@ static BOOL  s_pending = FALSE;  /* 有还没应用的新光标 */
 static BOOL  s_endReq = FALSE;   /* 钩子已见到抬起：应用完最后一点就收手 */
 static BOOL  s_needRestore = FALSE; /* 按下时是最大化：先等还原落地再取基准矩形 */
 static volatile LONG s_active = 0;   /* ★ 最后置：执行线程只信它 */
-static volatile LONG s_stop = 0;
-static CRITICAL_SECTION s_cs;
-static HANDLE s_ev = NULL, s_thread = NULL;
-static BOOL s_init = FALSE;
+/* 临界区 / 事件 / 线程 / 停止位四件套交给 lane.c（见 lane.h）—— 这一份原先与
+   act.c 的三条、ime.c 的一条逐行相同，其中"join 超时后不许拆锁与事件"那条
+   判断最危险，现在只写在 lane.c 里。
+   本文件只有这一条车道，所以钩子与线程都直接用 s_lane：业务状态一律挂在
+   s_lane.cs 这把锁下（线程形参因此用不上，只满足 LaneStart 的签名）。 */
+static Lane s_lane;
 
 /* 纯函数：落点 = 抓取基准的左上角 + 光标位移。单测覆盖（含负位移）。 */
 void DragComputeTopLeft(POINT wndTL, POINT from, POINT to, POINT* out) {
@@ -106,7 +107,7 @@ static BOOL DragOutReached(POINT from, POINT to, int px) {
 
 /* ---- 起停（act.c 的 ActStart / ActStop 调用） ---- */
 void DragLaneStart(void) {
-    if (s_init) return;
+    if (LaneLive(&s_lane)) return;
     memset(&s_wndTL, 0, sizeof(s_wndTL));
     memset(&s_origin, 0, sizeof(s_origin));
     memset(&s_cur, 0, sizeof(s_cur));
@@ -115,37 +116,17 @@ void DragLaneStart(void) {
     s_ticks = 0;
     s_pending = s_endReq = s_needRestore = s_waitDragOut = FALSE;
     InterlockedExchange(&s_active, 0);
-    InterlockedExchange(&s_stop, 0);
-    InitializeCriticalSection(&s_cs);
-    s_ev = CreateEventW(NULL, FALSE, FALSE, NULL);     /* 自动复位：一拍一唤醒 */
-    s_thread = s_ev ? CreateThread(NULL, 0, DragThread, NULL, 0, NULL) : NULL;
-    if (!s_ev || !s_thread) {
-        if (s_thread) { CloseHandle(s_thread); s_thread = NULL; }
-        if (s_ev) { CloseHandle(s_ev); s_ev = NULL; }
-        DeleteCriticalSection(&s_cs);
-        s_init = FALSE;
-        return;
-    }
-    s_init = TRUE;
+    /* 起不来就静默不可用（钩子入口都先问 LaneLive）—— 回滚与失败语义在 lane.c。 */
+    LaneStart(&s_lane, DragThread);
 }
 
 void DragLaneStop(void) {
-    if (!s_init) return;
-    InterlockedExchange(&s_stop, 1);
-    SetEvent(s_ev);                      /* 别让它停在 WaitForSingleObject 里 */
-    if (s_thread) {
-        WaitForSingleObject(s_thread, 1000);   /* 一拍有界（DRAG_SETTLE_MS），1s 足够 */
-        CloseHandle(s_thread);
-        s_thread = NULL;
-    }
-    if (s_ev) { CloseHandle(s_ev); s_ev = NULL; }
-    DeleteCriticalSection(&s_cs);
-    s_init = FALSE;
+    LaneStop(&s_lane, 1000);   /* 一拍有界（DRAG_SETTLE_MS），1s 足够 */
 }
 
 /* ---- 钩子入口（主线程，鼠标输入的关键路径） ---- */
 BOOL DragBegin(POINT pt) {
-    if (!s_init || g_state.paused) return FALSE;
+    if (!LaneLive(&s_lane) || g_state.paused) return FALSE;
 
     HWND hwnd = WindowFromPoint(pt);
     if (!hwnd) return FALSE;
@@ -171,7 +152,7 @@ BOOL DragBegin(POINT pt) {
     memset(&rc, 0, sizeof(rc));
     if (!wasMax && !GetWindowRect(hwnd, &rc)) return FALSE;
 
-    EnterCriticalSection(&s_cs);
+    EnterCriticalSection(&s_lane.cs);
     s_hwnd = hwnd;
     s_pressPt = pt;                  /* ★ 阈值判定专用（落点用的 s_origin 会被重锚） */
     s_origin = pt;
@@ -198,7 +179,7 @@ BOOL DragBegin(POINT pt) {
         s_wndTL.y = rc.top;
     }
     InterlockedExchange(&s_active, 1);   /* ★ 最后置：执行线程只信它 */
-    LeaveCriticalSection(&s_cs);
+    LeaveCriticalSection(&s_lane.cs);
     if (g_recording.load()) {
         char cls8[64];
         WCHAR wcls[64] = L"";
@@ -211,32 +192,32 @@ BOOL DragBegin(POINT pt) {
                (long)pt.x, (long)pt.y,
                wasMax ? " 最大化→等拖出阈值才还原" : "");
     }
-    SetEvent(s_ev);
+    LanePoke(&s_lane);
     return TRUE;
 }
 
 void DragMove(POINT pt) {
-    if (!s_init) return;
-    EnterCriticalSection(&s_cs);
+    if (!LaneLive(&s_lane)) return;
+    EnterCriticalSection(&s_lane.cs);
     if (InterlockedOr(&s_active, 0)) {
         s_cur = pt;
         s_pending = TRUE;
     }
-    LeaveCriticalSection(&s_cs);
-    SetEvent(s_ev);
+    LeaveCriticalSection(&s_lane.cs);
+    LanePoke(&s_lane);
 }
 
 void DragEnd(void) {
-    if (!s_init) return;
-    EnterCriticalSection(&s_cs);
+    if (!LaneLive(&s_lane)) return;
+    EnterCriticalSection(&s_lane.cs);
     s_endReq = TRUE;                     /* 应用完最后一点再收手 */
     s_pending = TRUE;
-    LeaveCriticalSection(&s_cs);
-    SetEvent(s_ev);
+    LeaveCriticalSection(&s_lane.cs);
+    LanePoke(&s_lane);
 }
 
 BOOL DragActive(void) {
-    return s_init && InterlockedOr(&s_active, 0) != 0;
+    return LaneLive(&s_lane) && InterlockedOr(&s_active, 0) != 0;
 }
 
 /* ---- 执行线程 ---- */
@@ -244,14 +225,14 @@ static DWORD WINAPI DragThread(LPVOID p) {
     (void)p;
     BOOL running = FALSE;
     for (;;) {
-        if (DRAG_STOPPED(&s_stop)) break;
-        WaitForSingleObject(s_ev, 1000);      /* 有新位置 / 结束 / 1s 兜底 */
-        if (DRAG_STOPPED(&s_stop)) break;
+        if (LaneStopped(&s_lane)) break;
+        WaitForSingleObject(s_lane.ev, 1000);      /* 有新位置 / 结束 / 1s 兜底 */
+        if (LaneStopped(&s_lane)) break;
 
         if (!running) {
             /* 空闲：先看状态再看事件，避免"事件已被上一轮吃掉"时白等 1s。 */
             if (!InterlockedOr(&s_active, 0)) continue;
-            if (DRAG_STOPPED(&s_stop)) break;
+            if (LaneStopped(&s_lane)) break;
             running = TRUE;
         }
 
@@ -264,7 +245,7 @@ static DWORD WINAPI DragThread(LPVOID p) {
            只有执行线程读写，不进锁、不跨线程。 */
         RECT restoreFrom;
         BOOL haveRestoreFrom = FALSE;
-        EnterCriticalSection(&s_cs);
+        EnterCriticalSection(&s_lane.cs);
         hwnd = s_hwnd;
         endReq = s_endReq;
         pending = s_pending;
@@ -277,7 +258,7 @@ static DWORD WINAPI DragThread(LPVOID p) {
         w = s_w;
         h = s_h;
         ticks = s_ticks;
-        LeaveCriticalSection(&s_cs);
+        LeaveCriticalSection(&s_lane.cs);
 
         /* 阶段 0：等“拖出阈值”（仅最大化窗口）。没越过就**完全不动它**，包括不还原 ——
            于是 Caps+左键点一下（手没动）不会把最大化窗口缩小；松手时直接收手，
@@ -287,12 +268,12 @@ static DWORD WINAPI DragThread(LPVOID p) {
                 if (!endReq) continue;          /* 阈值内：继续等（或等松手） */
                 if (g_recording.load())
                     CapLog("  [拖拽] 结束（未越过拖出阈值，窗口未动）");
-                EnterCriticalSection(&s_cs);
+                EnterCriticalSection(&s_lane.cs);
                 s_hwnd = NULL;
                 s_pending = FALSE;
                 s_endReq = FALSE;
                 s_waitDragOut = FALSE;
-                LeaveCriticalSection(&s_cs);
+                LeaveCriticalSection(&s_lane.cs);
                 InterlockedExchange(&s_active, 0);
                 running = FALSE;
                 continue;
@@ -303,11 +284,11 @@ static DWORD WINAPI DragThread(LPVOID p) {
                判据，退回只看 IsZoomed 的老行为。 */
             haveRestoreFrom = (GetWindowRect(hwnd, &restoreFrom) != FALSE);
             PostMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE, 0);
-            EnterCriticalSection(&s_cs);
+            EnterCriticalSection(&s_lane.cs);
             s_waitDragOut = FALSE;
             s_needRestore = TRUE;
             s_pending = TRUE;
-            LeaveCriticalSection(&s_cs);
+            LeaveCriticalSection(&s_lane.cs);
             needRestore = TRUE;
             pending = TRUE;
             if (g_recording.load())
@@ -316,11 +297,11 @@ static DWORD WINAPI DragThread(LPVOID p) {
 
         /* 窗口没了：收手（ Begin/End 之外唯一的收手路径） */
         if (!hwnd || !IsWindow(hwnd)) {
-            EnterCriticalSection(&s_cs);
+            EnterCriticalSection(&s_lane.cs);
             s_hwnd = NULL;
             s_pending = FALSE;
             s_endReq = FALSE;
-            LeaveCriticalSection(&s_cs);
+            LeaveCriticalSection(&s_lane.cs);
             InterlockedExchange(&s_active, 0);
             running = FALSE;
             continue;
@@ -336,9 +317,9 @@ static DWORD WINAPI DragThread(LPVOID p) {
                 Sleep(DRAG_SETTLE_MS);
                 waited += DRAG_SETTLE_MS;
             }
-            EnterCriticalSection(&s_cs);
+            EnterCriticalSection(&s_lane.cs);
             s_needRestore = FALSE;
-            LeaveCriticalSection(&s_cs);
+            LeaveCriticalSection(&s_lane.cs);
             if (IsZoomed(hwnd)) {              /* 拒绝还原：本次拖动作废 */
                 if (g_recording.load())
                     CapLog("  [拖拽] 最大化还原未落地，本次作废");
@@ -376,7 +357,7 @@ static DWORD WINAPI DragThread(LPVOID p) {
                     continue;
                 }
             }
-            EnterCriticalSection(&s_cs);
+            EnterCriticalSection(&s_lane.cs);
             s_wndTL.x = rc.left;
             s_wndTL.y = rc.top;
             s_w = (int)(rc.right - rc.left);
@@ -387,7 +368,7 @@ static DWORD WINAPI DragThread(LPVOID p) {
                                                   位移"又加回落点（窗口先跳一下再回来） */
             tl = s_wndTL;
             w = s_w; h = s_h;
-            LeaveCriticalSection(&s_cs);
+            LeaveCriticalSection(&s_lane.cs);
         }
 
         /* 阶段 2：落点 = 抓取基准左上角 + 光标位移，应用一次（有新点或要收手才算） */
@@ -400,7 +381,7 @@ static DWORD WINAPI DragThread(LPVOID p) {
                          SWP_ASYNCWINDOWPOS);
         }
 
-        EnterCriticalSection(&s_cs);
+        EnterCriticalSection(&s_lane.cs);
         s_pending = FALSE;
         if (s_endReq) {
             if (g_recording.load())
@@ -413,7 +394,7 @@ static DWORD WINAPI DragThread(LPVOID p) {
             InterlockedExchange(&s_active, 0);
             running = FALSE;
         }
-        LeaveCriticalSection(&s_cs);
+        LeaveCriticalSection(&s_lane.cs);
     }
     return 0;
 }

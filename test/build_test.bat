@@ -13,6 +13,10 @@ if errorlevel 1 exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\keymap_chord.obj src\keymap.c
 if errorlevel 1 exit /b 1
+rem lane.c: the worker-lane base used by act.c (included by test_chord.c) and drag.c
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
+   /Isrc /c /Foobj\lane_chord.obj src\lane.c
+if errorlevel 1 exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\winmove_chord.obj src\winmove.c
 if errorlevel 1 exit /b 1
@@ -29,7 +33,7 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /DCAP_TEST /TP ^
 if errorlevel 1 exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\test_chord.obj obj\config_chord.obj obj\keymap_chord.obj obj\winmove_chord.obj obj\drag_chord.obj ^
-   obj\folder_chord.obj ^
+   obj\folder_chord.obj obj\lane_chord.obj ^
    /link /OUT:obj\test\test_chord.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib winmm.lib ^
    /SUBSYSTEM:CONSOLE

@@ -32,7 +32,7 @@ cl /nologo /W4 /analyze /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    "%~dp0..\src\main.c" "%~dp0..\src\autodisp.c" "%~dp0..\src\bridge.c" ^
    "%~dp0..\src\wps.c" "%~dp0..\src\winmove.c" "%~dp0..\src\drag.c" ^
    "%~dp0..\src\ime.c" "%~dp0..\src\folder.c" "%~dp0..\src\help.c" ^
-   "%~dp0..\src\clip.c" "%~dp0..\src\colorcode.c" ^
+   "%~dp0..\src\clip.c" "%~dp0..\src\colorcode.c" "%~dp0..\src\lane.c" ^
    "%~dp0..\help\help.c" "%~dp0..\clip\clip.c" ^
    "%~dp0..\settings\settings.c"
 if errorlevel 1 exit /b 1

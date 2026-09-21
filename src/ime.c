@@ -24,6 +24,7 @@
    ------------------------------------------------------------------ */
 
 #include "cap.h"
+#include "lane.h"
 
 #include <imm.h>
 
@@ -197,26 +198,22 @@ static void ImeRunKey(int key) {
     }
 }
 
-/* ================= 专用线程 ================= */
-static CRITICAL_SECTION s_cs;
-static HANDLE  s_ev = NULL;
-static HANDLE  s_thread = NULL;
-static volatile LONG s_stop = 0;
-static BOOL    s_init = FALSE;
+/* ================= 专用线程 =================
+   临界区 / 事件 / 线程 / 停止位交给 lane.c（见 lane.h）。 */
+static Lane    s_lane;
 static int     s_pending = -1;   /* 待执行的 IME_KEY_*；-1 = 没有待办 */
-#define IME_STOPPED() (InterlockedCompareExchange(&s_stop, 0, 0) != 0)
 
 static DWORD WINAPI ImeThread(LPVOID p) {
     (void)p;
     for (;;) {
-        if (IME_STOPPED()) break;
-        WaitForSingleObject(s_ev, 1000);   /* 1s 超时兜底，防事件被吞 */
-        if (IME_STOPPED()) break;
+        if (LaneStopped(&s_lane)) break;
+        WaitForSingleObject(s_lane.ev, 1000);   /* 1s 超时兜底，防事件被吞 */
+        if (LaneStopped(&s_lane)) break;
         int key;
-        EnterCriticalSection(&s_cs);
+        EnterCriticalSection(&s_lane.cs);
         key = s_pending;
         s_pending = -1;                    /* "最新一次 wins"：只做最后一次 */
-        LeaveCriticalSection(&s_cs);
+        LeaveCriticalSection(&s_lane.cs);
         if (key >= 0) ImeRunKey(key);
     }
     return 0;
@@ -229,11 +226,11 @@ static DWORD WINAPI ImeThread(LPVOID p) {
    这里只挡"键号非法"与"线程没起来"两种不该发生的情况。 */
 void ImeRequest(int key) {
     if (key < 0 || key >= IME_KEY_COUNT) return;
-    if (!s_init) return;    /* 线程没起来 -> 静默不可用（见下面的说明） */
-    EnterCriticalSection(&s_cs);
+    if (!LaneLive(&s_lane)) return;    /* 线程没起来 -> 静默不可用（见下面的说明） */
+    EnterCriticalSection(&s_lane.cs);
     s_pending = key;
-    LeaveCriticalSection(&s_cs);
-    SetEvent(s_ev);
+    LeaveCriticalSection(&s_lane.cs);
+    LanePoke(&s_lane);
 }
 
 /* 起/停。与拖拽通道同一条哲学：起不来就**静默不可用**，绝不在主线程同步兜底 ——
@@ -241,31 +238,11 @@ void ImeRequest(int key) {
    （对比滚轮通道：它选择同步兜底，因为"少补一格"用户立刻能察觉；而输入法
    切换的代价是冻住键盘，两者不在一个量级。） */
 void ImeLaneStart(void) {
-    InterlockedExchange(&s_stop, 0);
     s_pending = -1;
-    InitializeCriticalSection(&s_cs);
-    s_ev = CreateEventW(NULL, FALSE, FALSE, NULL);
-    s_thread = s_ev ? CreateThread(NULL, 0, ImeThread, NULL, 0, NULL) : NULL;
-    if (!s_ev || !s_thread) {
-        if (s_thread)  { CloseHandle(s_thread); s_thread = NULL; }
-        if (s_ev)      { CloseHandle(s_ev);     s_ev = NULL; }
-        DeleteCriticalSection(&s_cs);
-        s_init = FALSE;
-        return;
-    }
-    s_init = TRUE;
+    LaneStart(&s_lane, ImeThread);
 }
 
 void ImeLaneStop(void) {
-    if (!s_init) return;
-    InterlockedExchange(&s_stop, 1);
-    SetEvent(s_ev);                       /* 唤醒可能正在等的线程 */
-    if (s_thread) {
-        /* 一次切换最长约 3 × 200ms + 50ms，给 2s 足够收尾 */
-        WaitForSingleObject(s_thread, 2000);
-        CloseHandle(s_thread); s_thread = NULL;
-    }
-    if (s_ev) { CloseHandle(s_ev); s_ev = NULL; }
-    DeleteCriticalSection(&s_cs);
-    s_init = FALSE;
+    /* 一次切换最长约 3 × 200ms + 50ms，给 2s 足够收尾 */
+    LaneStop(&s_lane, 2000);
 }

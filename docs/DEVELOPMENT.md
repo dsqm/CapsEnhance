@@ -91,7 +91,8 @@
 | `bridge.c` | **通用**的"降权桥"：管理员进程访问"只有普通权限才看得见的对象"时的 IPC。只做运输，协议内容由调用方定义 |
 | `wps.c` | **专用**的 WPS 文字通道：ProgID / 进程名 / 属性链 / 直接置位，以及跑在桥上的请求-应答协议。界面在 `src/auto.h` |
 | `send.c` | **模拟按键与滚轮的唯一出口**。扩展键标志（方向键 / Home / End / Del 等必须带 `KEYEVENTF_EXTENDEDKEY`）、逐条发送节奏、Ctrl/Shift 组合键的正确按住与释放、滚轮加速的逐格补发、超限改道的判定（`SendArrows`）、`SendInput` 返回值检查（UIPI 拒绝时记录） |
-| `act.c` | **执行线程**。串行执行会阻塞的发送动作；滚轮注入与持续滚动各有一条独立通道；持续滚动的状态机在锁内维护、由工作线程按拍输出 |
+| `act.c` | **执行线程**。串行执行会阻塞的发送动作；滚轮注入与持续滚动各有一条独立通道；持续滚动的状态机在锁内维护、由工作线程按拍输出。临界区 / 事件 / 线程 / 停止位来自 `lane.c`（`s_evIdle` 是本条车道独有的第二只事件） |
+| `lane.c` | **工作车道底座**。把"临界区 + 自动复位事件 + 线程句柄 + 停止标志 + 带超时的 join + 起不来的回滚"这套骨架收在一处 —— 它原先在 `act.c`（三条）、`drag.c`、`ime.c` 里**逐行重复了五遍**。其中最危险的一条判断（join 超时之后**绝不能**拆掉线程仍在使用的锁与事件）现在只写一遍：超时即把车道标成 `zombie` 并拒绝重起。不变量见 `lane.h` 顶部 |
 | `winmove.c` | **把焦点窗口挪到光标处**（`C+Q`）。落点计算是纯函数（单测覆盖多显示器几何）；执行部分只碰窗口几何：前台窗口 → `GA_ROOT` 顶层 → **全屏窗口直接拒**（`WinIsFullscreen`）→ **最大化且光标同屏则整个不动作**（结果不会变，做了只会闪）→ 还原（最小化/最大化）→ `MonitorFromPoint(DEFAULTTONEAREST)` + `MONITORINFO.rcWork` 钳制 → `SetWindowPos`。不认识键位（触发键在 `keymap.c`、分派在 `act.c`）。另：`WinIsFullscreen` 与 `WinIsShellClass` 是本模块对外提供的**共用判定**，`drag.c` 也用 |
 | `drag.c` | **Caps+左键拖动窗口**。判定在鼠标钩子（按下那一刻决定吞不吞），执行在专用线程（"最新点 wins"，钩子每帧只写一次状态 + SetEvent）；含最大化异步还原、全屏（判据取自 `winmove.c` 的 `WinIsFullscreen`）/最小化/桌面/任务栏/黑名单的接管判定 |
 | `ime.c` | **单键强制切换输入法**。判定在键盘钩子（"单击"），执行在专用线程（跨进程 IME 消息 + 键盘布局切换）；单槽 latest-wins，见[单键切换输入法](#单键切换输入法imec) |
@@ -947,7 +948,7 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 | 脚本 | 内容 |
 | --- | --- |
-| `build.bat` | 生成四个 exe：`bin/CapsEnhance.exe`（源文件：hook / nav / send / act / config / keymap / main / autodisp / bridge / wps / winmove / drag / ime / folder / help / clip）、`bin/CapsEnhanceSettings.exe`（settings/settings.c + src/config.c）、`bin/CapsEnhanceHelp.exe`（help/help.c，只吃一个共享头、不链接 src 下任何模块）、`bin/CapsEnhanceClip.exe`（clip/clip.c + `thirdparty\sqlite3mc_amalgamation.c` 编出的 obj，后者走**独立的 cl 命令行**：`/W0 /analyze-`、不加 `/TP`、`/bigobj`） |
+| `build.bat` | 生成四个 exe：`bin/CapsEnhance.exe`（源文件：hook / nav / send / act / config / keymap / main / autodisp / bridge / wps / winmove / drag / ime / folder / help / clip / child / lane）、`bin/CapsEnhanceSettings.exe`（settings/settings.c + src/config.c）、`bin/CapsEnhanceHelp.exe`（help/help.c，只吃一个共享头、不链接 src 下任何模块）、`bin/CapsEnhanceClip.exe`（clip/clip.c + `thirdparty\sqlite3mc_amalgamation.c` 编出的 obj，后者走**独立的 cl 命令行**：`/W0 /analyze-`、不加 `/TP`、`/bigobj`） |
 | `test\build_nav.bat` | 按词跳转测试：算法单测（`ComputeSteps`）+ Scintilla / Edit 通道集成（`test_sci`）+ 配置解析（`test_config`） |
 | `test\build_test.bat` | 和弦引擎回归：模式修饰的顺序语义（先按修饰再按触发键）、按下即开火、长按、增强补齐、多键同按、左 Alt=增强、清卡键判定、原生按词跳转序列、快速滚动 / 持续滚动、横向滚动、打开所在文件夹的键位接线与取路径、**全屏窗口在 `C+Q` 与 Caps+拖动两边都不动作**、**最大化窗口同屏连一次位置变化都没有**（数 `WM_WINDOWPOSCHANGED`）、按键帮助的键位接线与"寿命=和弦"、日志结束气泡的可点击接线与"点气泡不弹菜单 / 点图标才弹菜单"、键位表每条动作都有图上文案。带 `/DCAP_TEST`（让 `folder.c` 把"退成目录"这个判定结果通过可选形参带出来给断言看），链接 `winmm.lib`（`main.c` 的 `RecBeep` 用 `PlaySoundW`） |
 | `test\build_dbg.bat` | Debug CRT（`/MTd`）config 测试：Release CRT 不校验堆块，"越界写"这类 bug 只有这里拦得住 |
