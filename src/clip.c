@@ -94,7 +94,7 @@ static BOOL PathIsAbsoluteW(const WCHAR* p) {
 
 static void ResolveDittoDir(WCHAR* out, size_t cap) {
     out[0] = 0;
-    const WCHAR* raw = ConfigGetDittoDir();
+    const WCHAR* raw = CfgStr(CFG_DITTO_DIR);
     if (!raw || !raw[0]) return;                      /* 未配置：浮层自己会提示 */
     if (PathIsAbsoluteW(raw)) { wcscpy_s(out, cap, raw); return; }
     WCHAR dir[MAX_PATH];
@@ -114,7 +114,7 @@ static void SpawnClip(void) {
     WCHAR dir[MAX_PATH] = L"";
     WCHAR dd[DITTO_DIR_MAX] = L"";
     WCHAR font[CLIP_FONT_MAX] = L"";
-    int   sizePt = ConfigGetClipFontSize();
+    int   sizePt = CfgInt(CFG_CLIP_FONT_SIZE);
     WCHAR cmd[MAX_PATH + DITTO_DIR_MAX + CLIP_FONT_MAX + 96];
 
     if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return;
@@ -128,7 +128,7 @@ static void SpawnClip(void) {
        没配的项就不传，浮层用它自己的内置默认 —— "没配"与"配成空"语义一致。
        传的是**目录**，不是 db 路径：浮层还要用同一目录找 Ditto.exe（转本体）。 */
     ResolveDittoDir(dd, DITTO_DIR_MAX);
-    wcscpy_s(font, CLIP_FONT_MAX, ConfigGetClipFont());
+    wcscpy_s(font, CLIP_FONT_MAX, CfgStr(CFG_CLIP_FONT));
 
     if (dd[0] && font[0])
         _snwprintf_s(cmd, (size_t)(MAX_PATH + DITTO_DIR_MAX + CLIP_FONT_MAX + 96), _TRUNCATE,

@@ -122,7 +122,7 @@ void LogNewSession(void) {
 /* 是否已达上限（只做一次 stat，非常便宜，可以放在写日志的路径上）。
    上限由配置 [General] LogMaxKB 控制，0 = 不限制。 */
 static BOOL log_over_limit(const WCHAR* path) {
-    int maxKB = ConfigGetLogMaxKB();
+    int maxKB = CfgInt(CFG_LOG_MAX_KB);
     if (maxKB <= 0) return FALSE;
     WIN32_FILE_ATTRIBUTE_DATA d;
     if (!GetFileAttributesExW(path, GetFileExInfoStandard, &d)) return FALSE;
@@ -134,7 +134,7 @@ static BOOL log_over_limit(const WCHAR* path) {
    只在"确实超限"的那一次做，平时不碰 —— 它要读回半个文件再整写一遍，
    代价远高于普通写日志，所以**绝不能放在写日志的锁里**（详情见 CapLog）。 */
 static void log_rotate(const WCHAR* path) {
-    int maxKB = ConfigGetLogMaxKB();
+    int maxKB = CfgInt(CFG_LOG_MAX_KB);
     if (maxKB <= 0) return;
     LONGLONG keep = (LONGLONG)maxKB * 1024 / 2;
     /* 硬上限，双保险：LogMaxKB 已在配置层钳到 65536（keep 最大约 32MB），
@@ -847,8 +847,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             CapLog("===== REC START =====");
             /* 配置值入日志：排查"配置没生效"类问题时一目了然 */
             CapLog("配置: MaxArrowSteps=%d OverStepCtrl=%d LogMaxKB=%d RunAsAdmin=%d",
-                   ConfigGetMaxArrowSteps(), ConfigGetOverStepCtrl() ? 1 : 0,
-                   ConfigGetLogMaxKB(), ConfigGetRunAsAdmin() ? 1 : 0);
+                   CfgInt(CFG_MAX_ARROW_STEPS), CfgBool(CFG_OVER_STEP_CTRL) ? 1 : 0,
+                   CfgInt(CFG_LOG_MAX_KB), CfgBool(CFG_RUN_AS_ADMIN) ? 1 : 0);
             {   /* 实际生效的修饰激活键（编译期常量，见 cap.h）：排查按键映射时一眼可见 */
                 WCHAR ek[MODE_KEYS_MAXLEN], sk[MODE_KEYS_MAXLEN];
                 char  eb[MODE_KEYS_MAXLEN * 3], sb[MODE_KEYS_MAXLEN * 3];
@@ -858,16 +858,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 WideCharToMultiByte(CP_UTF8, 0, sk, -1, sb, (int)sizeof(sb), NULL, NULL);
                 CapLog("按键: 增强=%s 选区=%s（固定值，不读配置） WheelScrollMul=%d "
                        "AutoScrollInterval=%d AutoScrollFastMs=%d",
-                       eb, sb, ConfigGetWheelScrollMul(), ConfigGetAutoScrollInterval(),
-                       ConfigGetAutoScrollFastMs());
+                       eb, sb, CfgInt(CFG_WHEEL_SCROLL_MUL), CfgInt(CFG_AUTOSCROLL_INTERVAL),
+                       CfgInt(CFG_AUTOSCROLL_FAST_MS));
             }
             {   /* 持续滚动的两端方向：AutoScrollFastMs 是"最快"，毫秒数必须
                    **小于** AutoScrollInterval（起步）才有提速空间。写反了不会
                    崩（act.c 里 `if (fast > slow) fast = slow`），但提速阶梯会
                    **静默退化成恒定速度** —— 现象只是"再滚一下没变快"，极难
                    自查，所以在诊断日志里明说。 */
-                int slow = ConfigGetAutoScrollInterval();
-                int fast = ConfigGetAutoScrollFastMs();
+                int slow = CfgInt(CFG_AUTOSCROLL_INTERVAL);
+                int fast = CfgInt(CFG_AUTOSCROLL_FAST_MS);
                 CapLog("自动滚动: 起步=%dms/格 最快=%dms/格 %s", slow, fast,
                        (fast >= slow) ? "（!! 最快 >= 起步：提速已退化为恒速）" : "");
             }
@@ -1290,7 +1290,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
            提权实例带 --wait-exit —— 必须等本实例释放单实例互斥量之后再装
            钩子，否则两边抢同一把锁，提权实例会误判"已在运行"而直接退出，
            结果是提权静默失败。用户取消 UAC 则按普通权限继续运行。 */
-        if (ConfigGetRunAsAdmin() && !IsRunElevated()) {
+        if (CfgBool(CFG_RUN_AS_ADMIN) && !IsRunElevated()) {
             WCHAR exe[MAX_PATH] = L"";
             GetModuleFileNameW(NULL, exe, MAX_PATH);
             WCHAR args[64];

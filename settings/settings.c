@@ -20,9 +20,10 @@
    消息循环、持有控件、还要写文件，任何一处阻塞都会直接表现为"键盘卡住 /
    钩子被系统摘掉"。这是两类进程，不该共用一个主线程。
 
-   值域与键名**不在这里重复定义**：读用 config.c 的 ConfigGet*，写用
-   ConfigSet*（钳制与解析同源），写回走 ConfigSaveFile —— 它按行做增量更新，
-   用户的注释、未知段、BOM 与行尾风格都保留。
+   值域与键名**不在这里重复定义**：读用 CfgInt / CfgBool / CfgStr，写用
+   CfgSetInt / CfgSetBool / CfgSetStr（钳制与解析同源，值域也来自 config.c
+   的 kCfg 表），写回走 ConfigSaveFile —— 它按行做增量更新，用户的注释、
+   未知段、BOM 与行尾风格都保留。
 
    高 DPI：进程声明 Per-Monitor V2（拿不到就退回系统级 DPI 感知），字体按
    当前 DPI 取系统消息字体，所有像素尺寸经 S() 缩放；拖到不同缩放的显示器
@@ -115,14 +116,18 @@ enum { TAB_GENERAL = 0, TAB_LISTS = 1, TAB_N = 2 };
 static const WCHAR* const kTabNames[TAB_N] = { L"常规", L"名单" };
 
 /* ---------- 字段表：控件的"是什么"，不是"长什么样" ----------
-   界面的每个输入框都从这里取标签、类型与范围；加一个配置项 = 加一行 +
-   Load / Save 里各加一个分支（键名与值域仍只在 config.c 定义一次）。
+   加一个配置项 = 这里加一行（另两处是 config.c 的 kCfg 表与 README 的配置表）。
+   `cfg` 列指向 config.c 的配置项编号：Load / Save 按它直取直写，**没有分支**；
+   值域也从那边取（InitFieldRanges），这里不写第二份。
    标签只写中文说明 —— ini 里的键名属于配置文件的内部拼法，界面不重复；
    数值单位（KB / 毫秒 …）单独一列，显示在输入框右侧。
    group 一列是**归属段**（Ditto 路径 / 快速粘贴显然是「剪贴板」这类）：
    每段第一行渲染一个半粗段头，同一段的行必须连排（段头按"换段"渲染）。 */
 typedef struct {
     int          id;
+    int          cfg;       /* 对应的 CFG_* 编号；-1 = 纯界面控件（按钮）。
+                               有了它，Load / Save 就是"按 cfg 直取"，
+                               不用再为每个控件写一条 switch 分支。 */
     const WCHAR* label;
     const WCHAR* unit;      /* 数值单位，显示在输入框右侧；勾选框与文本框为 NULL */
     int          isBool;    /* 1 = 勾选框，0 = 输入框 */
@@ -132,34 +137,49 @@ typedef struct {
                                就会在校验分支里冒出 `if (isBool == 2)` 这种暗号。 */
     int          isBtn;     /* 1 = 按钮（label 就是按钮上的字）。
                                按钮不承载配置值，点击行为在 WM_COMMAND 里按 id 分支。 */
-    int          min, max;
+    int          min, max;  /* 值域**不在这里写第二份**：InitFieldRanges 从
+                               config.c 的表取（CfgLo / CfgHi）—— 与解析共用
+                               同一份判据，历史上"界面允许 999、加载回来变成 16"
+                               就是两份分叉出来的 */
     const WCHAR* group;     /* 归属段名（见上方说明；段头文字就是它） */
 } Field;
 
-static const Field kFields[] = {
-    { IDC_RUN_ADMIN, L"以管理员身份运行（会弹 UAC）",                   NULL,      1, 0, 0, 0, 0,      L"通用" },
-    { IDC_LOG_KB,    L"日志大小上限（0 = 不限制）",                    L"KB",     0, 0, 0, 0, 65536,  L"通用" },
-    { IDC_STEPS,     L"按词跳转逐格上限（0 = 不限制，上限 256）",       L"格",     0, 0, 0, 0, 256,    L"按词跳转" },
-    { IDC_OVER_CTRL, L"超过逐格上限时改发 Ctrl+方向（取消勾选只发一次方向键）", NULL,      1, 0, 0, 0, 0,      L"按词跳转" },
-    { IDC_SCI,       L"允许读取 Scintilla 程序内存（关掉则退回逐格）", NULL,      1, 0, 0, 0, 0,      L"按词跳转" },
-    { IDC_WMUL,      L"Caps+滚轮 放大倍数（0/1 = 关闭）",              L"倍",     0, 0, 0, 0, 16,     L"滚动" },
-    { IDC_INTERVAL,  L"持续滚动初始速度（越大越慢）",                  L"毫秒/格", 0, 0, 0, 100, 60000, L"滚动" },
-    { IDC_FASTMS,    L"持续滚动最快速度（越小越快）",                  L"毫秒/格", 0, 0, 0, 20, 60000,  L"滚动" },
-    { IDC_HMUL,      L"Caps+Shift+滚轮 横向倍数（0 = 关闭）",          L"倍",     0, 0, 0, 0, 16,     L"滚动" },
+static Field kFields[] = {
+    { IDC_RUN_ADMIN,  CFG_RUN_AS_ADMIN,        L"以管理员身份运行（会弹 UAC）",                   NULL,      1, 0, 0, 0, 0,      L"通用" },
+    { IDC_LOG_KB,     CFG_LOG_MAX_KB,          L"日志大小上限（0 = 不限制）",                    L"KB",     0, 0, 0, 0, 0,      L"通用" },
+    { IDC_STEPS,      CFG_MAX_ARROW_STEPS,     L"按词跳转逐格上限（0 = 不限制，上限 256）",       L"格",     0, 0, 0, 0, 0,      L"按词跳转" },
+    { IDC_OVER_CTRL,  CFG_OVER_STEP_CTRL,      L"超过逐格上限时改发 Ctrl+方向（取消勾选只发一次方向键）", NULL, 1, 0, 0, 0, 0, L"按词跳转" },
+    { IDC_SCI,        CFG_ALLOW_SCINTILLA_READ, L"允许读取 Scintilla 程序内存（关掉则退回逐格）", NULL,    1, 0, 0, 0, 0,      L"按词跳转" },
+    { IDC_WMUL,       CFG_WHEEL_SCROLL_MUL,    L"Caps+滚轮 放大倍数（0/1 = 关闭）",              L"倍",     0, 0, 0, 0, 0,      L"滚动" },
+    { IDC_INTERVAL,   CFG_AUTOSCROLL_INTERVAL, L"持续滚动初始速度（越大越慢）",                  L"毫秒/格", 0, 0, 0, 0, 0,      L"滚动" },
+    { IDC_FASTMS,     CFG_AUTOSCROLL_FAST_MS,  L"持续滚动最快速度（越小越快）",                  L"毫秒/格", 0, 0, 0, 0, 0,      L"滚动" },
+    { IDC_HMUL,       CFG_WHEEL_HSCROLL_MUL,   L"Caps+Shift+滚轮 横向倍数（0 = 关闭）",          L"倍",     0, 0, 0, 0, 0,      L"滚动" },
     /* 单键切换输入法：0=不处理 1=切中文 2=切英文（值域与语义只在 config.c 定义） */
-    { IDC_IME_CAPS,  L"单击 Caps 时切输入法（0=不处理 1=中文 2=英文）",  NULL,     0, 0, 0, 0, 2,      L"输入法" },
-    { IDC_IME_LSHF,  L"单击左 Shift 时切输入法（同上；英文键盘下都不处理）", NULL,   0, 0, 0, 0, 2,      L"输入法" },
-    { IDC_IME_RSHF,  L"单击右 Shift 时切输入法（同上；英文键盘下都不处理）", NULL,   0, 0, 0, 0, 2,      L"输入法" },
+    { IDC_IME_CAPS,   CFG_IME_CAPS_MODE,       L"单击 Caps 时切输入法（0=不处理 1=中文 2=英文）",  NULL,    0, 0, 0, 0, 0,      L"输入法" },
+    { IDC_IME_LSHF,   CFG_IME_LSHIFT_MODE,     L"单击左 Shift 时切输入法（同上；英文键盘下都不处理）", NULL, 0, 0, 0, 0, 0,   L"输入法" },
+    { IDC_IME_RSHF,   CFG_IME_RSHIFT_MODE,     L"单击右 Shift 时切输入法（同上；英文键盘下都不处理）", NULL, 0, 0, 0, 0, 0,   L"输入法" },
     /* Ditto 剪贴板数据库路径（`C+V` 读它）：**留空 = 不启用**。相对路径的
        基准是本程序 exe 所在目录 —— 这一句写在标签里而不是让用户去猜。 */
-    { IDC_DITTO_DB,  L"Ditto 文件夹路径（含 Ditto.db 与 Ditto.exe；留空 = 不启用 Caps+V；相对路径相对本程序目录）",
+    { IDC_DITTO_DB,   CFG_DITTO_DIR,           L"Ditto 文件夹路径（含 Ditto.db 与 Ditto.exe；留空 = 不启用 Caps+V；相对路径相对本程序目录）",
                      NULL, 0, 1, 0, 0, 0, L"剪贴板" },
     /* 快速粘贴的字体只有一个入口：按钮上**显示当前字体 + 字号**，点它弹系统
-       字体对话框（对话框里本来就能同时选字体和字号，再给个独立字号框是重复）。 */
-    { IDC_CLIP_PICK, L"快速粘贴字体",                                   NULL, 0, 0, 1, 0, 0, L"剪贴板" },
-    { IDC_CLIP_CLICK, L"单击条目直接上屏（取消勾选则单击只选中、双击才粘）", NULL, 1, 0, 0, 0, 0, L"剪贴板" },
+       字体对话框（对话框里本来就能同时选字体和字号，再给个独立字号框是重复）。
+       它不承载配置值，所以 cfg = -1，Load / Save 都跳过。 */
+    { IDC_CLIP_PICK, -1,                       L"快速粘贴字体",                                   NULL, 0, 0, 1, 0, 0, L"剪贴板" },
+    { IDC_CLIP_CLICK, CFG_CLIP_CLICK_PASTE,    L"单击条目直接上屏（取消勾选则单击只选中、双击才粘）", NULL, 1, 0, 0, 0, 0, L"剪贴板" },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
+
+/* 值域从 config.c 的表灌进来（界面不再写第二份 min/max）。
+   表是运行期可变的，所以在这里填一次；建控件之前调用。 */
+static void InitFieldRanges(void) {
+    for (int i = 0; i < FIELD_N; i++) {
+        if (kFields[i].cfg < 0) continue;
+        kFields[i].min = CfgLo(kFields[i].cfg);
+        kFields[i].max = CfgHi(kFields[i].cfg);
+    }
+}
+
 
 /* ---------- 段头映射 ----------
    group 列按"换段"渲染段头：这里把每行映射到它的段头控件 id（0 = 不带头，
@@ -392,36 +412,13 @@ static void LoadConfig(void) {
 
     g_loading = TRUE;
     for (int i = 0; i < FIELD_N; i++) {
-        HWND c = GetDlgItem(g_hwnd, kFields[i].id);
+        const Field* f = &kFields[i];
+        if (f->cfg < 0) continue;                  /* 按钮自己刷（见 UpdateClipFontBtn） */
+        HWND c = GetDlgItem(g_hwnd, f->id);
         if (!c) continue;
-        if (kFields[i].isBool) {
-            switch (kFields[i].id) {
-            case IDC_RUN_ADMIN: SetCheck(c, ConfigGetRunAsAdmin()); break;
-            case IDC_OVER_CTRL: SetCheck(c, ConfigGetOverStepCtrl()); break;
-            case IDC_SCI:       SetCheck(c, ConfigGetAllowScintillaRead()); break;
-            case IDC_CLIP_CLICK: SetCheck(c, ConfigGetClipClickPaste()); break;
-            default: break;
-            }
-        } else if (kFields[i].isText) {
-            switch (kFields[i].id) {
-            case IDC_DITTO_DB:  SetWindowTextW(c, ConfigGetDittoDir()); break;
-
-            default: break;
-            }
-        } else {
-            switch (kFields[i].id) {
-            case IDC_LOG_KB:   SetIntField(c, ConfigGetLogMaxKB()); break;
-            case IDC_STEPS:    SetIntField(c, ConfigGetMaxArrowSteps()); break;
-            case IDC_WMUL:     SetIntField(c, ConfigGetWheelScrollMul()); break;
-            case IDC_INTERVAL: SetIntField(c, ConfigGetAutoScrollInterval()); break;
-            case IDC_FASTMS:   SetIntField(c, ConfigGetAutoScrollFastMs()); break;
-            case IDC_HMUL:     SetIntField(c, ConfigGetWheelHScrollMul()); break;
-            case IDC_IME_CAPS: SetIntField(c, ConfigGetImeMode(IME_KEY_CAPS)); break;
-            case IDC_IME_LSHF: SetIntField(c, ConfigGetImeMode(IME_KEY_LSHIFT)); break;
-            case IDC_IME_RSHF: SetIntField(c, ConfigGetImeMode(IME_KEY_RSHIFT)); break;
-            default: break;
-            }
-        }
+        if (f->isBool)      SetCheck(c, CfgBool(f->cfg));
+        else if (f->isText) SetWindowTextW(c, CfgStr(f->cfg));
+        else                SetIntField(c, CfgInt(f->cfg));
     }
     for (int i = 0; i < LIST_N; i++) {
         FillList(GetDlgItem(g_hwnd, IDC_LIST0 + i * LIST_STRIDE), kLists[i].list);
@@ -456,38 +453,20 @@ static BOOL SaveConfig(void) {
     }
 
     for (int i = 0; i < FIELD_N; i++) {
-        HWND c = GetDlgItem(g_hwnd, kFields[i].id);
+        const Field* f = &kFields[i];
+        if (f->cfg < 0) continue;                  /* 按钮不承载配置值 */
+        HWND c = GetDlgItem(g_hwnd, f->id);
         if (!c) continue;
-        int v = 0;
-        if (kFields[i].isBool) {
-            switch (kFields[i].id) {
-            case IDC_RUN_ADMIN: ConfigSetRunAsAdmin(GetCheck(c)); break;
-            case IDC_OVER_CTRL: ConfigSetOverStepCtrl(GetCheck(c)); break;
-            case IDC_SCI:       ConfigSetAllowScintillaRead(GetCheck(c)); break;
-            case IDC_CLIP_CLICK: ConfigSetClipClickPaste(GetCheck(c)); break;
-            default: break;
-            }
-        } else if (kFields[i].isText) {
-            WCHAR t[DITTO_DIR_MAX];
+        if (f->isBool) {
+            CfgSetBool(f->cfg, GetCheck(c));
+        } else if (f->isText) {
+            WCHAR t[DITTO_DIR_MAX];                /* 最长的文本项就是 DittoDir */
             GetWindowTextW(c, t, DITTO_DIR_MAX);
-            switch (kFields[i].id) {
-            case IDC_DITTO_DB:  ConfigSetDittoDir(t); break;
-            default: break;
-            }
+            CfgSetStr(f->cfg, t);
         } else {
-            ReadIntField(c, &kFields[i], &v);      /* 校验已过，这里必然成功 */
-            switch (kFields[i].id) {
-            case IDC_LOG_KB:   ConfigSetLogMaxKB(v); break;
-            case IDC_STEPS:    ConfigSetMaxArrowSteps(v); break;
-            case IDC_WMUL:     ConfigSetWheelScrollMul(v); break;
-            case IDC_INTERVAL: ConfigSetAutoScrollInterval(v); break;
-            case IDC_FASTMS:   ConfigSetAutoScrollFastMs(v); break;
-            case IDC_HMUL:     ConfigSetWheelHScrollMul(v); break;
-            case IDC_IME_CAPS: ConfigSetImeMode(IME_KEY_CAPS, v); break;
-            case IDC_IME_LSHF: ConfigSetImeMode(IME_KEY_LSHIFT, v); break;
-            case IDC_IME_RSHF:  ConfigSetImeMode(IME_KEY_RSHIFT, v); break;
-            default: break;
-            }
+            int v = 0;
+            ReadIntField(c, f, &v);                /* 校验已过，这里必然成功 */
+            CfgSetInt(f->cfg, v);
         }
     }
 
@@ -1488,10 +1467,10 @@ static LRESULT CALLBACK FooterProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 static void UpdateClipFontBtn(void) {
     HWND b = GetDlgItem(g_hwnd, IDC_CLIP_PICK);
     if (!b) return;
-    const WCHAR* name = ConfigGetClipFont();
+    const WCHAR* name = CfgStr(CFG_CLIP_FONT);
     WCHAR txt[CLIP_FONT_MAX + 16];
     _snwprintf_s(txt, (size_t)(CLIP_FONT_MAX + 16), _TRUNCATE, L"%s　%d 磅",
-                 (name[0] ? name : L"Microsoft YaHei UI"), ConfigGetClipFontSize());
+                 (name[0] ? name : L"Microsoft YaHei UI"), CfgInt(CFG_CLIP_FONT_SIZE));
     SetWindowTextW(b, txt);
 }
 
@@ -1587,14 +1566,14 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id == IDC_SAVE)   { DoSave(); return 0; }
         if (id == IDC_CLIP_PICK) {
             WCHAR name[CLIP_FONT_MAX] = L"";
-            int size = ConfigGetClipFontSize();
-            const WCHAR* cur = ConfigGetClipFont();
+            int size = CfgInt(CFG_CLIP_FONT_SIZE);
+            const WCHAR* cur = CfgStr(CFG_CLIP_FONT);
             if (cur[0]) wcscpy_s(name, CLIP_FONT_MAX, cur);
             if (PickFont(h, name, CLIP_FONT_MAX, &size)) {
                 /* 确认即写入配置层（内存态）：ConfigSaveFile 写回时用的就是它，
                    所以不需要"隐藏字段"来替按钮保管值。 */
-                ConfigSetClipFont(name);
-                ConfigSetClipFontSize(size);
+                CfgSetStr(CFG_CLIP_FONT, name);
+                CfgSetInt(CFG_CLIP_FONT_SIZE, size);
                 UpdateClipFontBtn();
                 MarkDirty();
             }
@@ -1780,6 +1759,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     InitDpiAwareness();      /* 必须在任何窗口创建之前 */
 
+    InitFieldRanges();       /* 值域从 config.c 的表灌进来（建控件前） */
     InitGroups();            /* 段头映射：纯表数据，建控件前算好 */
 
     /* 页签控件是 comctl32 的通用控件：先注册它的窗口类，CreateWindow 找得到。

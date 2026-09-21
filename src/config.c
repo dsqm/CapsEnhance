@@ -192,45 +192,204 @@ typedef enum {
 
 static WCHAR g_names[CFGLIST_COUNT][CFG_MAX_ENTRIES][CFG_NAME_MAX];
 static int   g_count[CFGLIST_COUNT];
-/* 缺省**不提权**（缺省配置就是 RunAsAdmin = 0）。
-   为什么改默认：绝大多数功能（和弦映射、按词跳转、滚动、Caps+左键拖动普通窗口）
-   都不需要管理员；默认提权只会让每次启动多弹一次 UAC，还带来两个副作用 ——
-   管理员进程看不到普通权限程序的 COM/UIA 对象（WPS 得额外走降权桥），
-   以及进程级测试在本机沙箱里会卡在 UAC 等待。
-   什么时候需要设 1：**要拖动/操作以管理员运行的窗口** —— UIPI 会拦住低完整性
-   进程对高完整性窗口的 SetWindowPos，不提权就拖不动它们。 */
-static BOOL  g_runAsAdmin = FALSE;
-static int   g_logMaxKB   = LOG_MAX_KB_DEFAULT;   /* 日志大小上限（KB），0 = 不限制 */
-static int   g_maxArrowSteps = MAX_ARROW_STEPS_DEFAULT;  /* 逐格步数上限，达到即改道 */
-static BOOL  g_overStepCtrl = TRUE;  /* TRUE=超限改发 Ctrl+方向（原生按词跳转） */
-static int   g_wheelMul = WHEEL_MUL_DEFAULT;  /* Caps+滚轮 放大倍数，<2 = 不放大 */
-static int   g_autoScrollFastMs = AUTOSCROLL_FAST_DEFAULT;       /* 自动滚动最快速度(ms/格) */
-static int   g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT; /* 自动滚动初始节拍(ms) */
-static int   g_wheelHMul = WHEEL_HMUL_DEFAULT; /* Caps+Shift+滚轮 的横向滚动倍数，0=关闭 */
-static BOOL  g_allowSciRead = ALLOW_SCINTILLA_READ_DEFAULT; /* Scintilla 通道读目标进程内存 */
-/* 单键切换输入法：三个键各自的模式（IME_MODE_*，见 cap.h）。
-   默认值单独一份表 —— 解析、复位、模板三处都要用同一个值，写两遍就会漂移。 */
-static const int kImeModeDefault[IME_KEY_COUNT] = {
-    IME_CAPS_MODE_DEFAULT, IME_LSHIFT_MODE_DEFAULT, IME_RSHIFT_MODE_DEFAULT
-};
-static int   g_imeMode[IME_KEY_COUNT];
-/* Ditto 剪贴板数据库路径（Caps+V 读它）。空串 = 未配置 —— 那不是错误，
-   而是"这个功能没开"：主程序拉起剪贴板 exe 时不带 --db，浮层自己会提示。
-   ★ 字符串值有两份了（它和 ClipFont），键名比较、模板、升级、写回四处都要
-   按字符串处理，不能套 KV 的 "%d"。 */
+/* ---------- 值存储 ----------
+   整数 / 布尔项的值**就在 kCfg 表里**（表即存储）；文本项指向下面这两个缓冲
+   —— 文本项要求"返回内部指针"（主程序读路径、设置程序写回都要），塞不进表里。 */
 static WCHAR g_dittoDir[DITTO_DIR_MAX] = L"";
-/* 快速粘贴窗口的字体与字号（磅）。字号是**磅**：系统字体对话框（ChooseFont）
-   给的就是磅，两边不用换算。空字体名 = 浮层用自己的内置默认。 */
 static WCHAR g_clipFont[CLIP_FONT_MAX] = L"";
-static int   g_clipFontSize = CLIP_FONT_SIZE_DEFAULT;
-/* 单击条目直接上屏（默认开）：Ditto 的快速粘贴也是单击即粘 —— 挑中就上，
-   不必"先选中、再双击"两步。关掉则退回"单击只选中、双击才粘"。 */
-static BOOL  g_clipClickPaste = CLIP_CLICK_PASTE_DEFAULT;
 
-static int ClampClipFontSize(int v) {
-    if (v < 6)   v = 6;
-    if (v > CLIP_FONT_SIZE_MAX) v = CLIP_FONT_SIZE_MAX;
-    return v;
+/* ================= 配置项描述符表（**唯一一份语义定义**） =================
+   加一个配置项 = 本表加一行（默认值 / 值域 / ini 注释 / 解析 / 读写 / 写回
+   全部由这一行派生）+ settings.c 的 kFields 加一行（界面的标签 / 单位 / 分段
+   属于呈现）+ README 的配置表加一行。
+
+   为什么值得单独一张表：这些原先散在**八处**（常量、静态初值、解析分支、
+   ini 模板、老配置补写块、ConfigGet*、ConfigSet*、写回清单、设置程序的值域），
+   漏一处**不会编译报错**，只会静默不一致 —— 历史事故：默认值从 2 改成 3 时
+   漏改了三处文案与两处范围（见 DEVELOPMENT.md 的"配置项的设计与新增清单"）。
+
+   字段：
+     key    ini 里的键名（小写；解析与匹配一律用这个形态）
+     name   写进文件的形态（保留大小写）—— 匹配用 key、输出用 name：
+            用小写写回会让用户文件里的 RunAsAdmin 变成 runasadmin，
+            解析没问题，但"我的配置被人改了大小写"是实打实的观感问题
+     flags  CFG_F_BOOL（勾选语义，**只认 "1"**）/ CFG_F_TEXT（字符串项）
+     def    默认值（布尔项用 0/1；文本项无意义）
+     lo,hi  整数钳制范围（含端点）—— 解析与"设置界面改值"共用这一份判据
+     cap   文本项目标缓冲容量（字符数，含结尾 0）；0 = 非文本项
+     str   文本项目标缓冲
+     num   整数 / 布尔项的当前值
+     doc   ini 注释块（UTF-8）。**模板（文件不存在）与老配置补写（缺键）
+           共用同一份**，所以两边的文案不可能再漂移；NULL = 该键不写注释，
+           只写"键 = 值"一行（共享一大段说明的键用它，如输入法那三个）。
+           注释块里只写说明，**不写"Key = 值"那一行** —— 那一行由 name + def
+           现拼，默认值因此只有 def 一处来源。 */
+#define CFG_F_BOOL 0x1u
+#define CFG_F_TEXT 0x2u
+
+typedef struct {
+    const char*  key;
+    const char*  name;
+    unsigned     flags;
+    int          def;
+    int          lo, hi;
+    int          cap;
+    WCHAR*       str;
+    int          num;
+    const char*  doc;
+} CfgDef;
+
+static CfgDef kCfg[CFG_COUNT] = {
+    { "runasadmin", "RunAsAdmin", CFG_F_BOOL, 0, 0, 1, 0, NULL, 0,
+      "; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）\n"
+      "; 1=启用，0=禁用\n"
+      "; 默认 0：普通用法不需要管理员；只有要拖动/操作「以管理员运行的窗口」\n"
+      "; （UIPI 会拦住低权限进程对高权限窗口的 SetWindowPos）时才需要设 1。\n" },
+
+    { "logmaxkb", "LogMaxKB", 0, LOG_MAX_KB_DEFAULT, 0, LOG_MAX_KB_MAX, 0, NULL, 0,
+      "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
+      "; 范围 0.." STR(LOG_MAX_KB_MAX) "，超出按上限钳制\n" },
+
+    { "maxarrowsteps", "MaxArrowSteps", 0, MAX_ARROW_STEPS_DEFAULT, 0, MAX_ARROW_STEPS_MAX, 0, NULL, 0,
+      "; 逐格按词跳转的最大步数：达到该步数就不再逐格发送，\n"
+      "; 改按 OverStepMode 处理（" STR(MAX_ARROW_STEPS_DEFAULT) " = 该步数及以上瞬跳），避免方向键发太久。\n"
+      "; 0 = 不限制（一律逐格），最大 " STR(MAX_ARROW_STEPS_MAX) "\n" },
+
+    { "overstepmode", "OverStepMode", CFG_F_BOOL, 1, 0, 1, 0, NULL, 1,
+      "; 超过 MaxArrowSteps 时的替代方式\n"
+      ";   0 = 只发送一个方向键\n"
+      ";   1 = 改发 Ctrl+方向键\n" },
+
+    { "wheelscrollmul", "WheelScrollMul", 0, WHEEL_MUL_DEFAULT, 0, WHEEL_MUL_MAX, 0, NULL, 0,
+      "; 按住 C 时滚轮快速滚动：滚一格当 N 格（倍数 WheelScrollMul）。\n"
+      "; 0 或 1 = 关闭（滚轮按系统原本行为）。范围 0.." STR(WHEEL_MUL_MAX) "。\n" },
+
+    { "autoscrollinterval", "AutoScrollInterval", 0, AUTOSCROLL_INTERVAL_DEFAULT,
+      AUTOSCROLL_INTERVAL_MIN, AUTOSCROLL_INTERVAL_MAX, 0, NULL, 0,
+      "; 自动滚动的初始速度（毫秒/格，越大越慢）\n"
+      "; 最快到 AutoScrollFastMs\n"
+      "; 可调范围 " STR(AUTOSCROLL_INTERVAL_MIN) ".." STR(AUTOSCROLL_INTERVAL_MAX) "。\n" },
+
+    { "autoscrollfastms", "AutoScrollFastMs", 0, AUTOSCROLL_FAST_DEFAULT,
+      AUTOSCROLL_FAST_MIN, AUTOSCROLL_FAST_MAX, 0, NULL, 0,
+      "; 持续滚动速度上限\n"
+      "; 与上面 AutoScrollInterval（初始速度）各自独立：一个管起步、一个管顶档。\n"
+      "; 范围 " STR(AUTOSCROLL_FAST_MIN) ".." STR(AUTOSCROLL_FAST_MAX)
+      "；想更快就调小，想让它也慢下来就调大。\n" },
+
+    { "wheelhscrollmul", "WheelHScrollMul", 0, WHEEL_HMUL_DEFAULT, 0, WHEEL_HMUL_MAX, 0, NULL, 0,
+      "; 横向滚动：按住 C + Shift 滚滚轮，横向挪动。倍数 1 = 一滚一格（默认），\n"
+      "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n" },
+
+    { "allowscintillaread", "AllowScintillaRead", CFG_F_BOOL, ALLOW_SCINTILLA_READ_DEFAULT,
+      0, 1, 0, NULL, 1,
+      "; Scintilla 通道（Notepad3 / Notepad++ / SciTE 等）读全文必须\n"
+      "; 在目标进程里开一块内存再读回来（要 PROCESS_VM_OPERATION|VM_READ）。\n"
+      "; 设为 0 即整条通道放弃，退回 UIA / IA2 / 原生 Ctrl+方向（仍能跳，\n"
+      "; 只是不再是瞬跳）。\n" },
+
+    /* 单键切换输入法的三个键共用一个值域（0=不处理 1=中文 2=英文），
+       所以说明只挂在第一个上；后两个只写"键 = 值"一行。
+       ★ 三行必须与 IME_KEY_* 同序连排 —— ConfigGetImeMode 靠下标直取。 */
+    { "imecapsmode", "ImeCapsMode", 0, IME_CAPS_MODE_DEFAULT, 0, IME_MODE_MAX, 0, NULL, 1,
+      "; 单键切换输入法：单击（按下即抬起、期间不按别的键）下面三个键时，\n"
+      "; 无视当前输入法状态强制切到中文或英文。\n"
+      ";   0 = 不处理   1 = 切中文   2 = 切英文\n"
+      "; Caps：任何时候都切（当前是英文键盘时，会先换到已安装的中文键盘）。\n"
+      "; Shift：前台是英文键盘时不处理（本来就是英文，切它没意义）。\n"
+      "; 三个键都遵守 [AutoDisable] 名单。\n" },
+    { "imelshiftmode", "ImeLShiftMode", 0, IME_LSHIFT_MODE_DEFAULT, 0, IME_MODE_MAX, 0, NULL, 0, NULL },
+    { "imershiftmode", "ImeRShiftMode", 0, IME_RSHIFT_MODE_DEFAULT, 0, IME_MODE_MAX, 0, NULL, 0, NULL },
+
+    /* 文本项。收下时已 TrimW 过，**不做任何路径规范化**：相对路径的基准由
+       使用者决定（主程序按自己的 exe 目录展开），在这里展开就等于把基准写在两处。 */
+    { "dittodir", "DittoDir", CFG_F_TEXT, 0, 0, 0, DITTO_DIR_MAX, g_dittoDir, 0,
+      "; Ditto 的文件夹（Caps+V 弹出剪贴板用，两处派生）：\n"
+      ";   <DittoDir>\\Ditto.db   浮层只读地取最近 30 条\n"
+      ";   <DittoDir>\\Ditto.exe  浮层里\"转 Ditto 本体\"用 -open 拉起它的窗口\n"
+      "; 留空 = 不启用该功能（按 Caps+V 时浮层会提示未配置）。\n"
+      "; 相对路径的基准 = 本程序 exe 所在目录（也就是本文件所在目录）：\n"
+      ";   DittoDir = ..\\Ditto          -> exe 同级的上一级里的 Ditto 文件夹\n"
+      ";   DittoDir = C:\\Tools\\Ditto   -> 绝对路径，原样使用\n"
+      "; 不做任何自动探测：便携版 Ditto 的目录在哪，只有你知道。\n" },
+
+    { "clipfont", "ClipFont", CFG_F_TEXT, 0, 0, 0, CLIP_FONT_MAX, g_clipFont, 0,
+      "; 快速粘贴窗口（Caps+V）的字体与字号。\n"
+      "; ClipFontSize 单位是磅（与系统字体对话框一致），范围 6.."
+      STR(CLIP_FONT_SIZE_MAX) "\n"
+      "; ClipFont 留空 = 用内置的 Microsoft YaHei UI。\n" },
+
+    { "clipfontsize", "ClipFontSize", 0, CLIP_FONT_SIZE_DEFAULT, 6, CLIP_FONT_SIZE_MAX, 0, NULL, 0, NULL },
+
+    { "clipclickpaste", "ClipClickPaste", CFG_F_BOOL, CLIP_CLICK_PASTE_DEFAULT, 0, 1, 0, NULL, 1,
+      "; 单击条目直接上屏（默认开）：挑中就粘，不必先选中再双击。\n"
+      "; 0 = 关闭（单击只选中，双击才粘）\n" },
+};
+
+/* 三键与 CFG_IME_* 三个编号必须同序连排（ConfigGetImeMode 靠下标直取） */
+static_assert(IME_KEY_CAPS == 0 &&
+              CFG_IME_LSHIFT_MODE == CFG_IME_CAPS_MODE + IME_KEY_LSHIFT &&
+              CFG_IME_RSHIFT_MODE == CFG_IME_CAPS_MODE + IME_KEY_RSHIFT,
+              "CFG_IME_* 必须与 IME_KEY_* 同序连排");
+
+static CfgDef* CfgOf(int id) {
+    return (id >= 0 && id < CFG_COUNT) ? &kCfg[id] : NULL;
+}
+
+/* 复位成默认值（ConfigLoadFrom 每次进来都调：单测会反复加载） */
+/* 表里的"当前值"是由静态零初始化起来的（全局数组），真正的缺省在 def 里。
+   首次访问**早于**任何 ConfigLoadFrom 时必须先灌一次 —— 老实现是给每个全局
+   变量写静态初值，所以"没读过配置文件也能拿到缺省"是既有行为，不能丢。 */
+static BOOL g_cfgReady = FALSE;
+
+static void CfgInitDefaults(void) {
+    for (int i = 0; i < CFG_COUNT; i++) {
+        CfgDef* c = &kCfg[i];
+        if (c->flags & CFG_F_TEXT) { if (c->str && c->cap > 0) c->str[0] = 0; }
+        else                        c->num = c->def;
+    }
+    g_cfgReady = TRUE;
+}
+static void CfgEnsureReady(void) { if (!g_cfgReady) CfgInitDefaults(); }
+
+/* 表里的键名（ASCII）与解析出来的宽字符键名比较。两边的形态都已转小写。 */
+static BOOL KeyEqW(const WCHAR* wkey, const char* akey) {
+    for (; *akey; akey++, wkey++)
+        if (*wkey != (WCHAR)(unsigned char)*akey) return FALSE;
+    return (*wkey == 0);
+}
+
+/* 把"注释块 + 键 = 默认值"追加到 ini 文本。模板（文件不存在时写出）与
+   老配置补写（缺键）**共用这一个**，所以两边的文案与默认值不可能漂移。
+   注释块里不写"键 = 值"那一行，它由 name + def 现拼 —— 默认值只有 def 一处来源。 */
+static void AppendCfgBlock(std::string* out, int id) {
+    const CfgDef* c = CfgOf(id);
+    if (!c) return;
+    char line[CFG_VAL_LEN];
+    if (c->flags & CFG_F_TEXT)
+        _snprintf_s(line, sizeof(line), _TRUNCATE, "%s = \n", c->name);
+    else
+        _snprintf_s(line, sizeof(line), _TRUNCATE, "%s = %d\n", c->name, c->def);
+    if (c->doc) out->append(c->doc);
+    out->append(line);
+}
+
+/* 当前值 -> ini 的文本形态（写回用） */
+static void CfgValueText(int id, char* out, size_t cap) {
+    const CfgDef* c = CfgOf(id);
+    out[0] = 0;
+    if (!c) return;
+    if (c->flags & CFG_F_TEXT) {
+        /* ini 文件是 UTF-8，所以这里必须**显式**转一次，不能交给 printf 的
+           %ls —— 那用的是当前 locale（默认 "C"），中文路径会被换成问号。
+           转不下就写空串：宁可丢配置，也不写半截路径。 */
+        if (c->str && c->str[0]) {
+            int need = WideCharToMultiByte(CP_UTF8, 0, c->str, -1, out, (int)cap, NULL, NULL);
+            if (need <= 0) out[0] = 0;
+        }
+    } else {
+        _snprintf_s(out, cap, _TRUNCATE, "%d", c->num);
+    }
 }
 /* 注：AutoScrollSmooth（全局平滑开关）已**删除**：它要表达的是"某些程序
    不累积小数刻度"，那天然是"按程序区分"的事，做成全局开关就等于让所有程序
@@ -312,13 +471,6 @@ static int ClampInt(int v, int lo, int hi) {
     if (v > hi) v = hi;
     return v;
 }
-static int ClampLogMaxKB(int v)  { return ClampInt(v, 0, LOG_MAX_KB_MAX); }
-static int ClampMaxArrowSteps(int v) { return ClampInt(v, 0, MAX_ARROW_STEPS_MAX); }
-static int ClampWheelMul(int v)  { return ClampInt(v, 0, WHEEL_MUL_MAX); }
-static int ClampWheelHMul(int v) { return ClampInt(v, 0, WHEEL_HMUL_MAX); }
-static int ClampInterval(int v)  { return ClampInt(v, AUTOSCROLL_INTERVAL_MIN, AUTOSCROLL_INTERVAL_MAX); }
-static int ClampFastMs(int v)    { return ClampInt(v, AUTOSCROLL_FAST_MIN, AUTOSCROLL_FAST_MAX); }
-static int ClampImeMode(int v)   { return ClampInt(v, 0, IME_MODE_MAX); }
 
 static void AddEntry(int list, const WCHAR* name) {
     if (list < 0 || list >= CFGLIST_COUNT) return;
@@ -374,20 +526,7 @@ static const WCHAR* const kDragProcDefaults[] = {
 /* 非 static：供单元测试直接喂指定路径 */
 void ConfigLoadFrom(const WCHAR* path) {
     for (int i = 0; i < CFGLIST_COUNT; i++) g_count[i] = 0;
-    g_runAsAdmin = FALSE;      /* 缺省不提权（理由见 g_runAsAdmin 定义处） */
-    g_logMaxKB = LOG_MAX_KB_DEFAULT;
-    g_maxArrowSteps = MAX_ARROW_STEPS_DEFAULT;
-    g_overStepCtrl = TRUE;
-    g_wheelMul = WHEEL_MUL_DEFAULT;
-    g_autoScrollFastMs = AUTOSCROLL_FAST_DEFAULT;
-    g_autoScrollInterval = AUTOSCROLL_INTERVAL_DEFAULT;
-    g_wheelHMul = WHEEL_HMUL_DEFAULT;
-    g_allowSciRead = ALLOW_SCINTILLA_READ_DEFAULT;
-    for (int i = 0; i < IME_KEY_COUNT; i++) g_imeMode[i] = kImeModeDefault[i];
-    g_dittoDir[0] = 0;         /* 缺省未配置（= 剪贴板功能不开） */
-    g_clipFont[0] = 0;         /* 缺省字体名空 = 浮层用自己的内置默认 */
-    g_clipFontSize = CLIP_FONT_SIZE_DEFAULT;
-    g_clipClickPaste = CLIP_CLICK_PASTE_DEFAULT;
+    CfgInitDefaults();         /* 全部配置项回默认值（表里那 16 行的 def） */
 
     FILE* f = NULL;
     if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
@@ -459,56 +598,21 @@ void ConfigLoadFrom(const WCHAR* path) {
                 _snwprintf_s(key, CFG_NAME_MAX, _TRUNCATE, L"%s", line);
                 _snwprintf_s(val, CFG_VAL_LEN, _TRUNCATE, L"%s", eq + 1);
                 TrimW(key); TrimW(val); LowerW(key);
-                if (_wcsicmp(key, L"runasadmin") == 0) g_runAsAdmin = ParseBoolW(val);
-                else if (_wcsicmp(key, L"logmaxkb") == 0)
-                    g_logMaxKB = ClampLogMaxKB(ParseIntW(val, LOG_MAX_KB_DEFAULT));
-                else if (_wcsicmp(key, L"maxarrowsteps") == 0)
-                    g_maxArrowSteps = ClampMaxArrowSteps(ParseIntW(val, MAX_ARROW_STEPS_DEFAULT));
-                else if (_wcsicmp(key, L"overstepmode") == 0) g_overStepCtrl = ParseBoolW(val);
-                else if (_wcsicmp(key, L"wheelscrollmul") == 0)
-                    g_wheelMul = ClampWheelMul(ParseIntW(val, WHEEL_MUL_DEFAULT));
-                /* 过渡期曾把本条改名为 WheelScrollMs（毫秒/格）。两种量不可换算，
-                   所以旧键名既不解析、也不据它推算任何值 —— 直接忽略即可，
-                   升级机制会补上新的 WheelScrollMul（老配置里那行 WheelScrollMs
-                   会一直躺着，无害）。
-                   **键名必须是 wheelscrollms**：早期这里误写成 wheelscrollmul，
-                   与上面那条同名的分支重复 —— 那条永远先匹配，于是这块成了
-                   永不执行的死代码，还让人误以为旧键被特殊处理过。 */
-                else if (_wcsicmp(key, L"wheelscrollms") == 0) { /* 忽略（旧语义） */ }
-                else if (_wcsicmp(key, L"autoscrollinterval") == 0)
-                    g_autoScrollInterval = ClampInterval(ParseIntW(val, AUTOSCROLL_INTERVAL_DEFAULT));
-                else if (_wcsicmp(key, L"autoscrollfastms") == 0)
-                    g_autoScrollFastMs = ClampFastMs(ParseIntW(val, AUTOSCROLL_FAST_DEFAULT));
-                else if (_wcsicmp(key, L"wheelhscrollmul") == 0)
-                    g_wheelHMul = ClampWheelHMul(ParseIntW(val, WHEEL_HMUL_DEFAULT));
-                /* autoscrollsmooth 已废弃（由 [NoSmoothScroll] 名单取代）：
-                   既不解析、也不据它推算任何值 —— 写进去完全无副作用。 */
-                else if (_wcsicmp(key, L"autoscrollsmooth") == 0) { /* 忽略（已废弃） */ }
-                else if (_wcsicmp(key, L"allowscintillaread") == 0)
-                    g_allowSciRead = ParseBoolW(val);
-                else if (_wcsicmp(key, L"imecapsmode") == 0)
-                    g_imeMode[IME_KEY_CAPS] =
-                        ClampImeMode(ParseIntW(val, IME_CAPS_MODE_DEFAULT));
-                else if (_wcsicmp(key, L"imelshiftmode") == 0)
-                    g_imeMode[IME_KEY_LSHIFT] =
-                        ClampImeMode(ParseIntW(val, IME_LSHIFT_MODE_DEFAULT));
-                else if (_wcsicmp(key, L"imershiftmode") == 0)
-                    g_imeMode[IME_KEY_RSHIFT] =
-                        ClampImeMode(ParseIntW(val, IME_RSHIFT_MODE_DEFAULT));
-                /* 唯一一个字符串值：直接收下（已经 TrimW 过），不做任何路径
-                   规范化 —— 相对路径的基准由**使用者**决定（主程序按自己的
-                   exe 目录展开），在这里展开就等于把基准写在两处。 */
-                else if (_wcsicmp(key, L"dittodir") == 0)
-                    _snwprintf_s(g_dittoDir, DITTO_DIR_MAX, _TRUNCATE, L"%s", val);
-                else if (_wcsicmp(key, L"clipfont") == 0)
-                    _snwprintf_s(g_clipFont, CLIP_FONT_MAX, _TRUNCATE, L"%s", val);
-                else if (_wcsicmp(key, L"clipfontsize") == 0)
-                    g_clipFontSize = ClampClipFontSize(ParseIntW(val, CLIP_FONT_SIZE_DEFAULT));
-                else if (_wcsicmp(key, L"clipclickpaste") == 0)
-                    g_clipClickPaste = ParseBoolW(val);
-                /* 其余 [General] 项一律忽略：本项目所有配置项都在上面具名解析。
-                   不认识的键（含已废弃的旧键名）留着也只是噪音，不解析、不保存。 */
-                else { /* 忽略未知/废弃键 */ }
+                /* 具名项：按 key 在 kCfg 里找（大小写不敏感）。找不到就忽略 ——
+                   本项目所有配置项都在表里，不认识的键（含已废弃的旧键名：
+                   过渡期的 wheelscrollms、已被 [NoSmoothScroll] 名单取代的
+                   全局 autoscrollsmooth）既不解析、也不保存，留着只是噪音。 */
+                for (int i = 0; i < CFG_COUNT; i++) {
+                    const CfgDef* c = &kCfg[i];
+                    if (!KeyEqW(key, c->key)) continue;
+                    if (c->flags & CFG_F_TEXT)
+                        _snwprintf_s(c->str, (size_t)c->cap, _TRUNCATE, L"%s", val);
+                    else if (c->flags & CFG_F_BOOL)
+                        kCfg[i].num = ParseBoolW(val) ? 1 : 0;
+                    else
+                        kCfg[i].num = ClampInt(ParseIntW(val, c->def), c->lo, c->hi);
+                    break;
+                }
             }
         } else if (SecList(sec) >= 0) {
             AddEntry(SecList(sec), line);
@@ -539,86 +643,16 @@ void ConfigLoad(void) {
     FILE* probe = NULL;
     if (_wfopen_s(&probe, path, L"rb") != 0 || !probe) {
         /* 文件不存在：写一个带注释的模板，方便发现与编辑 */
-        static const char kTemplate[] =
+        /* ini 模板：由 kCfg **现拼**（注释块与"键 = 默认值"都从表里取）。
+           为什么不再留一份大字符串：模板与"老配置补写块"是同一份内容的两个
+           副本，历史上改默认值时总是只改一份（见 kCfg 顶部那段说明）。 */
+        static const char kHdr[] =
             "; 以 ; 开头的行是注释（空行忽略）；[段名] 行用于切段\n"
             "; 改动后需重启程序生效\n"
             ";\n"
-            "[General]\n"
-            "; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）\n"
-            "; 1=启用，0=禁用\n"
-            "; 默认 0：普通用法不需要管理员；只有要拖动/操作「以管理员运行的窗口」\n"
-            "; （UIPI 会拦住低权限进程对高权限窗口的 SetWindowPos）时才需要设 1。\n"
-            "RunAsAdmin = 0\n"
-            ";\n"
-            "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
-            "; 范围 0.." STR(LOG_MAX_KB_MAX) "，超出按上限钳制\n"
-            "LogMaxKB = " STR(LOG_MAX_KB_DEFAULT) "\n"
-            ";\n"
-            "; 逐格按词跳转的最大步数：达到该步数就不再逐格发送，\n"
-            "; 改按 OverStepMode 处理（" STR(MAX_ARROW_STEPS_DEFAULT) " = 该步数及以上瞬跳），避免方向键发太久。\n"
-            "; 0 = 不限制（一律逐格），最大 256\n"
-            "MaxArrowSteps = " STR(MAX_ARROW_STEPS_DEFAULT) "\n"
-            ";\n"
-            "; 超过 MaxArrowSteps 时的替代方式\n"
-            ";   0 = 只发送一个方向键\n"
-            ";   1 = 改发 Ctrl+方向键\n"
-            "OverStepMode = 1\n"
-            ";\n"
-            "; 按住 C 时滚轮快速滚动：滚一格当 N 格（倍数 WheelScrollMul）。\n"
-            "; 0 或 1 = 关闭（滚轮按系统原本行为）。范围 0..16。\n"
-            "WheelScrollMul = 3\n"
-            ";\n"
-            "; 自动滚动的初始速度（毫秒/格，越大越慢）\n"
-            "; 最快到 AutoScrollFastMs\n"
-            "; 可调范围 100..60000。\n"
-            "AutoScrollInterval = 1500\n"
-            ";\n"
-            "; 持续滚动速度上限\n"
-            "; 与上面 AutoScrollInterval（初始速度）各自独立：一个管起步、一个管顶档。\n"
-            "; 范围 20..60000；想更快就调小，想让它也慢下来就调大。\n"
-            "AutoScrollFastMs = 800\n"
-            ";\n"
-            "; 横向滚动：按住 C + Shift 滚滚轮，横向挪动。倍数 1 = 一滚一格（默认），\n"
-            "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n"
-            "WheelHScrollMul = 1\n"
-            ";\n"
-            "; Scintilla 通道（Notepad3 / Notepad++ / SciTE 等）读全文必须\n"
-            "; 在目标进程里开一块内存再读回来（要 PROCESS_VM_OPERATION|VM_READ）。\n"
-            "; 设为 0 即整条通道放弃，退回 UIA / IA2 / 原生 Ctrl+方向（仍能跳，\n"
-            "; 只是不再是瞬跳）。\n"
-            "AllowScintillaRead = " STR(ALLOW_SCINTILLA_READ_DEFAULT) "\n"
-            ";\n"
-            "; 单键切换输入法：单击（按下即抬起、期间不按别的键）下面三个键时，\n"
-            "; 无视当前输入法状态强制切到中文或英文。\n"
-            ";   0 = 不处理   1 = 切中文   2 = 切英文\n"
-            "; Caps：任何时候都切（当前是英文键盘时，会先换到已安装的中文键盘）。\n"
-            "; Shift：前台是英文键盘时不处理（本来就是英文，切它没意义）。\n"
-            "; 三个键都遵守 [AutoDisable] 名单。\n"
-            "ImeCapsMode = " STR(IME_CAPS_MODE_DEFAULT) "\n"
-            "ImeLShiftMode = " STR(IME_LSHIFT_MODE_DEFAULT) "\n"
-            "ImeRShiftMode = " STR(IME_RSHIFT_MODE_DEFAULT) "\n"
-            ";\n"
-            "; Ditto 的文件夹（Caps+V 弹出剪贴板用，两处派生）：\n"
-            ";   <DittoDir>\\Ditto.db   浮层只读地取最近 30 条\n"
-            ";   <DittoDir>\\Ditto.exe  浮层里\"转 Ditto 本体\"用 -open 拉起它的窗口\n"
-            "; 留空 = 不启用该功能（按 Caps+V 时浮层会提示未配置）。\n"
-            "; 相对路径的基准 = 本程序 exe 所在目录（也就是本文件所在目录）：\n"
-            ";   DittoDir = ..\\Ditto          -> exe 同级的上一级里的 Ditto 文件夹\n"
-            ";   DittoDir = C:\\Tools\\Ditto   -> 绝对路径，原样使用\n"
-            "; 不做任何自动探测：便携版 Ditto 的目录在哪，只有你知道。\n"
-            "DittoDir = \n"
-            ";\n"
-            "; 快速粘贴窗口（Caps+V）的字体与字号。\n"
-            "; ClipFontSize 单位是磅（与系统字体对话框一致），范围 6.."
-            STR(CLIP_FONT_SIZE_MAX) "\n"
-            "; ClipFont 留空 = 用内置的 Microsoft YaHei UI。\n"
-            "ClipFont = \n"
-            "ClipFontSize = " STR(CLIP_FONT_SIZE_DEFAULT) "\n"
-            ";\n"
-            "; 单击条目直接上屏（默认开）：挑中就粘，不必先选中再双击。\n"
-            "; 0 = 关闭（单击只选中，双击才粘）\n"
-            "ClipClickPaste = " STR(CLIP_CLICK_PASTE_DEFAULT) "\n"
-            ";\n"
+            "[General]\n";
+        /* 五份名单段的说明与内置条目原样保留（它们与 kCfg 无关）。 */
+        static const char kLists[] =
             "[NativeWordJump]\n"
             "; 命中名单的程序：Caps+N / Caps+O 不做文本探测，\n"
             "; 直接发送 Ctrl+← / Ctrl+→，由该程序自身的词导航完成按词跳转（Shift 位移同样支持）。\n"
@@ -679,10 +713,16 @@ void ConfigLoad(void) {
             "LeagueClientUxRender.exe\n"
             ";\n"
             "; 注：只要对应的段存在，就以文件为准（该份内置默认不再生效）——\n"
-            "; 想把某份名单清空就把它下面那几行删掉。";
+            "; 想把某份名单清空就把它下面那几行删掉。";;
+        std::string tmpl(kHdr);
+        for (int i = 0; i < CFG_COUNT; i++) {
+            AppendCfgBlock(&tmpl, i);
+            tmpl.append(";\n");
+        }
+        tmpl.append(kLists);
         FILE* w = NULL;
         if (_wfopen_s(&w, path, L"wb") == 0 && w) {
-            fwrite(kTemplate, 1, sizeof(kTemplate) - 1, w);
+            fwrite(tmpl.data(), 1, tmpl.size(), w);
             fclose(w);
         }
         return;
@@ -696,112 +736,22 @@ void ConfigLoad(void) {
    模板只在文件不存在时生成，老用户的 ini 会缺少后来新增的键。
    这里检测 [General] 段内缺失的键，把"注释 + 默认值"插入该段末尾；
    没有 [General] 段的老格式则在文件头新建一段。用户已有内容原样保留，
-   无缺失时不做任何写入。每次新增配置项后，在 kUpgrades 表里补一条即可。 */
-static const struct {
-    const char* key;
-    const char* block;
-} kUpgrades[] = {
-    { "runasadmin",
-      "\n"
-      "; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）\n"
-      "; 1=启用，0=禁用\n"
-      "; 默认 0：只有要拖动/操作「以管理员运行的窗口」时才需要设 1。\n"
-      "RunAsAdmin = 0\n" },
-    { "logmaxkb",
-      "\n"
-      "; 日志文件大小上限（KB）：超过后保留最近的一半内容，0 = 不限制\n"
-      "; 范围 0.." STR(LOG_MAX_KB_MAX) "，超出按上限钳制\n"
-      "LogMaxKB = " STR(LOG_MAX_KB_DEFAULT) "\n" },
-    { "maxarrowsteps",
-      "\n"
-      "; 逐格按词跳转的最大步数：达到该步数就不再逐格发送，\n"
-      "; 改按 OverStepMode 处理（" STR(MAX_ARROW_STEPS_DEFAULT) " = 该步数及以上瞬跳），避免方向键发太久。\n"
-      "; 0 = 不限制（一律逐格），最大 256\n"
-      "MaxArrowSteps = " STR(MAX_ARROW_STEPS_DEFAULT) "\n" },
-    { "overstepmode",
-      "\n"
-      "; 超过 MaxArrowSteps 时的替代方式\n"
-      ";   0 = 只发送一个方向键\n"
-      ";   1 = 改发 Ctrl+方向键\n"
-      "OverStepMode = 1\n" },
-    { "wheelscrollmul",
-      "\n"
-      "; 按住 C 时滚轮快速滚动：滚一格当 N 格（倍数 WheelScrollMul）。\n"
-      "; 0 或 1 = 关闭（滚轮按系统原本行为）。范围 0.." STR(WHEEL_MUL_MAX) "。\n"
-      "WheelScrollMul = " STR(WHEEL_MUL_DEFAULT) "\n" },
-    { "autoscrollinterval",
-      "\n"
-      "; 自动滚动的初始速度（毫秒/格，越大越慢）\n"
-      "; 最快到 AutoScrollFastMs\n"
-      "; 可调范围 " STR(AUTOSCROLL_INTERVAL_MIN) ".." STR(AUTOSCROLL_INTERVAL_MAX) "。\n"
-      "AutoScrollInterval = " STR(AUTOSCROLL_INTERVAL_DEFAULT) "\n" },
-    { "autoscrollfastms",
-      "\n"
-      "; 持续滚动速度上限\n"
-      "; 与上面 AutoScrollInterval（初始速度）各自独立：一个管起步、一个管顶档。\n"
-      "; 范围 " STR(AUTOSCROLL_FAST_MIN) ".." STR(AUTOSCROLL_FAST_MAX)
-      "；想更快就调小，想让它也慢下来就调大。\n"
-      "AutoScrollFastMs = " STR(AUTOSCROLL_FAST_DEFAULT) "\n" },
-    /* autoscrollsmooth 曾在这里：它已被 [NoSmoothScroll] 名单取代，
-       **故意不再补进老配置** —— 补一个已经没人读的键只会误导用户去改它。 */
-    { "wheelhscrollmul",
-      "\n"
-      "; 横向滚动：按住 C + Shift 滚滚轮，横向挪动。倍数 1 = 一滚一格（默认），\n"
-      "; 调大更快，0 = 关闭横向滚动（该组合退回原来的纵向语义）。\n"
-      "WheelHScrollMul = " STR(WHEEL_HMUL_DEFAULT) "\n" },
-    { "allowscintillaread",
-      "\n"
-      "; Scintilla 通道（Notepad3 / Notepad++ / SciTE 等）读全文必须\n"
-      "; 在目标进程里开一块内存再读回来（要 PROCESS_VM_OPERATION|VM_READ）。\n"
-      "; 设为 0 即整条通道放弃，退回 UIA / IA2 / 原生 Ctrl+方向（仍能跳，\n"
-      "; 只是不再是瞬跳）。\n"
-      "AllowScintillaRead = " STR(ALLOW_SCINTILLA_READ_DEFAULT) "\n" },
-    { "imecapsmode",
-      "\n"
-      "; 单键切换输入法：单击（按下即抬起、期间不按别的键）下面三个键时，\n"
-      "; 无视当前输入法状态强制切到中文或英文。\n"
-      ";   0 = 不处理   1 = 切中文   2 = 切英文\n"
-      "; Caps：任何时候都切（当前是英文键盘时，会先换到已安装的中文键盘）。\n"
-      "; Shift：前台是英文键盘时不处理（本来就是英文，切它没意义）。\n"
-      "; 三个键都遵守 [AutoDisable] 名单。\n"
-      "ImeCapsMode = " STR(IME_CAPS_MODE_DEFAULT) "\n" },
-    { "imelshiftmode",
-      "ImeLShiftMode = " STR(IME_LSHIFT_MODE_DEFAULT) "\n" },
-    { "imershiftmode",
-      "ImeRShiftMode = " STR(IME_RSHIFT_MODE_DEFAULT) "\n" },
-    { "dittodir",
-      "\n"
-      "; Ditto 的文件夹（Caps+V 用：Ditto.db 读历史，Ditto.exe 转本体）。\n"
-      "; 留空 = 不启用该功能。相对路径的基准 = 本程序 exe 所在目录。\n"
-      "; 例：..\\Ditto     或     C:\\Tools\\Ditto\n"
-      "DittoDir = \n" },
-    { "clipfont",
-      "\n"
-      "; 快速粘贴窗口（Caps+V）的字体与字号。\n"
-      "; ClipFontSize 单位是磅（与系统字体对话框一致），范围 6.."
-      STR(CLIP_FONT_SIZE_MAX) "\n"
-      "ClipFont = \n" },
-    { "clipfontsize",
-      "ClipFontSize = " STR(CLIP_FONT_SIZE_DEFAULT) "\n" },
-    { "clipclickpaste",
-      "\n"
-      "; 单击条目直接上屏（默认开）：挑中就粘，不必先选中再双击。\n"
-      "; 0 = 关闭（单击只选中，双击才粘）\n"
-      "ClipClickPaste = " STR(CLIP_CLICK_PASTE_DEFAULT) "\n" },
-};
+   无缺失时不做任何写入。补写块由 kCfg 现拼（见 AppendCfgBlock），新增配置项不必管这里。 */
+/* 老配置的"缺键补写"不再单独维护一张表：补写块 = kCfg 的注释块 + 键 = 默认值，
+   由 AppendCfgBlock 现拼（与 ini 模板同源，所以两处文案不可能漂移）。 */
 
 /* ---- 升级键清单的只读访问（供单元测试**自动**生成 fixture）----
    为什么值得专门开两个接口：test_config 有一条"键齐全时升级不改动文件"的
    用例，它需要一份"把所有当前键都写上"的临时配置。此前那份配置是**手写**
    的，于是每加一个配置项都要记得回来补一行 —— 忘了就是一条"升级逻辑被误
    判成有缺失"的假失败（实测已经栽过一次，注释里也留了警告，但警告拦不住
-   人忘）。改成从 kUpgrades 现读现生成之后，加配置项再也无需动测试。 */
+   人忘）。改成从升级键清单现读现生成之后，加配置项再也无需动测试。 */
 int ConfigUpgradeKeyCount(void) {
-    return (int)(sizeof(kUpgrades) / sizeof(kUpgrades[0]));
+    return CFG_COUNT;
 }
 const char* ConfigUpgradeKeyName(int i) {
     if (i < 0 || i >= ConfigUpgradeKeyCount()) return NULL;
-    return kUpgrades[i].key;
+    return kCfg[i].key;
 }
 
 /* ---- 输出缓冲：已改用 std::string ----
@@ -886,7 +836,7 @@ void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
     }
 
     /* 检查哪些键缺失（只在 [General] 段范围内找） */
-    #define KUP_N ((int)(sizeof(kUpgrades)/sizeof(kUpgrades[0])))
+    #define KUP_N CFG_COUNT
     BOOL missing[KUP_N];
     int nMiss = 0;
     for (int i = 0; i < KUP_N; i++) {
@@ -898,8 +848,8 @@ void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
             CopyLine(l, body + bodyLen, tmp, sizeof(tmp));
             char* s = tmp;
             while (*s == ' ' || *s == '\t' || *s == '\r') s++;
-            size_t klen = strlen(kUpgrades[i].key);
-            if (_strnicmp(s, kUpgrades[i].key, klen) == 0) {
+            size_t klen = strlen(kCfg[i].key);
+            if (_strnicmp(s, kCfg[i].key, klen) == 0) {
                 char c = s[klen];
                 if (c == '=' || c == ' ' || c == '\t' || c == 0) missing[i] = FALSE;
             }
@@ -922,8 +872,13 @@ void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
     out.append(body, insOff);
     if (!genStart)       out.append(kGenHdr, sizeof(kGenHdr) - 1);
     if (needNl)          out.push_back('\n');
-    for (int i = 0; i < KUP_N; i++)
-        if (missing[i])  out.append(kUpgrades[i].block);
+    for (int i = 0; i < KUP_N; i++) {
+        if (!missing[i]) continue;
+        out.push_back('\n');            /* 与上面已有内容隔开一行（块首空行） */
+        std::string blk;
+        AppendCfgBlock(&blk, i);        /* 注释块 + 键 = 默认值（模板同源） */
+        out.append(blk);
+    }
     out.append(body + insOff, bodyLen - insOff);
 
     if (_wfopen_s(&f, path, L"wb") == 0 && f) {
@@ -933,45 +888,45 @@ void ConfigUpgradeFile(const WCHAR* path) {    FILE* f = NULL;
     #undef KUP_N
 }
 
-BOOL ConfigGetRunAsAdmin(void) {
-    return g_runAsAdmin;
+/* ================= 配置项读写（全部落到那张表上） =================
+   越界 / 类型不符一律返回安全的默认（0 / FALSE / 空串）而不是崩 —— 调用点
+   都是按 CFG_* 常量写的，越界只可能是笔误，不该在运行时变成一条野指针。 */
+int  CfgInt(int id)  { CfgEnsureReady(); { const CfgDef* c = CfgOf(id); return c ? c->num : 0; } }
+BOOL CfgBool(int id) { CfgEnsureReady(); { const CfgDef* c = CfgOf(id); return (c && c->num) ? TRUE : FALSE; } }
+const WCHAR* CfgStr(int id) {
+    CfgEnsureReady();
+    const CfgDef* c = CfgOf(id);
+    return (c && (c->flags & CFG_F_TEXT) && c->str) ? c->str : L"";
+}
+int CfgLo(int id) { CfgEnsureReady(); { const CfgDef* c = CfgOf(id); return c ? c->lo : 0; } }
+int CfgHi(int id) { CfgEnsureReady(); { const CfgDef* c = CfgOf(id); return c ? c->hi : 0; } }
+
+void CfgSetInt(int id, int v) {
+    CfgEnsureReady();
+    CfgDef* c = CfgOf(id);
+    if (!c || (c->flags & CFG_F_TEXT)) return;
+    c->num = (c->flags & CFG_F_BOOL) ? (v ? 1 : 0) : ClampInt(v, c->lo, c->hi);
+}
+void CfgSetBool(int id, BOOL v) { CfgSetInt(id, v ? 1 : 0); }
+void CfgSetStr(int id, const WCHAR* v) {
+    CfgEnsureReady();
+    CfgDef* c = CfgOf(id);
+    if (!c || !(c->flags & CFG_F_TEXT) || !c->str || c->cap <= 0) return;
+    if (!v) { c->str[0] = 0; return; }
+    /* 截断而不是 fastfail：见 CFG_VAL_LEN 处那条说明 —— wcscpy_s 会把"放不下"
+       当无效参数直接 fastfail（0xC0000409），而字体名走系统对话框拿到、
+       上限本就是 LF_FULLFACESIZE，界面之外还有手改 ini 这条路。 */
+    _snwprintf_s(c->str, (size_t)c->cap, _TRUNCATE, L"%s", v);
 }
 
-int ConfigGetLogMaxKB(void) {
-    return g_logMaxKB;
-}
-
-int ConfigGetMaxArrowSteps(void) {
-    return g_maxArrowSteps;
-}
-
-BOOL ConfigGetOverStepCtrl(void) {
-    return g_overStepCtrl;
-}
-
-int ConfigGetWheelScrollMul(void) {
-    return g_wheelMul;
-}
-
-int ConfigGetAutoScrollInterval(void) {
-    return g_autoScrollInterval;
-}
-
-int ConfigGetAutoScrollFastMs(void) {
-    return g_autoScrollFastMs;
-}
-
-BOOL ConfigGetAllowScintillaRead(void) {
-    return g_allowSciRead;
-}
-
-int ConfigGetWheelHScrollMul(void) {
-    return g_wheelHMul;
-}
-
-/* 单键切换输入法：key = IME_KEY_* -> IME_MODE_*（越界一律"不处理"） */
+/* 单键切换输入法：key = IME_KEY_* -> IME_MODE_*（越界一律"不处理"）。
+   靠 CFG_IME_* 三个编号与 IME_KEY_* 同序连排直取（表里那条 static_assert 守着）。 */
 int ConfigGetImeMode(int key) {
-    return (key >= 0 && key < IME_KEY_COUNT) ? g_imeMode[key] : IME_MODE_OFF;
+    return (key >= 0 && key < IME_KEY_COUNT) ? CfgInt(CFG_IME_CAPS_MODE + key) : IME_MODE_OFF;
+}
+void ConfigSetImeMode(int key, int v) {
+    if (key < 0 || key >= IME_KEY_COUNT) return;
+    CfgSetInt(CFG_IME_CAPS_MODE + key, v);
 }
 
 /* 进程可执行文件名是否命中某份名单（完全匹配，.exe 可选） */
@@ -1055,46 +1010,18 @@ BOOL ConfigIsNativeWordJump(HWND focus) {
 /* ================= 设置程序用：改值 + 写回（增量更新） =================
    设置程序（settings/settings.c）是一个**表单**界面，它改的是"某个配置项"，
    而不是整份文本 —— 所以这里要提供两个东西：
-     · ConfigSet*：改内存里的值（钳制复用解析那套 Clamp*，不另写一份）；
+     · CfgSetInt / CfgSetBool / CfgSetStr：改内存里的值（钳制走表里的 lo/hi，
+       与解析共用同一份判据，不另写一份）；
      · ConfigSaveFile：把内存里的值**增量**写回 ini。
    为什么不是"整份重新生成"：配置文件里带大量注释，用户也可能留下我们不认识
    的段或键；整份重写会把它们全冲掉（用户视角就是"我写的东西没了"）。
    增量更新的规则：
      · [General] 段：已有的键**就地替换值**；缺失的键补到该段末尾（连同
-       kUpgrades 里那份注释块，值用当前值，不是默认值）；
+       kCfg 的那份注释块，值用当前值，不是默认值）；
      · 名单段：注释与空行保留，**名字行整段重建**（顺序即界面里的顺序）；
      · 其它段 / 未知键：原样保留；BOM 与行尾风格（LF / CRLF）跟随原文件；
      · 文件不存在：按"新建"处理（[General] + 全部键 + 五份名单段）。 */
 
-void ConfigSetRunAsAdmin(BOOL v)          { g_runAsAdmin = !!v; }
-void ConfigSetLogMaxKB(int v)             { g_logMaxKB = ClampLogMaxKB(v); }
-void ConfigSetMaxArrowSteps(int v)        { g_maxArrowSteps = ClampMaxArrowSteps(v); }
-void ConfigSetOverStepCtrl(BOOL v)        { g_overStepCtrl = !!v; }
-void ConfigSetWheelScrollMul(int v)       { g_wheelMul = ClampWheelMul(v); }
-void ConfigSetAutoScrollInterval(int v)   { g_autoScrollInterval = ClampInterval(v); }
-void ConfigSetAutoScrollFastMs(int v)     { g_autoScrollFastMs = ClampFastMs(v); }
-void ConfigSetWheelHScrollMul(int v)      { g_wheelHMul = ClampWheelHMul(v); }
-void ConfigSetAllowScintillaRead(BOOL v)  { g_allowSciRead = !!v; }
-void ConfigSetImeMode(int key, int v) {
-    if (key < 0 || key >= IME_KEY_COUNT) return;
-    g_imeMode[key] = ClampImeMode(v);
-}
-const WCHAR* ConfigGetDittoDir(void) { return g_dittoDir; }
-const WCHAR* ConfigGetClipFont(void) { return g_clipFont; }
-int  ConfigGetClipFontSize(void)     { return g_clipFontSize; }
-BOOL ConfigGetClipClickPaste(void)   { return g_clipClickPaste; }
-void ConfigSetClipFont(const WCHAR* v) {
-    if (!v) { g_clipFont[0] = 0; return; }
-    /* 截断而不是 fastfail：见 CFG_VAL_LEN 处那条说明（字体名走系统对话框拿到，
-       上限本就是 LF_FULLFACESIZE，但界面之外还有手改 ini 这条路） */
-    _snwprintf_s(g_clipFont, CLIP_FONT_MAX, _TRUNCATE, L"%s", v);
-}
-void ConfigSetClipFontSize(int v) { g_clipFontSize = ClampClipFontSize(v); }
-void ConfigSetClipClickPaste(BOOL v) { g_clipClickPaste = !!v; }
-void ConfigSetDittoDir(const WCHAR* v) {
-    if (!v) { g_dittoDir[0] = 0; return; }
-    _snwprintf_s(g_dittoDir, DITTO_DIR_MAX, _TRUNCATE, L"%s", v);  /* 过长按缓冲截断 */
-}
 
 /* 名单整体替换（顺序 = 传入顺序）。逐条走 AddEntry 才能拿到"去空白 / 去 .exe
    / 去空行"那套规整 —— 界面里手写的名字与文件里读出来的必须是同一个样子。 */
@@ -1164,52 +1091,22 @@ static const char* const kListSec[CFGLIST_COUNT] = {
     "DragWindowBlacklist", "DragProcessBlacklist"
 };
 
-/* 当前所有 [General] 键的"键 = 值"（供写回用）。键名一律小写 —— 与解析时
-   比较用的形态一致，也保证"文件里 Key 写成任意大小写"都能被就地替换。 */
-/* key = 比较用的形态（小写，与解析/升级表一致）；
-   name = **写进文件的形态**（与模板一致的大小写）—— 两者不能只留一个：
-   用小写写回的话，用户文件里的 RunAsAdmin 会变成 runasadmin，解析没问题，
-   但"我的配置被人改了大小写"是实打实的观感问题。 */
-/* val 的容量按**最宽的那个值**定：DittoDir 是字符串值之一，UTF-8 下一个
+/* 写回用的"键 = 值"清单：直接遍历 kCfg。
+   key = 比较用的形态（小写）；name = 写进文件的形态（见 CfgDef 的说明）。
+   val 的容量按**最宽的那个值**定：DittoDir 是字符串值之一，UTF-8 下一个
    汉字/非拉丁字符最多 3 字节，320 个 WCHAR 就是 960 字节上限，取 1024 留余量。
    写成固定数组而不是指针，是为了让"值"与"键"一样留在结构里 —— 调用方拿到
    的 KeyVal 数组在它的整个生命周期内都有效，不需要再管谁 owns 哪块内存。 */
-typedef struct { const char* key; const char* name; char val[1024]; } KeyVal;
+typedef struct { int id; const char* key; const char* name; char val[1024]; } KeyVal;
 static int GeneralValues(KeyVal* out, int cap) {
     int n = 0;
-#define KV(k, nm, fmt, arg) do { if (n < cap) { \
-        out[n].key = (k); out[n].name = (nm); \
-        _snprintf_s(out[n].val, sizeof(out[n].val), _TRUNCATE, fmt, arg); \
-        n++; } } while (0)
-/* 宽字符值（DittoDir / ClipFont）：ini 文件是 UTF-8，所以这里必须显式转一次，
-   不能交给 printf 的 %ls —— 那用的是当前 locale（默认是 "C"），中文路径会被
-   换成问号。转不下就写空串：宁可丢配置，也不写半截路径。 */
-#define KVW(k, nm, wstr) do { if (n < cap) { \
-        out[n].key = (k); out[n].name = (nm); out[n].val[0] = 0; \
-        if ((wstr)[0]) { \
-            int need = WideCharToMultiByte(CP_UTF8, 0, (wstr), -1, \
-                                           out[n].val, (int)sizeof(out[n].val), NULL, NULL); \
-            if (need <= 0) out[n].val[0] = 0; \
-        } \
-        n++; } } while (0)
-    KV("runasadmin",         "RunAsAdmin",         "%d", g_runAsAdmin ? 1 : 0);
-    KV("logmaxkb",           "LogMaxKB",           "%d", g_logMaxKB);
-    KV("maxarrowsteps",      "MaxArrowSteps",      "%d", g_maxArrowSteps);
-    KV("overstepmode",       "OverStepMode",       "%d", g_overStepCtrl ? 1 : 0);
-    KV("wheelscrollmul",     "WheelScrollMul",     "%d", g_wheelMul);
-    KV("autoscrollinterval", "AutoScrollInterval", "%d", g_autoScrollInterval);
-    KV("autoscrollfastms",   "AutoScrollFastMs",   "%d", g_autoScrollFastMs);
-    KV("wheelhscrollmul",    "WheelHScrollMul",    "%d", g_wheelHMul);
-    KV("allowscintillaread", "AllowScintillaRead", "%d", g_allowSciRead ? 1 : 0);
-    KV("imecapsmode",        "ImeCapsMode",        "%d", g_imeMode[IME_KEY_CAPS]);
-    KV("imelshiftmode",      "ImeLShiftMode",      "%d", g_imeMode[IME_KEY_LSHIFT]);
-    KV("imershiftmode",      "ImeRShiftMode",      "%d", g_imeMode[IME_KEY_RSHIFT]);
-    KVW("dittodir",          "DittoDir",           g_dittoDir);
-    KVW("clipfont",          "ClipFont",           g_clipFont);
-    KV("clipfontsize",       "ClipFontSize",       "%d", g_clipFontSize);
-    KV("clipclickpaste",     "ClipClickPaste",     "%d", g_clipClickPaste ? 1 : 0);
-#undef KVW
-#undef KV
+    for (int i = 0; i < CFG_COUNT && n < cap; i++) {
+        out[n].id   = i;
+        out[n].key  = kCfg[i].key;
+        out[n].name = kCfg[i].name;
+        CfgValueText(i, out[n].val, sizeof(out[n].val));
+        n++;
+    }
     return n;
 }
 
@@ -1258,30 +1155,16 @@ static void AppendLine(std::string* out, const std::string& line) {
     out->push_back('\n');
 }
 
-/* 把"键 = 当前值"连同 kUpgrades 里那份注释块追加进去（缺键时才用）。
-   注释块最后一行是 "Key = 默认值"，把它换成当前值 —— 不掉注释，也不写错值。 */
-/* key：小写、用于**匹配**注释块里的那一行；name：写进文件的形态 */
-static void AppendKeyBlock(std::string* out, const char* key, const char* name,
-                           const char* val) {
-    const char* block = NULL;
-    for (int i = 0; i < (int)(sizeof(kUpgrades) / sizeof(kUpgrades[0])); i++)
-        if (_stricmp(kUpgrades[i].key, key) == 0) { block = kUpgrades[i].block; break; }
-    std::string kv = std::string(name) + " = " + val;
-    if (!block) { AppendLine(out, kv); return; }
-    const char* p = block;
-    while (*p) {
-        const char* nl = strchr(p, '\n');
-        size_t len = nl ? (size_t)(nl - p) : strlen(p);
-        std::string line(p, len);
-        size_t e = line.size();
-        while (e > 0 && (line[e - 1] == '\r')) e--;
-        if (LineIsKey(line.c_str(), e, key)) AppendLine(out, kv);
-        else AppendLine(out, line.substr(0, e));
-        if (!nl) break;
-        p = nl + 1;
-    }
+/* 把"注释块 + 键 = 当前值"追加进去（缺键时才用）。
+   注释块取自 kCfg（与 ini 模板同一份），**值是当前值而不是默认值** ——
+   缺键被补上时用户已经改过这个键的场景不存在（缺键就是没写过），但
+   其他键的当前值可能来自默认，用当前值才与"写回"的语义一致。 */
+static void AppendKeyBlock(std::string* out, int id, const char* val) {
+    const CfgDef* c = CfgOf(id);
+    if (!c) return;
+    if (c->doc) out->append(c->doc);
+    AppendLine(out, std::string(c->name) + " = " + val);
 }
-
 BOOL ConfigSaveFile(const WCHAR* path) {
     std::string raw;
     int hasBom = 0;
@@ -1297,9 +1180,9 @@ BOOL ConfigSaveFile(const WCHAR* path) {
        的 UTF-8）是 1KB，16 条就是 ~17KB —— 放栈上会撞 /analyze 的 C6262
        （"函数使用堆叠的 17840 字节"）。这只函数只在保存配置时跑一次、且只有
        主线程会调（设置程序 / 主程序都不并发写 ini），静态化是安全的。 */
-    static KeyVal kv[16];
+    static KeyVal kv[CFG_COUNT];
     int nkv = GeneralValues(kv, (int)(sizeof(kv) / sizeof(kv[0])));
-    BOOL done[16];
+    BOOL done[CFG_COUNT];
     for (int i = 0; i < nkv; i++) done[i] = FALSE;
 
     std::string out;
@@ -1315,7 +1198,7 @@ BOOL ConfigSaveFile(const WCHAR* path) {
     #define FLUSH_SECTION() do { \
         if (sec == 0) { \
             for (int i = 0; i < nkv; i++) \
-                if (!done[i]) { AppendKeyBlock(&out, kv[i].key, kv[i].name, kv[i].val); done[i] = TRUE; } \
+                if (!done[i]) { AppendKeyBlock(&out, kv[i].id, kv[i].val); done[i] = TRUE; } \
         } else if (listId >= 0) { \
             char u[CFG_NAME_MAX * 4]; \
             for (int i = 0; i < g_count[listId]; i++) { \
@@ -1375,7 +1258,7 @@ BOOL ConfigSaveFile(const WCHAR* path) {
         std::string head;
         AppendLine(&head, std::string("[General]"));
         for (int i = 0; i < nkv; i++)
-            if (!done[i]) { AppendKeyBlock(&head, kv[i].key, kv[i].name, kv[i].val); done[i] = TRUE; }
+            if (!done[i]) { AppendKeyBlock(&head, kv[i].id, kv[i].val); done[i] = TRUE; }
         out.insert(0, head);
     }
     /* 名单段缺失但名单非空：补在文件末尾 */

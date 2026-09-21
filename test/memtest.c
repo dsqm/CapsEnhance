@@ -41,10 +41,27 @@ BOOL ConfigGetProcessName(HWND focus, WCHAR* out, size_t cap) {
     if (out && cap) out[0] = 0;
     return FALSE;
 }
-int  ConfigGetMaxArrowSteps(void) { return 0; }   /* 0=不限制：压测照常逐格 */
-BOOL ConfigGetOverStepCtrl(void) { return FALSE; }
+/* 配置层桩（本测试只 include nav.c/send.c，不链接 config.c）：
+   按 CFG_* 编号给值，与原 ConfigGet* 桩的语义一一对应。 */
+int CfgInt(int id) {
+    switch (id) {
+    case CFG_MAX_ARROW_STEPS: return 0;          /* 0=不限制：压测照常逐格 */
+    case CFG_AUTOSCROLL_INTERVAL: return 1500;
+    case CFG_AUTOSCROLL_FAST_MS:  return 800;
+    default: return 0;
+    }
+}
+int CfgBool(int id) {
+    switch (id) {
+    case CFG_ALLOW_SCINTILLA_READ: return TRUE;
+    default: return FALSE;
+    }
+}
+int CfgLo(int id) { (void)id; return 0; }
+int CfgHi(int id) { (void)id; return 0; }
+const WCHAR* CfgStr(int id) { (void)id; return L""; }
 /* nav.c 的 Sci 通道会先问这个开关；压测要覆盖那条代码路径，所以给 1 */
-BOOL ConfigGetAllowScintillaRead(void) { return TRUE; }
+
 
 #include "nav.c"
 #include "send.c"

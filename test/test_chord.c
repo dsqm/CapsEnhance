@@ -1002,10 +1002,10 @@ int main(void) {
        计数钩子只数**我们注入的**滚轮（LLMHF_INJECTED），与场景Q/T 共用，
        所以每段观测前先 ResetWheelRec。 */
     Reset();
-    int base = ConfigGetAutoScrollInterval();     /* 最慢档 = 1500 */
-    int fast = ConfigGetAutoScrollFastMs();        /* 最快档 = 800（独立配置项） */
+    int base = CfgInt(CFG_AUTOSCROLL_INTERVAL);     /* 最慢档 = 1500 */
+    int fast = CfgInt(CFG_AUTOSCROLL_FAST_MS);        /* 最快档 = 800（独立配置项） */
     CHECK(fast == 800, "R: 最快档 = AutoScrollFastMs 缺省 800ms/格");
-    CHECK(ConfigGetWheelScrollMul() == 3,
+    CHECK(CfgInt(CFG_WHEEL_SCROLL_MUL) == 3,
           "R: 倍数项与水平无关（WheelScrollMul 仍是 3，两边各自独立）");
     CHECK(ActAutoScrollTick() == 0, "R: 未启动时速度为 0");
     CHECK(!ActAutoScrollActive(), "R: 初始未在连续滚动");
@@ -1258,7 +1258,7 @@ int main(void) {
        方向照抄系统约定：滚轮**向上 = 向左**（浏览器 / 资源管理器 / 表格都是这个
        方向，Firefox 官方快捷键表就写着 Shift+上滚 = 向左）。 */
     Reset();
-    CHECK(ConfigGetWheelHScrollMul() == 1, "T: WheelHScrollMul 缺省为 1（一滚一格）");
+    CHECK(CfgInt(CFG_WHEEL_HSCROLL_MUL) == 1, "T: WheelHScrollMul 缺省为 1（一滚一格）");
 
     Key(CLI_CAPS, TRUE); Pump(2);
     Key(VK_LSHIFT, TRUE); Pump(2);                /* 真实左 Shift */

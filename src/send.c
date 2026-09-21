@@ -178,10 +178,10 @@ int SendArrows(int dir, int n, BOOL shift) {
          OverStepMode=0 -> 只发一个方向键（跳一格即停）
        放在这里而不是调用方，是为了让所有调用路径都受同一约束；
        MaxArrowSteps=0 表示不限制（硬上限仍是 256）。 */
-    int maxSteps = ConfigGetMaxArrowSteps();
+    int maxSteps = CfgInt(CFG_MAX_ARROW_STEPS);
     if (maxSteps > 0 && n >= maxSteps) {
         int want = n;
-        if (ConfigGetOverStepCtrl()) {
+        if (CfgBool(CFG_OVER_STEP_CTRL)) {
             SendNativeWordJump(dir, shift);
             if (g_recording.load())
                 CapLog("  -> 逐格步数 %d 达到 MaxArrowSteps(%d)，改发 Ctrl+arrow",

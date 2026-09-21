@@ -787,18 +787,15 @@ DPI 感知 = 每显示器V2(PerMonitorV2)  坐标空间 = 物理(与钩子一致
 
 **设计说明**：该项目配置项**不提供增强键 / 选区键开关**（`Alt/D`、`F`）。它们曾短暂做配置项（`EnhanceKeys` / `ShiftKeys`），当前版已去掉并回退（配置文件里写这两个键名会忽略）。原因：它们属于和弦语法，改它等于改功能，不该是暴露给用户的旋钮。
 
-新增 / 修改一个配置项牵扯到**八处**，漏一处不会编译报错，只会静默不一致（历史上"默认值从 2 改成 3"就漏改过三处文案）：
+新增 / 修改一个配置项 = **`config.c` 的 `kCfg` 表加一行** + **`settings.c` 的 `kFields` 表加一行** + README 的配置表加一行。三处分工明确，**不会静默漂移**：
 
-1. `config.c` 顶部：**常量**（`*_DEFAULT` / 范围上下限）——默认值只在此定值；
-2. `config.c` 的 `ConfigLoadFrom`：静态初值 + 解析分支（钳制走 `Clamp*`，不另写）；
-3. `config.c` 的 **ini 模板**（`kTemplate`，文件不存在时写出）；
-4. `config.c` 的 **`kUpgrades` 表**（老配置补齐，用 `STR(常量)` 拼；设置程序写回缺失键时复用的也是这份注释块）；
-5. `cap.h` 的 `ConfigGet*` 声明 + `config.c` 实现；
-6. `cap.h` 的 **`ConfigSet*`** 声明 + `config.c` 实现（设置程序改值用；与 Get 成对，漏了就是"界面改不动它"）；
-7. `config.c` 的 `GeneralValues()`（写回时的"键 = 值"清单：`key` 小写用于匹配、`name` 是写进文件的形态）；
-8. `settings/settings.c` 的 `kFields` 表（一行 = 一个控件）+ Load / Save 的两个分支，以及 README / 本文的说明。
+1. `config.c` 的 **`kCfg` 表**（`CfgDef`）——语义的唯一一份定义：`key`（ini 键名，小写，用于匹配）、`name`（写进文件的形态）、`flags`（`CFG_F_BOOL` / `CFG_F_TEXT`）、`def`（默认值）、`lo`/`hi`（值域）、文本项的缓冲、`doc`（ini 注释块）。**由这一行派生**：默认值初始化（`CfgInitDefaults`，另有 `CfgEnsureReady` 惰性兜底——"没读过配置也要拿得到缺省"是既有行为）、解析、钳制、`CfgInt`/`CfgBool`/`CfgStr` 读、`CfgSetInt`/`CfgSetBool`/`CfgSetStr` 写、`GeneralValues` 写回清单、ini 模板、老配置补写块（模板与补写块**共用同一份 `doc`**，见 `AppendCfgBlock`）。
+2. `settings/settings.c` 的 **`kFields` 表**（一行 = 一个控件）：`cfg` 列写上对应的 `CFG_*` 编号，Load / Save 就按它直取直写，**不需要再为每个控件写分支**；标签 / 单位 / 分段属于呈现，留在设置程序那边。**值域不在这里写第二份**——`InitFieldRanges()` 从 config.c 的表取（`CfgLo` / `CfgHi`）。
+3. README 的配置表（用户可见的默认值与作用）。
 
-**改默认值时务必全局搜那个数值**：注释、模板、`kUpgrades`、测试注释与**断言消息**里都可能写死它。"键齐全时升级不改动文件"的 fixture 由 `ConfigUpgradeKeyName()` 现读现生成，所以那条用例不会因加配置项假失败。
+**改默认值只需改 `kCfg` 的 `def`**（数值常量仍在 `config.c` 顶部）：ini 模板、补写块、写回值、设置界面的显示值全都跟着走——这三处以前是独立副本，历史上"默认值从 2 改成 3"就漏改过。仍需留意的是**测试断言与断言消息里写死的数值**。
+
+`CFG_*` 编号与 `kCfg` 的行序**必须一一对应**（靠下标直取，没有按名字查找）；`CFG_IME_*` 三项还必须与 `IME_KEY_*` 同序连排（`ConfigGetImeMode` 靠下标直取，表里有 `static_assert` 守着）。
 
 **新增一份名单**则要动四处（现有五份 ——  /  /  /  / `[DragProcessBlacklist]` —— 都走这个机制）：
 
@@ -916,7 +913,7 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
   · **不要**用 `#define` 给函数改名来"顶掉"生产定义：所有 TU 都按 `/TP` 当 C++ 编，同名 static 重定义是 `C2084`（已有主体），改名那条路走不通。门控只围定义、不围调用点，才是与本项目编译方式相容的做法（这也是["源码按 C++ 编译"](#源码按-c-编译tp)那一节说的 `C4505` 会浮出来的一个实例）。
 
 ### 配置（config.c）
-- **改一个配置项要动八处**（常量 → `ConfigLoadFrom`（含钳制）→ `kTemplate` → `kUpgrades` → `ConfigGet*` / `ConfigSet*` → `GeneralValues()` → `settings.c` 的 `kFields` → README/本文；完整清单见下）。漏一处只静默不一致。改默认值务必全局搜数值（注释/模板/`kUpgrades`/测试断言里都可能写死）（详见[配置项的设计与新增清单](#配置项的设计与新增清单)）。
+- **改一个配置项**：`config.c` 的 `kCfg` 加一行 + `settings.c` 的 `kFields` 加一行 + README 加一行；改默认值只改 `kCfg` 的 `def`。`CFG_*` 编号与表行序必须一一对应（详见[配置项的设计与新增清单](#配置项的设计与新增清单)）。
 
 ### COM / 跨进程
 - **借来的接口指针绝不 Release**：曾把调用方 `FindDocElement` 传进来的元素也 `Release` → WPS 每次走失败路径、引用计数归零 → `c0000005`。只有 `AddRef` 过或规则上归你的才释放（详见[按词跳转](#按词跳转wordjump实现) 的"UIA 引用计数坑"）。

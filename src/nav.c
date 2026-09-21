@@ -234,7 +234,7 @@ static BOOL SciGetTextCaret(HWND hwnd, WCHAR** text, int* lenOut, int* caretOut,
        默认开启但**可由用户关掉**：`[General] AllowScintillaRead = 0` 会让整条
        Scintilla 通道直接放弃，退回 UIA / IA2 / 原生 Ctrl+方向（功能降级，
        但不再触碰任何进程内存）。句柄即用即关，不缓存。 */
-    if (!ConfigGetAllowScintillaRead()) {
+    if (!CfgBool(CFG_ALLOW_SCINTILLA_READ)) {
         if (g_recording.load())
             CapLog("  Sci 通道已被配置关闭（AllowScintillaRead=0），跳过");
         return FALSE;

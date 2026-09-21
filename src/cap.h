@@ -601,24 +601,47 @@ void ConfigUpgradeFile(const WCHAR* path);   /* 老配置补齐新增键（单�
 int  ConfigUpgradeKeyCount(void);
 const char* ConfigUpgradeKeyName(int i);     /* 越界返回 NULL */
 BOOL ConfigMatchName(const WCHAR* exeName);  /* 进程名是否命中原生按词跳转名单 */
-BOOL ConfigGetRunAsAdmin(void);             /* [General] RunAsAdmin：启动时提权 */
-int  ConfigGetLogMaxKB(void);               /* [General] LogMaxKB：日志上限(KB)，0=不限 */
-int  ConfigGetMaxArrowSteps(void);          /* [General] MaxArrowSteps：逐格按词跳转最大步数 */
-BOOL ConfigGetOverStepCtrl(void);           /* [General] OverStepMode：超限 0=仍发方向键 1=Ctrl+方向 */
-int  ConfigGetWheelScrollMul(void);         /* [General] WheelScrollMul：Caps+滚轮 放大倍数，<2=不放大 */
-int  ConfigGetWheelHScrollMul(void);        /* [General] WheelHScrollMul：Caps+Shift+滚轮 横向倍数，0=关闭 */
-int  ConfigGetAutoScrollInterval(void);     /* [General] AutoScrollInterval：持续滚动初始速度(ms/格) */
-int  ConfigGetAutoScrollFastMs(void);        /* [General] AutoScrollFastMs：持续滚动最快速度(ms/格) */
-int  ConfigGetAllowScintillaRead(void);     /* [General] AllowScintillaRead：允许 Scintilla 通道读目标进程内存（0=关闭该通道） */
-/* [General] DittoDir：Ditto 的**安装文件夹**（Caps+V 用它，两处派生）：
-     · <DittoDir>\Ditto.db   浮层只读地取最近 30 条
-     · <DittoDir>\Ditto.exe  浮层里"转 Ditto 本体"用 `-open` 拉起它的窗口
-   相对路径的基准 = **本程序 exe 所在目录**（也就是 ini 所在目录），不做任何
-   自动探测 —— 便携版 Ditto 的目录在哪，路径只有用户知道。
-   ★ 主程序**不读**它，只在拉起剪贴板 exe 时把解析好的绝对路径通过命令行
-   传过去（`--dir <绝对路径>`）—— 相对路径基准只有一个进程知道（本进程的
-   exe 目录），让子进程再解一次就是同一件事的两份实现。 */
-const WCHAR* ConfigGetDittoDir(void);       /* 返回内部缓冲（空串 = 未配置），不要写它 */
+/* ---------- 配置项：编号 + 通用读写 ----------
+   语义（键名 / 默认值 / 值域 / ini 注释 / 解析 / 写回）**只在 config.c 的
+   kCfg 表里定义一次**，外面一律按 CFG_* 编号取用 —— 原先"一个配置项"要
+   手工同步八处（常量 / 静态初值 / 解析分支 / ini 模板 / 补写块 / Get / Set /
+   写回清单 / 设置界面的值域），漏一处**不会编译报错**，只会静默不一致
+   （历史事故：默认值从 2 改成 3 时漏改了三处文案与两处范围）。
+   加一个配置项 = config.c 的 kCfg 加一行 + settings.c 的 kFields 加一行
+   （界面的标签 / 单位 / 分段属于呈现，留在设置程序那边）+ README 加一行。 */
+enum {
+    CFG_RUN_AS_ADMIN = 0,      /* [General] RunAsAdmin */
+    CFG_LOG_MAX_KB,            /* [General] LogMaxKB */
+    CFG_MAX_ARROW_STEPS,       /* [General] MaxArrowSteps */
+    CFG_OVER_STEP_CTRL,        /* [General] OverStepMode */
+    CFG_WHEEL_SCROLL_MUL,      /* [General] WheelScrollMul */
+    CFG_AUTOSCROLL_INTERVAL,   /* [General] AutoScrollInterval */
+    CFG_AUTOSCROLL_FAST_MS,    /* [General] AutoScrollFastMs */
+    CFG_WHEEL_HSCROLL_MUL,     /* [General] WheelHScrollMul */
+    CFG_ALLOW_SCINTILLA_READ,  /* [General] AllowScintillaRead */
+    CFG_IME_CAPS_MODE,         /* [General] ImeCapsMode */
+    CFG_IME_LSHIFT_MODE,       /* [General] ImeLShiftMode */
+    CFG_IME_RSHIFT_MODE,       /* [General] ImeRShiftMode */
+    CFG_DITTO_DIR,             /* [General] DittoDir（文本项） */
+    CFG_CLIP_FONT,             /* [General] ClipFont（文本项） */
+    CFG_CLIP_FONT_SIZE,        /* [General] ClipFontSize（磅） */
+    CFG_CLIP_CLICK_PASTE,      /* [General] ClipClickPaste */
+    CFG_COUNT
+};
+
+int  CfgInt(int id);                 /* 整数项当前值（布尔项为 0/1；越界返回 0） */
+BOOL CfgBool(int id);                /* 布尔项当前值 */
+const WCHAR* CfgStr(int id);         /* 文本项当前值（指向内部缓冲；越界返回空串） */
+int  CfgLo(int id);                  /* 值域下限（设置程序校验用，与解析同源） */
+int  CfgHi(int id);                  /* 值域上限 */
+void CfgSetInt(int id, int v);       /* 改值：按表里的值域钳制（与解析同一份判据） */
+void CfgSetBool(int id, BOOL v);
+void CfgSetStr(int id, const WCHAR* v);   /* NULL = 清空；过长按缓冲截断，不 fastfail */
+
+/* [General] DittoDir 的派生：<DittoDir>\Ditto.db 与 <DittoDir>\Ditto.exe。
+   文本项的值用 CfgStr(CFG_DITTO_DIR) 取（返回内部缓冲，**不要写它**）。 */
+
+/* [General] ClipFontSize 的取值范围由 CfgLo/CfgHi(CFG_CLIP_FONT_SIZE) 给出。 */
 #define DITTO_DIR_MAX 320                   /* 路径缓冲区字符数（含结尾的 0）。
                                                比 MAX_PATH 宽一点：相对路径虽短，但拼出来的
                                                绝对路径可能落在较深的目录里。 */
@@ -629,9 +652,6 @@ const WCHAR* ConfigGetDittoDir(void);       /* 返回内部缓冲（空串 = 未
 #define CLIP_FONT_SIZE_DEFAULT 10
 #define CLIP_FONT_SIZE_MAX     72
 #define CLIP_CLICK_PASTE_DEFAULT 1  /* 单击条目直接上屏（默认开） */
-const WCHAR* ConfigGetClipFont(void);       /* 空串 = 用内置默认（调用方兜底） */
-int  ConfigGetClipFontSize(void);
-BOOL ConfigGetClipClickPaste(void);         /* 单击条目直接上屏（默认开，不用双击） */
 /* 单键切换输入法：key 为 IME_KEY_*，返回 IME_MODE_*（0=不处理 1=中文 2=英文） */
 int  ConfigGetImeMode(int key);
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中 [NativeWordJump] */
@@ -648,19 +668,7 @@ BOOL IsRunElevated(void);                   /* 真实运行权限（查进程令
    只给设置程序用：它改的是"某个配置项"，不是整份文本。钳制与解析同源
    （config.c 的 Clamp*），写回保留注释与未知段（规则见 ConfigSaveFile）。
    新增配置项时这里也要加一个 Set —— 与 Get 成对，漏了就是"界面改不动它"。 */
-void ConfigSetRunAsAdmin(BOOL v);
-void ConfigSetLogMaxKB(int v);
-void ConfigSetMaxArrowSteps(int v);
-void ConfigSetOverStepCtrl(BOOL v);
-void ConfigSetWheelScrollMul(int v);
-void ConfigSetAutoScrollInterval(int v);
-void ConfigSetAutoScrollFastMs(int v);
-void ConfigSetWheelHScrollMul(int v);
-void ConfigSetAllowScintillaRead(BOOL v);
-void ConfigSetDittoDir(const WCHAR* v);     /* 空/NULL = 未配置；过长按 DITTO_DIR_MAX 截断 */
-void ConfigSetClipFont(const WCHAR* v);     /* 空 = 用内置默认 */
-void ConfigSetClipFontSize(int v);          /* 磅，越界按上限钳制 */
-void ConfigSetClipClickPaste(BOOL v);
+
 void ConfigSetImeMode(int key, int v);      /* key = IME_KEY_*，v = IME_MODE_*（越界按键忽略） */
 void        ConfigSetList(int list, const WCHAR* const* names, int n); /* 整份替换 */
 int         ConfigListCount(int list);

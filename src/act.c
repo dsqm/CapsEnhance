@@ -327,7 +327,7 @@ static volatile LONG s_asMaxMs = AUTOSCROLL_MAX_MS;   /* 单测可缩短，见 c
 
 /* 持续滚动的最快速度（毫秒/格），来自 AutoScrollFastMs。 */
 static int AutoScrollFastMs(void) {
-    return ConfigGetAutoScrollFastMs();
+    return CfgInt(CFG_AUTOSCROLL_FAST_MS);
 }
 
 /* 平滑模式的固定节拍（ms）：25 次/秒。比它更快的注入对手感没有增益，
@@ -342,7 +342,7 @@ static int AutoScrollFastMs(void) {
    线性插值会把第 1→2 档做成几十倍，手感上就是"再滚一下直接飞出去"，
    而后面几档几乎分不出来。几何插值让每档的**倍率**相同，过渡才均匀。 */
 static DWORD AutoScrollTickMs(int gear) {
-    int slow = ConfigGetAutoScrollInterval();
+    int slow = CfgInt(CFG_AUTOSCROLL_INTERVAL);
     int fast = AutoScrollFastMs();
     if (fast > slow) fast = slow;   /* 配置不当（"最快"比初始还慢）：退化为恒定速度 */
     if (gear < 1) gear = 1;

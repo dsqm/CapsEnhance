@@ -8,36 +8,9 @@
 #include <string.h>
 #include <wchar.h>
 
-void ConfigLoadFrom(const WCHAR* path);
-void ConfigUpgradeFile(const WCHAR* path);
-int  ConfigUpgradeKeyCount(void);
-const char* ConfigUpgradeKeyName(int i);
-void ConfigLoad(void);
-BOOL ConfigMatchName(const WCHAR* exeName);
-BOOL ConfigGetRunAsAdmin(void);
-int  ConfigGetLogMaxKB(void);
-int  ConfigGetMaxArrowSteps(void);
-BOOL ConfigGetOverStepCtrl(void);
-int  ConfigGetWheelScrollMul(void);
-int  ConfigGetAutoScrollFastMs(void);
-int  ConfigGetAutoScrollInterval(void);
-BOOL ConfigMatchList(int list, const WCHAR* exeName);
-BOOL ConfigGetAllowScintillaRead(void);
-int  ConfigGetImeMode(int key);
-void ConfigSetImeMode(int key, int v);
-BOOL IsRunElevated(void);
-/* 设置程序用的写回接口 */
-void ConfigSetRunAsAdmin(BOOL v);
-void ConfigSetLogMaxKB(int v);
-void ConfigSetMaxArrowSteps(int v);
-void ConfigSetWheelHScrollMul(int v);
-void ConfigSetList(int list, const WCHAR* const* names, int n);
-int  ConfigListCount(int list);
-const WCHAR* ConfigListAt(int list, int i);
-BOOL ConfigSaveFile(const WCHAR* path);
-/* 字符串值写回：ClipFont（超长必须截断，见下面那组断言） */
-void ConfigSetClipFont(const WCHAR* v);
-const WCHAR* ConfigGetClipFont(void);
+/* 被测接口全部在 cap.h 声明（本文件 include 了它），这里不再抄一份 ——
+   抄一份的下场是改名之后一半原型漏改、报一堆"没有匹配的重载"。 */
+
 
 static int fails = 0;
 #define EXPECT(cond, name) do { \
@@ -108,7 +81,7 @@ int main(void) {
     );
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
 
-    EXPECT(ConfigGetRunAsAdmin(), "CFG: RunAsAdmin=1 生效");
+    EXPECT(CfgBool(CFG_RUN_AS_ADMIN), "CFG: RunAsAdmin=1 生效");
     EXPECT(ConfigMatchName(L"Editor.exe"),   "CFG: Editor.exe 命中（名单带 .exe）");
     EXPECT(ConfigMatchName(L"editor"),       "CFG: editor 命中（大小写不敏感）");
     EXPECT(ConfigMatchName(L"SomeApp.exe"),  "CFG: SomeApp 命中（名单不带 .exe）");
@@ -121,44 +94,44 @@ int main(void) {
     /* Other 段的同名键不应被当成 General */
     WriteIni("[General]\r\nRunAsAdmin = 1\r\n[Other]\r\nRunAsAdmin = 0\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetRunAsAdmin(), "CFG: 非 General 段的同名键不覆盖");
+    EXPECT(CfgBool(CFG_RUN_AS_ADMIN), "CFG: 非 General 段的同名键不覆盖");
 
     /* 布尔只认 0/1 */
     WriteIni("[General]\r\nRunAsAdmin = 1\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetRunAsAdmin(), "CFG: 1 视为真");
+    EXPECT(CfgBool(CFG_RUN_AS_ADMIN), "CFG: 1 视为真");
     WriteIni("[General]\r\nRunAsAdmin = true\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(!ConfigGetRunAsAdmin(), "CFG: true 不生效（只认 0/1）");
+    EXPECT(!CfgBool(CFG_RUN_AS_ADMIN), "CFG: true 不生效（只认 0/1）");
     WriteIni("[General]\r\nRunAsAdmin = \xe5\x90\xaf\xe7\x94\xa8\r\n");  /* 启用 */
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(!ConfigGetRunAsAdmin(), "CFG: 中文“启用”不生效（只认 0/1）");
+    EXPECT(!CfgBool(CFG_RUN_AS_ADMIN), "CFG: 中文“启用”不生效（只认 0/1）");
     WriteIni("[General]\r\nRunAsAdmin = 01\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(!ConfigGetRunAsAdmin(), "CFG: 01 不生效（严格等于 1）");
+    EXPECT(!CfgBool(CFG_RUN_AS_ADMIN), "CFG: 01 不生效（严格等于 1）");
     WriteIni("[General]\r\nRunAsAdmin = 0\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(!ConfigGetRunAsAdmin(), "CFG: 0 视为假");
+    EXPECT(!CfgBool(CFG_RUN_AS_ADMIN), "CFG: 0 视为假");
     WriteIni("[General]\r\nRunAsAdmin =\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(!ConfigGetRunAsAdmin(), "CFG: 空值视为假");
+    EXPECT(!CfgBool(CFG_RUN_AS_ADMIN), "CFG: 空值视为假");
     WriteIni("[General]\r\n\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
     /* ★ 缺省已改为**不提权**（RunAsAdmin = 0）：普通用法不需要管理员，
        只有要拖动/操作"以管理员运行的窗口"时才需要设 1（UIPI 会拦住低权限进程对高权限窗口的
        SetWindowPos）。这条断言就是那个默认值的保险丝。 */
-    EXPECT(!ConfigGetRunAsAdmin(), "CFG: 缺省为假（缺省配置就是 RunAsAdmin = 0）");
+    EXPECT(!CfgBool(CFG_RUN_AS_ADMIN), "CFG: 缺省为假（缺省配置就是 RunAsAdmin = 0）");
 
     /* 日志上限 LogMaxKB（KB） */
     WriteIni("[General]\r\nLogMaxKB = 512\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetLogMaxKB() == 512, "CFG: LogMaxKB=512 生效");
+    EXPECT(CfgInt(CFG_LOG_MAX_KB) == 512, "CFG: LogMaxKB=512 生效");
     WriteIni("[General]\r\nLogMaxKB = 0\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetLogMaxKB() == 0, "CFG: LogMaxKB=0（不限制）");
+    EXPECT(CfgInt(CFG_LOG_MAX_KB) == 0, "CFG: LogMaxKB=0（不限制）");
     WriteIni("[General]\r\nLogMaxKB = abc\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetLogMaxKB() == 2048, "CFG: LogMaxKB 非法值回落默认 2048");
+    EXPECT(CfgInt(CFG_LOG_MAX_KB) == 2048, "CFG: LogMaxKB 非法值回落默认 2048");
     /* 上限钳制是**安全**要求而不是口味：main.c 的日志轮转按"上限的一半"分配
        缓冲（keep = maxKB*512），不钳的话 (size_t)keep 在 32 位构建下会回绕成
        一个小数 —— malloc 拿到小缓冲、fread 却按回绕前的长度写进去，就是堆越界。
@@ -166,10 +139,10 @@ int main(void) {
        和"不可能"是两回事）。 */
     WriteIni("[General]\r\nLogMaxKB = 99999999\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetLogMaxKB() == 65536, "CFG: LogMaxKB 超过上限钳到 65536");
+    EXPECT(CfgInt(CFG_LOG_MAX_KB) == 65536, "CFG: LogMaxKB 超过上限钳到 65536");
     WriteIni("[General]\r\nRunAsAdmin = 1\r\n[Other]\r\nLogMaxKB = 1\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetLogMaxKB() == 2048, "CFG: 非 General 段的 LogMaxKB 不生效");
+    EXPECT(CfgInt(CFG_LOG_MAX_KB) == 2048, "CFG: 非 General 段的 LogMaxKB 不生效");
 
     /* UTF-8 BOM + LF 行尾（Linux 编辑器保存的格式） */
     {
@@ -180,76 +153,76 @@ int main(void) {
             fclose(fb);
         }
         ConfigLoadFrom(L"obj/test/cfgtest.ini");
-        EXPECT(ConfigGetRunAsAdmin() && ConfigMatchName(L"bomapp"),
+        EXPECT(CfgBool(CFG_RUN_AS_ADMIN) && ConfigMatchName(L"bomapp"),
                "CFG: UTF-8 BOM + LF 行尾");
     }
 
     /* 逐格阈值与超限模式 */
     WriteIni("[General]\r\nMaxArrowSteps = 16\r\nOverStepMode = 1\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetMaxArrowSteps() == 16 && ConfigGetOverStepCtrl(),
+    EXPECT(CfgInt(CFG_MAX_ARROW_STEPS) == 16 && CfgBool(CFG_OVER_STEP_CTRL),
            "CFG: MaxArrowSteps=16 + OverStepMode=1 生效");
     WriteIni("[General]\r\nMaxArrowSteps = 0\r\nOverStepMode = 0\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetMaxArrowSteps() == 0 && !ConfigGetOverStepCtrl(),
+    EXPECT(CfgInt(CFG_MAX_ARROW_STEPS) == 0 && !CfgBool(CFG_OVER_STEP_CTRL),
            "CFG: MaxArrowSteps=0(不限制) + OverStepMode=0 生效");
     WriteIni("[General]\r\nMaxArrowSteps = abc\r\nOverStepMode = xyz\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetMaxArrowSteps() == 4 && !ConfigGetOverStepCtrl(),
+    EXPECT(CfgInt(CFG_MAX_ARROW_STEPS) == 4 && !CfgBool(CFG_OVER_STEP_CTRL),
            "CFG: 非法值回落默认 (4 / OverStepMode=1)");
     /* [Other] 里写与缺省**不同**的值，才能证明它真的没生效
        （缺省 MaxArrowSteps=4 / OverStepMode=1）。 */
     WriteIni("[Other]\r\nMaxArrowSteps = 1\r\nOverStepMode = 0\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetMaxArrowSteps() == 4 && ConfigGetOverStepCtrl(),
+    EXPECT(CfgInt(CFG_MAX_ARROW_STEPS) == 4 && CfgBool(CFG_OVER_STEP_CTRL),
            "CFG: 非 General 段不生效（仍取缺省 4 / 1）");
 
     /* 按住 C 时滚轮的放大倍数 WheelScrollMul（只管 Caps+滚轮；与自动滚动无关）。
        样本一律用与默认值不同的值（默认值当样本会让"自定义生效"恒真）。 */
     WriteIni("[General]\r\nWheelScrollMul = 5\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMul() == 5, "CFG: WheelScrollMul=5 生效");
+    EXPECT(CfgInt(CFG_WHEEL_SCROLL_MUL) == 5, "CFG: WheelScrollMul=5 生效");
     WriteIni("[General]\r\nWheelScrollMul = 0\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMul() == 0, "CFG: WheelScrollMul=0（不放大）");
+    EXPECT(CfgInt(CFG_WHEEL_SCROLL_MUL) == 0, "CFG: WheelScrollMul=0（不放大）");
     WriteIni("[General]\r\nWheelScrollMul = 1\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMul() == 1, "CFG: WheelScrollMul=1（不放大）");
+    EXPECT(CfgInt(CFG_WHEEL_SCROLL_MUL) == 1, "CFG: WheelScrollMul=1（不放大）");
     WriteIni("[General]\r\nWheelScrollMul = 9999\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMul() == 16, "CFG: WheelScrollMul 超过上限钳到 16");
+    EXPECT(CfgInt(CFG_WHEEL_SCROLL_MUL) == 16, "CFG: WheelScrollMul 超过上限钳到 16");
     WriteIni("[General]\r\nWheelScrollMul = abc\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMul() == 3, "CFG: WheelScrollMul 非法值回落默认 3");
+    EXPECT(CfgInt(CFG_WHEEL_SCROLL_MUL) == 3, "CFG: WheelScrollMul 非法值回落默认 3");
     WriteIni("[Other]\r\nWheelScrollMul = 9\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMul() == 3, "CFG: 非 General 段的 WheelScrollMul 不生效");
+    EXPECT(CfgInt(CFG_WHEEL_SCROLL_MUL) == 3, "CFG: 非 General 段的 WheelScrollMul 不生效");
     WriteIni("[General]\r\n\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMul() == 3, "CFG: WheelScrollMul 缺省为 3");
+    EXPECT(CfgInt(CFG_WHEEL_SCROLL_MUL) == 3, "CFG: WheelScrollMul 缺省为 3");
     /* 过渡期的键名 WheelScrollMs（毫秒/格）已废弃：两种量不可换算，所以既不解析
        也不据它推算任何值 —— 写进去必须完全无副作用。 */
     WriteIni("[General]\r\nWheelScrollMs = 50\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelScrollMul() == 3, "CFG: 废弃键 WheelScrollMs 被忽略（不参与解析）");
+    EXPECT(CfgInt(CFG_WHEEL_SCROLL_MUL) == 3, "CFG: 废弃键 WheelScrollMs 被忽略（不参与解析）");
 
     /* 自动滚动基础节奏 AutoScrollInterval（ms），钳制 100..60000 */
     WriteIni("[General]\r\nAutoScrollInterval = 250\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollInterval() == 250, "CFG: AutoScrollInterval=250 生效");
+    EXPECT(CfgInt(CFG_AUTOSCROLL_INTERVAL) == 250, "CFG: AutoScrollInterval=250 生效");
     WriteIni("[General]\r\nAutoScrollInterval = 5\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollInterval() == 100, "CFG: AutoScrollInterval 下限钳到 100");
+    EXPECT(CfgInt(CFG_AUTOSCROLL_INTERVAL) == 100, "CFG: AutoScrollInterval 下限钳到 100");
     WriteIni("[General]\r\nAutoScrollInterval = 999999\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollInterval() == 60000, "CFG: AutoScrollInterval 上限钳到 60000");
+    EXPECT(CfgInt(CFG_AUTOSCROLL_INTERVAL) == 60000, "CFG: AutoScrollInterval 上限钳到 60000");
     WriteIni("[General]\r\nAutoScrollInterval = abc\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollInterval() == 1500,
+    EXPECT(CfgInt(CFG_AUTOSCROLL_INTERVAL) == 1500,
            "CFG: AutoScrollInterval 非法值回落默认 1500");
     WriteIni("[Other]\r\nAutoScrollInterval = 300\r\n");   /* 非 General 段：不应生效 */
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollInterval() == 1500,
+    EXPECT(CfgInt(CFG_AUTOSCROLL_INTERVAL) == 1500,
            "CFG: 非 General 段的 AutoScrollInterval 不生效");
     WriteIni("[General]\r\n\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
@@ -258,38 +231,38 @@ int main(void) {
        AUTOSCROLL_INTERVAL_DEFAULT 上方 —— 改默认值前先看它，并且
        **全局搜这个数值**：注释、ini 模板、ini 升级块、本文件的断言消息
        里都可能写死（历史上就漏改过三处）。 */
-    EXPECT(ConfigGetAutoScrollInterval() == 1500,
+    EXPECT(CfgInt(CFG_AUTOSCROLL_INTERVAL) == 1500,
            "CFG: AutoScrollInterval 缺省为 1500ms/格（约 2 格/秒）");
 
     /* 持续滚动的最快速度 AutoScrollFastMs（毫秒/格，越小越快）。它与初始速度
        **各自独立**：一个管起步、一个管顶档，互不牵制。 */
     WriteIni("[General]\r\nAutoScrollFastMs = 250\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollFastMs() == 250, "CFG: AutoScrollFastMs=250 生效");
+    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 250, "CFG: AutoScrollFastMs=250 生效");
     WriteIni("[General]\r\nAutoScrollFastMs = 1\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollFastMs() == 20, "CFG: AutoScrollFastMs 下限钳到 20");
+    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 20, "CFG: AutoScrollFastMs 下限钳到 20");
     WriteIni("[General]\r\nAutoScrollFastMs = 999999\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollFastMs() == 60000, "CFG: AutoScrollFastMs 上限钳到 60000");
+    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 60000, "CFG: AutoScrollFastMs 上限钳到 60000");
     WriteIni("[General]\r\nAutoScrollFastMs = abc\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollFastMs() == 800, "CFG: AutoScrollFastMs 非法值回落默认 1000");
+    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 800, "CFG: AutoScrollFastMs 非法值回落默认 1000");
     WriteIni("[Other]\r\nAutoScrollFastMs = 99\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollFastMs() == 800, "CFG: 非 General 段的 AutoScrollFastMs 不生效");
+    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 800, "CFG: 非 General 段的 AutoScrollFastMs 不生效");
     WriteIni("[General]\r\n\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollFastMs() == 800,
+    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 800,
            "CFG: AutoScrollFastMs 缺省为 800ms/格（比初始档更快）");
     /* 两项互不影响：改一个不该动另一个（这正是"单位/数值各自独立"的要求） */
     WriteIni("[General]\r\nAutoScrollInterval = 8000\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollFastMs() == 800 && ConfigGetAutoScrollInterval() == 8000,
+    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 800 && CfgInt(CFG_AUTOSCROLL_INTERVAL) == 8000,
            "CFG: 改初始速度不影响最快速度（两项独立）");
     WriteIni("[General]\r\nAutoScrollFastMs = 300\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollFastMs() == 300 && ConfigGetAutoScrollInterval() == 1500,
+    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 300 && CfgInt(CFG_AUTOSCROLL_INTERVAL) == 1500,
            "CFG: 改最快速度不影响初始速度（两项独立）");
 
     /* 三份进程名名单**各自独立**：[NativeWordJump] / [AutoDisable] /
@@ -329,34 +302,34 @@ int main(void) {
        也不据它推算任何值 —— 写进去必须完全无副作用。 */
     WriteIni("[General]\r\nAutoScrollSmooth = 0\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAutoScrollInterval() == 1500,
+    EXPECT(CfgInt(CFG_AUTOSCROLL_INTERVAL) == 1500,
            "CFG: 废弃键 AutoScrollSmooth 被忽略（滚动速度仍取缺省 1500）");
 
     /* 横向滚动倍数 WheelHScrollMul（Caps+Shift+滚轮）。默认必须是 **1**
        —— 一个物理格换一次横向滚动，与系统原生横向滚动一致。
        样本一律用与默认值不同的值（1 当样本会让"自定义生效"恒真）。 */
-    EXPECT(ConfigGetWheelHScrollMul() == 1, "CFG: WheelHScrollMul 缺省为 1");
+    EXPECT(CfgInt(CFG_WHEEL_HSCROLL_MUL) == 1, "CFG: WheelHScrollMul 缺省为 1");
     WriteIni("[General]\r\nWheelHScrollMul = 3\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelHScrollMul() == 3, "CFG: WheelHScrollMul=3 生效");
+    EXPECT(CfgInt(CFG_WHEEL_HSCROLL_MUL) == 3, "CFG: WheelHScrollMul=3 生效");
     WriteIni("[General]\r\nWheelHScrollMul = 0\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelHScrollMul() == 0, "CFG: WheelHScrollMul=0 表示关闭横向滚动");
+    EXPECT(CfgInt(CFG_WHEEL_HSCROLL_MUL) == 0, "CFG: WheelHScrollMul=0 表示关闭横向滚动");
     /* ParseIntW 只认前导十进制数字，负号不是数字 -> 当作非法值回落默认。
        （解析器里仍有 v<0 -> 0 的防御，但配置文本走不到那条路。） */
     WriteIni("[General]\r\nWheelHScrollMul = -5\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelHScrollMul() == 1,
+    EXPECT(CfgInt(CFG_WHEEL_HSCROLL_MUL) == 1,
            "CFG: WheelHScrollMul 负号被当非法值 -> 回落默认 1");
     WriteIni("[General]\r\nWheelHScrollMul = 999\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelHScrollMul() == 16, "CFG: WheelHScrollMul 上限钳到 16");
+    EXPECT(CfgInt(CFG_WHEEL_HSCROLL_MUL) == 16, "CFG: WheelHScrollMul 上限钳到 16");
     WriteIni("[General]\r\nWheelHScrollMul = abc\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelHScrollMul() == 1, "CFG: WheelHScrollMul 非法值回落默认 1");
+    EXPECT(CfgInt(CFG_WHEEL_HSCROLL_MUL) == 1, "CFG: WheelHScrollMul 非法值回落默认 1");
     WriteIni("[Other]\r\nWheelHScrollMul = 7\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetWheelHScrollMul() == 1, "CFG: 非 General 段的 WheelHScrollMul 不生效");
+    EXPECT(CfgInt(CFG_WHEEL_HSCROLL_MUL) == 1, "CFG: 非 General 段的 WheelHScrollMul 不生效");
 
     /* Scintilla 通道读目标进程内存的开关 AllowScintillaRead（默认开）。
        Scintilla 的 SCI_GETTEXT 只接受"对方进程地址空间里的缓冲区"，所以读全文
@@ -364,17 +337,17 @@ int main(void) {
        这是实质性权限，默认开（否则 Notepad3 这类编辑器只能退化成逐格箭头），
        但要给用户一个关掉它的旋钮：关掉后整条 Scintilla 通道放弃，退回
        UIA / IA2 / 原生 Ctrl+方向（仍能跳，只是不再瞬跳）。 */
-    EXPECT(ConfigGetAllowScintillaRead(), "CFG: AllowScintillaRead 缺省为开");
+    EXPECT(CfgBool(CFG_ALLOW_SCINTILLA_READ), "CFG: AllowScintillaRead 缺省为开");
     WriteIni("[General]\r\nAllowScintillaRead = 0\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(!ConfigGetAllowScintillaRead(), "CFG: AllowScintillaRead=0 生效（关闭该通道）");
+    EXPECT(!CfgBool(CFG_ALLOW_SCINTILLA_READ), "CFG: AllowScintillaRead=0 生效（关闭该通道）");
     WriteIni("[General]\r\nAllowScintillaRead = true\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(!ConfigGetAllowScintillaRead(),
+    EXPECT(!CfgBool(CFG_ALLOW_SCINTILLA_READ),
            "CFG: AllowScintillaRead 只认 0/1，true 视为关（不是回落默认）");
     WriteIni("[Other]\r\nAllowScintillaRead = 0\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetAllowScintillaRead(), "CFG: 非 General 段的 AllowScintillaRead 不生效");
+    EXPECT(CfgBool(CFG_ALLOW_SCINTILLA_READ), "CFG: 非 General 段的 AllowScintillaRead 不生效");
 
     /* 单键切换输入法：ImeCapsMode / ImeLShiftMode / ImeRShiftMode
          IME_MODE_OFF(0)=不处理   IME_MODE_CN(1)=切中文   IME_MODE_EN(2)=切英文
@@ -446,13 +419,13 @@ int main(void) {
         }
         ConfigUpgradeFile(L"obj/test/cfgtest.ini");
         ConfigLoadFrom(L"obj/test/cfgtest.ini");
-        EXPECT(ConfigGetRunAsAdmin() && ConfigMatchName(L"oldapp"),
+        EXPECT(CfgBool(CFG_RUN_AS_ADMIN) && ConfigMatchName(L"oldapp"),
                "UPG: 用户已有内容保留 (RunAsAdmin=1 / 名单)");
-        EXPECT(ConfigGetLogMaxKB() == 2048 && ConfigGetMaxArrowSteps() == 4,
+        EXPECT(CfgInt(CFG_LOG_MAX_KB) == 2048 && CfgInt(CFG_MAX_ARROW_STEPS) == 4,
                "UPG: 缺失键补齐默认值");
-        EXPECT(ConfigGetAutoScrollInterval() == 1500, "UPG: 补齐 AutoScrollInterval 默认值");
-        EXPECT(ConfigGetWheelScrollMul() == 3, "UPG: 补齐 WheelScrollMul 默认值");
-        EXPECT(ConfigGetAutoScrollFastMs() == 800, "UPG: 补齐 AutoScrollFastMs 默认值");
+        EXPECT(CfgInt(CFG_AUTOSCROLL_INTERVAL) == 1500, "UPG: 补齐 AutoScrollInterval 默认值");
+        EXPECT(CfgInt(CFG_WHEEL_SCROLL_MUL) == 3, "UPG: 补齐 WheelScrollMul 默认值");
+        EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 800, "UPG: 补齐 AutoScrollFastMs 默认值");
         EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_CN &&
                ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_EN &&
                ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_CN,
@@ -520,7 +493,7 @@ int main(void) {
             ConfigLoadFrom(L"obj/test/cfgtest.ini");
             char nm[128];
             _snprintf_s(nm, sizeof(nm), _TRUNCATE, "UPG(BOM边界): %s", kCases[c].name);
-            EXPECT(ConfigGetRunAsAdmin() || !strstr(kCases[c].body, "RunAsAdmin"),
+            EXPECT(CfgBool(CFG_RUN_AS_ADMIN) || !strstr(kCases[c].body, "RunAsAdmin"),
                    nm);
         }
         /* 缺键补齐后 BOM 必须仍然只在文件最开头出现一次 */
@@ -617,14 +590,14 @@ int main(void) {
         }
         EXPECT(strcmp(before, after) == 0, "UPG: 键齐全时不改动文件");
         ConfigLoadFrom(L"obj/test/cfgtest.ini");
-        EXPECT(ConfigGetLogMaxKB() == 7 && ConfigGetMaxArrowSteps() == 5 && ConfigGetOverStepCtrl(),
+        EXPECT(CfgInt(CFG_LOG_MAX_KB) == 7 && CfgInt(CFG_MAX_ARROW_STEPS) == 5 && CfgBool(CFG_OVER_STEP_CTRL),
                "UPG: 用户自定义值不被覆盖");
-        EXPECT(ConfigGetWheelScrollMul() == 5, "UPG: WheelScrollMul 自定义值不被覆盖");
-        EXPECT(ConfigGetAutoScrollFastMs() == 300,
+        EXPECT(CfgInt(CFG_WHEEL_SCROLL_MUL) == 5, "UPG: WheelScrollMul 自定义值不被覆盖");
+        EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 300,
                "UPG: AutoScrollFastMs 自定义值不被覆盖（默认 1000、样本 300）");
-        EXPECT(ConfigGetAutoScrollInterval() == 250,
+        EXPECT(CfgInt(CFG_AUTOSCROLL_INTERVAL) == 250,
                "UPG: AutoScrollInterval 自定义值不被覆盖");
-        EXPECT(ConfigGetWheelHScrollMul() == 4,
+        EXPECT(CfgInt(CFG_WHEEL_HSCROLL_MUL) == 4,
                "UPG: WheelHScrollMul 自定义值不被覆盖（默认 1、样本为 4）");
         EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_EN &&
                ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_OFF &&
@@ -632,7 +605,7 @@ int main(void) {
                "UPG: 输入法键的自定义值不被覆盖（样本 2/0/2）");
         /* 未识别的键（含已废弃的 EnhanceKeys）不再被留存，也不影响任何取值：
            "通用字符串项"设施已随这两个键一起去掉，配置层只认上面具名解析的那些。 */
-        EXPECT(ConfigGetWheelHScrollMul() == 4,
+        EXPECT(CfgInt(CFG_WHEEL_HSCROLL_MUL) == 4,
                "UPG: 废弃键不再被留存（横向倍数仍取自定义值 4）");
     }
 
@@ -657,13 +630,13 @@ int main(void) {
             "Old2.exe\r\n";
         WriteIni(before);
         ConfigLoadFrom(L"obj/test/cfgtest.ini");
-        EXPECT(ConfigGetLogMaxKB() == 777 && ConfigListCount(CFG_LIST_NATIVE) == 2,
+        EXPECT(CfgInt(CFG_LOG_MAX_KB) == 777 && ConfigListCount(CFG_LIST_NATIVE) == 2,
                "SAVE: 改前读到的就是文件里的值");
 
-        ConfigSetRunAsAdmin(FALSE);
-        ConfigSetLogMaxKB(999999);                 /* 越界 -> 应被钳到 65536 */
-        ConfigSetMaxArrowSteps(-5);                /* 越界 -> 钳到 0 */
-        ConfigSetWheelHScrollMul(4);
+        CfgSetBool(CFG_RUN_AS_ADMIN, FALSE);
+        CfgSetInt(CFG_LOG_MAX_KB, 999999);                 /* 越界 -> 应被钳到 65536 */
+        CfgSetInt(CFG_MAX_ARROW_STEPS, -5);                /* 越界 -> 钳到 0 */
+        CfgSetInt(CFG_WHEEL_HSCROLL_MUL, 4);
         ConfigSetImeMode(IME_KEY_CAPS,   IME_MODE_OFF);   /* 0 = 不处理 */
         ConfigSetImeMode(IME_KEY_LSHIFT, IME_MODE_CN);    /* 1 = 切中文 */
         ConfigSetImeMode(IME_KEY_RSHIFT, 7);              /* 越界 -> 钳到 2 */
@@ -676,10 +649,10 @@ int main(void) {
         EXPECT(ConfigSaveFile(L"obj/test/cfgtest.ini"), "SAVE: 写回成功");
 
         ConfigLoadFrom(L"obj/test/cfgtest.ini");
-        EXPECT(!ConfigGetRunAsAdmin(), "SAVE: 布尔改成 0 已落盘");
-        EXPECT(ConfigGetLogMaxKB() == 65536, "SAVE: 越界值写回时被钳到上限 65536");
-        EXPECT(ConfigGetMaxArrowSteps() == 0, "SAVE: 负数被钳到 0");
-        EXPECT(ConfigGetWheelHScrollMul() == 4, "SAVE: 数值改动已落盘");
+        EXPECT(!CfgBool(CFG_RUN_AS_ADMIN), "SAVE: 布尔改成 0 已落盘");
+        EXPECT(CfgInt(CFG_LOG_MAX_KB) == 65536, "SAVE: 越界值写回时被钳到上限 65536");
+        EXPECT(CfgInt(CFG_MAX_ARROW_STEPS) == 0, "SAVE: 负数被钳到 0");
+        EXPECT(CfgInt(CFG_WHEEL_HSCROLL_MUL) == 4, "SAVE: 数值改动已落盘");
         EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_OFF &&
                ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_CN &&
                ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_EN,
@@ -716,14 +689,14 @@ int main(void) {
         DeleteFileW(L"obj/test/cfgsave.ini");
         WriteIni("[General]\r\nRunAsAdmin = 1\r\n");
         ConfigLoadFrom(L"obj/test/cfgtest.ini");
-        ConfigSetWheelHScrollMul(7);
+        CfgSetInt(CFG_WHEEL_HSCROLL_MUL, 7);
         {
             static const WCHAR* n[1] = { L"a.exe" };
             ConfigSetList(CFG_LIST_NOSMOOTH, n, 1);
         }
         EXPECT(ConfigSaveFile(L"obj/test/cfgsave.ini"), "SAVE: 新文件写回成功");
         ConfigLoadFrom(L"obj/test/cfgsave.ini");
-        EXPECT(ConfigGetWheelHScrollMul() == 7, "SAVE: 新建文件里自定义值正确");
+        EXPECT(CfgInt(CFG_WHEEL_HSCROLL_MUL) == 7, "SAVE: 新建文件里自定义值正确");
         EXPECT(ConfigMatchList(CFG_LIST_NOSMOOTH, L"a.exe"), "SAVE: 新建文件含名单段");
         DeleteFileW(L"obj/test/cfgsave.ini");
     }
@@ -738,8 +711,8 @@ int main(void) {
     {
         WriteIni("[General ]\r\nLogMaxKB = 777\r\n");
         ConfigLoadFrom(L"obj/test/cfgtest.ini");
-        EXPECT(ConfigGetLogMaxKB() == 777, "SEC: [General ] 读端认得");
-        ConfigSetLogMaxKB(222);
+        EXPECT(CfgInt(CFG_LOG_MAX_KB) == 777, "SEC: [General ] 读端认得");
+        CfgSetInt(CFG_LOG_MAX_KB, 222);
         EXPECT(ConfigSaveFile(L"obj/test/cfgtest.ini"), "SEC: [General ] 写回成功");
         {
             FILE* fr = NULL; char whole[8192]; size_t wn = 0;
@@ -751,7 +724,7 @@ int main(void) {
                    "SEC: [General ] 没有再补一份规范段（只有一份 General）");
         }
         ConfigLoadFrom(L"obj/test/cfgtest.ini");
-        EXPECT(ConfigGetLogMaxKB() == 222,
+        EXPECT(CfgInt(CFG_LOG_MAX_KB) == 222,
                "SEC: [General ] 那份被就地改掉（设置界面的改动能落盘）");
     }
     {
@@ -783,11 +756,11 @@ int main(void) {
         for (int i = 0; i < (int)(sizeof(longFont) / sizeof(longFont[0]) - 1); i++)
             longFont[i] = L'字';
         longFont[sizeof(longFont) / sizeof(longFont[0]) - 1] = 0;
-        ConfigSetClipFont(longFont);
-        EXPECT(wcslen(ConfigGetClipFont()) == CLIP_FONT_MAX - 1,
+        CfgSetStr(CFG_CLIP_FONT, longFont);
+        EXPECT(wcslen(CfgStr(CFG_CLIP_FONT)) == CLIP_FONT_MAX - 1,
                "CFG: 超长 ClipFont 被截断存下（不是 fastfail）");
-        ConfigSetClipFont(L"");
-        EXPECT(ConfigGetClipFont()[0] == 0, "CFG: ClipFont 可清空（= 内置默认）");
+        CfgSetStr(CFG_CLIP_FONT, L"");
+        EXPECT(CfgStr(CFG_CLIP_FONT)[0] == 0, "CFG: ClipFont 可清空（= 内置默认）");
     }
 
     /* '#' 开头不再算注释（只认 ';'）。可观测的差别：名单段里一行 "# Ghost.exe"
@@ -807,7 +780,7 @@ int main(void) {
     /* 重新加载覆盖旧值 */
     WriteIni("[General]\r\nRunAsAdmin = 1\r\n[NativeWordJump]\r\nFooBar\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(ConfigGetRunAsAdmin() && ConfigMatchName(L"foobar"), "CFG: 重载后新配置生效");
+    EXPECT(CfgBool(CFG_RUN_AS_ADMIN) && ConfigMatchName(L"foobar"), "CFG: 重载后新配置生效");
     EXPECT(!ConfigMatchName(L"Legacy.exe"), "CFG: 重载后旧名单失效");
 
     /* 模板：不存在时生成，且不含禁止字样。
@@ -824,7 +797,7 @@ int main(void) {
     EXPECT(TemplateHas("LogMaxKB = 2048"),   "CFG: 模板含 LogMaxKB 默认值");
     /* 默认值来自 config.c 的编译期常量：这里按取值现拼，改默认不会漏改断言 */
     { char tpl[64];
-      _snprintf_s(tpl, sizeof(tpl), _TRUNCATE, "MaxArrowSteps = %d", ConfigGetMaxArrowSteps());
+      _snprintf_s(tpl, sizeof(tpl), _TRUNCATE, "MaxArrowSteps = %d", CfgInt(CFG_MAX_ARROW_STEPS));
       EXPECT(TemplateHas(tpl), "CFG: 模板含 MaxArrowSteps 默认值"); }
     EXPECT(TemplateHas("OverStepMode = 1"),  "CFG: 模板含 OverStepMode 默认值");
     EXPECT(TemplateHas("WheelScrollMul = 3"), "CFG: 模板含 WheelScrollMul 默认值");
@@ -844,12 +817,12 @@ int main(void) {
        它是字符串，走的是与整数不同的那条路。 */
     EXPECT(TemplateHas("DittoDir = "), "CFG: 模板含 DittoDir（默认空 = 不启用剪贴板）");
     {
-        ConfigSetDittoDir(L"..\\Ditto");
-        const WCHAR* got = ConfigGetDittoDir();
+        CfgSetStr(CFG_DITTO_DIR, L"..\\Ditto");
+        const WCHAR* got = CfgStr(CFG_DITTO_DIR);
         EXPECT(got && wcscmp(got, L"..\\Ditto") == 0,
                "CFG: DittoDir 原样存取（相对路径不在配置层展开）");
-        ConfigSetDittoDir(L"");
-        EXPECT(ConfigGetDittoDir()[0] == 0, "CFG: DittoDir 可清空（= 关闭该功能）");
+        CfgSetStr(CFG_DITTO_DIR, L"");
+        EXPECT(CfgStr(CFG_DITTO_DIR)[0] == 0, "CFG: DittoDir 可清空（= 关闭该功能）");
     }
     /* 快速粘贴的字体/字号：字号是**磅**（与系统字体对话框一致），有钳制。
        默认值 10 在这里写字面量（STR 宏是 config.c 的内部实现，测试不引入）——
@@ -857,15 +830,15 @@ int main(void) {
     EXPECT(TemplateHas("ClipFont = "),    "CFG: 模板含 ClipFont（默认空 = 内置字体）");
     EXPECT(TemplateHas("ClipFontSize = 10"), "CFG: 模板含 ClipFontSize 默认值");
     {
-        ConfigSetClipFont(L"MiSans Medium");
-        EXPECT(wcscmp(ConfigGetClipFont(), L"MiSans Medium") == 0,
+        CfgSetStr(CFG_CLIP_FONT, L"MiSans Medium");
+        EXPECT(wcscmp(CfgStr(CFG_CLIP_FONT), L"MiSans Medium") == 0,
                "CFG: ClipFont 原样存取（带字重后缀的字面名不改写）");
-        ConfigSetClipFontSize(999);
-        EXPECT(ConfigGetClipFontSize() == CLIP_FONT_SIZE_MAX, "CFG: 字号超上限被钳制");
-        ConfigSetClipFontSize(1);
-        EXPECT(ConfigGetClipFontSize() == 6, "CFG: 字号低于下限被钳到 6");
-        ConfigSetClipFont(L"");
-        ConfigSetClipFontSize(CLIP_FONT_SIZE_DEFAULT);
+        CfgSetInt(CFG_CLIP_FONT_SIZE, 999);
+        EXPECT(CfgInt(CFG_CLIP_FONT_SIZE) == CLIP_FONT_SIZE_MAX, "CFG: 字号超上限被钳制");
+        CfgSetInt(CFG_CLIP_FONT_SIZE, 1);
+        EXPECT(CfgInt(CFG_CLIP_FONT_SIZE) == 6, "CFG: 字号低于下限被钳到 6");
+        CfgSetStr(CFG_CLIP_FONT, L"");
+        CfgSetInt(CFG_CLIP_FONT_SIZE, CLIP_FONT_SIZE_DEFAULT);
     }
     /* 激活键不再进配置：模板里**不该**再出现这两项（否则用户会以为能改） */
     EXPECT(!TemplateHas("EnhanceKeys"), "CFG: 模板不再含 EnhanceKeys（已改为编译期常量）");

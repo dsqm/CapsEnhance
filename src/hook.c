@@ -666,7 +666,7 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
         /* 横向接管的判据：只有**纵向轴**才谈得上"Shift 把它改成横向"（横向轴本来
            就是横向，不需要再翻一次）。倍数 0 = 该组合已被配置关闭 -> 不接管，
            让它退回下面的纵向语义（旧承诺）。 */
-        int  hmul = (chord && vert && g_shiftMod) ? ConfigGetWheelHScrollMul() : 0;
+        int  hmul = (chord && vert && g_shiftMod) ? CfgInt(CFG_WHEEL_HSCROLL_MUL) : 0;
         BOOL shiftToH = (hmul > 0);
 
         /* 记录模式下的现场：**只记物理事件**（注入的在上面就放行了），所以不会被
@@ -716,7 +716,7 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
         /* 普通（只按住 C）：快速滚动 N 倍 —— 见 main.c 的 WM_WHEEL_ACCEL。
            物理格不吞（它是"加强"，不是"替换"）。 */
         if (vert && chord && delta != 0) {
-            int mul = ConfigGetWheelScrollMul();
+            int mul = CfgInt(CFG_WHEEL_SCROLL_MUL);
             if (mul > 1)
                 PostMessageW(g_mainWnd, WM_WHEEL_ACCEL, (WPARAM)delta, (LPARAM)mul);
         }
