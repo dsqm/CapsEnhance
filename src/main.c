@@ -667,9 +667,9 @@ void ApplyPauseState(void) {
 /* ============ 窗口过程 ============ */
 static void ResetEngine(void) {
     StopEngine();
-    /* 帮助窗口跟着和弦一起收：松开 C、暂停、重启都会走到这里，一处覆盖全 —— 
-       否则"按着 C+F1 直接松 C"会让窗口一直留着（心跳断供那条路虽然也会收，
-       但那是 800ms 之后的兜底，用户当下看到的就是"松手了图还挂着"）。 */
+    /* 帮助窗口跟着和弦一起收：松开 C、暂停、重启都会走到这里，一处覆盖全 ——
+       否则"按着 C+F1 直接松 C"会让窗口一直留着（子进程那边虽有 3 分钟上限，
+       但那是异常兜底；正常路径必须在这里就收）。 */
     HelpHide();
     NavSelTrackReset();
     /* 丢掉还没开始的"重复开火"尾流，但保留"松手补齐" —— 后者是用户本次
@@ -810,6 +810,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
        管理员运行时 explorer 的广播本来是会被 UIPI 拦掉的（见 TrayStartRetry）。 */
     if (msg == s_taskbarCreated && s_taskbarCreated) { TrayRebuild(); return 0; }
     if (ClipIsClosedMsg(msg)) { ClipClosed(); return 0; }   /* 浮层自行关闭（如粘贴后收起） */
+    if (msg == WM_CLIP_GONE) { ClipGone(); return 0; }      /* 浮层进程没了（内核告知，见 src/child.c） */
 
     switch (msg) {
     /* ---- 和弦引擎事件 ---- */
@@ -1021,9 +1022,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER: {
         if (wp == TRAY_RETRY_TIMER) { TrayRetryTick(); return 0; }
         if (wp == HELP_TIMER) { HelpTick(); return 0; }
-        if (wp == HELP_KA_TIMER) { HelpKaTick(); return 0; }
         if (wp == CLIP_TIMER) { ClipTick(); return 0; }
-        if (wp == CLIP_KA_TIMER) { ClipKaTick(); return 0; }
         if (wp != 2) break;
         if (!g_cMod) { ResetEngine(); return 0; }
         ULONGLONG now = GetTickCount64();

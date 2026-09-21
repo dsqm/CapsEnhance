@@ -25,6 +25,8 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\colorcode_test.obj src\colorcode.c || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\test_color.obj test\test_color.c || exit /b 1
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
+   /Isrc /c /Foobj\test_child.obj test\test_child.c || exit /b 1
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\test_nav.obj obj\nav_test.obj obj\send_test.obj obj\config_test.obj ^
    /link /OUT:obj\test\test_nav.exe ^
@@ -42,6 +44,10 @@ cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\test_color.obj obj\colorcode_test.obj ^
    /link /OUT:obj\test\test_color.exe /SUBSYSTEM:CONSOLE || exit /b 1
+rem test_child.c includes src\child.c directly, so link only its own obj
+cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
+   obj\test_child.obj ^
+   /link /OUT:obj\test\test_child.exe user32.lib /SUBSYSTEM:CONSOLE || exit /b 1
 echo [OK] compiled. running test_nav (word-jump algorithm)...
 ".\obj\test\test_nav.exe"
 set NAVRC=%errorlevel%
@@ -57,7 +63,12 @@ echo.
 echo [OK] running test_color (color-code parsing)...
 ".\obj\test\test_color.exe"
 set COLORRC=%errorlevel%
+echo.
+echo [OK] running test_child (subprocess lifetime: job + death notify)...
+".\obj\test\test_child.exe"
+set CHILDRC=%errorlevel%
 if not "%NAVRC%"=="0" exit /b %NAVRC%
 if not "%SCIRC%"=="0" exit /b %SCIRC%
 if not "%CFGRC%"=="0" exit /b %CFGRC%
-exit /b %COLORRC%
+if not "%COLORRC%"=="0" exit /b %COLORRC%
+exit /b %CHILDRC%

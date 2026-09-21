@@ -48,6 +48,7 @@
 #define WM_CLIP_ESC      (WM_APP + 15) /* 钩子 -> 主线程：剪贴板浮层打开期间按了 Esc（代收，见 clip.c） */
 #define WM_CLIP_KEY      (WM_APP + 16) /* 钩子 -> 主线程：浮层打开期间的导航键（wParam=vk，lParam=CLIPKF_*） */
 #define WM_CLIP_DITTO    (WM_APP + 17) /* 钩子 -> 主线程：浮层开着时单击了 Caps -> 转 Ditto 本体（见 ClipCallDitto） */
+#define WM_CLIP_GONE     (WM_APP + 18) /* 子进程死亡通知（实现在 src/child.c）-> 主线程：清 s_want、恢复按键放行 */
 #define CLIPKF_SHIFT     0x1           /* 那一刻 Shift 按着（= 纯文本粘贴） */
 #define CLIPKF_ALT       0x2           /* 那一刻 Alt 按着（Alt+数字 才拦，见 hook.c） */
 #define WM_FOLDER_OPEN (WM_APP + 14) /* 打开所在文件夹**失败**：wParam=FOLDER_ERR_*（一次性线程 -> 主线程弹气泡）。
@@ -339,30 +340,26 @@ BOOL FolderResolveTarget(const WCHAR* path, WCHAR* out, size_t cap
      · 主程序把"期望状态"记下来，用 40ms 的定时器反复对账，直到送达或超时
        （1 秒）。反正状态是幂等的，重复发没有副作用。
 
-   ★★ 心跳（HELP_KA_TIMER）：显示期间主程序按期喂一条 KA，帮助 exe 到点收不到
-   就自己退。这条**取代**了原来那两条兜底（"显示超 3 分钟自动收起"与"每秒看
-   主程序窗口在不在"），因为它盯的是更根本的事实 —— **"我还被需要吗"**：
-     · HIDE 丢了 / 主程序被强杀 / 主程序卡住不动，三种情形在别处各有各的判据，
-       在这里是同一件事：喂狗停了。
-     · 响应从 3 分钟降到 800ms，且不再需要"主程序窗口类名"这种间接信号。
-   代价只有显示期间每 200ms 一次 PostMessage（找不到窗口就什么都不做）。
-   手动双击（无 `--hold`）那份没有喂狗的人，所以它仍自己兜 3 分钟上限。 */
-#define HELP_TIMER   4                    /* 主窗口定时器 id（2=和弦引擎 3=托盘重试 5=心跳） */
+   ★★ 寿命兜底不再走心跳（原 HELP_KA_TIMER 已删，完整取舍见 src/child.c 的文件头）：
+     · 主程序**死了**（正常退出 / 崩溃 / 被强杀）-> Job Object 由内核收掉帮助
+       进程，不需要它配合。
+     · 主程序**卡住**（活着但不响应）-> 谁也发不出 HIDE，由帮助 exe 自己的
+       3 分钟上限（`TID_LIFE`）兜底。
+   第二条是 Job Object 覆盖不到的唯一情形 —— "死亡"是内核事件，"僵住"不是；判僵住
+   只能靠超时，而超时判据正是原来那条 800ms 心跳误伤的来源（主线程忙一下就成了
+   "父不要我了"）。正常路径下帮助窗口的寿命仍是和弦本身（F1 一抬就 HIDE），上面
+   两层只在异常时兜底，且不产生任何周期性流量。手动双击那份本来就没人在喂，3 分钟
+   上限对两种模式一视同仁。 */
+#define HELP_TIMER   4                    /* 主窗口定时器 id（2=和弦引擎 3=托盘重试） */
 #define HELP_TICK_MS 40                   /* 对账间隔 */
 #define HELP_TRIES_MAX 25                 /* 40ms x 25 ≈ 1s 内送不到就放弃（下次按下再试） */
-#define HELP_KA_TIMER 5                   /* 心跳定时器 id：只在"期望显示"期间跑 */
-#define HELP_KA_MS    200                 /* 心跳间隔 */
-#define HELP_KA_TIMEOUT_MS 800            /* 帮助 exe 侧：这么久没心跳就自己退。
-                                             4 个周期，容忍连丢两三条（消息队列瞬时拥塞） */
 #define HELP_CLASS   L"CapsEnhanceHelp"   /* 帮助窗口类名（跨进程握手靠它 FindWindow） */
 #define HELP_MSG_SHOW L"CapsEnhanceHelpShow"  /* 注册消息：让它显示 */
 #define HELP_MSG_HIDE L"CapsEnhanceHelpHide"  /* 注册消息：让它隐藏并退出 */
-#define HELP_MSG_KA   L"CapsEnhanceHelpKa"    /* 注册消息：心跳（"我还需要你"） */
 #define HELP_EXE     L"CapsEnhanceHelp.exe"
 void HelpShow(void);   /* F1 按下：让帮助窗口可见（必要时先拉起它） */
 void HelpHide(void);   /* 抬起 / 松开 Caps / 引擎复位：让它隐（它会自己退出） */
 void HelpTick(void);   /* HELP_TIMER 到点：把期望状态再送一次（见上面的说明） */
-void HelpKaTick(void); /* HELP_KA_TIMER 到点：喂一条心跳（只在显示期间有定时器） */
 
 /* ---------- 剪贴板浮层（`Caps+V`；窗口在**独立 exe** `CapsEnhanceClip.exe` 里） ----------
    与帮助窗口同一条理由拆成独立 exe，但比它更重一层：它要打开 Ditto 的 SQLite
@@ -372,7 +369,7 @@ void HelpKaTick(void); /* HELP_KA_TIMER 到点：喂一条心跳（只在显示�
    ★★ 寿命与帮助窗口**不同**：帮助是"按住才显示"（寿命 = 和弦），剪贴板是
    **按一下就开、之后自己活着** —— 按住 V 松手之后窗口还得留着让人挑条目，
    所以这里没有"Caps 抬起就隐"，只有明确的关闭途径（见下）。主程序侧因此
-   只做三件事：拉起、喂心跳、转发 Esc。
+   只做三件事：拉起、转发按键、在它死掉时立刻恢复按键放行。
 
    关闭途径（浮层自己是 WS_EX_NOACTIVATE，收不到键盘，所以 Esc 只能由主程序的
    键盘钩子代收转发）：
@@ -383,13 +380,10 @@ void HelpKaTick(void); /* HELP_KA_TIMER 到点：喂一条心跳（只在显示�
    另有一条：**双击标题栏置顶（钉住）**。置顶期间停用"粘贴后自动关"与
    "点击外部自动关"，为的是连粘多条不被打断 —— 置顶态只能靠 X / Esc / 热键退出。
 
-   心跳与帮助窗口同一套语义（800ms 断供即退）：主程序被强杀、浮层自己卡住，
-   在这里都是同一件事。代价只有显示期间每 200ms 一次 PostMessage。 */
-#define CLIP_TIMER   6                    /* 主窗口定时器 id（4=帮助对账 5=帮助心跳） */
-#define CLIP_KA_TIMER 7                   /* 剪贴板心跳定时器 id */
-#define CLIP_IDLE_TIMER 8                 /* 剪贴板空闲退出计时 id：浮层收起后这么久没再用就停心跳 */
-#define CLIP_IDLE_EXIT_MS (10 * 60 * 1000) /* 驻留时长：关闭后进程再活 10 分钟，期间唤出复用免冷启动 */
-#define CLIP_KA_MS    200                 /* 心跳间隔（与 HELP_KA_MS 同值：同一套语义） */
+   寿命兜底与帮助窗口同一套（Job Object + 各自的绝对上限），差别只在驻留：浮层收起
+   后**进程继续待命 10 分钟**（`GRACE_MS` 在 clip/clip.c），所以"父死子退"这条对它
+   更值钱 —— 主程序一退，内核立刻收掉待命中的浮层，不留孤儿。 */
+#define CLIP_TIMER   6                    /* 主窗口定时器 id（4=帮助对账） */
 #define CLIP_TICK_MS  40                  /* 送达重试间隔 */
 #define CLIP_TRIES_MAX 25                 /* 40ms x 25 ≈ 1s 内送不到就放弃 */
 #define CLIP_CLASS   L"CapsEnhanceClip"   /* 剪贴板窗口类名（跨进程握手靠它 FindWindow） */
@@ -404,24 +398,40 @@ void HelpKaTick(void); /* HELP_KA_TIMER 到点：喂一条心跳（只在显示�
 #define CLIP_INJECT_MARKER 0x434C4950u    /* 'CLIP' */
 #define CLIP_MSG_SHOW L"CapsEnhanceClipShow"  /* 注册消息：让它显示 */
 #define CLIP_MSG_HIDE L"CapsEnhanceClipHide"  /* 注册消息：让它隐藏并退出 */
-#define CLIP_MSG_KA   L"CapsEnhanceClipKa"    /* 注册消息：心跳（"我还需要你"） */
 #define CLIP_MSG_ESC  L"CapsEnhanceClipEsc"   /* 注册消息：主程序代收的 Esc */
 #define CLIP_MSG_KEY  L"CapsEnhanceClipKey"   /* 注册消息：主程序代收的导航键（wParam=vk，lParam=CLIPKF_*） */
-#define CLIP_MSG_CLOSED L"CapsEnhanceClipClosed" /* 注册消息：浮层自行关闭（粘贴/Esc/超时收起）-> 主程序清 s_want */
 #define CLIP_MSG_CLOSED L"CapsEnhanceClipClosed" /* 注册消息：浮层自行关闭（粘贴/Esc/超时收起）-> 主程序清 s_want */
 #define CLIP_EXE     L"CapsEnhanceClip.exe"
 void ClipShow(void);    /* Caps+V 按下：显示（已在显示则 toggle 成隐藏） */
 void ClipHide(void);    /* 明确关闭（Esc / toggle / 引擎复位） */
-void ClipTick(void);    /* CLIP_TIMER 到点：把期望状态再送一次 */
-void ClipKaTick(void);  /* CLIP_KA_TIMER 到点：喂一条心跳 */
+void ClipTick(void);    /* CLIP_TIMER 到点：把期望状态再送一次（送达后开始盯它） */
 void ClipEsc(void);     /* WM_CLIP_ESC：钩子代收的 Esc -> 通知浮层关闭 */
 void ClipCallDitto(void); /* 单击 Caps（浮层开着时）/ 浮层按钮：关浮层并拉起 Ditto 本体 -open */
 void ClipKey(int vk, unsigned flags); /* WM_CLIP_KEY：钩子代收的导航键 -> 转给浮层 */
 BOOL ClipIsOpen(void);  /* 浮层当前是否"该开着"（钩子据此决定要不要拦 Esc） */
 BOOL ClipIsClosedMsg(UINT msg); /* 主窗口收到这条注册消息 = 浮层自行关闭了 */
-void ClipClosed(void);  /* 收到 CLIP_MSG_CLOSED：清 s_want + 停心跳，恢复按键放行 */
-BOOL ClipIsClosedMsg(UINT msg); /* 主窗口收到这条注册消息 = 浮层自行关闭了 */
-void ClipClosed(void);  /* 收到 CLIP_MSG_CLOSED：清 s_want + 停心跳，恢复按键放行 */
+void ClipClosed(void);  /* 收到 CLIP_MSG_CLOSED：清 s_want，恢复按键放行 */
+void ClipGone(void);    /* 收到 WM_CLIP_GONE：浮层进程没了（同一件事，但由内核告知） */
+
+/* ---------- 子进程生命周期（帮助 / 剪贴板浮层的共同底座；实现在 src/child.c） ----------
+   两件事：**父死子退**（Job Object，零协作、卡死也照杀）与**子死父知**（进程句柄
+   等待，内核通知、零轮询）。原心跳（每 200ms 一条 KA + 对面 800ms 超时自杀）同时
+   兼着这两件事、外加一份与子进程自身计时器重复的驻留到期信号，已整体删除。
+   完整取舍见 src/child.c 的文件头。 */
+typedef struct {
+    HANDLE proc;    /* OpenProcess(SYNCHRONIZE) 打开的子进程句柄 */
+    HANDLE wait;    /* RegisterWaitForSingleObject 的等待句柄 */
+    HWND   notify;  /* 子进程结束时通知哪个窗口 */
+    UINT   msg;     /* 用哪条消息通知 */
+} ChildWatch;
+
+BOOL ChildSpawn(const WCHAR* exe, WCHAR* cmd, const WCHAR* dir, HANDLE* outProc);
+                    /* CreateProcess(CREATE_SUSPENDED) -> 挂进 job -> Resume。
+                       outProc 非空时带回进程句柄（调用方负责 CloseHandle）。 */
+BOOL ChildWatchPid(ChildWatch* w, DWORD pid, HWND notify, UINT msg);
+                    /* 盯着这个 pid：它一结束就给 notify 发 msg。已经在盯则直接返回 */
+void ChildWatchStop(ChildWatch* w);
+                    /* 拆掉等待（等回调跑完）并复位结构 */
 
 /* ---------- 坐标空间（进程级，必须在建任何窗口之前调用一次） ----------
    ★ 根因记录：低级鼠标钩子给的 `MSLLHOOKSTRUCT.pt` **永远是物理像素**

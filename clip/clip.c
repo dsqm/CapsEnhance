@@ -161,10 +161,9 @@ static BOOL     g_dbErr = FALSE;
 
 /* ---------- 窗口与绘制 ---------- */
 static HWND      g_hwnd = NULL;
-static UINT      g_msgShow = 0, g_msgHide = 0, g_msgKa = 0, g_msgEsc = 0, g_msgKey = 0;
+static UINT      g_msgShow = 0, g_msgHide = 0, g_msgEsc = 0, g_msgKey = 0;
 static UINT      g_msgClosed = 0;
 static BOOL      g_visible = FALSE;
-static ULONGLONG g_lastKa = 0;
 static HDC       g_memDC = NULL;
 static HBITMAP   g_bmp = NULL;
 static void*     g_bits = NULL;
@@ -183,16 +182,18 @@ static BOOL      g_dragging = FALSE;   /* 正在拖标题栏挪窗口 */
 static POINT     g_dragCur;            /* 按下那一刻的光标位置 */
 static POINT     g_dragWin;            /* 按下那一刻的窗口位置 */
 
+/* 寿命（2026-09-21 起本进程不再有心跳；完整取舍见 src/child.c 的文件头）：
+   TID_GRACE = 收起后**驻留**多久才真正退出（这段时间在等下一次唤出，免冷启动）。
+   主程序**死了**由 Job Object 收（内核立刻动手，不用我们判）；主程序只是**卡住**
+   没有人能发 HIDE，那时这个窗口会一直留着 —— 但它是可见的、鼠标能关，而"卡住"
+   本身就意味着用户正在处理别的事，比起"看着看着提示自己消失"（那是 800ms 心跳
+   时代的误伤），留着更不打扰。手动双击起来的那份同理。 */
 #define TID_GRACE  2
-#define TID_LIFE   3
-#define TID_KA     5
 #define TID_TIP   6    /* 悬停提示的自动消失（TRACK 模式不会自己收） */
 #define TID_TIPSHOW 7  /* 悬停初始延迟：停稳 500ms 才弹（Ditto/系统同款） */
 #define TID_TIPFADE 8  /* 提示窗口渐显/渐隐的步进时钟 */
 #define TIP_DELAY_MS 500
 #define GRACE_MS   (10 * 60 * 1000)   /* 驻留时长：收起后进程再活 10 分钟（期间唤出复用，免冷启动），到点才真正退出 */
-#define LIFE_MS    180000
-#define KA_POLL_MS 250
 
 static BOOL  Render(void);
 static void  DoHideClose(void);
@@ -1575,8 +1576,6 @@ static void DittoAction(void) {
 
 static void DoShow(void) {
     KillTimer(g_hwnd, TID_GRACE);      /* 撤销空闲退出：又有人用了 */
-    g_lastKa = GetTickCount64();
-    SetTimer(g_hwnd, TID_KA, KA_POLL_MS, NULL);
     if (!g_visible) {
         /* 驻留期间 Ditto 可能又复制了新内容：每次显示都重读一次（此刻窗口
            还没 SHOW，无闪烁；只读本地库 + LIMIT 30，毫秒级）。缩略图在
@@ -1628,7 +1627,6 @@ static void CALLBACK WinEventProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd,
 static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (g_msgShow && msg == g_msgShow) { DoShow(); return 0; }
     if (g_msgHide && msg == g_msgHide) { DoHideClose(); return 0; }
-    if (g_msgKa   && msg == g_msgKa)   { g_lastKa = GetTickCount64(); return 0; }
     if (g_msgEsc  && msg == g_msgEsc)  { DoHideClose(); return 0; }
     if (msg == WM_THUMB_READY) { Render(); return 0; }
     if (g_msgKey  && msg == g_msgKey) {
@@ -1649,7 +1647,6 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     switch (msg) {
     case WM_TIMER:
-        if (wp == TID_LIFE)  { DoHideClose(); return 0; }
         if (wp == TID_GRACE) { DestroyWindow(hwnd); return 0; }
         if (wp == TID_TIP)  { TipHide(); return 0; }   /* Ditto 的 ToolTipTimeout */
         if (wp == TID_TIPFADE) {
@@ -1674,14 +1671,6 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 int r2 = RowAt((float)cl.y);
                 if (r2 >= 0) TipShowAt(r2, c);
             }
-            return 0;
-        }
-        if (wp == TID_KA) {
-            /* 看门狗对驻留期同样生效：主程序退出/被杀 -> 心跳断 -> 800ms 内自杀。
-               ★ 条件里不能带 g_visible —— 驻留（隐藏待命）期正是最需要它的时候
-               （实测漏了它：主程序退了，驻留的浮层进程成了孤儿永生）。 */
-            if (GetTickCount64() - g_lastKa > HELP_KA_TIMEOUT_MS)
-                DestroyWindow(hwnd);
             return 0;
         }
         return 0;
@@ -1939,7 +1928,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     g_msgShow = RegisterWindowMessageW(CLIP_MSG_SHOW);
     g_msgHide = RegisterWindowMessageW(CLIP_MSG_HIDE);
-    g_msgKa   = RegisterWindowMessageW(CLIP_MSG_KA);
     g_msgEsc  = RegisterWindowMessageW(CLIP_MSG_ESC);
     g_msgKey  = RegisterWindowMessageW(CLIP_MSG_KEY);
     g_msgClosed = RegisterWindowMessageW(CLIP_MSG_CLOSED);

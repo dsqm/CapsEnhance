@@ -189,10 +189,9 @@ static const char* kImeDesc[] = { "不处理", "切中文", "切英文" };
 
 /* ---------- 运行时状态 ---------- */
 static HWND  g_hwnd = NULL;
-static UINT  g_msgShow = 0, g_msgHide = 0, g_msgKa = 0;
+static UINT  g_msgShow = 0, g_msgHide = 0;
 static BOOL  g_holdMode = FALSE;    /* --hold：由主程序驱动（等它给状态） */
 static BOOL  g_visible = FALSE;
-static ULONGLONG g_lastKa = 0;      /* 最后一次收到心跳的时刻（判据见 TID_KA） */
 static int   g_unit = 64;           /* 一个 u 多少像素（按屏幕算，见 FitUnit） */
 static int   g_pxW = 0, g_pxH = 0;  /* 整个浮层的像素尺寸 */
 /* 布局量：四个"带"的高度与四个字号。**全部由 FitUnit 按 DPI 算一次** —— 
@@ -204,13 +203,11 @@ static HBITMAP g_bmp = NULL;
 static void*   g_bits = NULL;
 
 #define TID_GRACE  2   /* 300ms：隐完再退，给"又按了一次"留余地 */
-#define TID_LIFE   3   /* 3 分钟：**只在手动模式下用**（--hold 有心跳，不需要它） */
+#define TID_LIFE   3   /* 3 分钟：可见期间的绝对上限（两种模式都上，见 DoShow） */
 #define TID_ARMED  4   /* 1.5s：--hold 下等不到状态就自己退 */
-#define TID_KA     5   /* 250ms：查一次心跳是否断供 */
 #define GRACE_MS   300
 #define LIFE_MS    180000
 #define ARMED_MS   1500
-#define KA_POLL_MS 250
 
 /* ---------- 小工具 ---------- */
 
@@ -781,15 +778,13 @@ static void MakeSurface(void) {
 static void DoShow(void) {
     KillTimer(g_hwnd, TID_GRACE);
     KillTimer(g_hwnd, TID_ARMED);
-    if (g_holdMode) {
-        /* 主程序在喂心跳，心跳就是寿命本身。这里先把它"喂"上一口，免得刚显示
-           就被判成断供（SHOW 与 KA 谁先到是有先后的）。 */
-        g_lastKa = GetTickCount64();
-        SetTimer(g_hwnd, TID_KA, KA_POLL_MS, NULL);
-    } else {
-        /* 手动查看：没有人在喂，只能自己兜一个上限（也是唯一用到 TID_LIFE 的地方） */
-        SetTimer(g_hwnd, TID_LIFE, LIFE_MS, NULL);
-    }
+    /* 可见期间的绝对上限，两种模式都上。正常路径的寿命由消息决定：--hold 下 F1
+       一抬主程序就发 HIDE，手动模式下用户自己关。这一条兜的是"谁也发不出 HIDE"
+       那种情形 —— 主程序**卡住**（不是死：死了由 Job Object 收，那是内核的事、
+       立刻生效）。判"卡住"只能靠超时，而超时判据正是原来那条 800ms 心跳误伤的
+       来源（主线程忙一下就成了"父不要我了"），所以放宽到 3 分钟：远长于"按住
+       看一眼"，又保证窗口不会永远挂在屏幕上。 */
+    SetTimer(g_hwnd, TID_LIFE, LIFE_MS, NULL);
     if (!g_visible) {
         Render();
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
@@ -808,9 +803,7 @@ static void DoHide(void) {
         ShowWindow(g_hwnd, SW_HIDE);
         g_visible = FALSE;
     }
-    /* 隐完再等 300ms 才退："刚松手又按下"时不至于来回重启进程。
-       心跳此时已经停了，但 TID_KA 的判据要 g_visible 才生效 —— 这段缓冲
-       不会被它打断，正好走完。（真有意外也顶多多活 800ms。） */
+    /* 隐完再等 300ms 才退："刚松手又按下"时不至于来回重启进程。 */
     SetTimer(g_hwnd, TID_GRACE, GRACE_MS, NULL);
 }
 
@@ -823,10 +816,6 @@ static LRESULT CALLBACK HelpProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DoHide();
         return 0;
     }
-    if (g_msgKa && msg == g_msgKa) {
-        g_lastKa = GetTickCount64();   /* 只续命，不做别的 */
-        return 0;
-    }
     switch (msg) {
     case WM_TIMER:
         if (wp == TID_LIFE) { DoHide(); return 0; }
@@ -835,14 +824,6 @@ static LRESULT CALLBACK HelpProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             /* --hold 下 1.5s 还没等到主程序给状态：它早就不需要这个窗口了
                （典型情形是"按下 30ms 就松手"，SHOW/HIDE 都发在窗口出生之前）。 */
             DestroyWindow(hwnd);
-            return 0;
-        }
-        if (wp == TID_KA) {
-            /* ★ 心跳断供 = 唯一需要的"收尾"判据：HIDE 丢了、主程序被强杀、
-               主程序卡住，到这里都是同一件事。对端按 200ms 喂，这边给到
-               800ms（4 个周期）—— 容忍消息队列瞬时拥塞，又远快于旧的 3 分钟。 */
-            if (g_visible && GetTickCount64() - g_lastKa > HELP_KA_TIMEOUT_MS)
-                DestroyWindow(hwnd);
             return 0;
         }
         return 0;
@@ -899,7 +880,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     g_msgShow = RegisterWindowMessageW(HELP_MSG_SHOW);
     g_msgHide = RegisterWindowMessageW(HELP_MSG_HIDE);
-    g_msgKa   = RegisterWindowMessageW(HELP_MSG_KA);
 
     /* 已经有一个在跑（上一轮还没退完）：把手动模式当成"再显示一次"，
        --hold 模式直接让位（主程序下 40ms 就会找到那个窗口并给它发状态）。 */

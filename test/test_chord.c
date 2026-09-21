@@ -81,7 +81,6 @@ static int g_helpShow = 0, g_helpHide = 0;
 void HelpShow(void) { g_helpShow++; }
 void HelpHide(void) { g_helpHide++; }
 void HelpTick(void) { }
-void HelpKaTick(void) { }
 static void ResetHelpRec(void) { g_helpShow = 0; g_helpHide = 0; }
 
 /* 剪贴板浮层（C+V）：与帮助同一类"只是拉起另一个 exe 的窗口"，同样桩掉 ——
@@ -93,11 +92,16 @@ static BOOL g_clipOpen = FALSE;
 void ClipShow(void) { g_clipShow++; g_clipOpen = TRUE; }
 void ClipHide(void) { g_clipHide++; g_clipOpen = FALSE; }
 void ClipTick(void) { }
-void ClipKaTick(void) { }
 void ClipEsc(void) { g_clipEsc++; ClipHide(); }
 void ClipKey(int vk, unsigned flags) { (void)vk; (void)flags; g_clipKey++; }
 void ClipCallDitto(void) { g_clipHide++; g_clipOpen = FALSE; }   /* 转本体先关浮层 */
 BOOL ClipIsOpen(void) { return g_clipOpen; }
+/* main.c 的 WndProc 还要下面三条（浮层自行关闭 / 浮层进程没了）。本测试不验它们，
+   但**必须给出定义**，否则整个 test_chord 链接不过 —— ccabe56 加前两条时就漏了，
+   build_test 从那时起一直是链接失败。 */
+BOOL ClipIsClosedMsg(UINT msg) { (void)msg; return FALSE; }
+void ClipClosed(void) { g_clipOpen = FALSE; }
+void ClipGone(void)   { g_clipOpen = FALSE; }
 static void ResetClipRec(void) {
     g_clipShow = 0; g_clipHide = 0; g_clipEsc = 0; g_clipKey = 0; g_clipOpen = FALSE;
 }

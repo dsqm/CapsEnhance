@@ -39,18 +39,19 @@
    反过来，帮助 exe 也有对称的防呆：它先建**隐藏**窗口再等消息，1.5 秒等不到
    就自己退出 —— 两边各兜一半，才不会出现"窗口永久留在屏幕上"。
 
-   第二件事是**喂心跳**（HELP_KA_TIMER）：显示期间每 200ms 一条 KA，帮助 exe
-   到点收不到就自己退。SHOW/HIDE 是"事件"，心跳是"状态"—— 只在事件上做判断
-   迟早会卡在某个没收到的事件上（消息丢了、对面死了、对面卡住了），而心跳
-   把"我还需要你"这件事变成持续可观测的。所以显示期间不需要别的看门狗。 */
+   原本还有第二件事**喂心跳**（HELP_KA_TIMER）：显示期间每 200ms 一条 KA，
+   帮助 exe 到点收不到就自己退。已整体删除 —— 它盯的两件事各自有了更好的做法：
+     · "父**死了**"由 Job Object 负责（内核收掉子进程，正常退出 / 崩溃 / 强杀
+       一视同仁，而且是**立刻**，不是 800ms 后）；
+     · "父**卡住了**"只能靠超时判，而超时判据正是心跳误伤的来源（主线程忙一下
+       就成了"父不要我了"）—— 改成帮助 exe 自己的 3 分钟上限（`TID_LIFE`）兜底。
+   完整取舍见 src/child.c 的文件头。 */
 
 static UINT  s_msgShow = 0;    /* 注册消息：与帮助 exe 用同名注册 -> 拿到同一个消息号 */
 static UINT  s_msgHide = 0;
-static UINT  s_msgKa   = 0;
 static BOOL  s_want    = FALSE;  /* 期望：可见？ */
 static int   s_delivered = 0;    /* 已送达：-1 未知 / 0 已隐 / 1 已显 */
 static BOOL  s_spawned = FALSE;  /* 本轮流是否已经 CreateProcess 过 */
-static BOOL  s_kaOn    = FALSE;  /* 心跳定时器是否在跑（只在期望显示期间） */
 static int   s_ticks   = 0;
 
 static void EnsureMsgs(void) {
@@ -58,35 +59,11 @@ static void EnsureMsgs(void) {
        这是 Windows 给"两个自有进程之间说私话"准备的正规做法。 */
     if (!s_msgShow) s_msgShow = RegisterWindowMessageW(HELP_MSG_SHOW);
     if (!s_msgHide) s_msgHide = RegisterWindowMessageW(HELP_MSG_HIDE);
-    if (!s_msgKa)   s_msgKa   = RegisterWindowMessageW(HELP_MSG_KA);
 }
 
 static void StopTick(void) {
     if (g_mainWnd) KillTimer(g_mainWnd, HELP_TIMER);
     s_ticks = 0;
-}
-
-/* ---------- 心跳 ----------
-   与对账那只看门狗不同：**它跑得越久越说明一切正常**，所以没有"送不到就放弃"
-   这种收尾；停表只在"不再需要显示"时发生。 */
-static void KaStart(void) {
-    if (!g_mainWnd || s_kaOn) return;
-    s_kaOn = TRUE;
-    SetTimer(g_mainWnd, HELP_KA_TIMER, HELP_KA_MS, NULL);
-}
-
-static void KaStop(void) {
-    if (!s_kaOn) return;
-    s_kaOn = FALSE;
-    if (g_mainWnd) KillTimer(g_mainWnd, HELP_KA_TIMER);
-}
-
-void HelpKaTick(void) {
-    if (!s_kaOn || !s_msgKa) return;
-    /* 找不到窗口就什么都不做：可能它还没出生（对账那只看门狗负责拉起），
-       也可能它已经退了（那正是心跳想达到的效果，不必重试）。 */
-    HWND w = FindWindowW(HELP_CLASS, NULL);
-    if (w) PostMessageW(w, s_msgKa, 0, 0);
 }
 
 /* 拉起帮助 exe（同目录）。与 LaunchSettings 同一条规矩：**工作目录显式传它
@@ -106,16 +83,11 @@ static void SpawnHelp(void) {
     /* --hold：别自己显示，等主程序告诉你状态（见 help/help.c 的模式说明） */
     _snwprintf_s(cmd, MAX_PATH + 32, _TRUNCATE, L"\"%s\" --hold", exe);
 
-    STARTUPINFOW si;
-    PROCESS_INFORMATION pi;
-    memset(&si, 0, sizeof(si));
-    memset(&pi, 0, sizeof(pi));
-    si.cb = sizeof(si);
-    if (CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, dir, &si, &pi)) {
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
+    /* 交给 child.c：挂起起 -> 挂进 job（主程序一死，内核收掉它）-> 放行。
+       hProcess 不接：帮助窗口的收场不走句柄等待 —— 它的 s_want 来自和弦，
+       下一拍对账自己会纠正，不需要"进程没了"这条通知。 */
+    if (ChildSpawn(exe, cmd, dir, NULL))
         return;
-    }
     /* 起不来只能算了：这只影响"C+F1 没反应"，不该打断当前和弦（也会写日志，
        ResetEngine 之后 s_want 会被清掉，不会反复重试）。 */
     if (g_recording.load()) CapLog("  [帮助] 启动 %ls 失败 err=%lu", HELP_EXE, GetLastError());
@@ -137,9 +109,6 @@ void HelpShow(void) {
     s_delivered = -1;                /* 强制重送：上一次的"已隐藏"不再代表现状 */
     s_spawned   = FALSE;
     Kick();
-    /* 心跳立刻起：帮助 exe 一起身就会先收到心跳（哪怕 SHOW 还在路上），
-       这样它那边的"刚显示就超时"从根上不存在。 */
-    KaStart();
 }
 
 void HelpHide(void) {
@@ -148,7 +117,6 @@ void HelpHide(void) {
     if (!s_want && s_delivered == 0) return;
     s_want      = FALSE;
     s_delivered = -1;
-    KaStop();                        /* 先停喂狗：HIDE 万一没送到，800ms 后它自己退 */
     Kick();
 }
 

@@ -24,9 +24,10 @@
 
 /* ================= 剪贴板浮层的"开合"（主程序侧，Caps+V） =================
    窗口本体在**独立 exe**（clip/clip.c → bin/CapsEnhanceClip.exe）里，这里只做
-   四件事：**拉起它**、**告诉它显示**、**喂心跳**、**代收 Esc**。跨进程机制与
-   帮助窗口（src/help.c）完全同构 —— 注册消息 + FindWindow + 送达重试 + 心跳，
-   那边的每一条理由在这里同样成立，不重复写一遍。
+   四件事：**拉起它**、**告诉它显示**、**代收 Esc**、**发现它没了**。跨进程机制与
+   帮助窗口（src/help.c）完全同构 —— 注册消息 + FindWindow + 送达重试，那边的
+   每一条理由在这里同样成立，不重复写一遍。**心跳两边都已删掉**：收场改由
+   Job Object（父死子退）与进程句柄等待（子死父知）负责，见 src/child.c。
 
    与帮助窗口唯一的、也是最关键的差别：**寿命不跟和弦走**。
      · 帮助是"按住 F1 才显示"，松开就隐 —— 寿命 = 和弦，所以 HelpHide 会在
@@ -44,22 +45,19 @@
 
 static UINT  s_msgShow = 0;
 static UINT  s_msgHide = 0;
-static UINT  s_msgKa   = 0;
 static UINT  s_msgEsc  = 0;
 static UINT  s_msgKey  = 0;
 static UINT  s_msgClosed = 0;
 static BOOL  s_want    = FALSE;   /* 期望：可见？ */
 static int   s_delivered = 0;     /* 已送达：-1 未知 / 0 已隐 / 1 已显 */
 static BOOL  s_spawned = FALSE;   /* 本轮是否已经 CreateProcess 过 */
-static BOOL  s_kaOn    = FALSE;
-static void  IdleArm(void);      /* 前置：KaStop/KaStart 的调用方在下面 */
-static int   s_miss    = 0;       /* 连续几拍找不到浮层窗口（见 ClipKaTick） */
+static HANDLE s_spawnProc = NULL; /* 本轮拉起来的那个进程：始终送不到就收掉它（见 ClipTick） */
+static ChildWatch s_watch;        /* 浮层进程的死亡通知（见 ClipGone） */
 static int   s_ticks   = 0;
 
 static void EnsureMsgs(void) {
     if (!s_msgShow) s_msgShow = RegisterWindowMessageW(CLIP_MSG_SHOW);
     if (!s_msgHide) s_msgHide = RegisterWindowMessageW(CLIP_MSG_HIDE);
-    if (!s_msgKa)   s_msgKa   = RegisterWindowMessageW(CLIP_MSG_KA);
     if (!s_msgEsc)  s_msgEsc  = RegisterWindowMessageW(CLIP_MSG_ESC);
     if (!s_msgKey)  s_msgKey  = RegisterWindowMessageW(CLIP_MSG_KEY);
     if (!s_msgClosed) s_msgClosed = RegisterWindowMessageW(CLIP_MSG_CLOSED);
@@ -74,59 +72,13 @@ static void StopTick(void) {
     s_ticks = 0;
 }
 
-static void KaStart(void) {
-    if (!g_mainWnd || s_kaOn) return;
-    s_kaOn = TRUE;
-    s_miss = 0;
-    SetTimer(g_mainWnd, CLIP_KA_TIMER, CLIP_KA_MS, NULL);
-}
-
-static void KaStop(void) {
-    if (!s_kaOn) return;
-    s_kaOn = FALSE;
-    if (g_mainWnd) KillTimer(g_mainWnd, CLIP_KA_TIMER);
-}
-
-
-/* 驻留策略（2026-09-21）：浮层收起/粘贴后**不停心跳**，进程继续待命 ——
-   下一次 Caps+V 直接复用（免冷启动：读库 + 起缩略图 + 建窗口都在省）。
-   起 10 分钟空闲计时，到点才 KaStop，浮层 800ms 内自行退出；
-   期间再唤出由 ClipShow 撤销计时。主程序退出时心跳随主窗口销毁自然停，
-   浮层同样自行退出 —— 不需要专门的清理路径。 */
-static void IdleArm(void) {
-    if (g_mainWnd) SetTimer(g_mainWnd, CLIP_IDLE_TIMER, CLIP_IDLE_EXIT_MS, NULL);
-}
-
-static void IdleDisarm(void) {
-    if (g_mainWnd) KillTimer(g_mainWnd, CLIP_IDLE_TIMER);
-}
-
-void ClipKaTick(void) {
-    if (!s_kaOn || !s_msgKa) return;
-    HWND w = FindWindowW(CLIP_CLASS, NULL);
-    if (w) {
-        s_miss = 0;
-        PostMessageW(w, s_msgKa, 0, 0);
-        return;
-    }
-    /* 还没送达过 = 窗口仍在冷启动的路上，"找不到"不是"它死了"。心跳的容忍
-       （3 拍 = 600ms）比送达重试的预算（25×40ms = 1000ms）还短，不关掉这一段
-       判活就会在窗口出生之前先把这次按键判死 —— 表现是"杀软扫得慢的时候
-       Caps+V 得按两次"。真正拉不起来由 ClipTick 的超时负责清 s_want。 */
-    if (s_delivered != 1) return;
-    /* ★ 浮层会**自己**退出（点 X / 点外面 / 粘贴后 / 它那边的心跳超时），而它
-       死的时候不会通知我们 —— 心跳本来就只是单向的"我还活着"。
-       所以这里必须自己发现：连续几拍找不到窗口 = 它已经没了。
-       不这么做的话 s_want 永远为真，钩子就会一直替一个**不存在的窗口**吞
-       Esc / 回车 / 方向键 —— 表现为"浮层关掉之后别的程序回车都用不了"。
-       3 拍 = 600ms：容忍一次消息抖动，又足够快。 */
-    if (++s_miss >= 3) {
-        s_want      = FALSE;
-        s_delivered = 0;
-        s_miss      = 0;
-        KaStop();
-    }
-}
+/* 驻留策略（2026-09-21）：浮层收起/粘贴后**进程继续待命 10 分钟**，下一次
+   Caps+V 直接复用（免冷启动：读库 + 起缩略图 + 建窗口都在省）。这段时间由
+   **浮层自己的** GRACE_MS 计时管着（clip/clip.c）—— 它是唯一知道"自己刚被收起"
+   的那一方，主程序再记一份就是两个钟各算各的（原来确实如此：主程序的
+   CLIP_IDLE_TIMER 与浮层的 TID_GRACE 同事件、同时长）。
+   待命期间主程序**没有任何周期性动作**：唤出时发一条消息，死活由 Job Object
+   与进程句柄等待负责（见 src/child.c）。 */
 
 /* ---------- Ditto 目录：相对 -> 绝对 ----------
    **基准只有本进程知道**（自己的 exe 目录），所以展开必须在这里做完再传给
@@ -191,16 +143,10 @@ static void SpawnClip(void) {
         _snwprintf_s(cmd, (size_t)(MAX_PATH + DITTO_DIR_MAX + CLIP_FONT_MAX + 96), _TRUNCATE,
                      L"\"%s\"", exe);
 
-    STARTUPINFOW si;
-    PROCESS_INFORMATION pi;
-    memset(&si, 0, sizeof(si));
-    memset(&pi, 0, sizeof(pi));
-    si.cb = sizeof(si);
-    if (CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, dir, &si, &pi)) {
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
+    /* 交给 child.c：挂起起 -> 挂进 job（父死子退）-> 放行，并带回进程句柄
+       （始终送不到时靠它把孤儿窗口收掉，见 ClipTick 的超时分支）。 */
+    if (ChildSpawn(exe, cmd, dir, &s_spawnProc))
         return;
-    }
     if (g_recording.load())
         CapLog("  [剪贴板] 启动 %ls 失败 err=%lu", CLIP_EXE, GetLastError());
 }
@@ -223,7 +169,6 @@ void ClipShow(void) {
         if (!FindWindowW(CLIP_CLASS, NULL)) {
             s_want      = FALSE;
             s_delivered = 0;
-            KaStop();
         } else {
             ClipHide();
             return;
@@ -232,9 +177,7 @@ void ClipShow(void) {
     s_want      = TRUE;
     s_delivered = -1;
     s_spawned   = FALSE;
-    IdleDisarm();
     Kick();
-    KaStart();
     if (g_recording.load()) CapLog("  [剪贴板] 请求显示");
 }
 
@@ -242,7 +185,6 @@ void ClipHide(void) {
     if (!s_want && s_delivered == 0) return;
     s_want      = FALSE;
     s_delivered = -1;
-    IdleArm();
     Kick();
     if (g_recording.load()) CapLog("  [剪贴板] 请求关闭");
 }
@@ -257,14 +199,13 @@ void ClipEsc(void) {
     if (s_want) ClipHide();
 }
 
-/* 浮层自行关闭（粘贴后收起 / ✕ / 超时）的通知：清 s_want + 停心跳。
+/* 浮层自行关闭（粘贴后收起 / ✕ / 超时）的通知：清 s_want，让钩子恢复放行。
    ★ 不清的后果（实测）：钩子继续替一个已隐藏的窗口吞回车 —— 宽限期内
    WM_CLIP_KEY 进隐藏浮层（= 再粘一次），窗口销毁后按键凭空消失
    （= 回车永远发不出去）。 */
 void ClipClosed(void) {
     if (!s_want) return;
     s_want = FALSE;
-    IdleArm();
     if (g_recording.load())
         CapLog("  [剪贴板] 浮层自行关闭，恢复按键放行");
 }
@@ -272,6 +213,22 @@ void ClipClosed(void) {
 BOOL ClipIsClosedMsg(UINT msg) {
     EnsureMsgs();
     return s_msgClosed && msg == s_msgClosed;
+}
+
+/* 浮层**进程**没了（崩溃 / 被任务管理器杀掉 / 主程序退出时 job 收尾）。
+   与 ClipClosed 是同一件事的两种来源，差别在"怎么知道的"：
+     · ClipClosed 靠浮层自己发消息 —— 只有它能优雅收场（粘贴 / ✕ / Esc）时才有。
+     · 这里靠内核：注册在进程句柄上的等待到点（src/child.c）。崩溃、被杀这类
+       "来不及说再见"的收场只有它能发现，而它正是原来最容易漏掉的一半 ——
+       心跳时代要轮询 3 拍（600ms）才敢下结论，那 600ms 里钩子一直替一个已经
+       不存在的窗口吞 Esc / 回车 / 方向键。 */
+void ClipGone(void) {
+    ChildWatchStop(&s_watch);        /* 复位还有一层意义：换个新进程时能重新盯上 */
+    if (!s_want) return;
+    s_want      = FALSE;
+    s_delivered = 0;
+    if (g_recording.load())
+        CapLog("  [剪贴板] 浮层进程已退出，恢复按键放行");
 }
 
 /* 把 Ditto 的快速粘贴窗口拉到前台（原理见 clip/clip.c 同名注释：Ditto 自己的
@@ -380,6 +337,15 @@ void ClipTick(void) {
         PostMessageW(w, s_want ? s_msgShow : s_msgHide, 0, 0);
         s_delivered = s_want ? 1 : 0;
         StopTick();
+        /* 送达成功 = 从现在起盯住它的进程：它一死（崩溃 / 被杀 / 被 job 收掉）
+           就给主窗口发 WM_CLIP_GONE，钩子立刻恢复放行。
+           拿句柄用"窗口的 pid"而不是 CreateProcess 的返回值 —— **两种来源一视同仁**：
+           冷启动那个是我们拉起的，"驻留复用"这份不是（甚至可能是手动双击起来的），
+           按 pid 走就只有一条路径。 */
+        DWORD pid = 0;
+        GetWindowThreadProcessId(w, &pid);
+        if (pid) ChildWatchPid(&s_watch, pid, g_mainWnd, WM_CLIP_GONE);
+        if (s_spawnProc) { CloseHandle(s_spawnProc); s_spawnProc = NULL; }
         return;
     }
 
@@ -388,13 +354,22 @@ void ClipTick(void) {
         SpawnClip();
     }
     if (++s_ticks > CLIP_TRIES_MAX) {
+        BOOL want = s_want;        /* 先留一份：下面要清 s_want，而日志说的是"当时" */
         StopTick();
         /* ★ 拉不起来就必须把 s_want 清掉：ClipIsOpen() 直接返回 s_want，而钩子
            据此决定"要不要替浮层吞 Esc"。留着 TRUE 就等于**永久吃掉用户的 Esc**
            （窗口根本不存在，却一直在拦键）—— 这比"没反应"糟糕得多。 */
-        if (s_want) { s_want = FALSE; KaStop(); }
+        if (s_want) s_want = FALSE;
+        /* 本轮自己拉起过、却始终没等到它的窗口：把它收掉。心跳时代这一步是白送的
+           （心跳一停它自己就退了），现在没有心跳，不主动收就是一个**留在屏幕上的
+           孤儿窗口** —— 冷启动慢过 1 秒重试预算时真会发生（杀软扫描、机械盘）。 */
+        if (s_spawnProc) {
+            TerminateProcess(s_spawnProc, 0);
+            CloseHandle(s_spawnProc);
+            s_spawnProc = NULL;
+        }
         if (g_recording.load())
             CapLog("  [剪贴板] 送达超时（%d 次 x %dms）：%s", CLIP_TRIES_MAX,
-                   CLIP_TICK_MS, s_want ? "没能拉起剪贴板程序" : "窗口没出生就已关闭");
+                   CLIP_TICK_MS, want ? "没能拉起剪贴板程序" : "窗口没出生就已关闭");
     }
 }
