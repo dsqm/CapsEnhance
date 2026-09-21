@@ -955,6 +955,8 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 ## 构建 / 测试 / CI
 
+**源文件清单只有一份**：主 exe 的 TU 列在 `src/sources.txt`（一行一个相对路径），`build.bat` 与 `test\build_analyze.bat` 都用 `cl @src\sources.txt` 读它。两个脚本原先各有一份列表，结果是 `src\child.c` 被本体链接、却从没被静态分析过（补进名单后当场抓出一条 `C6031`）。两个前提：① **在仓库根运行**（响应文件里的路径是相对的）；② 该文件**只能是纯文件名** —— `cl` 的响应文件没有注释语法（写 `rem` 会变成"未知选项"，破坏零告警基线），任何位置的 `@` 又会嵌套下一层响应文件（`D8035`）。独立编译的 TU（`thirdparty` 的 sqlite、`src\colorcode.c`、以及 settings / help / clip 三个 exe）不在名单里，各自留在自己的 cl 命令行上。
+
 依赖 **MSVC x64**（Windows 10/11），工具链由 `build_env.bat` 统一定位：用 vswhere 探测 VS/MSVC/SDK 并显式设置 `PATH/INCLUDE/LIB`（不走 vvcvars64，避开它的注册表探测；批处理里含 `(x86)` 的路径不能内联展开，也无法出现在 `( )` 块 / FOR 集合里）。
 
 ### 源码按 C++ 编译（`/TP`）
@@ -969,11 +971,11 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 | 脚本 | 内容 |
 | --- | --- |
-| `build.bat` | 生成四个 exe：`bin/CapsEnhance.exe`（源文件：hook / nav / send / act / config / keymap / main / autodisp / bridge / wps / winmove / drag / ime / folder / help / clip / child / lane）、`bin/CapsEnhanceSettings.exe`（settings/settings.c + src/config.c）、`bin/CapsEnhanceHelp.exe`（help/help.c，只吃一个共享头、不链接 src 下任何模块）、`bin/CapsEnhanceClip.exe`（clip/clip.c + `thirdparty\sqlite3mc_amalgamation.c` 编出的 obj，后者走**独立的 cl 命令行**：`/W0 /analyze-`、不加 `/TP`、`/bigobj`） |
+| `build.bat` | 生成四个 exe：`bin/CapsEnhance.exe`（源文件清单在 **`src/sources.txt`**，由 `cl @src\sources.txt` 读入 —— 与 `test\build_analyze.bat` **共用同一份**，新增一个源文件只改这一个地方）、`bin/CapsEnhanceSettings.exe`（settings/settings.c + src/config.c）、`bin/CapsEnhanceHelp.exe`（help/help.c，只吃一个共享头、不链接 src 下任何模块）、`bin/CapsEnhanceClip.exe`（clip/clip.c + `thirdparty\sqlite3mc_amalgamation.c` 编出的 obj，后者走**独立的 cl 命令行**：`/W0 /analyze-`、不加 `/TP`、`/bigobj`） |
 | `test\build_nav.bat` | 按词跳转测试：算法单测（`ComputeSteps`）+ Scintilla / Edit 通道集成（`test_sci`）+ 配置解析（`test_config`） |
 | `test\build_test.bat` | 和弦引擎回归：模式修饰的顺序语义（先按修饰再按触发键）、按下即开火、长按、增强补齐、多键同按、左 Alt=增强、清卡键判定、原生按词跳转序列、快速滚动 / 持续滚动、横向滚动、打开所在文件夹的键位接线与取路径、**全屏窗口在 `C+Q` 与 Caps+拖动两边都不动作**、**最大化窗口同屏连一次位置变化都没有**（数 `WM_WINDOWPOSCHANGED`）、按键帮助的键位接线与"寿命=和弦"、日志结束气泡的可点击接线与"点气泡不弹菜单 / 点图标才弹菜单"、键位表每条动作都有图上文案。带 `/DCAP_TEST`（让 `folder.c` 把"退成目录"这个判定结果通过可选形参带出来给断言看），链接 `winmm.lib`（`main.c` 的 `RecBeep` 用 `PlaySoundW`） |
 | `test\build_dbg.bat` | Debug CRT（`/MTd`）config 测试：Release CRT 不校验堆块，"越界写"这类 bug 只有这里拦得住 |
-| `test\build_analyze.bat` | 静态分析（`/W4` + `/analyze`）：只编译不链接。数据流引擎能发现"按 X 分配、按 Y 读"和 Interlocked 混用这类问题 |
+| `test\build_analyze.bat` | 静态分析（`/W4` + `/analyze`）：只编译不链接。数据流引擎能发现"按 X 分配、按 Y 读"和 Interlocked 混用这类问题。源文件清单与 `build.bat` 共用 `src\sources.txt`（自身只额外列出 4 个独立编译的 TU），所以两边**不会漏**——`src\child.c` 就曾在 `build.bat` 里链接、却从没进过分析列表（补上之后当场抓出一条 `C6031`） |
 | `test\build_keytest.bat` | 诊断工具：`keytest`（按键投递实测）、`uiprobe`（UIA 逐步探测）、`memtest`（UIA 内存压测）、`restarttest`（重启握手 + 单实例）、`traymemtest`（托盘菜单内存定位）、`logsmoke`（日志轮转）、`ilcheck`（打印各进程完整性级别）、`lowrun`（借 shell 令牌以普通权限启动任意程序）、`wspset`（WPS 直接置位三招实测：以普通权限跑 `lowrun.exe obj\test\wspset.exe`） |
 | `test\build_wpsjump.bat` | WPS 通道真机检查：把 WPS 文字窗口置前直接调 `NavJump`，核对"选中的是 WPS 通道"且光标落在算出的目标上。没装 / 没开 WPS 时打印 `[SKIP]` 以 0 退出（CI 友好）。**会移动 WPS 里文档的光标**（不改内容），先存盘 |
 

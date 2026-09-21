@@ -55,11 +55,16 @@ rem (see src/cap.h's CINTERFACE bridge); the switch exists so the codebase can
 rem adopt C++ where it pays off (type safety / RAII / std::string) file by
 rem file, instead of in one big-bang rewrite. Cross-checked in CI by the same
 rem /W4 + /analyze steps, which must stay at zero warnings.
+rem Source list: src\sources.txt, shared verbatim with test\build_analyze.bat
+rem via cl's response-file syntax. A new src\*.c is therefore added in ONE
+rem place -- the two lists used to drift (child.c was linked but never analyzed).
+rem NOTE: a cl response file has NO comment syntax (rem becomes an unknown
+rem option) and any '@' inside it nests another response file (D8035), so the
+rem list is bare filenames only.  Run from the repo root: the paths in it are
+rem relative, exactly like the ones on this command line.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP ^
    /Foobj\ ^
-   src\hook.c src\nav.c src\send.c src\act.c src\config.c src\keymap.c src\main.c ^
-   src\autodisp.c src\bridge.c src\wps.c src\winmove.c src\drag.c src\ime.c ^
-   src\folder.c src\help.c src\clip.c src\child.c src\lane.c ^
+   @src\sources.txt ^
    /link /OUT:bin/CapsEnhance.exe ^
    obj\app_res.obj ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib winmm.lib ^

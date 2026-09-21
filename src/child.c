@@ -135,13 +135,18 @@ BOOL ChildWatchPid(ChildWatch* w, DWORD pid, HWND notify, UINT msg) {
 }
 
 void ChildWatchStop(ChildWatch* w) {
+    /* ★ 返回值必须看（/analyze 的 C6031 就是冲着"返回值被忽略"来的）：
+       失败说明等待**没拆掉**，回调可能仍在飞 —— 那就不能把 notify 清掉，
+       否则它醒来时会去 PostMessage 一个已经不属于它的窗口。参数只有等待句柄
+       与完成事件，正常调用不会失败，所以这条分支是纯防御；万一走到，就保留
+       wait / notify（少回收一个句柄，本函数只在退出路径上跑一次）。 */
+    BOOL stopped = TRUE;
     if (w->wait) {
         /* INVALID_HANDLE_VALUE = 等回调跑完再拆。回调只做一次 PostMessage，不会
            卡住；用 NULL（异步）反而可能让它在结构被复位之后才跑。 */
-        UnregisterWaitEx(w->wait, INVALID_HANDLE_VALUE);
-        w->wait = NULL;
+        stopped = UnregisterWaitEx(w->wait, INVALID_HANDLE_VALUE) ? TRUE : FALSE;
+        if (stopped) w->wait = NULL;
     }
     if (w->proc) { CloseHandle(w->proc); w->proc = NULL; }
-    w->notify = NULL;
-    w->msg    = 0;
+    if (stopped) { w->notify = NULL; w->msg = 0; }
 }
