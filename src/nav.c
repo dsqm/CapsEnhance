@@ -26,8 +26,14 @@
    大于则一步置到目标，避免远距离逐格发方向键拖慢。**四个通道都受此值约束**：
    经典 Edit / Scintilla / UIA / IA2（UIA/IA2 还要求无 Shift —— 带选区时回读的
    caret 是选区起点而非活动端，目标计算本身不成立）；WPS 另有"带 Shift 或
-   已有选区就必须置位"的附加条件。 */
-#define DIRECT_JUMP_MIN 6
+   已有选区就必须置位"的附加条件。
+   ★ 必须 **<= 默认的 MaxArrowSteps(4)**：逐格上限一旦高过它，两种阈值之间就
+   夹出一档"不够格瞬跳、又超过逐格上限"的步数 —— 只能改发给目标程序自己的
+   Ctrl+方向，而那条路的落点由**对方的**词切分决定（实测 Notepad3 把整段 CJK
+   一跳到底，"结尾按 N 跳到开头"即是）。原值 6 配默认 4 时，4~5 步正好掉进
+   这条缝；3 之后支持置位的通道在 >=3 步全部瞬跳，改道只剩"置位失败"兜底
+   与无文本的原生路径可走。 */
+#define DIRECT_JUMP_MIN 3
 
 /* ============ IAccessibleText（IAccessible2）手工声明 ============
    SDK 不带 IA2 头文件，这里按官方 AccessibleText.idl 手工声明 vtable。
@@ -1400,8 +1406,8 @@ static int NavJumpInner(int dir, BOOL shift) {
        带 Shift 的选区移动不做补正（anchor 校验复杂，收益低）。
        补正一律走 SendArrowsStrict：步数是"还差多少"算出来的，再判一次超限
        就又改道一次、又落不到目标，而改道之后没人再校验。
-       Scintilla 通道暂不做补正（SCI_GETCURRENTPOS 是字节域，回读后要反向
-       换算成 UTF-16 才能和 tgt 比，现无该方向的换算函数）；记此备查。 */
+       Scintilla 通道不做回读补正（取舍见函数尾部那块说明）；它的跳距
+       >=3 步全走直接置位，改道只在置位失败时才可能到达。 */
     if (!direct && !oneStep && !broke && !shift && path == Chan::Edit && focus) {
         LONGLONG now = EditGetCaret(focus);
         if (now >= 0 && now == (LONGLONG)tgt) {
@@ -1465,6 +1471,13 @@ static int NavJumpInner(int dir, BOOL shift) {
         }
         free(t2);
     }
+    /* Scintilla 通道**不做**回读补正（Edit/UIA/WPS 做）。不是遗漏，是取舍：
+       补正的时序是"Ctrl+← 先把光标甩到别处（Notepad3 实测会甩到 0）、再逐格
+       爬回来"，用户看到的就是光标来回跳，实测体感很差。而且 DIRECT_JUMP_MIN(3)
+       之后 Sci 通道 >=3 步全部走直接置位，改道只剩"置位失败"一种入口 —— 为
+       这个边角留一套"甩过去再爬回来"的动画不值得。代价要写明：置位失败 +
+       超过 MaxArrowSteps 的那一发，落点由 Notepad3 这类程序的词切分决定，
+       可能落在段中间（把进程名写进 [NativeWordJump] 名单可整体绕开）。 */
     free(text);
     return steps;
 }

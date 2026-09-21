@@ -218,7 +218,7 @@ int main(void) {
         return 0;
     }
 
-    /* ---- A. 长中文串：走直接置位（步数 >= 6），验证 UTF-8 字节换算 ----
+    /* ---- A. 长中文串：走直接置位（步数 9 >= DIRECT_JUMP_MIN），验证 UTF-8 字节换算 ----
        这是一个测试句子 = 8 汉字(24字节) + 空格，UTF-16 目标下标 = 9 */
     const wchar_t* t1 = L"这是一个测试句子 end";   /* 8 汉字 + 空格 + end */
     SetDocUtf8(t1);
@@ -240,7 +240,8 @@ int main(void) {
            "SC: shift 右跳 -> caret=目标, anchor=原位置");
 
     /* ---- D. 文档末尾：不越界 ---- */
-    const wchar_t* t2 = L"ab cd ef";
+    const wchar_t* t2 = L"a bcd ef";   /* 词(1字) 空格 词(3字)：E 段两跳都只有 2 步，
+                                          < DIRECT_JUMP_MIN(3)，保证走的是逐格箭头 */
     SetDocUtf8(t2);
     g_caret = g_anchor = (int)strlen(g_doc);
     Pump(50);
@@ -251,13 +252,15 @@ int main(void) {
     /* ---- 排空：上面若残留了注入键，等它们全到齐再测箭头路径 ---- */
     Pump(600);
 
-    /* ---- E. 短距离走逐格箭头（步数 < DIRECT_JUMP_MIN） ---- */
+    /* ---- E. 短距离走逐格箭头（步数 < DIRECT_JUMP_MIN） ----
+       样本必须是 2 步跳：原来 "ab cd ef" 首词 2 字 + 跳到下一词首 = 3 步，
+       DIRECT_JUMP_MIN 降到 3 之后那条路被直接置位接管，逐格箭头就没有用例了。 */
     SetDocUtf8(t2);
     g_caret = g_anchor = 0;
     Pump(50);
     NavJump(DIR_RIGHT, FALSE);
     PumpFor(3, 5000);
-    EXPECT(g_caret == 3, "SC: 短距右跳走箭头 -> 字节 3 (cd 首)");
+    EXPECT(g_caret == 2, "SC: 短距右跳走箭头 -> 字节 2 (bcd 首)");
     NavJump(DIR_LEFT, FALSE);
     PumpFor(3, 5000);
     EXPECT(g_caret == 0, "SC: 短距左跳走箭头 -> 回到 0");

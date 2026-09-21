@@ -230,7 +230,7 @@ ImeRShiftMode = 1   ; 右Shift -> 中文
 | `AutoScrollFastMs`   | `60`   | 持续滚动的**最快**速度（毫秒/格，越小越快），范围 `20..60000`；与上一项各自独立                                              |
 | `WheelHScrollMul`    | `1`    | `C+Shift+滚轮` 横向倍数；`0` = 关闭，上限 `16`                                                            |
 | `AllowScintillaRead` | `1`    | 是否允许读取 Scintilla 程序（Notepad3/Notepad++）的进程内存来实现瞬跳；设 `0` 退回 UIA / 原生 Ctrl+方向                   |
-| `MaxArrowSteps`      | `4`    | 按词跳转逐格发送达到多少步就触发 `OverStepMode` 策略（4 = 4 格及以上瞬跳、3 格以内逐格）；`0` = 不限制（一律逐格）                      |
+| `MaxArrowSteps`      | `4`    | 逐格发送方向键的步数上限：达到就不再逐格，改按 `OverStepMode` 处理（改发 `Ctrl+方向` / 只发一格）。**只约束"直接置位"不可用的场合**——支持置位的控件（经典 Edit / Scintilla / UIA / WPS）在 **3 步及以上就走瞬跳**（比逐格又快又准），所以本项实际只影响置位失败后的退路；`0` = 不限制（置位失败时也逐格发完，上限 256） |
 | `OverStepMode`       | `1`    | `0` = 只发一个方向键；`1` = 改发 `Ctrl+方向`（由目标程序自身按词跳转）                                                 |
 | `ImeCapsMode`        | `1`    | 单击 Caps 时把输入法强制切到哪：`0` = 不处理、`1` = 中文、`2` = 英文（详见[单键切换输入法](#单键切换输入法caps--左右-shift)）      |
 | `ImeLShiftMode`      | `2`    | 单击**左** Shift 同上（默认切英文）。**当前是英文键盘时三个键都不处理**                                            |
