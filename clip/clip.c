@@ -165,6 +165,7 @@ static UINT      g_msgShow = 0, g_msgHide = 0, g_msgKa = 0, g_msgEsc = 0, g_msgK
 static UINT      g_msgClosed = 0;
 static BOOL      g_visible = FALSE;
 static ULONGLONG g_lastKa = 0;
+static ULONGLONG g_lastLoadTick = 0;   /* 上次读库时刻（驻留期显示按需刷新） */
 static HDC       g_memDC = NULL;
 static HBITMAP   g_bmp = NULL;
 static void*     g_bits = NULL;
@@ -190,7 +191,7 @@ static POINT     g_dragWin;            /* 按下那一刻的窗口位置 */
 #define TID_TIPSHOW 7  /* 悬停初始延迟：停稳 500ms 才弹（Ditto/系统同款） */
 #define TID_TIPFADE 8  /* 提示窗口渐显/渐隐的步进时钟 */
 #define TIP_DELAY_MS 500
-#define GRACE_MS   300
+#define GRACE_MS   (10 * 60 * 1000)   /* 驻留时长：收起后进程再活 10 分钟（期间唤出复用，免冷启动），到点才真正退出 */
 #define LIFE_MS    180000
 #define KA_POLL_MS 250
 
@@ -330,6 +331,7 @@ static void DbLoadItems(void) {
     }
     sqlite3_finalize(st);
     sqlite3_close(db);
+    g_lastLoadTick = GetTickCount64();
 }
 
 /* ================= 悬停提示（照 Ditto 的 CToolTipEx：自绘窗口） =================
@@ -1558,11 +1560,19 @@ static void DittoAction(void) {
 }
 
 static void DoShow(void) {
-    KillTimer(g_hwnd, TID_GRACE);
+    KillTimer(g_hwnd, TID_GRACE);      /* 撤销空闲退出：又有人用了 */
     g_lastKa = GetTickCount64();
     SetTimer(g_hwnd, TID_KA, KA_POLL_MS, NULL);
     if (!g_visible) {
-        PlaceWindow();                 /* ★ 只在这里定位 */
+        /* 驻留期间 Ditto 可能又复制了新内容：距上次加载超过 30s 就重读一次。
+           同步读（此刻窗口还没 SHOW，无闪烁）；只读本地库 + LIMIT 30，毫秒级。
+           缩略图按条目下标缓存，条目重读后必须整体作废，否则错位。 */
+        if (g_lastLoadTick == 0 ||
+            GetTickCount64() - g_lastLoadTick > 30 * 1000) {
+            FreeThumbs();
+            g_sel = 0;  g_scrollY = 0;
+            DbLoadItems();
+        }        PlaceWindow();                 /* ★ 只在这里定位 */
         MoveWindow(g_hwnd, g_px, g_py, g_pxW, g_pxH, FALSE);
         Render();
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);

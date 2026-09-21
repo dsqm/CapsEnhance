@@ -52,6 +52,7 @@ static BOOL  s_want    = FALSE;   /* 期望：可见？ */
 static int   s_delivered = 0;     /* 已送达：-1 未知 / 0 已隐 / 1 已显 */
 static BOOL  s_spawned = FALSE;   /* 本轮是否已经 CreateProcess 过 */
 static BOOL  s_kaOn    = FALSE;
+static void  IdleArm(void);      /* 前置：KaStop/KaStart 的调用方在下面 */
 static int   s_miss    = 0;       /* 连续几拍找不到浮层窗口（见 ClipKaTick） */
 static int   s_ticks   = 0;
 
@@ -84,6 +85,20 @@ static void KaStop(void) {
     if (!s_kaOn) return;
     s_kaOn = FALSE;
     if (g_mainWnd) KillTimer(g_mainWnd, CLIP_KA_TIMER);
+}
+
+
+/* 驻留策略（2026-09-21）：浮层收起/粘贴后**不停心跳**，进程继续待命 ——
+   下一次 Caps+V 直接复用（免冷启动：读库 + 起缩略图 + 建窗口都在省）。
+   起 10 分钟空闲计时，到点才 KaStop，浮层 800ms 内自行退出；
+   期间再唤出由 ClipShow 撤销计时。主程序退出时心跳随主窗口销毁自然停，
+   浮层同样自行退出 —— 不需要专门的清理路径。 */
+static void IdleArm(void) {
+    if (g_mainWnd) SetTimer(g_mainWnd, CLIP_IDLE_TIMER, CLIP_IDLE_EXIT_MS, NULL);
+}
+
+static void IdleDisarm(void) {
+    if (g_mainWnd) KillTimer(g_mainWnd, CLIP_IDLE_TIMER);
 }
 
 void ClipKaTick(void) {
@@ -217,6 +232,7 @@ void ClipShow(void) {
     s_want      = TRUE;
     s_delivered = -1;
     s_spawned   = FALSE;
+    IdleDisarm();
     Kick();
     KaStart();
     if (g_recording.load()) CapLog("  [剪贴板] 请求显示");
@@ -226,7 +242,7 @@ void ClipHide(void) {
     if (!s_want && s_delivered == 0) return;
     s_want      = FALSE;
     s_delivered = -1;
-    KaStop();
+    IdleArm();
     Kick();
     if (g_recording.load()) CapLog("  [剪贴板] 请求关闭");
 }
@@ -248,7 +264,7 @@ void ClipEsc(void) {
 void ClipClosed(void) {
     if (!s_want) return;
     s_want = FALSE;
-    KaStop();
+    IdleArm();
     if (g_recording.load())
         CapLog("  [剪贴板] 浮层自行关闭，恢复按键放行");
 }

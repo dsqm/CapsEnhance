@@ -387,6 +387,8 @@ void HelpKaTick(void); /* HELP_KA_TIMER 到点：喂一条心跳（只在显示�
    在这里都是同一件事。代价只有显示期间每 200ms 一次 PostMessage。 */
 #define CLIP_TIMER   6                    /* 主窗口定时器 id（4=帮助对账 5=帮助心跳） */
 #define CLIP_KA_TIMER 7                   /* 剪贴板心跳定时器 id */
+#define CLIP_IDLE_TIMER 8                 /* 剪贴板空闲退出计时 id：浮层收起后这么久没再用就停心跳 */
+#define CLIP_IDLE_EXIT_MS (10 * 60 * 1000) /* 驻留时长：关闭后进程再活 10 分钟，期间唤出复用免冷启动 */
 #define CLIP_KA_MS    200                 /* 心跳间隔（与 HELP_KA_MS 同值：同一套语义） */
 #define CLIP_TICK_MS  40                  /* 送达重试间隔 */
 #define CLIP_TRIES_MAX 25                 /* 40ms x 25 ≈ 1s 内送不到就放弃 */
