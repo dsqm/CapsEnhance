@@ -247,18 +247,18 @@ int main(void) {
     EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 60000, "CFG: AutoScrollFastMs 上限钳到 60000");
     WriteIni("[General]\r\nAutoScrollFastMs = abc\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 800, "CFG: AutoScrollFastMs 非法值回落默认 1000");
+    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 60, "CFG: AutoScrollFastMs 非法值回落默认 60");
     WriteIni("[Other]\r\nAutoScrollFastMs = 99\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 800, "CFG: 非 General 段的 AutoScrollFastMs 不生效");
+    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 60, "CFG: 非 General 段的 AutoScrollFastMs 不生效");
     WriteIni("[General]\r\n\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 800,
-           "CFG: AutoScrollFastMs 缺省为 800ms/格（比初始档更快）");
+    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 60,
+           "CFG: AutoScrollFastMs 缺省为 60ms/格（比初始档更快）");
     /* 两项互不影响：改一个不该动另一个（这正是"单位/数值各自独立"的要求） */
     WriteIni("[General]\r\nAutoScrollInterval = 8000\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
-    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 800 && CfgInt(CFG_AUTOSCROLL_INTERVAL) == 8000,
+    EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 60 && CfgInt(CFG_AUTOSCROLL_INTERVAL) == 8000,
            "CFG: 改初始速度不影响最快速度（两项独立）");
     WriteIni("[General]\r\nAutoScrollFastMs = 300\r\n");
     ConfigLoadFrom(L"obj/test/cfgtest.ini");
@@ -425,7 +425,7 @@ int main(void) {
                "UPG: 缺失键补齐默认值");
         EXPECT(CfgInt(CFG_AUTOSCROLL_INTERVAL) == 1500, "UPG: 补齐 AutoScrollInterval 默认值");
         EXPECT(CfgInt(CFG_WHEEL_SCROLL_MUL) == 3, "UPG: 补齐 WheelScrollMul 默认值");
-        EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 800, "UPG: 补齐 AutoScrollFastMs 默认值");
+        EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 60, "UPG: 补齐 AutoScrollFastMs 默认值");
         EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_CN &&
                ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_EN &&
                ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_CN,
@@ -444,7 +444,7 @@ int main(void) {
                 if (strstr(line, "MaxArrowSteps = 4")) hasSteps = 1;
                 if (strstr(line, "OverStepMode = 1")) hasMode = 1;
                 if (strstr(line, "WheelScrollMul = 3")) hasWheel = 1;
-                if (strstr(line, "AutoScrollFastMs = 800")) hasFast = 1;
+                if (strstr(line, "AutoScrollFastMs = 60")) hasFast = 1;
                 if (strstr(line, "AutoScrollInterval = 1500")) hasInterval = 1;
                 if (strstr(line, "WheelHScrollMul = 1")) hasHMul = 1;
                 if (strstr(line, "ImeCapsMode = 1"))   hasImeCaps = 1;
@@ -801,7 +801,7 @@ int main(void) {
       EXPECT(TemplateHas(tpl), "CFG: 模板含 MaxArrowSteps 默认值"); }
     EXPECT(TemplateHas("OverStepMode = 1"),  "CFG: 模板含 OverStepMode 默认值");
     EXPECT(TemplateHas("WheelScrollMul = 3"), "CFG: 模板含 WheelScrollMul 默认值");
-    EXPECT(TemplateHas("AutoScrollFastMs = 800"), "CFG: 模板含 AutoScrollFastMs 默认值");
+    EXPECT(TemplateHas("AutoScrollFastMs = 60"), "CFG: 模板含 AutoScrollFastMs 默认值");
     EXPECT(TemplateHas("AutoScrollInterval = 1500"), "CFG: 模板含 AutoScrollInterval 默认值");
     EXPECT(TemplateHas("WheelHScrollMul = 1"),     "CFG: 模板含 WheelHScrollMul 默认值");
     /* AutoScrollSmooth 已改为 [NoSmoothScroll] 名单：模板里不该再有这个键

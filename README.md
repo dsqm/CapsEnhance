@@ -227,7 +227,7 @@ ImeRShiftMode = 1   ; 右Shift -> 中文
 | `LogMaxKB`           | `2048` | 日志大小上限（KB），超过保留最近一半；`0` = 不限制                                                                 |
 | `WheelScrollMul`     | `3`    | `C+滚轮` 快速滚动的倍数（滚一格当 N 格）；`0/1` = 关闭，上限 `16`                                                   |
 | `AutoScrollInterval` | `1500` | 持续滚动的**初始**速度（毫秒/格，越大越慢），范围 `100..60000`                                                      |
-| `AutoScrollFastMs`   | `800`  | 持续滚动的**最快**速度（毫秒/格，越小越快），范围 `20..60000`；与上一项各自独立                                              |
+| `AutoScrollFastMs`   | `60`   | 持续滚动的**最快**速度（毫秒/格，越小越快），范围 `20..60000`；与上一项各自独立                                              |
 | `WheelHScrollMul`    | `1`    | `C+Shift+滚轮` 横向倍数；`0` = 关闭，上限 `16`                                                            |
 | `AllowScintillaRead` | `1`    | 是否允许读取 Scintilla 程序（Notepad3/Notepad++）的进程内存来实现瞬跳；设 `0` 退回 UIA / 原生 Ctrl+方向                   |
 | `MaxArrowSteps`      | `4`    | 按词跳转逐格发送达到多少步就触发 `OverStepMode` 策略（4 = 4 格及以上瞬跳、3 格以内逐格）；`0` = 不限制（一律逐格）                      |

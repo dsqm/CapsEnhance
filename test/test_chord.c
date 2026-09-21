@@ -1003,8 +1003,8 @@ int main(void) {
        所以每段观测前先 ResetWheelRec。 */
     Reset();
     int base = CfgInt(CFG_AUTOSCROLL_INTERVAL);     /* 最慢档 = 1500 */
-    int fast = CfgInt(CFG_AUTOSCROLL_FAST_MS);        /* 最快档 = 800（独立配置项） */
-    CHECK(fast == 800, "R: 最快档 = AutoScrollFastMs 缺省 800ms/格");
+    int fast = CfgInt(CFG_AUTOSCROLL_FAST_MS);        /* 最快档 = 60（独立配置项） */
+    CHECK(fast == 60, "R: 最快档 = AutoScrollFastMs 缺省 60ms/格");
     CHECK(CfgInt(CFG_WHEEL_SCROLL_MUL) == 3,
           "R: 倍数项与水平无关（WheelScrollMul 仍是 3，两边各自独立）");
     CHECK(ActAutoScrollTick() == 0, "R: 未启动时速度为 0");
@@ -1058,7 +1058,7 @@ int main(void) {
     ActAutoScrollWheel(120);
     CHECK(ActAutoScrollGear() == gTop && ActAutoScrollTick() == tTop,
           "R: 到顶档后不再提速（档位饱和）");
-    CHECK(tTop == fast, "R: 顶档速度 == AutoScrollFastMs = 800ms/格");
+    CHECK(tTop == fast, "R: 顶档速度 == AutoScrollFastMs = 60ms/格");
     CHECK(tTop <= base, "R: 最快档不会比初始档还慢（阶梯方向正确）");
     CHECK(ActAutoScrollDelta() > 0 && ActAutoScrollDelta() < 120,
           "R: 顶档仍是小数刻度（平滑提速靠加 delta，不是加格数）");
