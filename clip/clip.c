@@ -2028,6 +2028,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     memset(g_thumb, 0, sizeof(g_thumb));
     memset(g_thumbTried, 0, sizeof(g_thumbTried));
+    /* ★ 临界区必须在第一次 DbLoadItems 之前初始化：DbLoadItems 重载条目后
+       会按需 FreeThumbs()（进去就 EnterCriticalSection），而启动路径的
+       DbLoadItems 就在这一行 —— 初始化放后面就是"未初始化临界区"，
+       进程起来即崩（实测踩过：浮层完全不显示）。 */
+    InitializeCriticalSection(&g_thumbLock);
     DbLoadItems();
     FitMetrics();
     MakeSurface();
@@ -2053,7 +2058,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     if (!g_hwnd) { Gdiplus::GdiplusShutdown(token); return 1; }
     SetLayeredWindowAttributes(g_hwnd, 0, CLIP_ALPHA, LWA_ALPHA);
 
-    InitializeCriticalSection(&g_thumbLock);
     g_thumbThread = CreateThread(NULL, 0, ThumbThreadProc, NULL, 0, NULL);
 
     g_target = GetForegroundWindow();
