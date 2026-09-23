@@ -39,6 +39,9 @@ BOOL     AdCall0(IDispatch* d, const WCHAR* name);                   /* 无参�
 BOOL     AdCall2(IDispatch* d, const WCHAR* name, long a1, long a2); /* 两个 long 的方法 */
 /* 带两个 long 参数的**属性**（如 Word/WPS 的 Document.Range(Start, End)） */
 BOOL     AdGetProp2(IDispatch* d, const WCHAR* name, long a1, long a2, IDispatch** out);
+/* 带两个 long 参数的**方法**并取回子对象（如 WPS 演示的 Characters(start,len)：
+   它只以 DISPATCH_METHOD 应答，PROPERTYGET 取不到） */
+BOOL     AdCallDisp2(IDispatch* d, const WCHAR* name, long a1, long a2, IDispatch** out);
 
 /* ---------- 降权桥（src/bridge.c） ----------
    解决的问题：**管理员进程看不到普通权限进程注册的 COM 运行对象**（ROT 按

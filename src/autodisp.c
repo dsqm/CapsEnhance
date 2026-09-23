@@ -52,8 +52,15 @@ DISPID AdId(IDispatch* d, const WCHAR* name) {
     wcscpy_s(buf, 64, name);
     LPOLESTR p = buf;                      /* 见文件头坑 4 */
     DISPID id = DISPID_UNKNOWN;
-    if (FAILED(d->lpVtbl->GetIDsOfNames(d, kNull, &p, 1, LOCALE_USER_DEFAULT, &id)))
+    if (FAILED(d->lpVtbl->GetIDsOfNames(d, kNull, &p, 1, LOCALE_USER_DEFAULT, &id))) {
+        /* WPS 演示（KWPP）的 GetIDsOfNames 不认映射到 DISPID_VALUE 的名字：
+           TextRange.Text / 集合 Item 在类型库里就是 DISPID 0（实测 id=0、
+           名字查询报错）。按 hr 判会以为"没有这个成员"，整条通道静默失效。
+           这两个名字解析失败时显式回退 0（DISPID_VALUE = 默认成员）。 */
+        if (wcscmp(name, L"Text") == 0 || wcscmp(name, L"Item") == 0)
+            return DISPID_VALUE;           /* 0，合法 */
         return DISPID_UNKNOWN;
+    }
     return id;
 }
 
@@ -199,6 +206,33 @@ BOOL AdGetProp2(IDispatch* d, const WCHAR* name, long a1, long a2, IDispatch** o
     UINT ec = 0;
     HRESULT hr = d->lpVtbl->Invoke(d, id, kNull, LOCALE_USER_DEFAULT,
                                    DISPATCH_PROPERTYGET, &dp, &v, &ei, &ec);
+    if (!EiDone(hr, &v, &ei)) return FALSE;
+    BOOL ok = FALSE;
+    if (v.vt == VT_DISPATCH && v.pdispVal && out) {
+        *out = v.pdispVal;
+        (*out)->lpVtbl->AddRef(*out);
+        ok = TRUE;
+    }
+    VariantClear(&v);
+    return ok;
+}
+
+/* 带两个形参的方法调用并取回子对象。与 AdGetProp2 的差别在 invoke 种类：
+   WPS 演示的 TextRange.Characters(start,len) 只以 DISPATCH_METHOD 应答
+   （实测 PROPERTYGET 取不到），而 Word 系的成员属性两种都通 —— 各走各的。 */
+BOOL AdCallDisp2(IDispatch* d, const WCHAR* name, long a1, long a2, IDispatch** out) {
+    if (out) *out = NULL;
+    DISPID id = AdId(d, name);
+    if (id == DISPID_UNKNOWN) return FALSE;
+    VARIANTARG av[2];
+    DISPPARAMS dp;
+    Args2(av, &dp, a1, a2);
+    VARIANT v;
+    VariantInit(&v);
+    EXCEPINFO ei; memset(&ei, 0, sizeof(ei));
+    UINT ec = 0;
+    HRESULT hr = d->lpVtbl->Invoke(d, id, kNull, LOCALE_USER_DEFAULT,
+                                   DISPATCH_METHOD, &dp, &v, &ei, &ec);
     if (!EiDone(hr, &v, &ei)) return FALSE;
     BOOL ok = FALSE;
     if (v.vt == VT_DISPATCH && v.pdispVal && out) {

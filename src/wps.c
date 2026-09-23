@@ -34,12 +34,47 @@
        原来是 [12,12]，写 Start=5 之后变成 [5,12]（右端留在原地）。
        所以"移光标"必须发 SetRange(t, t)。
    WPS 上 Selection.Start/End 始终有序（Start<=End），与经典 Edit 通道的
-   LOWORD/HIWORD 取向一致，因此位移序列的锚点跟踪可以照用那套逻辑。 */
+   LOWORD/HIWORD 取向一致，因此位移序列的锚点跟踪可以照用那套逻辑。
 
-#define WPS_PROGID    L"KWPS.Application"   /* WPS 文字；表格/演示的对象模型不同，不支持 */
+   ================= WPS 演示通道（wpp.exe，KWPP.Application） =================
+   演示与文字同病：光标对标准接口全不可见（无 Win32 光标、无 MSAA caret、
+   UIA 无 TextPattern、走 TSF 不走 IMM），词跳转只能走对象模型。模型抄
+   PowerPoint：Selection 挂在 **Window** 上（不是 Application），且只有
+   Selection.Type == 3（ppSelectionText，文本编辑态）才有 TextRange —— 非编辑
+   态拿的是形状，词跳转无从谈起，直接放弃本通道。
+
+   实测坐标语义（都验证过）：
+     · Selection.TextRange.Start 是 **1 基**"第 N 个字符之前"（PowerPoint 官方
+       是 0 基，WPS 不一样！）；Length 就是选区长。0 基 caret = Start - 1。
+     · 全文 = TextRange.Parent(=TextFrame).TextRange.Text，与 Start 同一坐标
+       系；段落分隔符 \r 计 1 字符，与 Text 串对齐。
+     · Text 与集合 Item 的 GetIDsOfNames **查不到**（它们映射到 DISPID_VALUE，
+       WPS 的名字解析不认）—— autodisp.c 的 AdId 对这两个名字回退 DISPID 0。
+     · 置位 = Parent.TextRange.Characters(lo+1, hi-lo).Select()：lo/hi 是 0 基
+       有序两端，折叠时长度 0 合法，lo+1 可到 len+1（折叠到末尾）。**没有**
+       SetRange/Collapse/End，Start 属性只读，这是唯一的置位原语。
+     · 置位后回读校验：Start-1 == lo && Length == hi-lo。
+     · ★ 与文字通道的差异：Select() 后 WPS 内部的"活动端"恒为**选区左端**，
+       文字通道那种"SetRange 首参即活动端"的手法没法复刻 —— 向右扩选（活动
+       端在右）后用户手按 Shift+方向 会动到左端。影响仅此一处，下次跳转即
+       重置；不想为它引入真实按键序列。
+
+   表格（et.exe）实测**不可适配**：单元格编辑态下焦点是网格窗口 EXCEL6 自己
+   （无子编辑控件，WM_GETTEXT/EM_* 全空），编辑栏 EtFmlEditBar 只是个框架
+   窗口（真编辑器是 Qt 内绘、无 HWND），UIA 无 TextPattern（Value 恒空）、
+   MSAA 无子对象无 IAccessibleText，KET.Application 的 Excel 模型也够不到
+   格内编辑缓冲。词跳转在这些程序里走原生 Ctrl+方向兜底（nav.c 现有逻辑）。 */
+
+#define WPS_PROGID    L"KWPS.Application"   /* WPS 文字 */
 #define WPS_PROC      L"wps.exe"
+#define WPP_PROGID    L"KWPP.Application"   /* WPS 演示 */
+#define WPP_PROC      L"wpp.exe"
+#define WPS_SEL_TEXT  3                     /* ppSelectionText：文本编辑态 */
 #define WPS_TEXT_MAX  100000                /* 单次读取上限（UTF-16 字符）；超过放弃本通道 */
 #define WPS_DOC_MIN   2                     /* 短于此视为占位，弃用（与 UIA/IA2 同理） */
+
+/* 按进程名分派的子通道 */
+enum { WPSA_TEXT = 0, WPSA_SHOW = 1, WPSA_COUNT };
 
 /* 桥协议：请求 {op,a,b}，应答 = WpsResp + 可选文本。
    应答 status 的含义分两种：GET 用 WPS_ST_*；SET 直接回 WPS_SET_* 分类。 */
@@ -51,7 +86,7 @@
 #define WPS_OP_GET  1
 #define WPS_OP_SET  2
 
-typedef struct { LONG op; LONG a; LONG b; } WpsReq;
+typedef struct { LONG op; LONG app; LONG a; LONG b; } WpsReq;   /* app = WPSA_* */
 typedef struct { LONG status; LONG caret; LONG selEnd; LONG len; } WpsResp;
 
 /* 子进程没有"记录模式"这条开关可依赖，而它一旦失败，用户看到的只有父进程那句
@@ -65,35 +100,39 @@ static void WpsLog(const char* fmt, ...) {
     CapLog("%s%s", BrIsChild() ? "[桥WPS] " : "  WPS ", line);
 }
 
-/* 焦点进程是不是 WPS 文字。**必须按进程名判**（见文件头）。 */
-static BOOL WpsFocusIsWps(HWND hwnd) {
-    if (!hwnd) return FALSE;
+/* 焦点进程属于哪条 WPS 子通道。**必须按进程名判**（见文件头）：
+   WPS 的窗口/控件类名与真正 Office 一模一样，按类名判会把 Word/PPT 卷进来。 */
+static int WpsFocusKindOf(HWND hwnd) {
+    if (!hwnd) return -1;
     WCHAR name[64] = {0};
-    if (!ConfigGetProcessName(hwnd, name, 64)) return FALSE;
-    return _wcsicmp(name, WPS_PROC) == 0;
+    if (!ConfigGetProcessName(hwnd, name, 64)) return -1;
+    if (_wcsicmp(name, WPS_PROC) == 0) return WPSA_TEXT;
+    if (_wcsicmp(name, WPP_PROC) == 0) return WPSA_SHOW;
+    return -1;
 }
 
-/* 本线程缓存的 WPS Application。缓存失效（WPS 重启 / 关掉文档再开）时由下面的
-   包装丢掉重试一次。
+/* 本线程缓存的 WPS Application（文字/演示各一份）。缓存失效（WPS 重启 /
+   关掉文档再开）时由下面的包装丢掉重试一次。
 
    用 `thread_local ComPtr` 持有：线程结束时析构会自动 Release（以前是裸指针，
    那次缓存只能等进程退出才回收）。「线程级」这件事本身是必须的 ——
    `CoInitialize` 与 COM 套间都是线程级的，跨线程共享接口指针要封送。 */
-static thread_local ComPtr<IDispatch> t_wpsApp;
+static thread_local ComPtr<IDispatch> t_wpsApp[WPSA_COUNT];
 
 /* IID_IDispatch 只在 `#include <initguid.h>` 的 TU 里才有定义（否则是 extern
    声明、要靠 uuid.lib）。自带一份常量：值固定、与链接顺序无关。 */
 static const IID kIID_Dispatch =
     {0x00020400, 0x0000, 0x0000, {0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}};
 
-static IDispatch* WpsAppGet(void) {
-    if (t_wpsApp) return t_wpsApp.get();
+static IDispatch* WpsAppGet(int kind) {
+    if (t_wpsApp[kind]) return t_wpsApp[kind].get();
     if (!AdCoUp()) return NULL;
+    const WCHAR* progid = (kind == WPSA_SHOW) ? WPP_PROGID : WPS_PROGID;
     CLSID clsid;
     /* CLSIDFromProgID 收的是 LPCLSID（指针），而下面的 GetActiveObject 收的是
        REFCLSID（C++ 下是引用）—— 同一个变量，两处写法不同，别统一 */
-    if (FAILED(CLSIDFromProgID(WPS_PROGID, &clsid))) {
-        WpsLog("CLSIDFromProgID(%ls) 失败（WPS 未注册 COM 接口？）", WPS_PROGID);
+    if (FAILED(CLSIDFromProgID(progid, &clsid))) {
+        WpsLog("CLSIDFromProgID(%ls) 失败（WPS 未注册 COM 接口？）", progid);
         return NULL;
     }
     ComPtr<IUnknown> unk;                 /* GetActiveObject 给的引用交给它放 */
@@ -109,13 +148,13 @@ static IDispatch* WpsAppGet(void) {
     ComPtr<IDispatch> app;
     if (SUCCEEDED(unk->lpVtbl->QueryInterface(unk.get(), kIID_Dispatch,
                                               (void**)app.put())) && app)
-        t_wpsApp = app;                   /* 拷贝赋值会 AddRef，缓存多持一份 */
-    return t_wpsApp.get();
+        t_wpsApp[kind] = app;             /* 拷贝赋值会 AddRef，缓存多持一份 */
+    return t_wpsApp[kind].get();
 }
 
-/* 读一次：全文 + 光标 + 选区另一端。text 由调用方 free。 */
-static BOOL WpsComReadOnce(WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) {
-    IDispatch* app = WpsAppGet();
+/* ---------- 文字：读一次（全文 + 光标 + 选区另一端）。text 由调用方 free。 ---------- */
+static BOOL WpsTextReadOnce(WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) {
+    IDispatch* app = WpsAppGet(WPSA_TEXT);
     /* Selection / ActiveDocument / Range 都是我们 AddRef 到手的子对象，
        全部交给 ComPtr —— 以前每个都在 done: 手动 Release，漏一个就是泄漏。 */
     ComPtr<IDispatch> sel, doc, rng;
@@ -177,11 +216,95 @@ done:
     return ok;          /* 子对象的 Release 全由上面的 ComPtr 负责 */
 }
 
-/* 直接置位一次，并把结果分成三态（见 auto.h 的 WPS_SET_*）。
+/* ---------- 演示：读一次。坐标系与置位规则见文件头。 ---------- */
+static BOOL WpsShowReadOnce(WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) {
+    IDispatch* app = WpsAppGet(WPSA_SHOW);
+    ComPtr<IDispatch> win, sel, tr, par, all;
+    BOOL ok = FALSE;
+    long st = -1, ln = -1;
+
+    if (!app) return FALSE;
+    *text = NULL;
+    *lenOut = 0;
+    *caretOut = 0;
+    if (selEndOut) *selEndOut = 0;
+
+    win = ComPtr<IDispatch>(AdGetDisp(app, L"ActiveWindow"));
+    if (!win) {
+        WpsLog("ActiveWindow 取不到（演示没开文稿？）");
+        goto done;
+    }
+    /* 演示的 Selection 挂在 Window 上（文字挂在 Application 上） */
+    sel = ComPtr<IDispatch>(AdGetDisp(win.get(), L"Selection"));
+    if (!sel) {
+        WpsLog("Selection 取不到");
+        goto done;
+    }
+    {
+        long ty = -1;
+        /* 只有文本编辑态（Type=3）才有 TextRange；选形状/未进编辑直接放弃，
+           让上层走原生兜底 —— 这是常态而非错误，不打日志刷屏 */
+        if (!AdGetLong(sel.get(), L"Type", &ty) || ty != WPS_SEL_TEXT) goto done;
+    }
+    tr = ComPtr<IDispatch>(AdGetDisp(sel.get(), L"TextRange"));
+    if (!tr || !AdGetLong(tr.get(), L"Start", &st) || st < 1) {
+        WpsLog("TextRange.Start 取不到");
+        goto done;
+    }
+    if (!AdGetLong(tr.get(), L"Length", &ln) || ln < 0) {
+        WpsLog("TextRange.Length 取不到");
+        goto done;
+    }
+    par = ComPtr<IDispatch>(AdGetDisp(tr.get(), L"Parent"));        /* = TextFrame */
+    if (!par) {
+        WpsLog("TextRange.Parent 取不到");
+        goto done;
+    }
+    /* 全文用 TextFrame 自己的 TextRange —— Selection.TextRange 只是选区，
+       词算法需要整个形状的文本（同一坐标系） */
+    all = ComPtr<IDispatch>(AdGetDisp(par.get(), L"TextRange"));
+    if (!all) {
+        WpsLog("TextFrame.TextRange 取不到");
+        goto done;
+    }
+    {
+        WCHAR* t = NULL;
+        /* "Text" 的 GetIDsOfNames 查不到（DISPID_VALUE），AdId 里已回退 0 */
+        if (!AdGetText(all.get(), L"Text", &t)) {
+            WpsLog("TextFrame.TextRange.Text 取不到");
+            goto done;
+        }
+        int len = (int)wcslen(t);
+        if (len < WPS_DOC_MIN || len > WPS_TEXT_MAX) {
+            WpsLog("文本框长度 %d 不适合本通道（范围 %d..%d）", len, WPS_DOC_MIN, WPS_TEXT_MAX);
+            free(t);
+            goto done;
+        }
+        int caret = (int)st - 1;            /* 实测 Start 是 1 基（见文件头） */
+        int selEnd = caret + (int)ln;
+        if (caret > len) caret = len;
+        if (caret < 0) caret = 0;
+        if (selEnd > len) selEnd = len;
+        if (selEnd < caret) selEnd = caret;
+        *text = t;
+        *lenOut = len;
+        *caretOut = caret;
+        if (selEndOut) *selEndOut = selEnd;
+        ok = TRUE;
+        if (g_recording.load())
+            CapLog("  WPP shape len=%d caret=%d selEnd=%d Start=%ld Length=%ld",
+                   len, caret, selEnd, st, ln);
+    }
+
+done:
+    return ok;
+}
+
+/* ---------- 文字：直接置位一次，并把结果分成三态（见 auto.h 的 WPS_SET_*）。
    分类依据是**回读的位置**，不是 Invoke 的 HRESULT —— provider（这里是 WPS）
-   完全可能"返回成功但没动"。 */
-static int WpsComSetSelOnce(long start, long end) {
-    IDispatch* app = WpsAppGet();
+   完全可能"返回成功但没动"。 ---------- */
+static int WpsTextSetSelOnce(long start, long end) {
+    IDispatch* app = WpsAppGet(WPSA_TEXT);
     if (!app) return WPS_SET_UNSURE;
     ComPtr<IDispatch> sel(AdGetDisp(app, L"Selection"));
     if (!sel) return WPS_SET_UNSURE;
@@ -208,34 +331,87 @@ static int WpsComSetSelOnce(long start, long end) {
     return WPS_SET_UNSURE;
 }
 
-static void WpsAppDrop(void) {
-    t_wpsApp.reset();
+/* ---------- 演示：置位一次（Characters(lo+1, hi-lo).Select()，见文件头） ---------- */
+static int WpsShowSetSelOnce(long a1, long a2) {
+    IDispatch* app = WpsAppGet(WPSA_SHOW);
+    if (!app) return WPS_SET_UNSURE;
+    ComPtr<IDispatch> win(AdGetDisp(app, L"ActiveWindow"));
+    if (!win) return WPS_SET_UNSURE;
+    ComPtr<IDispatch> sel(AdGetDisp(win.get(), L"Selection"));
+    if (!sel) return WPS_SET_UNSURE;
+    {
+        long ty = -1;
+        /* 不在文本编辑态：置位无处可落，但也**不能**当"没动"补箭头 —— 补出的
+           方向键会去移动被选中的形状。按"状态不明"处理。 */
+        if (!AdGetLong(sel.get(), L"Type", &ty) || ty != WPS_SEL_TEXT)
+            return WPS_SET_UNSURE;
+    }
+    ComPtr<IDispatch> tr(AdGetDisp(sel.get(), L"TextRange"));
+    long preS = -1, preL = -1;
+    BOOL preOK = tr && AdGetLong(tr.get(), L"Start", &preS) && AdGetLong(tr.get(), L"Length", &preL);
+
+    long lo = (a1 < a2) ? a1 : a2;
+    long hi = (a1 < a2) ? a2 : a1;
+    /* 取全长：Selection.TextRange 只是选区，Characters 得在 TextFrame 的
+       全长 TextRange 上取（lo/hi 是它坐标系里的 0 基偏移） */
+    ComPtr<IDispatch> par(tr ? AdGetDisp(tr.get(), L"Parent") : NULL);
+    ComPtr<IDispatch> all(par ? AdGetDisp(par.get(), L"TextRange") : NULL);
+    if (!all) return WPS_SET_UNSURE;
+    long alen = -1;
+    if (!AdGetLong(all.get(), L"Length", &alen) || alen < 0) return WPS_SET_UNSURE;
+    if (lo < 0 || hi > alen || hi < lo) return WPS_SET_UNSURE;   /* 读到的坐标已过期 */
+
+    /* 折叠也走 Characters(k,0)：0 长度实测合法，k 可到 len+1（折叠到末尾） */
+    ComPtr<IDispatch> sub;
+    if (!AdCallDisp2(all.get(), L"Characters", lo + 1, hi - lo, sub.put()) || !sub)
+        return WPS_SET_UNSURE;
+    if (!AdCall0(sub.get(), L"Select")) return WPS_SET_UNSURE;
+
+    /* 回读校验（0 基换算见文件头） */
+    ComPtr<IDispatch> tr2(AdGetDisp(sel.get(), L"TextRange"));
+    long postS = -1, postL = -1;
+    BOOL postOK = tr2 && AdGetLong(tr2.get(), L"Start", &postS) &&
+                  AdGetLong(tr2.get(), L"Length", &postL);
+    if (postOK && postS - 1 == lo && postL == hi - lo) return WPS_SET_OK;
+    if (postOK && preOK && postS == preS && postL == preL) return WPS_SET_NONE;
+    return WPS_SET_UNSURE;
+}
+
+static void WpsAppDrop(int kind) {
+    t_wpsApp[kind].reset();
 }
 
 /* 缓存可能失效（WPS 重启、关掉文档又开）→ 失败就丢掉重试一次。
    只在**曾经拿到过**缓存时重试：首次就没有实例的话再试一次没有意义，
    反而让每次按键都多付一遍 COM 往返。 */
-static BOOL WpsComRead(WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) {
-    BOOL had = (t_wpsApp ? TRUE : FALSE);
-    if (WpsComReadOnce(text, lenOut, caretOut, selEndOut)) return TRUE;
-    WpsAppDrop();
-    if (had) return WpsComReadOnce(text, lenOut, caretOut, selEndOut);
-    return FALSE;
+static BOOL WpsComRead(int kind, WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) {
+    BOOL had = (t_wpsApp[kind] ? TRUE : FALSE);
+    BOOL ok = (kind == WPSA_SHOW)
+                  ? WpsShowReadOnce(text, lenOut, caretOut, selEndOut)
+                  : WpsTextReadOnce(text, lenOut, caretOut, selEndOut);
+    if (ok) return TRUE;
+    WpsAppDrop(kind);
+    if (!had) return FALSE;
+    return (kind == WPSA_SHOW)
+               ? WpsShowReadOnce(text, lenOut, caretOut, selEndOut)
+               : WpsTextReadOnce(text, lenOut, caretOut, selEndOut);
 }
 
-static int WpsComSetSel(long start, long end) {
-    BOOL had = (t_wpsApp ? TRUE : FALSE);
-    int r = WpsComSetSelOnce(start, end);
+static int WpsComSetSel(int kind, long start, long end) {
+    BOOL had = (t_wpsApp[kind] ? TRUE : FALSE);
+    int r = (kind == WPSA_SHOW) ? WpsShowSetSelOnce(start, end)
+                                : WpsTextSetSelOnce(start, end);
     if (r == WPS_SET_OK) return r;
-    WpsAppDrop();
-    if (had) return WpsComSetSelOnce(start, end);
-    return r;
+    WpsAppDrop(kind);
+    if (!had) return r;
+    return (kind == WPSA_SHOW) ? WpsShowSetSelOnce(start, end)
+                               : WpsTextSetSelOnce(start, end);
 }
 
-/* ---------- 经降权桥（管理员运行时唯一通路） ---------- */
+/* ---------- 经降权桥（管理员运行时唯一通路） ----------
 
-/* 发一次请求、收一次应答。**只有运输层失败才丢连接** —— 桥报告"COM 读失败"
-   （WPS 没打开文档之类）是业务结果，桥本身还好好的，丢掉反而要重新拉进程。 */
+   桥协议在 {op,a,b} 基础上带 app（WPSA_*）：文字/演示是两个不同的对象模型，
+   子进程得知道按哪套读/写。协议只在本程序的父子进程之间使用，同版本同发。 */
 static BOOL WpsBrCall(const WpsReq* req, WpsResp* hdr, WCHAR** text, int* textLen) {
     if (text) { *text = NULL; }
     if (textLen) { *textLen = 0; }
@@ -263,8 +439,9 @@ static BOOL WpsBrCall(const WpsReq* req, WpsResp* hdr, WCHAR** text, int* textLe
     return TRUE;
 }
 
-static BOOL WpsBrRead(WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) {
-    WpsReq req; memset(&req, 0, sizeof(req)); req.op = WPS_OP_GET;
+static BOOL WpsBrRead(int kind, WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) {
+    WpsReq req; memset(&req, 0, sizeof(req));
+    req.op = WPS_OP_GET; req.app = kind;
     WpsResp hdr; memset(&hdr, 0, sizeof(hdr));
     WCHAR* t = NULL; int tl = 0;
     if (!WpsBrCall(&req, &hdr, &t, &tl)) return FALSE;
@@ -280,9 +457,9 @@ static BOOL WpsBrRead(WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) 
     return TRUE;
 }
 
-static int WpsBrSetSel(long start, long end) {
+static int WpsBrSetSel(int kind, long start, long end) {
     WpsReq req; memset(&req, 0, sizeof(req));
-    req.op = WPS_OP_SET; req.a = start; req.b = end;
+    req.op = WPS_OP_SET; req.app = kind; req.a = start; req.b = end;
     WpsResp hdr; memset(&hdr, 0, sizeof(hdr));
     if (!WpsBrCall(&req, &hdr, NULL, NULL)) return WPS_SET_UNSURE;
     if (hdr.status == WPS_ST_FAIL) return WPS_SET_UNSURE;
@@ -290,24 +467,26 @@ static int WpsBrSetSel(long start, long end) {
 }
 
 /* 按运行权限选通路（不含"是不是 WPS"的判定，自检也用这一条） */
-static BOOL WpsReadAny(WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) {
-    if (!IsRunElevated()) return WpsComRead(text, lenOut, caretOut, selEndOut);
-    return WpsBrRead(text, lenOut, caretOut, selEndOut);
+static BOOL WpsReadAny(int kind, WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) {
+    if (!IsRunElevated()) return WpsComRead(kind, text, lenOut, caretOut, selEndOut);
+    return WpsBrRead(kind, text, lenOut, caretOut, selEndOut);
 }
 
 /* ---------- 对外的通道接口 ---------- */
 
 BOOL WpsGetTextCaret(HWND focus, WCHAR** text, int* lenOut, int* caretOut, int* selEndOut) {
     if (!text || !lenOut || !caretOut) return FALSE;
-    if (!WpsFocusIsWps(focus)) return FALSE;
-    return WpsReadAny(text, lenOut, caretOut, selEndOut);
+    int kind = WpsFocusKindOf(focus);
+    if (kind < 0) return FALSE;
+    return WpsReadAny(kind, text, lenOut, caretOut, selEndOut);
 }
 
 int WpsSetSel(HWND focus, int start, int end) {
+    int kind = WpsFocusKindOf(focus);
     /* 不是 WPS 焦点：本模块什么都没做，所以"可以安全退回箭头" */
-    if (!WpsFocusIsWps(focus)) return WPS_SET_NONE;
-    if (!IsRunElevated()) return WpsComSetSel(start, end);
-    return WpsBrSetSel(start, end);
+    if (kind < 0) return WPS_SET_NONE;
+    if (!IsRunElevated()) return WpsComSetSel(kind, start, end);
+    return WpsBrSetSel(kind, start, end);
 }
 
 /* ---------- 桥的子进程侧 ---------- */
@@ -316,13 +495,17 @@ static BOOL WpsBridgeCall(const BYTE* req, DWORD reqLen, BYTE** resp, DWORD* res
     if (!req || reqLen < sizeof(WpsReq)) return FALSE;
     WpsReq r;
     memcpy(&r, req, sizeof(r));
+    if (r.app != WPSA_TEXT && r.app != WPSA_SHOW) {
+        WpsLog("收到未知 app=%ld", (long)r.app);
+        return FALSE;
+    }
     WpsResp h;
     memset(&h, 0, sizeof(h));
 
     if (r.op == WPS_OP_GET) {
         WCHAR* text = NULL;
         int len = 0, caret = 0, selEnd = 0;
-        if (!WpsComRead(&text, &len, &caret, &selEnd)) {
+        if (!WpsComRead((int)r.app, &text, &len, &caret, &selEnd)) {
             h.status = WPS_ST_FAIL;
         } else {
             h.status = WPS_ST_OK;
@@ -343,14 +526,24 @@ static BOOL WpsBridgeCall(const BYTE* req, DWORD reqLen, BYTE** resp, DWORD* res
         return TRUE;
     }
     if (r.op == WPS_OP_SET) {
-        h.status = WpsComSetSel(r.a, r.b);      /* WPS_SET_* 直接透传给父进程 */
+        h.status = WpsComSetSel((int)r.app, r.a, r.b);   /* WPS_SET_* 直接透传给父进程 */
         long s = -1, e = -1;
-        IDispatch* app = WpsAppGet();          /* 借来的（线程缓存），不包 ComPtr */
+        IDispatch* app = WpsAppGet((int)r.app);   /* 借来的（线程缓存），不包 ComPtr */
         if (app) {
-            ComPtr<IDispatch> sel(AdGetDisp(app, L"Selection"));
-            if (sel) {
-                AdGetLong(sel.get(), L"Start", &s);
-                AdGetLong(sel.get(), L"End", &e);
+            if (r.app == WPSA_SHOW) {
+                ComPtr<IDispatch> win(AdGetDisp(app, L"ActiveWindow"));
+                ComPtr<IDispatch> sel(win ? AdGetDisp(win.get(), L"Selection") : NULL);
+                if (sel) {
+                    long ln = -1;
+                    AdGetLong(sel.get(), L"Start", &s);
+                    if (AdGetLong(sel.get(), L"Length", &ln) && s >= 0) e = s + ln;
+                }
+            } else {
+                ComPtr<IDispatch> sel(AdGetDisp(app, L"Selection"));
+                if (sel) {
+                    AdGetLong(sel.get(), L"Start", &s);
+                    AdGetLong(sel.get(), L"End", &e);
+                }
             }
         }
         h.caret = s;
@@ -366,7 +559,10 @@ static BOOL WpsBridgeCall(const BYTE* req, DWORD reqLen, BYTE** resp, DWORD* res
     return FALSE;
 }
 
-static void WpsComTeardown(void) { WpsAppDrop(); }
+static void WpsComTeardown(void) {
+    WpsAppDrop(WPSA_TEXT);
+    WpsAppDrop(WPSA_SHOW);
+}
 
 int WpsBridgeServe(unsigned long pid, unsigned long seq) {
     /* 子进程本就该是普通权限；若还是管理员，说明降权没成功，桥毫无意义 */
