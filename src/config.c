@@ -308,7 +308,7 @@ static CfgDef kCfg[CFG_COUNT] = {
        使用者决定（主程序按自己的 exe 目录展开），在这里展开就等于把基准写在两处。 */
     { "dittodir", "DittoDir", CFG_F_TEXT, 0, 0, 0, DITTO_DIR_MAX, g_dittoDir, 0,
       "; Ditto 的文件夹（Caps+V 弹出剪贴板用，两处派生）：\n"
-      ";   <DittoDir>\\Ditto.db   浮层只读地取最近 30 条\n"
+      ";   <DittoDir>\\Ditto.db   浮层只读地取最近 100 条\n"
       ";   <DittoDir>\\Ditto.exe  浮层里\"转 Ditto 本体\"用 -open 拉起它的窗口\n"
       "; 留空 = 不启用该功能（按 Caps+V 时浮层会提示未配置）。\n"
       "; 相对路径的基准 = 本程序 exe 所在目录（也就是本文件所在目录）：\n"

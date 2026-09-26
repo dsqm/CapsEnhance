@@ -60,7 +60,7 @@
 
 /* ================= 剪贴板浮层（CapsEnhanceClip.exe） =================
    它是什么：按 `Caps + V` 弹出的一个**不抢焦点**的列表 —— 列出 Ditto
-   剪贴板历史里最近的 30 条，单击 / 双击 / 回车粘贴（单击可在设置里关掉），
+   剪贴板历史里最近的 100 条，单击 / 双击 / 回车粘贴（单击可在设置里关掉），
    Shift 修饰时只粘纯文本。
 
    四条硬约束与它们的落地方式：
@@ -113,7 +113,10 @@
    逐像素 alpha 的半透明会让它退化成灰阶抗锯齿（第一版字发虚就是这个原因）。 */
 #define CLIP_ALPHA  242
 #define ROWS_VISIBLE 10           /* 基准可见行数：窗口高度按它算 */
-#define CLIP_MAX_ITEMS 30
+#define CLIP_MAX_ITEMS 100        /* 从库里取的条目上限（SQL 的 LIMIT 也由它拼出） */
+/* 把数字宏变成字符串字面量：LIMIT 与数组尺寸共用同一个真相，不会漂 */
+#define CLIP_STR_(x) #x
+#define CLIP_STR(x)  CLIP_STR_(x)
 #define CLIP_TEXT_MAX 160
 
 /* ---------- 条目 ---------- */
@@ -302,7 +305,7 @@ static void DbLoadItems(void) {
         "WHERE IFNULL(m.bIsGroup, 0) = 0 "
         "ORDER BY COALESCE(m.stickyClipOrder, -2147483647) DESC, "
         "         COALESCE(m.clipOrder, m.lDate) DESC "
-        "LIMIT 30";
+        "LIMIT " CLIP_STR(CLIP_MAX_ITEMS);
     const char* sqlOld =
         "SELECT m.lID, m.mText, m.QuickPasteText, "
         "       (SELECT group_concat(d.strClipBoardFormat, ',') FROM Data d "
@@ -311,7 +314,7 @@ static void DbLoadItems(void) {
         "WHERE IFNULL(m.bIsGroup, 0) = 0 "
         "ORDER BY COALESCE(m.stickyClipOrder, -2147483647) DESC, "
         "         COALESCE(m.clipOrder, m.lDate) DESC "
-        "LIMIT 30";
+        "LIMIT " CLIP_STR(CLIP_MAX_ITEMS);
     int hasDate = 1;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
         hasDate = 0;
@@ -1621,8 +1624,8 @@ static void DittoAction(void) {
 static void DoShow(void) {
     if (!g_visible) {
         /* 驻留期间 Ditto 可能又复制了新内容：每次显示都重读一次（此刻窗口
-           还没 SHOW，无闪烁；只读本地库 + LIMIT 30，毫秒级）。缩略图在
-           DbLoadItems 里按 lID 序列对比决定去留，条目集没变就不重解。 */
+           还没 SHOW，无闪烁；只读本地库 + LIMIT CLIP_MAX_ITEMS，毫秒级）。
+           缩略图在 DbLoadItems 里按 lID 序列对比决定去留，条目集没变就不重解。 */
         DbLoadItems();        PlaceWindow();                 /* ★ 只在这里定位 */
         MoveWindow(g_hwnd, g_px, g_py, g_pxW, g_pxH, FALSE);
         Render();

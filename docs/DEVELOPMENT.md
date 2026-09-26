@@ -126,7 +126,7 @@
 | `help.c` | **按键帮助的开合（主程序侧）**（`C+F1`）：拉起同目录的 `CapsEnhanceHelp.exe`，并把"当前该显示还是该隐藏"告诉它（注册消息 + 40ms 对账重试）。窗口**不常驻**，所以每次显示都是一次冷启动 —— 而"按一下就松手"会让 SHOW/HIDE 都发在窗口出生之前，重试就是为这个竞态准备的。寿命由和弦决定：按下开、抬起关、松开 Caps（`ResetEngine`）也关 |
 | `help/help.c` | **按键帮助窗口本体**（独立 exe `CapsEnhanceHelp.exe`）。自包含：不装钩子、不初始化 COM/TSF，只做"GDI+ 起一次 + 铺底一帧 + GDI 画一遍字 + 送进分层窗口"（只读 `CapsEnhance.ini` 里那三个 `Ime*Mode`，用来决定底部三条"单击切输入法"的文案）。逐像素 alpha（32bpp DIB + `UpdateLayeredWindow`）实现半透明；文字用 **GDI + ClearType**；`WS_EX_NOACTIVATE` 保证不抢焦点；键位表从 `keymap_table.h` 编进来（不跨进程取数据）。见[按键帮助](#按键帮助helphelpc) |
 | `clip.c` | **剪贴板浮层的开合（主程序侧）**（`C+V`）：拉起 `CapsEnhanceClip.exe`（把 ini 里的 `DittoDir` 按**自己的** exe 目录展开成绝对路径后经 `--dir` 传过去）、Show/Hide 对账重试、盯住浮层进程的生死（见 `child.c`）、以及把钩子代收的 `Esc` / 导航键转过去。**寿命 ≠ 和弦**（松开 Caps 不关），`ClipShow` 是 toggle；`ClipIsOpen()` 被钩子用来决定"要不要吞 Esc"，所以送达超时必须把它清假。见[剪贴板浮层](#剪贴板浮层clipclipc--srcclipc) |
-| `clip/clip.c` | **剪贴板浮层本体**（独立 exe `CapsEnhanceClip.exe`）。分层窗口框架与 `help/help.c` 同源；**只读**打开 Ditto 的 SQLite 取最近 30 条（只取 `mText` 显示，正文选中时才查 `Data`）；粘贴时把该条记录的所有格式原样回写剪贴板并挂 `"Clipboard Viewer Ignore"` 防污染历史；`SetWinEventHook` 记住要粘回哪个窗口并兼做"点外面就关"。它是唯一链接第三方代码（SQLite3 Multiple Ciphers）的 exe |
+| `clip/clip.c` | **剪贴板浮层本体**（独立 exe `CapsEnhanceClip.exe`）。分层窗口框架与 `help/help.c` 同源；**只读**打开 Ditto 的 SQLite 取最近 100 条（只取 `mText` 显示，正文选中时才查 `Data`）；粘贴时把该条记录的所有格式原样回写剪贴板并挂 `"Clipboard Viewer Ignore"` 防污染历史；`SetWinEventHook` 记住要粘回哪个窗口并兼做"点外面就关"。它是唯一链接第三方代码（SQLite3 Multiple Ciphers）的 exe |
 
 > 分层意义：以后要支持"另一个只有 COM 才读得到的程序"（如 WPS 表格），照 `wps.c` 再写一个文件即可，`autodisp.c` 与 `bridge.c` 原样复用。
 > 激活键（`Alt/D`、`F`）**不做成配置项**：它们属于和弦语法本身，改变量级 < 配置项，历史实装成 `EnhanceKeys` / `ShiftKeys` 后已回退（改它们等于改功能）。但 `keymap.c` 那层模式抽象仍在，以后想改常量只需动 `cap.h` 一处。
@@ -544,7 +544,7 @@ WPS 置位的回读校验返回**三态**：
 
 ## 剪贴板浮层（`clip/clip.c` + `src/clip.c`）
 
-一句话：`C + V` **按一下**就弹出一个不抢焦点的列表（Ditto 历史最近 30 条），挑一条粘回原来那个程序。窗口在**独立 exe** 里，分层窗口框架与 `help/help.c` 同源。
+一句话：`C + V` **按一下**就弹出一个不抢焦点的列表（Ditto 历史最近 100 条），挑一条粘回原来那个程序。窗口在**独立 exe** 里，分层窗口框架与 `help/help.c` 同源。
 
 **为什么拆成独立 exe**：与帮助图同一条理由，但更重一层 —— 它要打开并查询别人的 SQLite 数据库、把一条记录的多个剪贴板格式解码后回写进系统剪贴板，这些都属于"可能慢、可能失败"的事，绝不能发生在承载钩子的主线程上。
 
@@ -572,8 +572,8 @@ WPS 置位的回读校验返回**三态**：
 
 落地的几条取舍：
 
-- **只取 `mText` 用作显示，正文留到选中时再查 `Data`** —— 30 条正文可能是 30 篇文章。
-- "这是文本还是图片"靠 `group_concat(strClipBoardFormat)` 一次带出来，不为它再发 30 条查询。
+- **只取 `mText` 用作显示，正文留到选中时再查 `Data`** —— 100 条正文可能是 100 篇文章。
+- "这是文本还是图片"靠 `group_concat(strClipBoardFormat)` 一次带出来，不为它再发 100 条查询。
 - `sqlite3_open_v2` 只认 UTF-8 路径，所以宽路径先转一次；它是唯一带 flags 的打开接口，而**只读必须走它**（`sqlite3_open16` 没有 flags 参数，只能读写打开）。
 - 路径的**相对基准由主程序展开**（它自己的 exe 目录）后用 `--db` 传给浮层 —— 基准只有那个进程知道，让子进程再解一次就是同一件事的两份实现。
 
