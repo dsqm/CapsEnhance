@@ -88,9 +88,9 @@ BOOL ChildSpawn(const WCHAR* exe, WCHAR* cmd, const WCHAR* dir, HANDLE* outProc)
     HANDLE job = ChildJob();
     if (!job || !AssignProcessToJobObject(job, pi.hProcess)) {
         /* 降级：子进程照常跑，只是不受 job 管（外层 job 禁止并入等少见情形）。
-           后果是主程序退出后它可能多活一会儿 —— 两个子 exe 各自还有兜底
-           （帮助 3 分钟上限 / 浮层 10 分钟空闲退出），不会永远留着，所以不为此
-           再兜一层。 */
+           后果是主程序退出后它可能多活一会儿 —— 帮助窗口还有自己的 3 分钟上限，
+           不会永远留着；剪贴板浮层则是常驻设计（没有到期退出），这一份要靠用户
+           自己结束它，所以不为此再兜一层。 */
         if (g_recording.load())
             CapLog("  [子进程] 未能挂进 job（err=%lu），本次无父死子退保证", GetLastError());
     }

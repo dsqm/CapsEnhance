@@ -60,13 +60,22 @@ void HelpTick(void);   /* HELP_TIMER 到点：把期望状态再送一次（见�
    另有一条：**双击标题栏置顶（钉住）**。置顶期间停用"粘贴后自动关"与
    "点击外部自动关"，为的是连粘多条不被打断 —— 置顶态只能靠 X / Esc / 热键退出。
 
-   寿命兜底与帮助窗口同一套（Job Object + 各自的绝对上限），差别只在驻留：浮层收起
-   后**进程继续待命 10 分钟**（`GRACE_MS` 在 clip/clip.c），所以"父死子退"这条对它
-   更值钱 —— 主程序一退，内核立刻收掉待命中的浮层，不留孤儿。 */
+   寿命兜底与帮助窗口同一套（Job Object），差别有两条：
+     · **驻留改成不限时**（2026-09-26）：浮层收起后**进程永久待命**，不再有"待命
+       10 分钟就退出"这一档。冷启动每重经历一次就完整地再付一次（杀软扫 1.67MB
+       未签名 exe、装载静态 sqlite3mc、起 GDI+）—— 那正是"偶发要 2-5 秒"的来源，
+       而待命到期（用户隔十几分钟不用）恰好是我们要付它的时候。代价是一个隐藏
+       进程活到主程序退出为止；"父死子退"这条因此更值钱 —— 主程序一退，内核立刻
+       收掉待命中的浮层，不留孤儿。
+     · **送达靠子进程报信，不靠主程序猜**：浮层建窗成功后自己向主窗口发
+       `CLIP_MSG_BORN`，主程序收到那一刻才确认它存在、才发 SHOW/HIDE。40ms 的
+       `CLIP_TIMER` 轮询降为**兜底**，预算放宽到 10 秒，**到点不再杀进程**（见下面
+       CLIP_TRIES_MAX 的注释）。 */
 #define CLIP_TIMER   6                    /* 主窗口定时器 id（4=帮助对账） */
-#define CLIP_TICK_MS  40                  /* 送达重试间隔 */
-#define CLIP_TRIES_MAX 25                 /* 40ms x 25 ≈ 1s 内送不到就放弃 */
+#define CLIP_TICK_MS  40                  /* 兜底轮询间隔（正常路径用不上，见 ClipBorn） */
+#define CLIP_TRIES_MAX 250                /* 40ms x 250 ≈ 10s：报信始终没来才判异常 */
 #define CLIP_CLASS   L"CapsEnhanceClip"   /* 剪贴板窗口类名（跨进程握手靠它 FindWindow） */
+#define CLIP_MAIN_CLASS L"CapsEnhanceMain" /* 主窗口类名（浮层反向报信用它 FindWindow） */
 /* 浮层注入按键时打的标记（dwExtraInfo）。浮层是独立 exe，这个值就是跨进程的
    唯一约定，两边共用这一个常量。
    为什么要它：LLKHF_INJECTED 只说明"有程序注入了键"，分不清是谁 —— 浮层粘贴
@@ -81,6 +90,14 @@ void HelpTick(void);   /* HELP_TIMER 到点：把期望状态再送一次（见�
 #define CLIP_MSG_ESC  L"CapsEnhanceClipEsc"   /* 注册消息：主程序代收的 Esc */
 #define CLIP_MSG_KEY  L"CapsEnhanceClipKey"   /* 注册消息：主程序代收的导航键（wParam=vk，lParam=CLIPKF_*） */
 #define CLIP_MSG_CLOSED L"CapsEnhanceClipClosed" /* 注册消息：浮层自行关闭（粘贴/Esc/超时收起）-> 主程序清 s_want */
+/* 浮层 -> 主程序：我的窗口已经出生，可以说话了（注册消息）。
+   wParam = 浮层自报的启动耗时 ms（进程入口 -> 建窗成功），lParam = 其中读库那一段的 ms。
+   为什么要有这条：握手原来全靠主程序 40ms 一次 `FindWindow` 去**猜**它出生了没有 ——
+   猜得急（1 秒预算）就把还没出窗的那份杀掉，猜得松用户就干等。子进程是唯一知道自己
+   出生了的人，让它说了算，主程序这边不必再为"该等多久"编数字。
+   注册消息天生可重复投递（重发几次也只是一次幂等的再确认），所以这条即使重复到达、
+   或在没有任何人等待它时到达，都只是让主程序把账补齐，不会有副作用。 */
+#define CLIP_MSG_BORN L"CapsEnhanceClipBorn"
 #define CLIP_EXE     L"CapsEnhanceClip.exe"
 void ClipShow(void);    /* Caps+V 按下：显示（已在显示则 toggle 成隐藏） */
 void ClipHide(void);    /* 明确关闭（Esc / toggle / 引擎复位） */
@@ -92,6 +109,8 @@ BOOL ClipIsOpen(void);  /* 浮层当前是否"该开着"（钩子据此决定要
 BOOL ClipIsClosedMsg(UINT msg); /* 主窗口收到这条注册消息 = 浮层自行关闭了 */
 void ClipClosed(void);  /* 收到 CLIP_MSG_CLOSED：清 s_want，恢复按键放行 */
 void ClipGone(void);    /* 收到 WM_CLIP_GONE：浮层进程没了（同一件事，但由内核告知） */
+BOOL ClipIsBornMsg(UINT msg); /* 主窗口收到这条注册消息 = 浮层窗口已出生（与 ClipIsClosedMsg 同图案） */
+void ClipBorn(DWORD selfMs, DWORD dbMs); /* 收到 CLIP_MSG_BORN：握手完成（自报耗时，用于日志） */
 
 /* ---------- 子进程生命周期（帮助 / 剪贴板浮层的共同底座；实现在 src/child.c） ----------
    两件事：**父死子退**（Job Object，零协作、卡死也照杀）与**子死父知**（进程句柄

@@ -163,6 +163,7 @@ static BOOL     g_dbErr = FALSE;
 static HWND      g_hwnd = NULL;
 static UINT      g_msgShow = 0, g_msgHide = 0, g_msgEsc = 0, g_msgKey = 0;
 static UINT      g_msgClosed = 0;
+static UINT      g_msgBorn = 0;      /* 出生报信（-> 主程序），见 src/cap_overlay.h */
 static BOOL      g_visible = FALSE;
 static HDC       g_memDC = NULL;
 static HBITMAP   g_bmp = NULL;
@@ -183,17 +184,17 @@ static POINT     g_dragCur;            /* 按下那一刻的光标位置 */
 static POINT     g_dragWin;            /* 按下那一刻的窗口位置 */
 
 /* 寿命（2026-09-21 起本进程不再有心跳；完整取舍见 src/child.c 的文件头）：
-   TID_GRACE = 收起后**驻留**多久才真正退出（这段时间在等下一次唤出，免冷启动）。
-   主程序**死了**由 Job Object 收（内核立刻动手，不用我们判）；主程序只是**卡住**
-   没有人能发 HIDE，那时这个窗口会一直留着 —— 但它是可见的、鼠标能关，而"卡住"
-   本身就意味着用户正在处理别的事，比起"看着看着提示自己消失"（那是 800ms 心跳
-   时代的误伤），留着更不打扰。手动双击起来的那份同理。 */
-#define TID_GRACE  2
+   **2026-09-26 起本进程没有"到期退出"这回事了** —— 收起后永久驻留，直到主程序退出
+   由 Job Object 收走。原来那个 GRACE_MS（待命 10 分钟）被删掉，因为它恰好在最坏的
+   时机制造一次冷启动：用户隔十几分钟没用剪贴板，下一次按就要重新付一遍启动成本
+   （杀软扫 1.67MB 未签名 exe、装载静态 sqlite3mc、起 GDI+），而这笔钱本来已经付过。
+   主程序只是**卡住**时同样没有别的退路 —— 但它是可见的、鼠标能关（这条取舍没变）。
+   手动双击起来的那份没有主程序喂它，也据此常驻：**关掉它的唯一办法是右击托盘退出
+   主程序**（job 会把它一起收掉），这正是原来那份由 job 保证的行为。 */
 #define TID_TIP   6    /* 悬停提示的自动消失（TRACK 模式不会自己收） */
 #define TID_TIPSHOW 7  /* 悬停初始延迟：停稳 500ms 才弹（Ditto/系统同款） */
 #define TID_TIPFADE 8  /* 提示窗口渐显/渐隐的步进时钟 */
 #define TIP_DELAY_MS 500
-#define GRACE_MS   (10 * 60 * 1000)   /* 驻留时长：收起后进程再活 10 分钟（期间唤出复用，免冷启动），到点才真正退出 */
 
 static BOOL  Render(void);
 static void  DoHideClose(void);
@@ -1522,7 +1523,8 @@ static void PlaceWindow(void) {
 
 static void DoHideClose(void) {
     HideIfVisible();
-    SetTimer(g_hwnd, TID_GRACE, GRACE_MS, NULL);
+    /* 常驻：不再设定时器自杀（见上面"寿命"那段）。窗口隐掉、数据与缩略图都留着，
+       下一次唤出是纯 SHOW —— 这正是当初要它的全部理由，别让它到期返贫。 */
 }
 
 /* 把 Ditto 的快速粘贴窗口拉到前台。
@@ -1575,7 +1577,6 @@ static void DittoAction(void) {
 }
 
 static void DoShow(void) {
-    KillTimer(g_hwnd, TID_GRACE);      /* 撤销空闲退出：又有人用了 */
     if (!g_visible) {
         /* 驻留期间 Ditto 可能又复制了新内容：每次显示都重读一次（此刻窗口
            还没 SHOW，无闪烁；只读本地库 + LIMIT 30，毫秒级）。缩略图在
@@ -1647,7 +1648,6 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     switch (msg) {
     case WM_TIMER:
-        if (wp == TID_GRACE) { DestroyWindow(hwnd); return 0; }
         if (wp == TID_TIP)  { TipHide(); return 0; }   /* Ditto 的 ToolTipTimeout */
         if (wp == TID_TIPFADE) {
             /* 渐显/渐隐步进：每步重发一次 ULW，SourceConstantAlpha 当乘数 */
@@ -1926,11 +1926,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                       _In_ LPWSTR cmdLine, _In_ int show) {
     (void)hPrev; (void)show;
 
+    /* 自测起点：进程生命周期都从这里算，主程序日志里那两个 ms 就是它。 */
+    ULONGLONG t0 = GetTickCount64();
+    DWORD dbMs = 0;                  /* 读库那一段的耗时（见下面报信时才带上） */
     g_msgShow = RegisterWindowMessageW(CLIP_MSG_SHOW);
     g_msgHide = RegisterWindowMessageW(CLIP_MSG_HIDE);
     g_msgEsc  = RegisterWindowMessageW(CLIP_MSG_ESC);
     g_msgKey  = RegisterWindowMessageW(CLIP_MSG_KEY);
     g_msgClosed = RegisterWindowMessageW(CLIP_MSG_CLOSED);
+    g_msgBorn = RegisterWindowMessageW(CLIP_MSG_BORN);
 
     if (cmdLine) {
         const WCHAR* p = wcsstr(cmdLine, L"--dir");
@@ -2021,7 +2025,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
        DbLoadItems 就在这一行 —— 初始化放后面就是"未初始化临界区"，
        进程起来即崩（实测踩过：浮层完全不显示）。 */
     InitializeCriticalSection(&g_thumbLock);
-    DbLoadItems();
+    {   /* 读库单独计时：它是这段里唯一会随历史增长而变慢的一步，值得单独看清 */
+        ULONGLONG tDb = GetTickCount64();
+        DbLoadItems();
+        dbMs = (DWORD)(GetTickCount64() - tDb);
+    }
     FitMetrics();
     MakeSurface();
 
@@ -2046,6 +2054,23 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     if (!g_hwnd) { Gdiplus::GdiplusShutdown(token); return 1; }
     SetLayeredWindowAttributes(g_hwnd, 0, CLIP_ALPHA, LWA_ALPHA);
 
+    /* ★ 出生报信：**只有我知道自己出世了**，所以由我开口 —— 主程序原来用 40ms
+       一次 FindWindow 猜这件事，猜急了（1 秒预算）就把还没出窗的这份杀掉重起，
+       那正是"偶发要 2-5 秒"被放大成"要多按几次"的地方（详见 src/cap_overlay.h）。
+       带上两段耗时：进程入口 -> 出窗（wParam）与其中读库那段（lParam），主程序
+       只在记录模式下抄进日志，用来回答"现在到底快没快"。
+       ★ 报信成功就不再自己显示 —— 拉我起来的人会告诉我该不该显示（SHOW/HIDE），
+         再来一次 `DoShow` 等于多读一遍库（驻留省下的正是这个）。找不到主窗口
+         （手动双击）才退回老样子：自己显示，自己活着。 */
+    BOOL toldMain = FALSE;
+    if (g_msgBorn) {
+        HWND mw = FindWindowW(CLIP_MAIN_CLASS, NULL);
+        if (mw) {
+            PostMessageW(mw, g_msgBorn, (WPARAM)(DWORD)(GetTickCount64() - t0), (LPARAM)dbMs);
+            toldMain = TRUE;
+        }
+    }
+
     g_thumbThread = CreateThread(NULL, 0, ThumbThreadProc, NULL, 0, NULL);
 
     g_target = GetForegroundWindow();
@@ -2054,7 +2079,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                                NULL, WinEventProc, 0, 0,
                                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
-    DoShow();
+    /* 有人拉我起来时（toldMain），显示与否由他说了算 —— 他会发 SHOW/HIDE，样子与
+       "驻留中被唤出"完全一致；这条道上不再自己 DoShow，省一遍读库。 */
+    if (!toldMain) DoShow();
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {

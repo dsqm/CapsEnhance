@@ -809,6 +809,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
        ★ 这条广播要能被收到，前提是 WinMain 里把它放进了 UIPI 白名单 ——
        管理员运行时 explorer 的广播本来是会被 UIPI 拦掉的（见 TrayStartRetry）。 */
     if (msg == s_taskbarCreated && s_taskbarCreated) { TrayRebuild(); return 0; }
+    if (ClipIsBornMsg(msg))   { ClipBorn((DWORD)wp, (DWORD)lp); return 0; }  /* 浮层窗口已出生，握手完成 */
     if (ClipIsClosedMsg(msg)) { ClipClosed(); return 0; }   /* 浮层自行关闭（如粘贴后收起） */
     if (msg == WM_CLIP_GONE) { ClipGone(); return 0; }      /* 浮层进程没了（内核告知，见 src/child.c） */
 

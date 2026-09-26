@@ -102,6 +102,8 @@ BOOL ClipIsOpen(void) { return g_clipOpen; }
 BOOL ClipIsClosedMsg(UINT msg) { (void)msg; return FALSE; }
 void ClipClosed(void) { g_clipOpen = FALSE; }
 void ClipGone(void)   { g_clipOpen = FALSE; }
+BOOL ClipIsBornMsg(UINT msg) { (void)msg; return FALSE; }
+void ClipBorn(DWORD selfMs, DWORD dbMs) { (void)selfMs; (void)dbMs; }
 static void ResetClipRec(void) {
     g_clipShow = 0; g_clipHide = 0; g_clipEsc = 0; g_clipKey = 0; g_clipOpen = FALSE;
 }
