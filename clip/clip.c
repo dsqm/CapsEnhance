@@ -1214,7 +1214,9 @@ static void FitMetrics(void) {
     HMONITOR mon = CursorMonitor();
     g_k = (float)DpiOfMonitor(mon) / 96.0f;
     g_headerH  = 34.0f * g_k;
-    g_gutterW  = 26.0f * g_k;
+    /* 序号栏只服务前 10 条（1..9, 0）：收窄到放得下单个数字即可，
+       再宽就是白占行宽（后面的条目根本没有序号） */
+    g_gutterW  = 18.0f * g_k;
     g_rowH1    = 34.0f * g_k;
     /* 图片行给足高度：缩略图要**占满整行**（Ditto 就是这样），行不够高图就小 */
     g_rowH2    = 76.0f * g_k;
@@ -1412,7 +1414,7 @@ static BOOL Render(void) {
         g.FillRectangle(sel ? &brSel : (alt ? &brAlt : &brWhite),
                         Gdiplus::RectF(0.0f, drawY, (float)g_pxW, drawH));
         if (g_items[i].hasImage) {
-            float bx = g_gutterW + 4.0f * g_k;
+            float bx = ((i < 10) ? g_gutterW : 0.0f) + 4.0f * g_k;
             /* ★ 锁要一直持有到画完：GDI+ 的 Bitmap 不是 COM 对象、没有引用计数，
                不能靠 AddRef 借用。后台线程只在自己那把锁里换指针，
                这里最多等它一次解码的时间，不会卡住消息循环。 */
@@ -1436,7 +1438,7 @@ static BOOL Render(void) {
            满行高的方块太大，所以按缩略图那样上下各留一个 padding。 */
         if (g_items[i].hasSwatch) {
             float box = h - 2.0f * g_thumbPad;
-            float bx  = g_gutterW + 6.0f * g_k;
+            float bx  = ((i < 10) ? g_gutterW : 0.0f) + 6.0f * g_k;
             float by  = top + (h - box) * 0.5f;
             BYTE r = GetRValue(g_items[i].swatch);
             BYTE gg = GetGValue(g_items[i].swatch);
@@ -1489,9 +1491,10 @@ static BOOL Render(void) {
             ? (g_dbPath[0] ? L"打不开 Ditto 数据库（检查 ini 的 DittoDir）"
                            : L"未配置 Ditto 文件夹：在 ini 的 DittoDir 里写路径")
             : L"（没有读到条目）";
+        /* 空态没有任何序号，文字直接从左边起 */
         GdiText(msg, g_fontRow, CR(C_TEXT_DIM),
-                g_gutterW + 8.0f * g_k, yList,
-                (float)g_pxW - g_gutterW - 16.0f * g_k, g_rowH1 * 2.0f, DT_LEFT, TRUE);
+                8.0f * g_k, yList,
+                (float)g_pxW - 16.0f * g_k, g_rowH1 * 2.0f, DT_LEFT, TRUE);
     }
     /* 半截行照画的前提：文字全部裁剪到列表区，不许越进标题栏（标题已画在上面） */
     int textDC = SaveDC(g_memDC);
@@ -1507,7 +1510,10 @@ static BOOL Render(void) {
         GdiText(num, g_fontSmall, CR(C_INDEX),
                 0.0f, top, g_gutterW, h, DT_CENTER, FALSE);
 
-        float tx = g_gutterW + 6.0f * g_k;
+        /* 前 10 条有序号，文字让开序号栏；之后没有序号，整行从左边起，
+           不留这条空白（缩略图/色块/文字三处起点都按这个规则） */
+        float bx0 = ((i < 10) ? g_gutterW : 0.0f);
+        float tx  = bx0 + 6.0f * g_k;
         if (g_items[i].hasImage)
             tx += g_thumbW[i] + 8.0f * g_k;   /* 让开缩略图**实际**的宽度 */
         if (g_items[i].hasSwatch)
