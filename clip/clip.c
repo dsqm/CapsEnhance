@@ -1216,7 +1216,7 @@ static void FitMetrics(void) {
     g_headerH  = 34.0f * g_k;
     /* 序号栏只服务前 10 条（1..9, 0）：收窄到放得下单个数字即可，
        再宽就是白占行宽（后面的条目根本没有序号） */
-    g_gutterW  = 18.0f * g_k;
+    g_gutterW  = 13.5f * g_k;
     g_rowH1    = 34.0f * g_k;
     /* 图片行给足高度：缩略图要**占满整行**（Ditto 就是这样），行不够高图就小 */
     g_rowH2    = 76.0f * g_k;
