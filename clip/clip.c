@@ -263,6 +263,10 @@ static void LabelFromFormats(const WCHAR* fmts, WCHAR* out, int cap) {
 }
 
 static void FreeThumbs(void);   /* 706 行：DbLoadItems 重载条目后按需作废缩略图 */
+/* 解码线程的唤醒事件与换代号：DbLoadItems 判定条目集变了就换代 + SetEvent，
+   常驻的解码线程据此重做一轮。定义放这儿，因为 DbLoadItems 自己要用。 */
+static HANDLE        g_thumbWake = NULL;   /* 自动重置事件：有新活/退出 */
+static volatile LONG g_thumbGen  = 0;      /* 条目重载换代：换一次作废整轮 */
 
 static void DbLoadItems(void) {
     /* 旧条目的 lID 序列：加载完对比 —— 条目集没变就复用缩略图缓存
@@ -347,6 +351,9 @@ static void DbLoadItems(void) {
     if (!same) {
         FreeThumbs();
         g_sel = 0;  g_scrollY = 0;
+        /* 换代 + 唤醒：叫解码线程按新条目重做一轮（不叫醒就是"再开全灰"） */
+        InterlockedIncrement(&g_thumbGen);
+        if (g_thumbWake) SetEvent(g_thumbWake);
     }
 }
 
@@ -706,7 +713,6 @@ static void TipTextOf(int idx) {
 /* ================= 缩略图 ================= */
 
 static Gdiplus::Bitmap* g_thumb[CLIP_MAX_ITEMS];
-static BOOL             g_thumbTried[CLIP_MAX_ITEMS];
 /* 缩略图在**后台线程**解码并缩到目标尺寸：
    第一版在渲染路径里现读库现解码，图片一多每滚一格都要卡一次 —— 磁盘 + 解码 +
    高质量缩放全在 UI 线程上。现在后台一次做完，渲染只画现成的小图（1:1 贴）；
@@ -725,7 +731,6 @@ static void FreeThumbs(void) {
     for (int i = 0; i < CLIP_MAX_ITEMS; i++) {
         delete g_thumb[i];
         g_thumb[i] = NULL;
-        g_thumbTried[i] = FALSE;
         g_thumbW[i] = 0.0f;
     }
     LeaveCriticalSection(&g_thumbLock);
@@ -741,23 +746,37 @@ static Gdiplus::Bitmap* BitmapFromDib(const BYTE* blob, int len) {
     DWORD comp = h->biCompression;
     if (comp != BI_RGB && comp != BI_BITFIELDS) return NULL;
 
-    int clrUsed = (int)h->biClrUsed;
-    if (clrUsed == 0 && bpp <= 8) clrUsed = 1 << bpp;
-    DWORD off = h->biSize + (DWORD)clrUsed * sizeof(RGBQUAD);
-    if (comp == BI_BITFIELDS) off += 3 * sizeof(DWORD);
-    if (off >= (DWORD)len) return NULL;
+    /* Ditto 的路子（借鉴其 ImageHelper.cpp 的 prependStream）：DIB 裸数据
+       （BITMAPINFOHEADER + 调色板/掩码 + 像素，没有文件头）前面补一个 14 字节
+       BITMAPFILEHEADER 拼成完整 BMP，交给 GDI+ 当图片文件解码。
+       位深、调色板、BI_BITFIELDS 掩码、V4/V5 扩展头全部由 GDI+ 原生处理。
+       原先 CreateDIBSection + FromHBITMAP 的路子有死角：16bpp BITFIELDS 这类
+       DIB FromHBITMAP 直接失败 → 解码返回 NULL → 界面上就是一块占位灰框
+       （"缩略图显示成灰色"），而 Ditto 同一条数据照常出图。 */
+    int clr = 0;
+    if (bpp <= 8) clr = h->biClrUsed ? (int)h->biClrUsed : (1 << bpp);
+    DWORD offBits = h->biSize + (DWORD)clr * sizeof(RGBQUAD);
+    if (comp == BI_BITFIELDS) offBits += 3 * sizeof(DWORD);   /* 3 个掩码在像素前 */
+    if (offBits >= (DWORD)len) return NULL;
 
-    int stride = ((h->biWidth * bpp + 31) / 32) * 4;
-    LONG absH = h->biHeight > 0 ? h->biHeight : -h->biHeight;
-    DWORD need = (DWORD)stride * (DWORD)absH;
-    if (need > (DWORD)(len - (int)off)) return NULL;
+    BITMAPFILEHEADER bfh;
+    memset(&bfh, 0, sizeof(bfh));
+    bfh.bfType = 0x4D42;                            /* 'BM' */
+    bfh.bfSize = (DWORD)sizeof(bfh) + (DWORD)len;
+    bfh.bfOffBits = (DWORD)sizeof(bfh) + offBits;
 
-    void* bits = NULL;
-    HBITMAP hb = CreateDIBSection(NULL, (const BITMAPINFO*)blob, DIB_RGB_COLORS, &bits, NULL, 0);
-    if (!hb || !bits) { if (hb) DeleteObject(hb); return NULL; }
-    memcpy(bits, blob + off, need);
-    Gdiplus::Bitmap* bm = Gdiplus::Bitmap::FromHBITMAP(hb, NULL);
-    DeleteObject(hb);
+    HGLOBAL gh = GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)sizeof(bfh) + (SIZE_T)len);
+    if (!gh) return NULL;
+    BYTE* p = (BYTE*)GlobalLock(gh);
+    if (!p) { GlobalFree(gh); return NULL; }
+    memcpy(p, &bfh, sizeof(bfh));
+    memcpy(p + sizeof(bfh), blob, (size_t)len);
+    GlobalUnlock(gh);
+
+    IStream* s = NULL;
+    if (CreateStreamOnHGlobal(gh, TRUE, &s) != S_OK) { GlobalFree(gh); return NULL; }
+    Gdiplus::Bitmap* bm = Gdiplus::Bitmap::FromStream(s);
+    s->lpVtbl->Release(s);   /* cap.h 走 CINTERFACE：IStream 没有 C++ 的 Release() */
     return bm;
 }
 
@@ -831,22 +850,35 @@ static Gdiplus::Bitmap* DecodeThumb(int idx) {
     return out;
 }
 
-/* 后台解码线程：把所有带图条目的缩略图一次做完（进程活着只做这一轮）。 */
+/* 后台解码线程：常驻循环 —— 等唤醒事件，把带图条目的缩略图解码一遍。
+   旧版"进程活着只做这一轮"：驻留期间条目集一变（复制了新条目 / 粘贴后
+   Ditto 重排序），DbLoadItems 作废全部缓存，却没人再解码 → 第一次开
+   正常、再开全是占位灰框。现在 DbLoadItems 换代后 SetEvent 叫醒重做。 */
 #define WM_THUMB_READY (WM_APP + 20)
 static DWORD WINAPI ThumbThreadProc(LPVOID lp) {
     (void)lp;
-    for (int i = 0; i < g_count; i++) {
+    for (;;) {
+        WaitForSingleObject(g_thumbWake, INFINITE);
         if (g_thumbQuit) return 0;
-        if (!g_items[i].hasImage) continue;
-        Gdiplus::Bitmap* bm = DecodeThumb(i);
-        EnterCriticalSection(&g_thumbLock);
-        g_thumb[i] = bm;                 /* 失败就是 NULL：占位框逻辑照旧 */
-        g_thumbTried[i] = TRUE;
-        LeaveCriticalSection(&g_thumbLock);
-        PostMessageW(g_hwnd, WM_THUMB_READY, (WPARAM)i, 0);
-        Sleep(0);
+        LONG myGen = g_thumbGen;
+        for (int i = 0; i < g_count; i++) {
+            if (g_thumbQuit) return 0;
+            if (g_thumbGen != myGen) break;   /* 条目又重载了：整轮重来 */
+            if (!g_items[i].hasImage) continue;
+            long long id = g_items[i].id;     /* 记下解的是谁，防中途重载串位 */
+            Gdiplus::Bitmap* bm = DecodeThumb(i);
+            EnterCriticalSection(&g_thumbLock);
+            if (g_thumbGen == myGen && g_items[i].id == id) {
+                g_thumb[i] = bm;              /* 失败就是 NULL：占位框逻辑照旧 */
+                bm = NULL;                    /* 缓存已接管 */
+            }
+            LeaveCriticalSection(&g_thumbLock);
+            delete bm;                        /* 没接管的（含 NULL）在这里释放 */
+            if (g_thumbGen == myGen)
+                PostMessageW(g_hwnd, WM_THUMB_READY, (WPARAM)i, 0);
+            Sleep(0);
+        }
     }
-    return 0;
 }
 
 /* ================= 粘贴 ================= */
@@ -2019,12 +2051,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     if (Gdiplus::GdiplusStartup(&token, &gsi, NULL) != Gdiplus::Ok) return 1;
 
     memset(g_thumb, 0, sizeof(g_thumb));
-    memset(g_thumbTried, 0, sizeof(g_thumbTried));
     /* ★ 临界区必须在第一次 DbLoadItems 之前初始化：DbLoadItems 重载条目后
        会按需 FreeThumbs()（进去就 EnterCriticalSection），而启动路径的
        DbLoadItems 就在这一行 —— 初始化放后面就是"未初始化临界区"，
        进程起来即崩（实测踩过：浮层完全不显示）。 */
     InitializeCriticalSection(&g_thumbLock);
+    /* 唤醒事件也要在第一次 DbLoadItems 之前建好：那次加载 oldCount=0 必判
+       "条目集变了"，会在里面 SetEvent —— 第一轮解码的开工信号就来自它。 */
+    g_thumbWake = CreateEventW(NULL, FALSE, FALSE, NULL);
     {   /* 读库单独计时：它是这段里唯一会随历史增长而变慢的一步，值得单独看清 */
         ULONGLONG tDb = GetTickCount64();
         DbLoadItems();
@@ -2071,7 +2105,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         }
     }
 
-    g_thumbThread = CreateThread(NULL, 0, ThumbThreadProc, NULL, 0, NULL);
+    if (g_thumbWake)    /* 事件没建成就别起线程：等一个 NULL 句柄是忙循环 */
+        g_thumbThread = CreateThread(NULL, 0, ThumbThreadProc, NULL, 0, NULL);
 
     g_target = GetForegroundWindow();
     g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, NULL, 0);
@@ -2091,10 +2126,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     if (g_thumbThread) {
         InterlockedExchange(&g_thumbQuit, 1);
+        if (g_thumbWake) SetEvent(g_thumbWake);   /* 可能正等着活干：叫醒它好退场 */
         WaitForSingleObject(g_thumbThread, 3000);
         CloseHandle(g_thumbThread);
         g_thumbThread = NULL;
     }
+    if (g_thumbWake) { CloseHandle(g_thumbWake); g_thumbWake = NULL; }
     if (g_mouseHook) UnhookWindowsHookEx(g_mouseHook);
     if (g_evHook) UnhookWinEvent(g_evHook);
     if (g_fontRow)   DeleteObject(g_fontRow);
