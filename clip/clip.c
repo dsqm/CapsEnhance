@@ -808,20 +808,28 @@ static Gdiplus::Bitmap* DecodeThumb(int idx) {
     sqlite3_busy_timeout(db, 3000);
     Gdiplus::Bitmap* big = NULL;
     sqlite3_stmt* st = NULL;
+    /* 格式取舍照 Ditto（QPasteWndThread.cpp:349 起的取法）：先精确找 CF_DIB，
+       找不到才找 PNG，别的格式（含 CF_DIBV5）一律不用 —— 多格式条目两边解
+       同一个源。CASE 把 CF_DIB 排最前，取**首个命中行**（解码失败也不换源，
+       Ditto 同样只在"没有 CF_DIB"时才退 PNG）。 */
     if (sqlite3_prepare_v2(db, "SELECT strClipBoardFormat, ooData FROM Data "
-                              "WHERE lParentID = ? ORDER BY Data.lID",
+                              "WHERE lParentID = ? "
+                              "AND strClipBoardFormat IN ('CF_DIB', 'PNG') "
+                              "ORDER BY CASE strClipBoardFormat "
+                              "WHEN 'CF_DIB' THEN 0 ELSE 1 END, Data.lID",
                            -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(st, 1, g_items[idx].id);
-        while (sqlite3_step(st) == SQLITE_ROW && !big) {
+        while (sqlite3_step(st) == SQLITE_ROW) {
             const WCHAR* nm = (const WCHAR*)sqlite3_column_text16(st, 0);
             const void* blob = sqlite3_column_blob(st, 1);
             int len = sqlite3_column_bytes(st, 1);
-            if (!nm || !blob || len <= 0) continue;
-            UINT cf = FormatIdFromName(nm);
-            if (cf == CF_DIB || cf == 17)
-                big = BitmapFromDib((const BYTE*)blob, len);
-            else if (wcscmp(nm, L"PNG") == 0)
-                big = BitmapFromPng((const BYTE*)blob, len);
+            if (nm && blob && len > 0) {
+                if (wcscmp(nm, L"CF_DIB") == 0)
+                    big = BitmapFromDib((const BYTE*)blob, len);
+                else if (wcscmp(nm, L"PNG") == 0)
+                    big = BitmapFromPng((const BYTE*)blob, len);
+                break;                       /* 只取首个命中行，后面不再看 */
+            }
         }
         sqlite3_finalize(st);
     }
@@ -831,8 +839,10 @@ static Gdiplus::Bitmap* DecodeThumb(int idx) {
     UINT iw = big->GetWidth(), ih = big->GetHeight();
     if (iw == 0 || ih == 0) { delete big; return NULL; }
     float boxH = g_rowH2 - 2.0f * g_thumbPad;
-    float bw = boxH * (float)iw / (float)ih;
-    float bh = boxH;
+    /* Ditto 同款（BitmapHelper.cpp:69 的 min）：目标高取 min(行高, 原高)，
+       小图保持原大 —— 放大只会糊。 */
+    float bh = ((float)ih < boxH) ? (float)ih : boxH;
+    float bw = bh * (float)iw / (float)ih;
     float maxW = ((float)g_pxW - g_gutterW) * 0.5f;
     if (bw > maxW) { bw = maxW; bh = bw * (float)ih / (float)iw; }
     if (bw < 1.0f || bh < 1.0f) { delete big; return NULL; }

@@ -7,7 +7,8 @@
    因此可以像 nav.c 的 ComputeSteps 那样进单测（test/test_color.c）。
 
    来源：Ditto `src/QListCtrl.cpp` 的 DrawCopiedColorCode() 与
-   InitializeColorNameMap()（判据与色值表照抄，oklch() 未实现）。
+   InitializeColorNameMap()（判据与色值表照抄，oklch 的数学取自同文件
+   OklchToRgb()）。
    ============================================================ */
 #include "colorcode.h"
 #include <math.h>     /* fmod */
@@ -160,8 +161,7 @@ static const NamedColor kNamed[] = {
 };
 
 /* ---- 解析逻辑 ----
-   判据与顺序照抄 Ditto，一处例外：`oklch()` 未实现（罕见，且要搬 OKLab→sRGB
-   那一整套矩阵）。它命中不了时就是普通文本，不会误伤。 */
+   判据与顺序照抄 Ditto（含 oklch()，数学取自其 OklchToRgb()）。 */
 
 #define CC_BUF 64          /* 色值表达式最长也就 "rgba(255, 255, 255, 0.5)" 这种量级 */
 
@@ -241,6 +241,40 @@ static COLORREF HslToRgb(double h, double s, double l) {
         b = Hue2rgb(p, q, hn - 1.0 / 3.0);
     }
     return RGB(Clamp255(r * 255.0), Clamp255(g * 255.0), Clamp255(b * 255.0));
+}
+
+/* 线性 sRGB -> gamma 校正 sRGB（照 Ditto OklchToRgb 里的 ToSrgb） */
+static double SrgbGamma(double v) {
+    if (v <= 0.0031308) return 12.92 * v;
+    return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+
+/* OKLCH -> sRGB（照 Ditto 的 OklchToRgb，QListCtrl.cpp:746，系数逐位取自该处）。
+   l: 0-1，c: 色度（理论上无界，实际很小），h: 0-360 */
+static COLORREF OklchToRgb(double l, double c, double h) {
+    const double kPi = 3.14159265358979323846;
+    /* 1) OKLCH -> OKLAB */
+    double h_rad = h * kPi / 180.0;
+    double a = c * cos(h_rad);
+    double b = c * sin(h_rad);
+    /* 2) OKLAB -> 线性 LMS（抵消立方根非线性） */
+    double l_ = l + 0.3963377774 * a + 0.2158037573 * b;
+    double m_ = l - 0.1055613458 * a - 0.0638541728 * b;
+    double s_ = l - 0.0894841775 * a - 1.2914855480 * b;
+    double ll = l_ * l_ * l_;
+    double mm = m_ * m_ * m_;
+    double ss = s_ * s_ * s_;
+    /* 3) 线性 LMS -> XYZ -> 线性 sRGB */
+    double x  = +1.2270138511 * ll - 0.5577999807 * mm + 0.2812561490 * ss;
+    double y  = -0.0405801784 * ll + 1.1122568696 * mm - 0.0716766787 * ss;
+    double z  = -0.0763812845 * ll - 0.4214819784 * mm + 1.5861632204 * ss;
+    double rl = +3.2404542 * x - 1.5371385 * y - 0.4985314 * z;
+    double gl = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z;
+    double bl = +0.0556434 * x - 0.2040259 * y + 1.0572252 * z;
+    /* 4) gamma 校正 -> 0-255（出界颜色靠钳制收回 gamut，照 Ditto） */
+    return RGB(Clamp255(SrgbGamma(rl) * 255.0),
+               Clamp255(SrgbGamma(gl) * 255.0),
+               Clamp255(SrgbGamma(bl) * 255.0));
 }
 
 /* W3C 命名色（表已按名字升序 -> 二分） */
@@ -365,6 +399,40 @@ BOOL CcParseColor(const WCHAR* text, COLORREF* rgbOut, int* alphaOut) {
                         if (v0 < 0.0 || v0 > 255.0 || v1 < 0.0 || v1 > 255.0 ||
                             v2 < 0.0 || v2 > 255.0) return FALSE;
                         *rgbOut = RGB(Clamp255(v0), Clamp255(v1), Clamp255(v2));
+                        *alphaOut = alpha;
+                        return TRUE;
+                    }
+                }
+            }
+        } else if (wcsncmp(low, L"oklch", 5) == 0) {
+            /* oklch(L C H) / oklch(L C H / A) —— 照 Ditto：没有 "deg" 抹除，
+               色相不查范围，只验 l∈[0,1]（% 先除 100）与 c>=0 */
+            if (n > 7) {
+                WCHAR tmp[CC_BUF];
+                int tl = n - 7;                     /* 去掉 "oklch(" 与 ")" */
+                memcpy(tmp, low + 6, (size_t)tl * sizeof(WCHAR));
+                tmp[tl] = 0;
+                for (int i = 0; i < tl; i++) {
+                    if (tmp[i] == L',' || tmp[i] == L'/') tmp[i] = L' ';
+                }
+                WCHAR tok[8][16];
+                int cnt = SplitTokens(tmp, tok, 8);
+                if (cnt >= 3) {
+                    double v0 = 0, v1 = 0, v2 = 0, va = 1.0;
+                    BOOL p0 = FALSE, p3 = FALSE;
+                    if (!NumOf(tok[0], &v0, &p0)) return FALSE;
+                    if (!NumOf(tok[1], &v1, NULL)) return FALSE;
+                    if (!NumOf(tok[2], &v2, NULL)) return FALSE;
+                    int alpha = 255;
+                    if (cnt >= 4 && NumOf(tok[3], &va, &p3)) {
+                        if (p3) va /= 100.0;
+                        if (va < 0.0) va = 0.0;
+                        if (va > 1.0) va = 1.0;
+                        alpha = (int)(va * 255.0 + 0.5);
+                    }
+                    if (p0) v0 /= 100.0;
+                    if (v0 >= 0.0 && v0 <= 1.0 && v1 >= 0.0) {
+                        *rgbOut = OklchToRgb(v0, v1, v2);
                         *alphaOut = alpha;
                         return TRUE;
                     }
