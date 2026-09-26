@@ -92,8 +92,8 @@
      ListBoxOddRowsBG/Text        奇数行底/文字
      ListBoxEvenRowsBG            偶数行底（隔行灰）
      ListBoxSelectedBG/Text       选中行底/文字（**灰底黑字**，不是系统蓝）
-     listSmallQuickPasteIndexColor 序号
-     CaptionLeft/Right/TextColor  标题栏渐变（白→#CCC）与标题文字
+     listSmallQuickPasteIndexColor 序号（原 #B4B4B4，用户要求加深，见下）
+     CaptionLeft/Right/TextColor  标题栏渐变（白→#CCC）与标题文字（原 #BFBFBF，同上）
      Border                       边框
      MainWindowBG                 主窗口底（占位框用它） */
 #define C_BG        0xFFFFFFFF   /* ListBoxOddRowsBG = RGB(255,255,255) */
@@ -103,8 +103,8 @@
 #define C_ROW_ALT   0xFFF3F3F3   /* ListBoxEvenRowsBG = RGB(243,243,243) */
 #define C_SEL_BG    0xFFCCCCCC   /* ListBoxSelectedBG = RGB(204,204,204) */
 #define C_HEAD      0xFFFFFFFF   /* 标题栏：纯白（Ditto 的 Caption 是白→#CCC 渐变，实测观感突兀，弃用渐变只留白底） */
-#define C_TITLE     0xFFBFBFBF   /* CaptionTextColor = RGB(191,191,191) */
-#define C_INDEX     0xFFB4B4B4   /* listSmallQuickPasteIndexColor = RGB(180,180,180) */
+#define C_TITLE     0xFF6E6E6E   /* 标题文字：Ditto 原值 CaptionTextColor #BFBFBF 偏浅，与序号一起统一到按钮字色 #6E6E6E */
+#define C_INDEX     0xFF6E6E6E   /* 序号：Ditto 原值 #B4B4B4 偏浅，与标题一起统一到按钮字色 #6E6E6E（✕/Ditto 同色） */
 #define C_THUMB_BG  0xFFF0F0F0   /* MainWindowBG = RGB(240,240,240) */
 
 #define APP_TITLE   L"快速粘贴"
