@@ -324,6 +324,14 @@ static CfgDef kCfg[CFG_COUNT] = {
 
     { "clipfontsize", "ClipFontSize", 0, CLIP_FONT_SIZE_DEFAULT, 6, CLIP_FONT_SIZE_MAX, 0, NULL, 0, NULL },
 
+    { "clipw", "ClipW", 0, CLIP_W_DEFAULT, CLIP_W_MIN, CLIP_W_MAX, 0, NULL, 0,
+      "; 快速粘贴窗口（Caps+V）的大小：单位是 96 DPI 下的像素，\n"
+      "; 实际大小 = 值 × 显示器 DPI/96（换显示器不用改配置）。\n"
+      "; 宽 " STR(CLIP_W_MIN) ".." STR(CLIP_W_MAX)
+      "，高 " STR(CLIP_H_MIN) ".." STR(CLIP_H_MAX) "\n"
+      "; 高度只定外框：条目按行高往下排，排不下的用滚轮看。\n" },
+    { "cliph", "ClipH", 0, CLIP_H_DEFAULT, CLIP_H_MIN, CLIP_H_MAX, 0, NULL, 0, NULL },
+
     { "clipclickpaste", "ClipClickPaste", CFG_F_BOOL, CLIP_CLICK_PASTE_DEFAULT, 0, 1, 0, NULL, 1,
       "; 单击条目直接上屏（默认开）：挑中就粘，不必先选中再双击。\n"
       "; 0 = 关闭（单击只选中，双击才粘）\n" },

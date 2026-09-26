@@ -159,6 +159,9 @@ static WCHAR    g_dbPath[DITTO_DIR_MAX] = L"";   /* = <dirPath>\Ditto.db，打�
 static BOOL     g_dittoOk = FALSE;               /* <dirPath>\Ditto.exe 存在（决定"转本体"按钮显隐） */
 static WCHAR    g_fontName[CLIP_FONT_MAX] = L"";  /* 空 = 内置 Microsoft YaHei UI */
 static int      g_fontPt = 10;                     /* 字号（磅） */
+static int      g_cfgW = CLIP_W_DEFAULT;           /* 窗口宽（96 DPI 下的像素，按 DPI 放大） */
+static int      g_cfgH = CLIP_H_DEFAULT;           /* 窗口高（同上） */
+static BOOL     g_sizeArg = FALSE;                 /* --w/--h 传过：不再回落到 ini */
 static BOOL     g_clickPaste = TRUE;               /* 单击条目直接上屏 */
 static BOOL     g_dbErr = FALSE;
 
@@ -1221,8 +1224,11 @@ static void FitMetrics(void) {
     /* 图片行给足高度：缩略图要**占满整行**（Ditto 就是这样），行不够高图就小 */
     g_rowH2    = 76.0f * g_k;
     g_thumbPad = 3.0f * g_k;
-    g_pxW = (int)(560.0f * g_k);
-    g_pxH = (int)(g_headerH + ROWS_VISIBLE * g_rowH1);
+    /* 外框尺寸来自配置（主程序 --w/--h 传进来，手动启动时读 ini，见
+       LoadIniFallback）：单位是 96 DPI 下的像素，这里按显示器 DPI 放大，
+       与上面每一个 `* g_k` 同一套记法。 */
+    g_pxW = (int)((float)g_cfgW * g_k);
+    g_pxH = (int)((float)g_cfgH * g_k);
 
     if (g_fontRow)   DeleteObject(g_fontRow);
     if (g_tipFont)   DeleteObject(g_tipFont);
@@ -1955,7 +1961,27 @@ static void IniReadString(const char* buf, size_t len, const char* key,
     }
 }
 
-static void LoadDbPathFromIni(void) {
+/* 整数版 IniReadString：ini 是手改的文本，值可能是空的、也可能不是数
+   （_wtoi 给 0），所以照 config.c 那样按值域钳制 —— 拿到 0 就画出个
+   0×0 的窗口比用默认值难看得多。 */
+static int IniReadInt(const char* buf, size_t len, const char* key,
+                      int def, int lo, int hi) {
+    WCHAR tmp[24];
+    tmp[0] = 0;
+    IniReadString(buf, len, key, tmp, (int)(sizeof(tmp) / sizeof(tmp[0])));
+    if (!tmp[0]) return def;
+    int v = _wtoi(tmp);
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    return v;
+}
+
+/* 命令行没给的项，在这里一次读完（手动双击启动时没人传参数）：
+   DittoDir / ClipFont / ClipW / ClipH。与 help/help.c 读 ImeCapsMode 同一个
+   理由 —— 浮层不链主程序任何模块，而这些值的权威解析在 config.c。
+   ★ 一个配置项开一次文件是没有道理的：每加一项就多一次 CreateFile +
+   16KB 读，而它们本来就是同一个文件的几行。 */
+static void LoadIniFallback(void) {
     WCHAR path[MAX_PATH];
     if (!GetModuleFileNameW(NULL, path, MAX_PATH)) return;
     WCHAR* slash = wcsrchr(path, L'\\');
@@ -1970,10 +1996,14 @@ static void LoadDbPathFromIni(void) {
     DWORD got = 0;
     if (ReadFile(f, buf, sizeof(buf) - 1, &got, NULL) && got) {
         buf[got] = 0;
-        IniReadString(buf, got, "DittoDir", g_dirPath, DITTO_DIR_MAX);
+        if (!g_dirPath[0])  IniReadString(buf, got, "DittoDir", g_dirPath, DITTO_DIR_MAX);
+        if (!g_fontName[0]) IniReadString(buf, got, "ClipFont", g_fontName, CLIP_FONT_MAX);
+        if (!g_sizeArg) {
+            g_cfgW = IniReadInt(buf, got, "ClipW", CLIP_W_DEFAULT, CLIP_W_MIN, CLIP_W_MAX);
+            g_cfgH = IniReadInt(buf, got, "ClipH", CLIP_H_DEFAULT, CLIP_H_MIN, CLIP_H_MAX);
+        }
     }
     CloseHandle(f);
-    BuildDbPath();
 }
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
@@ -2004,19 +2034,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
             }
         }
     }
-    if (!g_dirPath[0]) LoadDbPathFromIni();
-    BuildDbPath();
-    DsLoad();                       /* Ditto.Settings：读不到就全用 Ditto 的默认值 */
-    /* "转 Ditto 本体"按钮只在 Ditto.exe 真的存在时才画/才响应 —— 靠猜的
-       按钮点了没反应是最差的那种 UI。检测一次就够：一次会话里目录不会变。 */
-    {
-        WCHAR dx[MAX_PATH];
-        _snwprintf_s(dx, MAX_PATH, _TRUNCATE, L"%s\\Ditto.exe", g_dirPath);
-        g_dittoOk = g_dirPath[0] && GetFileAttributesW(dx) != INVALID_FILE_ATTRIBUTES;
-    }
-
-    /* --font "<字体名>" --size <磅>：主程序传进来的（配置的权威解析在 config.c）。
-       没传就用手动启动时的 ini 兜底；再没有就用上面的内置默认。 */
+    /* --font "<字体名>" --size <磅> --w <宽> --h <高> --click <0|1>：全部由
+       主程序传进来（配置的权威解析在 config.c）。**解析完再统一兜底**：命令行
+       没给的项回落到 ini（手动双击启动时没人传），再没有才用内置默认 ——
+       顺序反过来（先兜底再解析）会让 ini 盖掉命令行传的值。 */
     if (cmdLine) {
         const WCHAR* pf = wcsstr(cmdLine, L"--font");
         if (pf) {
@@ -2035,30 +2056,29 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
             int v = _wtoi(ps + 6);
             if (v >= 6 && v <= CLIP_FONT_SIZE_MAX) g_fontPt = v;
         }
+        const WCHAR* pw = wcsstr(cmdLine, L"--w");
+        if (pw) {
+            int v = _wtoi(pw + 3);
+            if (v >= CLIP_W_MIN && v <= CLIP_W_MAX) { g_cfgW = v; g_sizeArg = TRUE; }
+        }
+        const WCHAR* ph = wcsstr(cmdLine, L"--h");
+        if (ph) {
+            int v = _wtoi(ph + 3);
+            if (v >= CLIP_H_MIN && v <= CLIP_H_MAX) { g_cfgH = v; g_sizeArg = TRUE; }
+        }
         const WCHAR* pc = wcsstr(cmdLine, L"--click");
         if (pc) g_clickPaste = (_wtoi(pc + 7) != 0);
     }
-    if (!g_fontName[0]) {
-        /* 手动启动（没人传 --font）时兜底读一次 ini 的 ClipFont */
-        WCHAR path2[MAX_PATH];
-        if (GetModuleFileNameW(NULL, path2, MAX_PATH)) {
-            WCHAR* sl2 = wcsrchr(path2, L'\\');
-            if (sl2) {
-                wcscpy_s(sl2, MAX_PATH - (size_t)(sl2 - path2), L"\\CapsEnhance.ini");
-                HANDLE f2 = CreateFileW(path2, GENERIC_READ,
-                                        FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-                if (f2 != INVALID_HANDLE_VALUE) {
-                    static char buf2[16384];
-                    DWORD got2 = 0;
-                    if (ReadFile(f2, buf2, sizeof(buf2) - 1, &got2, NULL) && got2) {
-                        buf2[got2] = 0;
-                        IniReadString(buf2, got2, "ClipFont", g_fontName, CLIP_FONT_MAX);
-                    }
-                    CloseHandle(f2);
-                }
-            }
-        }
+    LoadIniFallback();      /* 命令行没给的：DittoDir / 字体 / 窗口尺寸 */
+
+    BuildDbPath();
+    DsLoad();                       /* Ditto.Settings：读不到就全用 Ditto 的默认值 */
+    /* "转 Ditto 本体"按钮只在 Ditto.exe 真的存在时才画/才响应 —— 靠猜的
+       按钮点了没反应是最差的那种 UI。检测一次就够：一次会话里目录不会变。 */
+    {
+        WCHAR dx[MAX_PATH];
+        _snwprintf_s(dx, MAX_PATH, _TRUNCATE, L"%s\\Ditto.exe", g_dirPath);
+        g_dittoOk = g_dirPath[0] && GetFileAttributesW(dx) != INVALID_FILE_ATTRIBUTES;
     }
 
     HWND prev = FindWindowW(CLIP_CLASS, NULL);

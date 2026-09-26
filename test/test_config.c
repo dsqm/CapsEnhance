@@ -840,6 +840,22 @@ int main(void) {
         CfgSetStr(CFG_CLIP_FONT, L"");
         CfgSetInt(CFG_CLIP_FONT_SIZE, CLIP_FONT_SIZE_DEFAULT);
     }
+    /* 快速粘贴窗口的尺寸：96 DPI 下的像素，写进 ini 的默认值必须等于浮层
+       原来写死的那两个（560 / 374），否则"什么都没配"也会变个尺寸。 */
+    EXPECT(TemplateHas("ClipW = 560"), "CFG: 模板含 ClipW 默认值");
+    EXPECT(TemplateHas("ClipH = 374"), "CFG: 模板含 ClipH 默认值");
+    {
+        CfgSetInt(CFG_CLIP_W, 9999);
+        EXPECT(CfgInt(CFG_CLIP_W) == CLIP_W_MAX, "CFG: 宽度超上限被钳制");
+        CfgSetInt(CFG_CLIP_W, 1);
+        EXPECT(CfgInt(CFG_CLIP_W) == CLIP_W_MIN, "CFG: 宽度低于下限被钳到最小值");
+        CfgSetInt(CFG_CLIP_H, 9999);
+        EXPECT(CfgInt(CFG_CLIP_H) == CLIP_H_MAX, "CFG: 高度超上限被钳制");
+        CfgSetInt(CFG_CLIP_H, 1);
+        EXPECT(CfgInt(CFG_CLIP_H) == CLIP_H_MIN, "CFG: 高度低于下限被钳到最小值");
+        CfgSetInt(CFG_CLIP_W, CLIP_W_DEFAULT);
+        CfgSetInt(CFG_CLIP_H, CLIP_H_DEFAULT);
+    }
     /* 激活键不再进配置：模板里**不该**再出现这两项（否则用户会以为能改） */
     EXPECT(!TemplateHas("EnhanceKeys"), "CFG: 模板不再含 EnhanceKeys（已改为编译期常量）");
     EXPECT(!TemplateHas("ShiftKeys"),   "CFG: 模板不再含 ShiftKeys（已改为编译期常量）");

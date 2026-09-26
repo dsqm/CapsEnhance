@@ -135,7 +135,9 @@ static BOOL SpawnClip(void) {
     WCHAR dd[DITTO_DIR_MAX] = L"";
     WCHAR font[CLIP_FONT_MAX] = L"";
     int   sizePt = CfgInt(CFG_CLIP_FONT_SIZE);
-    WCHAR cmd[MAX_PATH + DITTO_DIR_MAX + CLIP_FONT_MAX + 96];
+    enum { CMD_CAP = MAX_PATH + DITTO_DIR_MAX + CLIP_FONT_MAX + 160 };
+    WCHAR cmd[CMD_CAP];
+    WCHAR add[CLIP_FONT_MAX + 96];
 
     if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return FALSE;
     wcscpy_s(dir, MAX_PATH, exe);
@@ -146,22 +148,27 @@ static BOOL SpawnClip(void) {
 
     /* --dir / --font 都用引号包住：路径与字体名几乎必然带空格。
        没配的项就不传，浮层用它自己的内置默认 —— "没配"与"配成空"语义一致。
-       传的是**目录**，不是 db 路径：浮层还要用同一目录找 Ditto.exe（转本体）。 */
+       传的是**目录**，不是 db 路径：浮层还要用同一目录找 Ditto.exe（转本体）。
+       ★ 逐段往后拼，不按"有 A 没 B"排组合：四个可选项排出来是 16 条分支，
+         而它们彼此无关（少传一个，浮层就用内置默认）。 */
     ResolveDittoDir(dd, DITTO_DIR_MAX);
     wcscpy_s(font, CLIP_FONT_MAX, CfgStr(CFG_CLIP_FONT));
 
-    if (dd[0] && font[0])
-        _snwprintf_s(cmd, (size_t)(MAX_PATH + DITTO_DIR_MAX + CLIP_FONT_MAX + 96), _TRUNCATE,
-                     L"\"%s\" --dir \"%s\" --font \"%s\" --size %d", exe, dd, font, sizePt);
-    else if (dd[0])
-        _snwprintf_s(cmd, (size_t)(MAX_PATH + DITTO_DIR_MAX + CLIP_FONT_MAX + 96), _TRUNCATE,
-                     L"\"%s\" --dir \"%s\"", exe, dd);
-    else if (font[0])
-        _snwprintf_s(cmd, (size_t)(MAX_PATH + DITTO_DIR_MAX + CLIP_FONT_MAX + 96), _TRUNCATE,
-                     L"\"%s\" --font \"%s\" --size %d", exe, font, sizePt);
-    else
-        _snwprintf_s(cmd, (size_t)(MAX_PATH + DITTO_DIR_MAX + CLIP_FONT_MAX + 96), _TRUNCATE,
-                     L"\"%s\"", exe);
+    _snwprintf_s(cmd, CMD_CAP, _TRUNCATE, L"\"%s\"", exe);
+    if (dd[0]) {
+        _snwprintf_s(add, (size_t)(CLIP_FONT_MAX + 96), _TRUNCATE, L" --dir \"%s\"", dd);
+        wcscat_s(cmd, CMD_CAP, add);
+    }
+    if (font[0]) {
+        _snwprintf_s(add, (size_t)(CLIP_FONT_MAX + 96), _TRUNCATE,
+                     L" --font \"%s\" --size %d", font, sizePt);
+        wcscat_s(cmd, CMD_CAP, add);
+    }
+    /* 尺寸与单击粘贴**恒传**：它们始终有值（配置表里带默认与值域），
+       不传就等于让浮层用自己的一份默认 —— 于是界面里改了没有效果。 */
+    _snwprintf_s(add, (size_t)(CLIP_FONT_MAX + 96), _TRUNCATE, L" --w %d --h %d --click %d",
+                 CfgInt(CFG_CLIP_W), CfgInt(CFG_CLIP_H), CfgBool(CFG_CLIP_CLICK_PASTE) ? 1 : 0);
+    wcscat_s(cmd, CMD_CAP, add);
 
     /* 交给 child.c：挂起起 -> 挂进 job（父死子退）-> 放行。
        ★ 进程句柄**就地用完即弃**：先按 pid 登记死亡通知（子死父知），再关句柄。

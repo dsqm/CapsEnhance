@@ -98,6 +98,8 @@
 #define IDC_DITTO_BROWSE 215 /* 按钮：选 Ditto 文件夹 */
 
 #define IDC_DITTO_CONV   216 /* 按钮：DittoDir 相对/绝对路径互转（跨盘禁用） */
+#define IDC_CLIP_W       217 /* 快速粘贴窗口宽（96 DPI 像素） */
+#define IDC_CLIP_H       218 /* 快速粘贴窗口高（同上） */
 
 /* 五份名单各一组：列表框 / 输入框 / 添加 / 删除 / 标题 / 选取窗口 */
 #define IDC_LIST0  300
@@ -166,6 +168,8 @@ static Field kFields[] = {
        字体对话框（对话框里本来就能同时选字体和字号，再给个独立字号框是重复）。
        它不承载配置值，所以 cfg = -1，Load / Save 都跳过。 */
     { IDC_CLIP_PICK, -1,                       L"快速粘贴字体",                                   NULL, 0, 0, 1, 0, 0, L"剪贴板" },
+    { IDC_CLIP_W,     CFG_CLIP_W,              L"快速粘贴窗口宽度（96 DPI 下的像素，实机按显示器 DPI 放大）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_H,     CFG_CLIP_H,              L"快速粘贴窗口高度（同上；排不下的条目用滚轮看）",           L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
     { IDC_CLIP_CLICK, CFG_CLIP_CLICK_PASTE,    L"单击条目直接上屏（取消勾选则单击只选中、双击才粘）", NULL, 1, 0, 0, 0, 0, L"剪贴板" },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
