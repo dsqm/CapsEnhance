@@ -1507,8 +1507,11 @@ static BOOL Render(void) {
         if (i < 9)       _snwprintf_s(num, 8, _TRUNCATE, L"%d", i + 1);
         else if (i == 9) wcscpy_s(num, 8, L"0");
         else             num[0] = 0;
+        /* 数字在「序号栏 + 文字前 6px 留白」这段完整空档里取中。
+           只对序号栏取中会看着偏左：左边距量的是到窗缘，右边却还要
+           再让出 6px 留白才到文字 —— 视觉两边距不相等。 */
         GdiText(num, g_fontSmall, CR(C_INDEX),
-                0.0f, top, g_gutterW, h, DT_CENTER, FALSE);
+                0.0f, top, g_gutterW + 6.0f * g_k, h, DT_CENTER, FALSE);
 
         /* 前 10 条有序号，文字让开序号栏；之后没有序号，整行从左边起，
            不留这条空白（缩略图/色块/文字三处起点都按这个规则） */
