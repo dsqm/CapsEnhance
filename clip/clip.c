@@ -164,6 +164,8 @@ static int      g_cfgW = CLIP_W_DEFAULT;           /* 窗口宽（96 DPI 下的�
 static int      g_cfgH = CLIP_H_DEFAULT;           /* 窗口高（同上） */
 static int      g_viewMaxW = CLIP_VIEW_MAX_W_DEFAULT;  /* F3 预览窗格最大宽（96 DPI 像素） */
 static int      g_viewMaxH = CLIP_VIEW_MAX_H_DEFAULT;  /* 同上；仍会被工作区钳一道 */
+static int      g_viewMinW = CLIP_VIEW_MIN_W_DEFAULT;  /* F3 预览窗格最小宽：小图也撑到 */
+static int      g_viewMinH = CLIP_VIEW_MIN_H_DEFAULT;  /* 这么大，点图放大才看得清 */
 static BOOL     g_sizeArg = FALSE;                 /* --w/--h 传过：不再回落到 ini */
 static BOOL     g_clickPaste = TRUE;               /* 单击条目直接上屏 */
 static BOOL     g_dbErr = FALSE;
@@ -184,6 +186,8 @@ static float     g_headerH, g_gutterW, g_rowH1, g_rowH2, g_thumbPad;
 static float     g_lineH = 20.0f;   /* 一行文字的行高（按字号算，见 FitMetrics） */
 static HFONT     g_fontRow = NULL, g_fontSmall = NULL;
 static HFONT     g_tipFont = NULL;        /* 提示字体：比列表小一档（Ditto 的提示也不用列表字号） */
+#define VIEW_BAR_W   10          /* 预览自绘滚动条的条宽（96 DPI 像素，FitMetrics 里 × g_k） */
+static int       g_barW = 0, g_barH = 0;  /* 实际条宽/高（物理像素） */
 static HWND      g_target = NULL;
 static HWINEVENTHOOK g_evHook = NULL;
 static HHOOK     g_mouseHook = NULL;
@@ -1383,6 +1387,11 @@ static void FitMetrics(void) {
     /* 图片行给足高度：缩略图要**占满整行**（Ditto 就是这样），行不够高图就小 */
     g_rowH2    = 76.0f * g_k;
     g_thumbPad = 3.0f * g_k;
+    /* 自绘滚动条的条宽/高（预览窗）：10 逻辑像素，太小的屏保底 8 物理像素 */
+    g_barW = (int)(VIEW_BAR_W * g_k);
+    g_barH = (int)(VIEW_BAR_W * g_k);
+    if (g_barW < 8) g_barW = 8;
+    if (g_barH < 8) g_barH = 8;
     /* 外框尺寸来自配置（主程序 --w/--h 传进来，手动启动时读 ini，见
        LoadIniFallback；设置界面里可改）—— 单位 96 DPI 像素，按显示器
        DPI 放大，与上面每一个 `* g_k` 同一套记法。窗口大小不读 Ditto：
@@ -1854,39 +1863,142 @@ static BOOL g_viewAnim = FALSE;                   /* 正在向目标滑 */
    适应窗口"的真实语义是**窗口适应图像**，那件事由 ViewFitOnce 管，图像
    自己不缩）。g_viewScale < 0 是"适应窗口"显式模式（双击图片切换）：
    图像缩进客户区，基于客户区算（常驻滚动条已扣除），小图不放大（放大糊）。 */
-/* 滚动条是**子控件**（SCROLLBAR 类），不是窗口自带的非客户区滚动条：
-   自带滚动条从窗口最顶上开始，正好压着标题栏的 ✕；用户要求它从 ✕ 下方
-   开始 —— 子控件的位置自己摆（垂直条 = 标题栏以下、水平条 = 底部一整条，
-   右下角留一个背景小方块）。两个条把客户区右缘/下缘盖住一条，图像/边框
-   的绘制不用改（被盖住的部分看不见）。 */
-static HWND g_vbar = NULL, g_hbar = NULL;
-static int  g_barW = 0, g_barH = 0;      /* 滚动条的宽/高（随 DPI） */
+/* ---- 自绘滚动条（替换系统 SCROLLBAR 控件）----
+   系统滚动条带箭头、体量笨重（用户嫌丑），改成细条 + 圆角拇指的现代画法：
+   无箭头，轨道即所在背景，拇指 #B8B8B8（悬停 #999、拖动 #7F7F7F）。
+   位置：垂直条 = 标题栏以下的一条右缘窄带；水平条 = 底部一整条窄带；
+   右下角交叉处留空。滚动位/范围是自己的状态（不再有 SetScrollInfo）。 */
+static int  g_vPos = 0, g_vMax = 0, g_vPage = 1;   /* 垂直：现位 / 可滚上限 / 视口高 */
+static int  g_hPos = 0, g_hMax = 0, g_hPage = 1;   /* 水平：同上 */
+static int  g_vHover = 0, g_hHover = 0;         /* 拇指悬停 */
+static BOOL g_vDrag = FALSE, g_hDrag = FALSE;   /* 拇指拖动中 */
+static int  g_vDragGrab = 0, g_hDragGrab = 0;   /* 按下点相对拇指顶/左的偏移 */
+static BOOL g_barHoverTrack = FALSE;            /* TrackMouseEvent 已挂 */
 
-/* 子滚动条定位：跟随窗口尺寸（WM_SIZE / 摆窗后调用）。 */
-static void LayoutViewBars(void) {
-    if (!g_view || !g_vbar) return;
+/* 两条滚动条的轨道矩形（客户区坐标；右下角交叉处各自让位）。 */
+static void ViewBarRects(RECT* v, RECT* h) {
     RECT rc;
-    if (!GetClientRect(g_view, &rc)) return;
-    g_barW = GetSystemMetrics(SM_CXVSCROLL);
-    g_barH = GetSystemMetrics(SM_CYHSCROLL);
-    MoveWindow(g_vbar, rc.right - g_barW, (int)g_headerH,
-               g_barW, rc.bottom - (int)g_headerH - g_barH, TRUE);
-    MoveWindow(g_hbar, 0, rc.bottom - g_barH,
-               rc.right - g_barW, g_barH, TRUE);
+    if (!g_view || !GetClientRect(g_view, &rc)) return;
+    if (v) { v->left = rc.right - g_barW;  v->top = (int)g_headerH;
+             v->right = rc.right;          v->bottom = rc.bottom - g_barH; }
+    if (h) { h->left = 0;                  h->top = rc.bottom - g_barH;
+             h->right = rc.right - g_barW; h->bottom = rc.bottom; }
 }
 
-/* 滚动位的读写全部落在子控件上（父窗口没有非客户区滚动条了）。 */
-static HWND ViewBarOf(int bar) {
-    return (bar == SB_VERT) ? g_vbar : g_hbar;
+/* 拇指几何（含 2px 内边距）。max=0 时不该被调用。 */
+static void ViewThumbRectV(RECT* out) {
+    RECT tr;
+    ViewBarRects(&tr, NULL);
+    int trackH = tr.bottom - tr.top - 4;
+    int page = g_vPage > 0 ? g_vPage : 1;
+    int th = (int)((float)trackH * page / (page + g_vMax) + 0.5f);
+    if (th < (int)(18 * g_k)) th = (int)(18 * g_k);
+    if (th > trackH) th = trackH;
+    int y = tr.top + 2;
+    if (g_vMax > 0) y += (int)((float)(trackH - th) * g_vPos / g_vMax + 0.5f);
+    out->left = tr.left + 2;  out->right = tr.right - 2;
+    out->top = y;             out->bottom = y + th;
+}
+
+static void ViewThumbRectH(RECT* out) {
+    RECT tr;
+    ViewBarRects(NULL, &tr);
+    int trackW = tr.right - tr.left - 4;
+    int page = g_hPage > 0 ? g_hPage : 1;
+    int tw = (int)((float)trackW * page / (page + g_hMax) + 0.5f);
+    if (tw < (int)(18 * g_k)) tw = (int)(18 * g_k);
+    if (tw > trackW) tw = trackW;
+    int x = tr.left + 2;
+    if (g_hMax > 0) x += (int)((float)(trackW - tw) * g_hPos / g_hMax + 0.5f);
+    out->top = tr.top + 2;  out->bottom = tr.bottom - 2;
+    out->left = x;          out->right = x + tw;
+}
+
+/* 画两条滚动条（整帧与条带帧都要调：滚动时拇指也在动）。
+   轨道 = 半透明黑一抹；拇指 = 圆角不做的纯色小条（悬停/拖动加深）。 */
+static void ViewDrawBars(Gdiplus::Graphics* g) {
+    BYTE v = g_vDrag || g_hDrag ? 0x7F : (g_vHover || g_hHover) ? 0x99 : 0xB8;
+    Gdiplus::SolidBrush brThumb(Gdiplus::Color(255, v, v, v));
+    Gdiplus::SolidBrush brTrack(Gdiplus::Color(26, 0, 0, 0));
+    if (g_vMax > 0) {
+        RECT t; ViewBarRects(&t, NULL);
+        g->FillRectangle(&brTrack, Gdiplus::RectF((float)t.left, (float)t.top,
+                                                  (float)(t.right - t.left),
+                                                  (float)(t.bottom - t.top)));
+        RECT th; ViewThumbRectV(&th);
+        g->FillRectangle(&brThumb, Gdiplus::RectF((float)th.left, (float)th.top,
+                                                  (float)(th.right - th.left),
+                                                  (float)(th.bottom - th.top)));
+    }
+    if (g_hMax > 0) {
+        RECT t; ViewBarRects(NULL, &t);
+        g->FillRectangle(&brTrack, Gdiplus::RectF((float)t.left, (float)t.top,
+                                                  (float)(t.right - t.left),
+                                                  (float)(t.bottom - t.top)));
+        RECT th; ViewThumbRectH(&th);
+        g->FillRectangle(&brThumb, Gdiplus::RectF((float)th.left, (float)th.top,
+                                                  (float)(th.right - th.left),
+                                                  (float)(th.bottom - th.top)));
+    }
 }
 
 static int ViewScrollPos(int bar) {
-    SCROLLINFO si;
-    memset(&si, 0, sizeof(si));
-    si.cbSize = sizeof(si);
-    si.fMask = SIF_POS;
-    HWND h = ViewBarOf(bar);
-    return (h && GetScrollInfo(h, SB_CTL, &si)) ? si.nPos : 0;
+    return (bar == SB_VERT) ? g_vPos : g_hPos;
+}
+
+/* ---- 放大镜光标（Ditto 同款）----
+   系统没有现成的放大镜光标，运行时自己画两枚 32x32 ARGB 光标：
+   白底黑圈镜片 + 手柄，镜心 + / -；热点在镜心。点击的语义 = 光标图案：
+   适应窗口时镜片是 +（点击放大到 100%），100% 时是 -（点击缩到适配）。 */
+static HCURSOR g_curZoomIn = NULL, g_curZoomOut = NULL;
+
+static HCURSOR MakeZoomCursor(BOOL plus) {
+    const int S = 32;
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth       = S;
+    bi.bmiHeader.biHeight      = -S;             /* 自上而下 */
+    bi.bmiHeader.biPlanes      = 1;
+    bi.bmiHeader.biBitCount    = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    BYTE* bits = NULL;
+    HBITMAP color = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, (void**)&bits, NULL, 0);
+    if (!color || !bits) return NULL;
+    memset(bits, 0, (size_t)S * S * 4);
+
+    {
+        Gdiplus::Bitmap bmp(S, S, S * 4, PixelFormat32bppARGB, bits);
+        Gdiplus::Graphics g(&bmp);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::Pen penBlack(Gdiplus::Color(255, 20, 20, 20), 2.0f);
+        Gdiplus::SolidBrush brGlass(Gdiplus::Color(190, 255, 255, 255));
+        /* 镜片：白玻璃 + 黑圈 */
+        g.FillEllipse(&brGlass, 3.0f, 3.0f, 20.0f, 20.0f);
+        g.DrawEllipse(&penBlack, 3.0f, 3.0f, 20.0f, 20.0f);
+        /* 手柄：圆头短把 */
+        Gdiplus::Pen penHandle(Gdiplus::Color(255, 20, 20, 20), 4.0f);
+        penHandle.SetStartCap(Gdiplus::LineCapRound);
+        penHandle.SetEndCap(Gdiplus::LineCapRound);
+        g.DrawLine(&penHandle, 19.5f, 19.5f, 27.5f, 27.5f);
+        /* 镜心 + / - */
+        Gdiplus::Pen penSign(Gdiplus::Color(255, 20, 20, 20), 2.5f);
+        penSign.SetStartCap(Gdiplus::LineCapRound);
+        penSign.SetEndCap(Gdiplus::LineCapRound);
+        if (plus) g.DrawLine(&penSign, 13.0f, 8.5f, 13.0f, 17.5f);
+        g.DrawLine(&penSign, 8.5f, 13.0f, 17.5f, 13.0f);
+    }
+
+    HBITMAP mask = CreateBitmap(S, S, 1, 1, NULL);   /* 全 0 掩码 → 按 alpha 合成 */
+    ICONINFO ii;
+    memset(&ii, 0, sizeof(ii));
+    ii.fIcon = FALSE;                                /* 光标 */
+    ii.xHotspot = 13;  ii.yHotspot = 13;             /* 镜心 */
+    ii.hbmMask = mask;  ii.hbmColor = color;
+    HCURSOR c = (HCURSOR)CreateIconIndirect(&ii);
+    DeleteObject(color);
+    DeleteObject(mask);
+    return c;
 }
 
 static float ViewEffScale(void) {
@@ -2021,49 +2133,51 @@ static BOOL ScrollPaintStrip(int dx, int dy) {
        memmove，水平位移 = 逐行行内 memmove，结果确定。
        ★ 斜向（横竖同时）罕见，退回整帧。 */
     if (dx != 0 && dy != 0) return FALSE;
-    /* ★ 搬动区域**不含边框**（bot = rc.bottom - 1，右列同理见横向分支）：
+    /* ★ 搬动区域**不含窗框**（内容边框行/列与滚动条边条都排除在外）：
        边框属于"窗框"，跟着内容搬就是一条随滚动游走、永远洗不掉的细线
-       （实测踩过：每滚一档，一条 #CCCCCC 细线在图里向上游 120px）。 */
-    int top = (int)g_headerH, bot = rc.bottom - 1;
-    int rowsN = bot - top;
-    int w = rc.right;
+       （实测踩过：每滚一档，一条 #CCCCCC 细线在图里向上游 120px）。
+       cw2/bot2 = 内容区右缘/下缘（右侧与下侧是自绘滚动条边条）。 */
+    int top = (int)g_headerH;
+    int cw2 = rc.right - g_barW;
+    int bot2 = rc.bottom - g_barH - 1;
+    int rowsN = bot2 - top;
     BYTE* base = (BYTE*)g_viewBits;
     int stride = g_viewW * 4;
     RECT up;
     if (dy != 0) {
         if (dy >= rowsN || -dy >= rowsN) return FALSE;          /* 搬不动/搬满：整帧 */
         if (dy > 0) {
-            /* 往下滚：内容上移 dy 行，底部露出 dy 行（底边框行原地不动） */
+            /* 往下滚：内容上移 dy 行，底部露出 dy 行（内容底边框行原地不动） */
             memmove(base + (size_t)top * stride,
                     base + (size_t)(top + dy) * stride,
                     (size_t)(rowsN - dy) * stride);
-            up.left = 0;  up.right = w;  up.top = bot - dy;  up.bottom = bot;
+            up.left = 0;  up.right = cw2;  up.top = bot2 - dy;  up.bottom = bot2;
         } else {
             int n = -dy;   /* 往上滚：内容下移 n 行，顶部露出 n 行 */
             memmove(base + (size_t)(top + n) * stride,
                     base + (size_t)top * stride,
                     (size_t)(rowsN - n) * stride);
-            up.left = 0;  up.right = w;  up.top = top;  up.bottom = top + n;
+            up.left = 0;  up.right = cw2;  up.top = top;  up.bottom = top + n;
         }
     } else {
         /* ---- 横向：逐行行内 memmove ----
-           竖边框列同样不搬（dx>0 时右列会被搬走、dx<0 时左列会被搬走），
+           内容右缘边框列同样不搬（dx>0 时会被搬走、dx<0 时左列会被搬走），
            搬动区域把那一列排除，露出的条带里再补画边框。 */
         if (dx > 0) {
-            if (dx >= w - 1) return FALSE;
-            for (int y = top; y < bot; y++) {
+            if (dx >= cw2 - 1) return FALSE;
+            for (int y = top; y < bot2; y++) {
                 BYTE* row = base + (size_t)y * stride;
-                memmove(row, row + (size_t)dx * 4, (size_t)(w - 1 - dx) * 4);
+                memmove(row, row + (size_t)dx * 4, (size_t)(cw2 - 1 - dx) * 4);
             }
-            up.left = w - 1 - dx;  up.right = w;  up.top = top;  up.bottom = bot;
+            up.left = cw2 - 1 - dx;  up.right = cw2;  up.top = top;  up.bottom = bot2;
         } else {
             int n = -dx;
-            if (n >= w - 1) return FALSE;
-            for (int y = top; y < bot; y++) {
+            if (n >= cw2 - 1) return FALSE;
+            for (int y = top; y < bot2; y++) {
                 BYTE* row = base + (size_t)y * stride;
-                memmove(row + (size_t)n * 4, row, (size_t)(w - 1 - n) * 4);
+                memmove(row + (size_t)n * 4, row, (size_t)(cw2 - 1 - n) * 4);
             }
-            up.left = 0;  up.right = n + 1;  up.top = top;  up.bottom = bot;
+            up.left = 0;  up.right = n + 1;  up.top = top;  up.bottom = bot2;
         }
     }
 
@@ -2087,12 +2201,12 @@ static BOOL ScrollPaintStrip(int dx, int dy) {
         float ix1 = ix0 + dw, iy1 = iy0 + dh;
         float vx0 = (ix0 > 0.0f) ? ix0 : 0.0f;
         float vy0 = (iy0 > g_headerH) ? iy0 : g_headerH;
-        float vx1 = (ix1 < (float)rc.right) ? ix1 : (float)rc.right;
-        float vy1 = (iy1 < bot) ? iy1 : (float)bot;
+        float vx1 = (ix1 < (float)cw2) ? ix1 : (float)cw2;
+        float vy1 = (iy1 < bot2) ? iy1 : (float)bot2;
         /* 只补条带：与露出的矩形求交。上下各多盖 1 行：盖住任何半像素
            边缘残留（多盖的是相邻的正确内容或条带自身，无副作用）。 */
         float ovTop = up.top > top ? up.top - 1.0f : (float)up.top;
-        float ovBot = up.bottom < bot ? up.bottom + 1.0f : (float)up.bottom;
+        float ovBot = up.bottom < bot2 ? up.bottom + 1.0f : (float)up.bottom;
         if (vx0 < (float)up.left)   vx0 = (float)up.left;
         if (vy0 < ovTop)            vy0 = ovTop;
         if (vx1 > (float)up.right)  vx1 = (float)up.right;
@@ -2105,13 +2219,15 @@ static BOOL ScrollPaintStrip(int dx, int dy) {
                         (vx1 - vx0) / eff, (vy1 - vy0) / eff, Gdiplus::UnitPixel);
         }
     }
-    /* 条带盖掉的外缘边框补回来（整帧的 DrawRectangle 只在整画时走） */
+    /* 条带盖掉的内容边框补回来（左列 / 内容右缘列；底边框行不搬不用补），
+       再画两条滚动条（thumb 跟随新滚动位）。 */
     if (up.left == 0)
         g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, (float)up.top, 1.0f,
                                                   (float)(up.bottom - up.top)));
-    if (up.right == rc.right)
-        g.FillRectangle(&brBorder, Gdiplus::RectF((float)(rc.right - 1), (float)up.top,
+    if (up.right == cw2)
+        g.FillRectangle(&brBorder, Gdiplus::RectF((float)(cw2 - 1), (float)up.top,
                                                   1.0f, (float)(up.bottom - up.top)));
+    ViewDrawBars(&g);
     g.Flush(Gdiplus::FlushIntentionSync);
     ThumbUpdateVisRange();           /* 滚动改了可见范围：解码线程按需补图 */
     /* ★ 呈现必须**整帧**：memmove 之后内存 DIB 已经全对，但屏幕（DWM 表面）
@@ -2142,50 +2258,12 @@ static void ViewSyncScroll(int anchor) {
     for (int pass = 0; pass < 2; pass++) {
         int bar = pass ? SB_VERT : SB_HORZ;
         int max = pass ? vmax : hmax;
-        si.nMin = 0;
-        si.nMax = (max > 0) ? max + (pass ? ch : cw) - 1 : 0;
-        si.nPage = (max > 0) ? (pass ? ch : cw) : 0;
-        si.nPos = (anchor == VIEW_ANCHOR_CENTER) ? (max / 2)
+        int page = pass ? ch : cw;
+        int pos = (anchor == VIEW_ANCHOR_CENTER) ? (max / 2)
                 : (anchor == VIEW_ANCHOR_TOP)    ? 0
                 : min(ViewScrollPos(bar), max);
-        HWND h = ViewBarOf(bar);
-        if (h) {
-            SetScrollInfo(h, SB_CTL, &si, TRUE);
-            /* 没得滚就置灰（Ditto 同款：图不超窗时滚动条灰显） */
-            EnableWindow(h, max > 0);
-        }
-    }
-}
-
-/* WM_VSCROLL / WM_HSCROLL：滚动条自身的拖动 / 行 / 页 / 端点。 */
-static void ViewScrollCmd(int bar, int cmd, int req) {
-    SCROLLINFO si;
-    memset(&si, 0, sizeof(si));
-    si.cbSize = sizeof(si);
-    si.fMask = SIF_ALL;
-    HWND h = ViewBarOf(bar);
-    if (!h || !GetScrollInfo(h, SB_CTL, &si)) return;
-    int old = si.nPos;
-    switch (cmd) {
-    case SB_TOP:          si.nPos = 0; break;
-    case SB_BOTTOM:       si.nPos = si.nMax; break;
-    case SB_LINEUP:       si.nPos -= VIEW_SCROLL_STEP; break;
-    case SB_LINEDOWN:     si.nPos += VIEW_SCROLL_STEP; break;
-    case SB_PAGEUP:       si.nPos -= (int)si.nPage; break;
-    case SB_PAGEDOWN:     si.nPos += (int)si.nPage; break;
-    case SB_THUMBPOSITION:
-    case SB_THUMBTRACK:   si.nPos = req; break;
-    default:              return;
-    }
-    si.fMask = SIF_POS;
-    SetScrollInfo(h, SB_CTL, &si, TRUE);
-    if (ViewScrollPos(bar) != old) {
-        /* 拖动/点击滚动条是直接跟手的操作，动画要立刻让位 —— 目标同步成
-           现位，否则下一帧又把视图拽回目标上去（视图和拇指打架）。 */
-        g_viewAnim = FALSE;
-        g_viewTargetX = ViewScrollPos(SB_HORZ);
-        g_viewTargetY = ViewScrollPos(SB_VERT);
-        ViewPaintSoon();
+        if (bar == SB_VERT) { g_vMax = max; g_vPage = page; g_vPos = pos; }
+        else                { g_hMax = max; g_hPage = page; g_hPos = pos; }
     }
 }
 
@@ -2194,13 +2272,7 @@ static void ViewScrollCmd(int bar, int cmd, int req) {
    连续滑动后滚动条与图像是一起匀滑移动的。 */
 static void ViewScrollBy(int bar, int steps) {
     if (!steps || !g_view) return;
-    SCROLLINFO si;
-    memset(&si, 0, sizeof(si));
-    si.cbSize = sizeof(si);
-    si.fMask = SIF_ALL;
-    HWND h = ViewBarOf(bar);
-    if (!h || !GetScrollInfo(h, SB_CTL, &si)) return;
-    int posmax = (si.nMax > 0 && si.nPage > 0) ? si.nMax - (int)si.nPage + 1 : 0;
+    int posmax = (bar == SB_VERT) ? g_vMax : g_hMax;
     if (posmax <= 0) return;                       /* 内容没超窗：没得滚 */
     int *target = (bar == SB_VERT) ? &g_viewTargetY : &g_viewTargetX;
     if (!g_viewAnim)   /* 动画没在跑：目标从当前位置起算（上次的目标已过时） */
@@ -2222,12 +2294,7 @@ static void ViewAnimStep(void) {
     if (g_viewTargetX - nx < 2 && nx - g_viewTargetX < 2) nx = g_viewTargetX;
     if (g_viewTargetY - ny < 2 && ny - g_viewTargetY < 2) ny = g_viewTargetY;
     if (nx == px && ny == py) { g_viewAnim = FALSE; return; }
-    SCROLLINFO si;
-    memset(&si, 0, sizeof(si));
-    si.cbSize = sizeof(si);
-    si.fMask = SIF_POS;
-    if (nx != px) { si.nPos = nx; SetScrollInfo(ViewBarOf(SB_HORZ), SB_CTL, &si, TRUE); }
-    if (ny != py) { si.nPos = ny; SetScrollInfo(ViewBarOf(SB_VERT), SB_CTL, &si, TRUE); }
+    g_hPos = nx;  g_vPos = ny;
     if (nx != g_viewTargetX || ny != g_viewTargetY)
         ViewPaintSoon();               /* 还没到：下一帧继续 */
 }
@@ -2301,12 +2368,13 @@ static void ViewPaint(void) {
         }
     }
 
-    /* 边框最后画：压住可能溢出的图片（贴客户区，右侧压在滚动条内侧）。
-       四条边都是整数 1px 填充（理由见上）。 */
+    /* 边框最后画：压住可能溢出的图片。右/下边框画在**内容区**内缘
+       （滚动条边条画在它们外侧的自绘条上）。四条边都是整数 1px 填充。 */
     g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, 0.0f, cw, 1.0f));
-    g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, (float)(rc.bottom - 1), cw, 1.0f));
-    g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, 0.0f, 1.0f, (float)rc.bottom));
-    g.FillRectangle(&brBorder, Gdiplus::RectF(cw - 1.0f, 0.0f, 1.0f, (float)rc.bottom));
+    g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, (float)(rc.bottom - g_barH - 1), cw - (float)g_barW, 1.0f));
+    g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, 0.0f, 1.0f, (float)(rc.bottom - g_barH)));
+    g.FillRectangle(&brBorder, Gdiplus::RectF(cw - (float)g_barW - 1.0f, 0.0f, 1.0f, (float)(rc.bottom - g_barH)));
+    ViewDrawBars(&g);                /* 自绘滚动条（thumb 跟随滚动位） */
     g.Flush(Gdiplus::FlushIntentionSync);
 
     /* ---- GDI 文字（ClearType）---- */
@@ -2438,7 +2506,7 @@ static LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ViewPaint();
         }
         return 0;
-    case WM_MOUSEMOVE:
+    case WM_MOUSEMOVE: {
         /* ---- 拖标题栏挪窗（与列表同套路：NOACTIVATE 收不到 WM_NCLBUTTONDOWN） ---- */
         if (g_viewWinDrag && (wp & MK_LBUTTON)) {
             POINT cur;
@@ -2457,12 +2525,114 @@ static LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        /* ---- 自绘滚动条的拖拽与悬停 ---- */
+        RECT v, h;
+        ViewBarRects(&v, &h);
+        POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
+        if (g_vDrag) {
+            int trackH = v.bottom - v.top - 4;
+            RECT th; ViewThumbRectV(&th);
+            int thumbH = th.bottom - th.top;
+            int y = pt.y - g_vDragGrab;
+            if (y < v.top + 2) y = v.top + 2;
+            if (y + thumbH > v.bottom - 2) y = v.bottom - 2 - thumbH;
+            int npos = (trackH > thumbH)
+                     ? (int)((float)(y - v.top - 2) * g_vMax / (trackH - thumbH) + 0.5f) : 0;
+            if (npos < 0) npos = 0;
+            if (npos > g_vMax) npos = g_vMax;
+            if (npos != g_vPos) { g_vPos = npos; g_viewAnim = FALSE; ViewPaintSoon(); }
+            return 0;
+        }
+        if (g_hDrag) {
+            int trackW = h.right - h.left - 4;
+            RECT th; ViewThumbRectH(&th);
+            int thumbW = th.right - th.left;
+            int x = pt.x - g_hDragGrab;
+            if (x < h.left + 2) x = h.left + 2;
+            if (x + thumbW > h.right - 2) x = h.right - 2 - thumbW;
+            int npos = (trackW > thumbW)
+                     ? (int)((float)(x - h.left - 2) * g_hMax / (trackW - thumbW) + 0.5f) : 0;
+            if (npos < 0) npos = 0;
+            if (npos > g_hMax) npos = g_hMax;
+            if (npos != g_hPos) { g_hPos = npos; g_viewAnim = FALSE; ViewPaintSoon(); }
+            return 0;
+        }
+        {
+            RECT th;
+            ViewThumbRectV(&th);
+            RECT thh;
+            ViewThumbRectH(&thh);
+            int nhv = (g_vMax > 0 && PtInRect(&v, pt) &&
+                       pt.y >= th.top && pt.y <= th.bottom) ? 1 : 0;
+            int nhh = (g_hMax > 0 && PtInRect(&h, pt) &&
+                       pt.x >= thh.left && pt.x <= thh.right) ? 1 : 0;
+            if (nhv != g_vHover || nhh != g_hHover) {
+                g_vHover = nhv;  g_hHover = nhh;
+                ViewPaintSoon();
+            }
+            if ((g_vMax > 0 && PtInRect(&v, pt)) || (g_hMax > 0 && PtInRect(&h, pt)) ||
+                pt.y >= g_headerH) {
+                TRACKMOUSEEVENT tme;
+                memset(&tme, 0, sizeof(tme));
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                if (!g_barHoverTrack && TrackMouseEvent(&tme)) g_barHoverTrack = TRUE;
+            }
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        g_barHoverTrack = FALSE;
+        if (g_vHover || g_hHover) { g_vHover = 0; g_hHover = 0; ViewPaintSoon(); }
         return 0;
     case WM_LBUTTONDOWN: {
         float x = (float)(short)LOWORD(lp), y = (float)(short)HIWORD(lp);
         int hb = ViewHitBtn(x, y);
         if (hb == 0) { ViewHide(); return 0; }    /* ✕ */
         if (hb == 1) { ViewCopy(); return 0; }    /* 复制原图 */
+        /* ---- 自绘滚动条：拇指 = 拖拽；轨道 = 翻页 ---- */
+        RECT v, h;
+        ViewBarRects(&v, &h);
+        POINT pt = { (int)x, (int)y };
+        if (g_vMax > 0 && PtInRect(&v, pt)) {
+            RECT th; ViewThumbRectV(&th);
+            if (pt.y >= th.top && pt.y <= th.bottom) {
+                g_vDrag = TRUE;
+                g_vDragGrab = pt.y - th.top;
+            } else {
+                int page = v.bottom - v.top;   /* 轨道点击 = 翻页 */
+                g_vPos += (pt.y < th.top) ? -page : page;
+                if (g_vPos < 0) g_vPos = 0;
+                if (g_vPos > g_vMax) g_vPos = g_vMax;
+                g_viewAnim = FALSE;
+                RECT t2; ViewThumbRectV(&t2);
+                g_vDrag = TRUE;
+                g_vDragGrab = pt.y - t2.top;
+                ViewPaintSoon();
+            }
+            SetCapture(hwnd);
+            return 0;
+        }
+        if (g_hMax > 0 && PtInRect(&h, pt)) {
+            RECT th; ViewThumbRectH(&th);
+            if (pt.x >= th.left && pt.x <= th.right) {
+                g_hDrag = TRUE;
+                g_hDragGrab = pt.x - th.left;
+            } else {
+                int page = h.right - h.left;
+                g_hPos += (pt.x < th.left) ? -page : page;
+                if (g_hPos < 0) g_hPos = 0;
+                if (g_hPos > g_hMax) g_hPos = g_hMax;
+                g_viewAnim = FALSE;
+                RECT t2; ViewThumbRectH(&t2);
+                g_hDrag = TRUE;
+                g_hDragGrab = pt.x - t2.left;
+                ViewPaintSoon();
+            }
+            SetCapture(hwnd);
+            return 0;
+        }
         if (y < g_headerH) {                      /* 标题栏：拖窗 */
             GetCursorPos(&g_viewDragCur);
             g_viewWinDrag = TRUE;
@@ -2478,6 +2648,11 @@ static LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_LBUTTONUP: {
+        if (g_vDrag || g_hDrag) {
+            g_vDrag = FALSE;  g_hDrag = FALSE;
+            if (GetCapture() == hwnd) ReleaseCapture();
+            return 0;
+        }
         if (g_viewWinDrag) {
             g_viewWinDrag = FALSE;
             if (GetCapture() == hwnd) ReleaseCapture();
@@ -2500,10 +2675,28 @@ static LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CAPTURECHANGED:
         g_viewWinDrag = FALSE;
         g_viewClickArm = FALSE;
+        g_vDrag = FALSE;  g_hDrag = FALSE;
         return 0;
-    case WM_SIZE:
-        LayoutViewBars();                /* 子滚动条跟随窗口尺寸 */
-        return 0;
+    case WM_SETCURSOR: {
+        /* ---- 放大镜光标（Ditto 同款）----
+           图片区上按当前缩放态给光标：适应窗口 = 放大镜 +（点击放大），
+           100% = 放大镜 −（点击缩小到适配）。标题栏/按钮/滚动条 = 箭头。 */
+        if (LOWORD(lp) == HTCLIENT && g_view) {
+            POINT pt;
+            DWORD mp = GetMessagePos();
+            pt.x = (short)LOWORD(mp);  pt.y = (short)HIWORD(mp);
+            ScreenToClient(hwnd, &pt);
+            RECT v, h;
+            ViewBarRects(&v, &h);
+            BOOL onBar = (g_vMax > 0 && PtInRect(&v, pt)) || (g_hMax > 0 && PtInRect(&h, pt));
+            if (pt.y >= g_headerH && !onBar && ViewHitBtn((float)pt.x, (float)pt.y) < 0) {
+                if (!g_curZoomIn) { g_curZoomIn = MakeZoomCursor(TRUE); g_curZoomOut = MakeZoomCursor(FALSE); }
+                SetCursor((g_viewScale < 0.0f) ? g_curZoomIn : g_curZoomOut);
+                return TRUE;
+            }
+        }
+        break;   /* 其余区域交给类光标（箭头） */
+    }
     case WM_MOUSEWHEEL: {
         if (!g_viewImg) return 0;
         int d = GET_WHEEL_DELTA_WPARAM(wp);
@@ -2530,12 +2723,6 @@ static LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ViewScrollBy(SB_HORZ, d / WHEEL_DELTA);   /* 右滚看右方 */
         }
         return 0;
-    case WM_VSCROLL:
-        ViewScrollCmd(SB_VERT, LOWORD(wp), (short)HIWORD(wp));
-        return 0;
-    case WM_HSCROLL:
-        ViewScrollCmd(SB_HORZ, LOWORD(wp), (short)HIWORD(wp));
-        return 0;
     case WM_DESTROY:
         return 0;   /* 收尾统一在主窗口的 WM_DESTROY（那里才 PostQuitMessage） */
     }
@@ -2550,6 +2737,7 @@ static void ViewEnsureWindow(void) {
     wc.hInstance     = GetModuleHandleW(NULL);
     wc.lpszClassName = L"CapsEnhanceClipView";
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    wc.style = CS_DROPSHADOW;    /* 窗口阴影：浮在内容上时分得清边界 */
     RegisterClassW(&wc);
     /* 与列表同一套样式，但有三处**故意**不同：
        · 没有 WS_EX_TRANSPARENT —— 它要吃鼠标（滚轮/滚动条/按钮），穿透了就
@@ -2558,21 +2746,11 @@ static void ViewEnsureWindow(void) {
        · 没有 WS_EX_LAYERED —— 列表那 5% 整窗透明（CLIP_ALPHA）用来看文字
          无感，用来看图就是把图片和标题栏一起洗淡（用户实测：看不清）。
          预览要的是像素保真，普通窗口直出。
-       · 滚动条是**子控件**（见 g_vbar 处的说明）：窗口自带的滚动条从最顶上
-         开始，压着标题栏的 ✕；子控件从 ✕ 下方摆起。两条常驻（图不超窗时
-         置灰，Ditto 同款），客户区因此恒定。 */
+       · CS_DROPSHADOW —— 系统画的窗口投影，预览贴着内容时能分清边界。 */
     g_view = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
                              wc.lpszClassName, NULL,
                              WS_POPUP,
                              0, 0, 0, 0, NULL, NULL, wc.hInstance, NULL);
-    if (!g_view) return;
-    g_vbar = CreateWindowExW(0, L"SCROLLBAR", NULL,
-                             WS_CHILD | WS_VISIBLE | SBS_VERT,
-                             0, 0, 0, 0, g_view, NULL, wc.hInstance, NULL);
-    g_hbar = CreateWindowExW(0, L"SCROLLBAR", NULL,
-                             WS_CHILD | WS_VISIBLE | SBS_HORZ,
-                             0, 0, 0, 0, g_view, NULL, wc.hInstance, NULL);
-    LayoutViewBars();
 }
 
 static void ViewToggle(void) {
@@ -2625,20 +2803,29 @@ static void ViewFitOnce(void) {
        窗口"在这里生效：是窗口适应图像，图像自己保持原大）。 */
     int nw = (int)iw + 2;
     if (nw > maxW) nw = maxW;
-    if (nw < 120) nw = 120;
     int nh = (int)ih + (int)g_headerH + 2;
     if (nh > maxH) nh = maxH;
-    if (nh < (int)g_headerH + 80) nh = (int)g_headerH + 80;
     g_viewFitted = TRUE;
     BOOL firstShow = !IsWindowVisible(g_view);
-    /* 窗口尺寸 = 目标客户区 + 两条**子**滚动条占掉的边条（宽高按系统度量，
-       跟屏幕 DPI 走）。子滚动条盖在客户区上，内容可视区 = 客户区 - 边条，
+    /* 窗口尺寸 = 内容可视区 + 两条**自绘**滚动条占掉的边条（宽高随 DPI，
+       见 FitMetrics）。边条盖在客户区上，内容可视区 = 客户区 - 边条，
        所以要把边条尺寸加回来，"贴着原图"的观感才不变。 */
-    nw += GetSystemMetrics(SM_CXVSCROLL);
-    nh += GetSystemMetrics(SM_CYHSCROLL);
+    nw += g_barW;
+    nh += g_barH;
     if (nw > maxW) nw = maxW;   /* 加上边条后再钳上限：大图超限就交给
                                    滚动条平移（100% + 滚动，Ditto 同款） */
     if (nh > maxH) nh = maxH;
+    /* **最小尺寸**（ClipViewMinW/H）：小图的预览窗也撑到这么大 —— 不然
+       "适应窗口"跟 100% 没差别，点一下看不出放大。上限优先，最小值再往上抬。 */
+    int minW = (int)((float)g_viewMinW * g_k);
+    int minH = (int)((float)g_viewMinH * g_k);
+    if (nw < minW) nw = minW;
+    if (nh < minH) nh = minH;
+    /* 最小值抬完再被工作区钳一道（最小值配得比屏幕还大时以屏幕为准） */
+    if (nw > maxW) nw = maxW;
+    if (nh > maxH) nh = maxH;
+    if (nw > work.right - work.left) nw = work.right - work.left;
+    if (nh > work.bottom - work.top) nh = work.bottom - work.top;
     g_viewW = nw;  g_viewH = nh;
     if (firstShow) {
         int row = (g_viewRow >= 0) ? g_viewRow : g_sel;
@@ -3279,6 +3466,10 @@ static void LoadIniFallback(void) {
                                 CLIP_VIEW_MAX_W_MIN, CLIP_VIEW_MAX_W_MAX);
         g_viewMaxH = IniReadInt(buf, got, "ClipViewMaxH", CLIP_VIEW_MAX_H_DEFAULT,
                                 CLIP_VIEW_MAX_H_MIN, CLIP_VIEW_MAX_H_MAX);
+        g_viewMinW = IniReadInt(buf, got, "ClipViewMinW", CLIP_VIEW_MIN_W_DEFAULT,
+                                CLIP_VIEW_MIN_W_MIN, CLIP_VIEW_MIN_W_MAX);
+        g_viewMinH = IniReadInt(buf, got, "ClipViewMinH", CLIP_VIEW_MIN_H_DEFAULT,
+                                CLIP_VIEW_MIN_H_MIN, CLIP_VIEW_MIN_H_MAX);
     }
     CloseHandle(f);
 }
@@ -3370,6 +3561,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         if (pvh) {
             int v = _wtoi(pvh + 4);
             if (v >= CLIP_VIEW_MAX_H_MIN && v <= CLIP_VIEW_MAX_H_MAX) g_viewMaxH = v;
+        }
+        const WCHAR* pmw = wcsstr(cmdLine, L"--mw");
+        if (pmw) {
+            int v = _wtoi(pmw + 4);
+            if (v >= CLIP_VIEW_MIN_W_MIN && v <= CLIP_VIEW_MIN_W_MAX) g_viewMinW = v;
+        }
+        const WCHAR* pmh = wcsstr(cmdLine, L"--mh");
+        if (pmh) {
+            int v = _wtoi(pmh + 4);
+            if (v >= CLIP_VIEW_MIN_H_MIN && v <= CLIP_VIEW_MIN_H_MAX) g_viewMinH = v;
         }
     }
     LoadIniFallback();      /* 命令行没给的：DittoDir / 字体 / 窗口尺寸 */

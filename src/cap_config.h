@@ -62,6 +62,8 @@ enum {
     CFG_CLIP_CLICK_PASTE,      /* [General] ClipClickPaste */
     CFG_CLIP_VIEW_MAX_W,       /* [General] ClipViewMaxW（F3 预览窗格最大宽，96 DPI 下的像素） */
     CFG_CLIP_VIEW_MAX_H,       /* [General] ClipViewMaxH（F3 预览窗格最大高，同上） */
+    CFG_CLIP_VIEW_MIN_W,       /* [General] ClipViewMinW（F3 预览窗格最小宽，同上） */
+    CFG_CLIP_VIEW_MIN_H,       /* [General] ClipViewMinH（F3 预览窗格最小高，同上） */
     CFG_COUNT
 };
 
@@ -111,6 +113,16 @@ void CfgSetStr(int id, const WCHAR* v);   /* NULL = 清空；过长按缓冲截�
 #define CLIP_VIEW_MAX_H_DEFAULT 530
 #define CLIP_VIEW_MAX_H_MIN     140
 #define CLIP_VIEW_MAX_H_MAX     8192
+/* ClipViewMinW / ClipViewMinH：预览窗格的**最小**宽/高（同样 96 DPI 像素）。
+   窗口贴着小图开时"适应窗口"跟 100% 没差别、看不清 —— 给个最小尺寸，
+   小图的预览窗也撑到这个大小，点一下"适应窗口"就是实打实的放大。
+   默认 480x320；窗口仍不超过 ClipViewMaxW/H 与工作区。 */
+#define CLIP_VIEW_MIN_W_DEFAULT 480
+#define CLIP_VIEW_MIN_W_MIN     40
+#define CLIP_VIEW_MIN_W_MAX     4096
+#define CLIP_VIEW_MIN_H_DEFAULT 320
+#define CLIP_VIEW_MIN_H_MIN     80
+#define CLIP_VIEW_MIN_H_MAX     4096
 #define CLIP_CLICK_PASTE_DEFAULT 1  /* 单击条目直接上屏（默认开） */
 /* 单键切换输入法：key 为 IME_KEY_*，返回 IME_MODE_*（0=不处理 1=中文 2=英文） */
 int  ConfigGetImeMode(int key);

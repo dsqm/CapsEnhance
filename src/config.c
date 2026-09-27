@@ -348,6 +348,13 @@ static CfgDef kCfg[CFG_COUNT] = {
       "; ★ 浮层进程启动时读，改完要重启 CapsEnhance 才生效。\n" },
     { "clipviewmaxh", "ClipViewMaxH", 0, CLIP_VIEW_MAX_H_DEFAULT, CLIP_VIEW_MAX_H_MIN, CLIP_VIEW_MAX_H_MAX, 0, NULL, 0,
       "; F3 图片预览窗格的最大高度（同上）。\n" },
+
+    { "clipviewminw", "ClipViewMinW", 0, CLIP_VIEW_MIN_W_DEFAULT, CLIP_VIEW_MIN_W_MIN, CLIP_VIEW_MIN_W_MAX, 0, NULL, 0,
+      "; F3 图片预览窗格的最小宽度：小图的预览窗也撑到这个大小，\n"
+      "; 点一下图（切换适应窗口）才是实打实的放大。与最大值一样按 DPI 放大、\n"
+      "; 不超工作区；设置界面（剪贴板段）里可改。\n" },
+    { "clipviewminh", "ClipViewMinH", 0, CLIP_VIEW_MIN_H_DEFAULT, CLIP_VIEW_MIN_H_MIN, CLIP_VIEW_MIN_H_MAX, 0, NULL, 0,
+      "; F3 图片预览窗格的最小高度（同上）。\n" },
 };
 
 /* 三键与 CFG_IME_* 三个编号必须同序连排（ConfigGetImeMode 靠下标直取） */
