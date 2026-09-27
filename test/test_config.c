@@ -11,6 +11,10 @@
 /* 被测接口全部在 cap.h 声明（本文件 include 了它），这里不再抄一份 ——
    抄一份的下场是改名之后一半原型漏改、报一堆"没有匹配的重载"。 */
 
+/* 模板期望值里拼默认值用（与 src/config.c 同款，模板改默认值这里自动跟） */
+#define STR2(x) #x
+#define STR(x)  STR2(x)
+
 
 static int fails = 0;
 #define EXPECT(cond, name) do { \
@@ -518,7 +522,7 @@ int main(void) {
             EXPECT(rd >= 3 && bomCount == 1 && head[0] == 0xEF,
                    "UPG(BOM边界): BOM 保留且只在文件头出现一次");
             /* 正文里也不应再出现第二个 BOM */
-            char whole[4096];
+            char whole[65536];
             size_t wn = 0;
             if (fopen_s(&fr, "obj/test/cfgtest.ini", "rb") == 0 && fr) {
                 wn = fread(whole, 1, sizeof(whole) - 1, fr);
@@ -665,9 +669,12 @@ int main(void) {
         EXPECT(ConfigMatchList(CFG_LIST_AUTODISABLE, L"mstsc.exe"),
                "SAVE: 原本不存在的名单段被补进文件");
 
-        /* 原样保留的部分（这是"增量更新"的全部意义） */
+        /* 原样保留的部分（这是"增量更新"的全部意义）。
+           ★ 读回缓冲必须比写回产物大：[General] 里补写的缺失键每个都带
+             完整注释块，输出早已超过 4KB —— 缓冲小了，排在文件尾部的
+             [Mine]/名单段就被截在读回窗口外，看着像"没保留"。 */
         FILE* fr = NULL;
-        char whole[4096];
+        char whole[65536];
         size_t wn = 0;
         if (fopen_s(&fr, "obj/test/cfgtest.ini", "rb") == 0 && fr) {
             wn = fread(whole, 1, sizeof(whole) - 1, fr);
@@ -715,7 +722,7 @@ int main(void) {
         CfgSetInt(CFG_LOG_MAX_KB, 222);
         EXPECT(ConfigSaveFile(L"obj/test/cfgtest.ini"), "SEC: [General ] 写回成功");
         {
-            FILE* fr = NULL; char whole[8192]; size_t wn = 0;
+            FILE* fr = NULL; char whole[65536]; size_t wn = 0;
             if (fopen_s(&fr, "obj/test/cfgtest.ini", "rb") == 0 && fr) {
                 wn = fread(whole, 1, sizeof(whole) - 1, fr); fclose(fr);
             }
@@ -735,7 +742,7 @@ int main(void) {
                    "SEC: [Auto Disable] 旧写法每轮只读到一条（不累积）");
             EXPECT(ConfigSaveFile(L"obj/test/cfgtest.ini"), "SEC: 旧段名写回成功");
         }
-        FILE* fr = NULL; char whole[8192]; size_t wn = 0;
+        FILE* fr = NULL; char whole[65536]; size_t wn = 0;
         if (fopen_s(&fr, "obj/test/cfgtest.ini", "rb") == 0 && fr) {
             wn = fread(whole, 1, sizeof(whole) - 1, fr); fclose(fr);
         }
@@ -842,8 +849,8 @@ int main(void) {
     }
     /* 快速粘贴窗口的尺寸：96 DPI 下的像素，写进 ini 的默认值必须等于浮层
        原来写死的那两个（560 / 374），否则"什么都没配"也会变个尺寸。 */
-    EXPECT(TemplateHas("ClipW = 560"), "CFG: 模板含 ClipW 默认值");
-    EXPECT(TemplateHas("ClipH = 374"), "CFG: 模板含 ClipH 默认值");
+    EXPECT(TemplateHas("ClipW = " STR(CLIP_W_DEFAULT)), "CFG: 模板含 ClipW 默认值");
+    EXPECT(TemplateHas("ClipH = " STR(CLIP_H_DEFAULT)), "CFG: 模板含 ClipH 默认值");
     {
         CfgSetInt(CFG_CLIP_W, 9999);
         EXPECT(CfgInt(CFG_CLIP_W) == CLIP_W_MAX, "CFG: 宽度超上限被钳制");
