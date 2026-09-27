@@ -212,6 +212,7 @@ static POINT     g_dragWin;            /* 按下那一刻的窗口位置 */
 
 static BOOL  Render(void);
 static void  RenderSoon(void);      /* 帧合并版 Render：高频来源只标脏（TID_RENDER） */
+static void  ThumbUpdateVisRange(void);   /* 可见行区间 -> 解码线程（Render/条带里调用） */
 static void  DoHideClose(void);
 static void  DittoAction(void);
 static void  DoPaste(BOOL plain);
@@ -281,10 +282,13 @@ static void LabelFromFormats(const WCHAR* fmts, WCHAR* out, int cap) {
 }
 
 static void FreeThumbs(void);   /* 796 行：进程退出时清空缩略图缓存 */
-/* 解码线程的唤醒事件与换代号：DbLoadItems 判定条目集变了就换代 + SetEvent，
-   常驻的解码线程据此重做一轮。定义放这儿，因为 DbLoadItems 自己要用。 */
+/* 解码线程的唤醒事件与**可见行区间**：DbLoadItems 判定条目集变了、或主线程
+   滚动/换页让可见范围变化时 SetEvent，常驻的解码线程据此只解**看得见的**
+   未缓存条目（Ditto 的预载模型，见 ThumbThreadProc）。定义放这儿，
+   因为 DbLoadItems 自己要用。 */
 static HANDLE        g_thumbWake = NULL;   /* 自动重置事件：有新活/退出 */
-static volatile LONG g_thumbGen  = 0;      /* 条目重载换代：换一次作废整轮 */
+static volatile LONG g_thumbVisFirst = 0;  /* 当前可见首行（主线程写，worker 读） */
+static volatile LONG g_thumbVisLast  = 0;  /* 当前可见末行（含） */
 
 static void DbLoadItems(void) {
     /* 旧条目的 lID 序列：加载完对比 —— 条目集没变就复用缩略图缓存
@@ -368,13 +372,12 @@ static void DbLoadItems(void) {
             if (g_items[i].id != oldIds[i]) { same = FALSE; break; }
     if (!same) {
         /* 缩略图**不作废**：缓存按 id 走（Ditto 同款），重载后已解好的照用，
-           线程重走一轮时只解新增的 id —— 旧做法"重载即全部重解"是"缩略图
-           慢"的主因（Ditto 开着时每复制一条就要白解一遍全部）。 */
+           线程重走可见范围时只解新增的 id —— 旧做法"重载即全部重解"是
+           "缩略图慢"的主因（Ditto 开着时每复制一条就要白解一遍全部）。 */
         g_sel = 0;  g_scrollY = 0;
         g_listAnim = FALSE;  g_listTargetY = 0;   /* 旧目标对新条目没有意义 */
-        /* 换代 + 唤醒：叫解码线程按新条目重走一轮（缓存命中的直接跳过） */
-        InterlockedIncrement(&g_thumbGen);
-        if (g_thumbWake) SetEvent(g_thumbWake);
+        g_thumbVisFirst = 0;  g_thumbVisLast = 0; /* 回到顶部：可见范围重新算 */
+        if (g_thumbWake) SetEvent(g_thumbWake);   /* 叫醒：解新集合的可见条目 */
     }
 }
 
@@ -961,107 +964,91 @@ static Gdiplus::Bitmap* DecodeThumb(sqlite3* db, int idx, float* outW) {
 #define WM_VIEW_READY  (WM_APP + 21)   /* 预览大图解码完成（wParam/lParam 未用） */
 static DWORD WINAPI ThumbThreadProc(LPVOID lp) {
     (void)lp;
-    /* 缩略图轮的续跑下标：-1 = 等下一次唤醒（从头做）；>=0 = 有半截轮次，
-       **不等唤醒**直接续跑。★ 0 也算"有半截"：预览请求可以在第 0 张之前
-       插队 —— 按"resume<=0 就回去等"的写法，这种打断会把整轮缩略图睡没，
-       而唤醒事件已经消费掉，不重载条目就再没有人叫它（实测：F3 之后
-       缩略图永远灰着）。 */
-    int resume = -1;
-    sqlite3* tdb = NULL;                     /* 本轮缩略图解码的只读连接（懒开） */
+    /* ---- 只解**可见**范围（Ditto 同款预载模型）----
+       主线程随显示/滚动把当前可见行区间写进 g_thumbVisFirst/Last 并叫醒本
+       线程；这里把区间内未缓存的图片逐张解出来，解完就睡。冷启动的解码量
+       因此是"一屏"而不是"整个历史" —— 历史里大图再多，首屏也只要一两张的
+       时间；往下滚，新进入视野的才解（旧版一口气解完所有条目，历史里大图
+       一多就是数秒的落后）。预览请求（F3 正盯着的加载）随时插队。 */
+    sqlite3* tdb = NULL;
     for (;;) {
-        LONG myGen;
-        int i;
-        if (resume < 0) {
-            WaitForSingleObject(g_thumbWake, INFINITE);
-            if (g_thumbQuit) return 0;
-            myGen = g_thumbGen;
-            i = 0;
-        } else {
-            myGen = g_thumbGen;
-            i = resume;
-        }
-        if (!tdb) tdb = DbOpen();
-        for (; i < g_count; i++) {
-            if (g_thumbQuit) return 0;
-            if (g_thumbGen != myGen) break;   /* 条目又重载了：整轮重来 */
-            /* ★ 预览请求插队：F3 的"解码中…"是用户正盯着的加载，缩略图晚
-               一两秒没人看得出。打断点记进 resume，预览做完接着补。 */
-            if (g_viewWantId) break;
-            if (!g_items[i].hasImage) continue;
-            long long id = g_items[i].id;     /* 记下解的是谁，防中途重载串位 */
-            Gdiplus::Bitmap* cached = NULL;
-            float w = 0;
-            EnterCriticalSection(&g_thumbLock);
-            BOOL have = ThumbFind(id, &cached, &w);
-            LeaveCriticalSection(&g_thumbLock);
-            if (have) continue;               /* 缓存里有结论（含解不出图的）：跳过 */
-            Gdiplus::Bitmap* bm = tdb ? DecodeThumb(tdb, i, &w) : NULL;
-            EnterCriticalSection(&g_thumbLock);
-            if (g_thumbGen == myGen && g_items[i].id == id) {
-                ThumbPut(id, bm, w);          /* 失败就是 NULL：负缓存，不再重试 */
-                bm = NULL;                    /* 缓存已接管 */
-            }
-            LeaveCriticalSection(&g_thumbLock);
-            delete bm;                        /* 没接管的（含 NULL）在这里释放 */
-            if (g_thumbGen == myGen)
-                PostMessageW(g_hwnd, WM_THUMB_READY, (WPARAM)i, 0);
-            Sleep(0);
-        }
-        if (tdb) { sqlite3_close(tdb); tdb = NULL; }
-        /* ---- F3 预览的大图：一次解码一张，做完再睡 ----
-           与缩略图共用线程/事件/锁：预览一次只要一张，另起线程与事件只会
-           多一条唤醒路径要记。循环里每次都重读请求 —— 快速翻条目时永远追
-           最新那张，追上了（want == doneId）就睡。请求 0 = 没有活。
-           ★ 解好的图放 g_viewDecoded 槽里等主线程收割（ViewHarvest），
-           不直接换 g_viewImg：g_viewImg 归主线程专有，旧图的释放点就在
-           主线程消息处理里 —— 换成线程直接换指针+锁外 delete 旧图，主线程
-           ViewPaint 正画着的那张就可能被释放（use-after-free，窗口小但真实）。
-           ★ want == doneId 时**补发一次完成消息**再睡：重开同一条目（F3 关了
-             再开）或上次解码失败的条目再按 F3，主程序不知道"这个请求其实早
-             有结论"，没有这条消息它就永远停在"解码中"。消息幂等：收割没有
-             新图就不动，解码本身不重复。 */
-        for (;;) {
-            if (g_thumbQuit) return 0;
+        WaitForSingleObject(g_thumbWake, INFINITE);
+        if (g_thumbQuit) { if (tdb) sqlite3_close(tdb); return 0; }
+
+        for (;;) {                       /* 把当前可见范围的活干完再睡 */
+            if (g_thumbQuit) break;
+
+            /* ---- F3 预览的大图优先 ----
+               与缩略图共用线程/事件/锁。解好的图放 g_viewDecoded 槽里等主线程
+               收割（ViewHarvest），不直接换 g_viewImg：那张归主线程专有，旧图
+               的释放点在主线程消息处理里，线程直接换指针再 delete 旧图，
+               ViewPaint 正画着的那张就可能被释放（use-after-free，窗口小但真实）。
+               want == doneId 时**补发一次完成消息**：重开同一条目或解码失败的
+               条目再按 F3，主程序不知道"这个请求早有结论"，没有这条消息它就
+               永远停在"解码中"。消息幂等，解码不重复。 */
             EnterCriticalSection(&g_thumbLock);
             long long want = g_viewWantId;
             LeaveCriticalSection(&g_thumbLock);
-            if (!want) break;
-            if (want == g_viewDoneId) {
-                PostMessageW(g_hwnd, WM_VIEW_READY, 0, 0);
-                /* 这个请求已经有结论了，清掉它：want 常驻非零会让"预览插队"
-                   的缩略图断点永远走不完（每圈都在这里 break），快路径直接
-                   变忙循环。主线程不依赖这个字段记状态，重开同一条目要么走
-                   ViewToggle 的现成图快路径、要么重新把它写上。 */
-                EnterCriticalSection(&g_thumbLock);
-                if (g_viewWantId == want) g_viewWantId = 0;
-                LeaveCriticalSection(&g_thumbLock);
-                break;
+            if (want) {
+                if (want == g_viewDoneId) {
+                    PostMessageW(g_hwnd, WM_VIEW_READY, 0, 0);
+                    EnterCriticalSection(&g_thumbLock);
+                    if (g_viewWantId == want) g_viewWantId = 0;   /* 请求已有结论，清账 */
+                    LeaveCriticalSection(&g_thumbLock);
+                } else {
+                    Gdiplus::Bitmap* bm = NULL;
+                    if (!tdb) tdb = DbOpen();
+                    if (tdb) bm = DecodeBig(tdb, want);
+                    Gdiplus::Bitmap* stale = NULL;
+                    EnterCriticalSection(&g_thumbLock);
+                    g_viewDoneId = want;
+                    if (g_viewWantId == want) {
+                        g_viewWantId = 0;              /* 请求已答复，清账 */
+                        stale = g_viewDecoded;         /* 没收割的旧图让出槽 */
+                        g_viewDecoded = bm; g_viewDecodedId = want;
+                        bm = NULL;
+                    }
+                    LeaveCriticalSection(&g_thumbLock);
+                    delete stale;                      /* 锁外放：收割与这里串行 */
+                    delete bm;                         /* 请求已变的这张（含 NULL） */
+                    PostMessageW(g_hwnd, WM_VIEW_READY, 0, 0);
+                    Sleep(0);
+                    continue;                          /* 回去继续扫可见范围 */
+                }
             }
-            Gdiplus::Bitmap* bm = NULL;
-            {
-                sqlite3* db = DbOpen();
-                if (db) { bm = DecodeBig(db, want); sqlite3_close(db); }
-            }
-            Gdiplus::Bitmap* stale = NULL;
+
+            /* ---- 可见范围内找一个未缓存的图片条目 ---- */
             EnterCriticalSection(&g_thumbLock);
-            g_viewDoneId = want;
-            if (g_viewWantId == want) {
-                g_viewWantId = 0;               /* 请求已答复，清账（防插队断点空转，见上） */
-                stale = g_viewDecoded;          /* 上一张没被收割的（罕见）就位让出槽 */
-                g_viewDecoded = bm; g_viewDecodedId = want;
-                bm = NULL;
+            int vf = g_thumbVisFirst, vl = g_thumbVisLast;
+            LeaveCriticalSection(&g_thumbLock);
+            if (vf < 0) vf = 0;
+            int todo = -1;
+            for (int i = vf; i <= vl && i < g_count; i++) {
+                if (!g_items[i].hasImage) continue;
+                Gdiplus::Bitmap* c = NULL;
+                float cw2 = 0;
+                EnterCriticalSection(&g_thumbLock);
+                BOOL have = ThumbFind(g_items[i].id, &c, &cw2);
+                LeaveCriticalSection(&g_thumbLock);
+                if (!have) { todo = i; break; }
+            }
+            if (todo < 0) break;                 /* 这一屏全齐了：睡 */
+
+            if (!tdb) tdb = DbOpen();
+            float w = 0;
+            long long id = g_items[todo].id;     /* 记下解的是谁，防中途重载串位 */
+            Gdiplus::Bitmap* bm = tdb ? DecodeThumb(tdb, todo, &w) : NULL;
+            EnterCriticalSection(&g_thumbLock);
+            if (g_items[todo].id == id) {
+                ThumbPut(id, bm, w);             /* 失败就是 NULL：负缓存，不再重试 */
+                bm = NULL;                       /* 缓存已接管 */
             }
             LeaveCriticalSection(&g_thumbLock);
-            delete stale;                       /* 锁外放：槽里的图主线程没在用（收割是串行消息处理） */
-            delete bm;                          /* 请求已变的这张（含 NULL）在这里释放 */
-            PostMessageW(g_hwnd, WM_VIEW_READY, 0, 0);
+            delete bm;                           /* 没接管的（含 NULL）在这里释放 */
+            PostMessageW(g_hwnd, WM_THUMB_READY, (WPARAM)todo, 0);
             Sleep(0);
         }
-        /* 收尾：换代 -> 等下一次唤醒；轮次没走完（被预览打断）-> 不等待直接
-           续跑（i==0 也一样，见上）；走完了 -> 等下一次唤醒。续跑态的每一圈
-           都至少解一张缩略图或消化一个预览请求，不会空转。 */
-        if (g_thumbQuit) return 0;
-        resume = (g_thumbGen == myGen && i < g_count) ? i : -1;
+        if (tdb) { sqlite3_close(tdb); tdb = NULL; }
     }
 }
 
@@ -1738,8 +1725,34 @@ static BOOL Render(void) {
     }
     RestoreDC(g_memDC, textDC);
 
+    ThumbUpdateVisRange();           /* 可见范围可能变了：解码线程按需补图 */
     InvalidateRect(g_hwnd, NULL, FALSE);
     return TRUE;
+}
+
+/* 把当前可见行区间写给解码线程（区间变了才叫醒）。只解看得见的条目 ——
+   冷启动的解码量 = 一屏，而不是整个历史（Ditto 的预载模型）。粗略即可：
+   区间多算一行少算一行都无妨，滚动时会自动修正。 */
+static void ThumbUpdateVisRange(void) {
+    int first = -1, last = -1;
+    float acc = g_headerH - (float)g_scrollY;
+    for (int i = 0; i < g_count; i++) {
+        float h = RowHeight(i);
+        if (first < 0 && acc + h > g_headerH) first = i;
+        if (acc < (float)g_pxH) last = i;
+        acc += h;
+        if (acc > (float)g_pxH && first >= 0) break;
+    }
+    if (first < 0) { first = 0; last = -1; }
+    BOOL changed = FALSE;
+    EnterCriticalSection(&g_thumbLock);
+    if (first != g_thumbVisFirst || last != g_thumbVisLast) {
+        g_thumbVisFirst = first;
+        g_thumbVisLast = last;
+        changed = TRUE;
+    }
+    LeaveCriticalSection(&g_thumbLock);
+    if (changed && g_thumbWake) SetEvent(g_thumbWake);
 }
 
 /* 按"待画一帧"合并列表的高频重绘来源（滚轮 / 悬停换行 / 键盘导航连续按）。
@@ -2100,6 +2113,7 @@ static BOOL ScrollPaintStrip(int dx, int dy) {
         g.FillRectangle(&brBorder, Gdiplus::RectF((float)(rc.right - 1), (float)up.top,
                                                   1.0f, (float)(up.bottom - up.top)));
     g.Flush(Gdiplus::FlushIntentionSync);
+    ThumbUpdateVisRange();           /* 滚动改了可见范围：解码线程按需补图 */
     /* ★ 呈现必须**整帧**：memmove 之后内存 DIB 已经全对，但屏幕（DWM 表面）
        只有被 BitBlt 过的区域才更新 —— 只无效化条带的话，位移过的上面一大片
        永远停在旧帧（实测就是"滚动图片破碎"：底部一条新的、上面全是旧的）。
