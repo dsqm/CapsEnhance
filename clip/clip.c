@@ -1811,6 +1811,7 @@ static float     g_viewScale = 0.0f;   /* 0 = 100% 原大（默认）；>0 = 显
 static BOOL      g_viewFitted = FALSE; /* 本条目按内容定过窗口尺寸（换条目重置） */
 static BOOL      g_viewPinned = FALSE; /* 空格钉住：停用"无关键退场" */
 static BOOL      g_viewWinDrag = FALSE;     /* 正在拖标题栏挪窗 */
+static BOOL      g_viewClickArm = FALSE;    /* 按下发生在图片区：抬起时切换适应窗口 */
 static POINT     g_viewDragCur;             /* 按下那一刻的光标位置 */
 static POINT     g_viewWinPos;              /* 按下那一刻的窗口位置 */
 static BOOL      g_viewPaintPending = FALSE;/* 帧合并：有一帧待画 */
@@ -1837,23 +1838,55 @@ static BOOL g_viewAnim = FALSE;                   /* 正在向目标滑 */
    适应窗口"的真实语义是**窗口适应图像**，那件事由 ViewFitOnce 管，图像
    自己不缩）。g_viewScale < 0 是"适应窗口"显式模式（双击图片切换）：
    图像缩进客户区，基于客户区算（常驻滚动条已扣除），小图不放大（放大糊）。 */
+/* 滚动条是**子控件**（SCROLLBAR 类），不是窗口自带的非客户区滚动条：
+   自带滚动条从窗口最顶上开始，正好压着标题栏的 ✕；用户要求它从 ✕ 下方
+   开始 —— 子控件的位置自己摆（垂直条 = 标题栏以下、水平条 = 底部一整条，
+   右下角留一个背景小方块）。两个条把客户区右缘/下缘盖住一条，图像/边框
+   的绘制不用改（被盖住的部分看不见）。 */
+static HWND g_vbar = NULL, g_hbar = NULL;
+static int  g_barW = 0, g_barH = 0;      /* 滚动条的宽/高（随 DPI） */
+
+/* 子滚动条定位：跟随窗口尺寸（WM_SIZE / 摆窗后调用）。 */
+static void LayoutViewBars(void) {
+    if (!g_view || !g_vbar) return;
+    RECT rc;
+    if (!GetClientRect(g_view, &rc)) return;
+    g_barW = GetSystemMetrics(SM_CXVSCROLL);
+    g_barH = GetSystemMetrics(SM_CYHSCROLL);
+    MoveWindow(g_vbar, rc.right - g_barW, (int)g_headerH,
+               g_barW, rc.bottom - (int)g_headerH - g_barH, TRUE);
+    MoveWindow(g_hbar, 0, rc.bottom - g_barH,
+               rc.right - g_barW, g_barH, TRUE);
+}
+
+/* 滚动位的读写全部落在子控件上（父窗口没有非客户区滚动条了）。 */
+static HWND ViewBarOf(int bar) {
+    return (bar == SB_VERT) ? g_vbar : g_hbar;
+}
+
+static int ViewScrollPos(int bar) {
+    SCROLLINFO si;
+    memset(&si, 0, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_POS;
+    HWND h = ViewBarOf(bar);
+    return (h && GetScrollInfo(h, SB_CTL, &si)) ? si.nPos : 0;
+}
+
 static float ViewEffScale(void) {
     if (g_viewScale > 0.0f) return g_viewScale;
     if (g_viewScale < 0.0f) {
+        /* 「缩放图像以适应窗口」的适配比例，Ditto 同式（ImageViewer.cpp
+           UpdateBitmapSize）：**可视宽 / 图宽** —— 它把滚动条尺寸加回客户区
+           再除图宽，语义是"按可视宽适配"；高度交给滚动条。不设放大上限。 */
         UINT iw = g_viewImg ? g_viewImg->GetWidth() : 0;
-        UINT ih = g_viewImg ? g_viewImg->GetHeight() : 0;
-        if (!iw || !ih) return 1.0f;
+        if (!iw || !g_viewImg) return 1.0f;
         RECT rc;
-        float cw = 1.0f, ch = 1.0f;
-        if (g_view && GetClientRect(g_view, &rc)) {
-            cw = (float)rc.right - 2.0f;
-            ch = (float)rc.bottom - g_headerH - 2.0f;
-        }
+        float cw = 1.0f;
+        if (g_view && GetClientRect(g_view, &rc))
+            cw = (float)(rc.right - g_barW) - 2.0f;   /* 去掉滚动条占的那条 */
         if (cw < 1.0f) cw = 1.0f;
-        if (ch < 1.0f) ch = 1.0f;
-        float fx = cw / (float)iw, fy = ch / (float)ih;
-        float fit = (fx < fy) ? fx : fy;
-        if (fit > 1.0f) fit = 1.0f;
+        float fit = cw / (float)iw;
         if (fit < 0.01f) fit = 0.01f;
         return fit;
     }
@@ -1944,16 +1977,9 @@ static void ViewHarvest(void) {
 }
 
 /* ---- 滚动条与帧合并 ----
-   平移状态全部住在标准滚动条里（GetScrollInfo 即取即用，没有第二份要同步的
-   变量）：图不超窗时滚动条灰显、图像居中；超出后滚动条接管平移。 */
+   平移状态全部住在滚动条里（GetScrollInfo 即取即用，没有第二份要同步的
+   变量）：图不超窗时滚动条置灰；超出后滚动条接管平移。 */
 
-static int ViewScrollPos(int bar) {
-    SCROLLINFO si;
-    memset(&si, 0, sizeof(si));
-    si.cbSize = sizeof(si);
-    si.fMask = SIF_POS;
-    return GetScrollInfo(g_view, bar, &si) ? si.nPos : 0;
-}
 
 /* 按"待画一帧"合并高频重绘来源（mousemove / 滚轮 / 滚动条拖动）。本进程
    主线程挂着低级鼠标钩子：每事件全量重画会把主线程打满，钩子回调排队，
@@ -2105,7 +2131,12 @@ static void ViewSyncScroll(int anchor) {
         si.nPos = (anchor == VIEW_ANCHOR_CENTER) ? (max / 2)
                 : (anchor == VIEW_ANCHOR_TOP)    ? 0
                 : min(ViewScrollPos(bar), max);
-        SetScrollInfo(g_view, bar, &si, TRUE);
+        HWND h = ViewBarOf(bar);
+        if (h) {
+            SetScrollInfo(h, SB_CTL, &si, TRUE);
+            /* 没得滚就置灰（Ditto 同款：图不超窗时滚动条灰显） */
+            EnableWindow(h, max > 0);
+        }
     }
 }
 
@@ -2115,7 +2146,8 @@ static void ViewScrollCmd(int bar, int cmd, int req) {
     memset(&si, 0, sizeof(si));
     si.cbSize = sizeof(si);
     si.fMask = SIF_ALL;
-    if (!GetScrollInfo(g_view, bar, &si)) return;
+    HWND h = ViewBarOf(bar);
+    if (!h || !GetScrollInfo(h, SB_CTL, &si)) return;
     int old = si.nPos;
     switch (cmd) {
     case SB_TOP:          si.nPos = 0; break;
@@ -2129,7 +2161,7 @@ static void ViewScrollCmd(int bar, int cmd, int req) {
     default:              return;
     }
     si.fMask = SIF_POS;
-    SetScrollInfo(g_view, bar, &si, TRUE);
+    SetScrollInfo(h, SB_CTL, &si, TRUE);
     if (ViewScrollPos(bar) != old) {
         /* 拖动/点击滚动条是直接跟手的操作，动画要立刻让位 —— 目标同步成
            现位，否则下一帧又把视图拽回目标上去（视图和拇指打架）。 */
@@ -2149,7 +2181,8 @@ static void ViewScrollBy(int bar, int steps) {
     memset(&si, 0, sizeof(si));
     si.cbSize = sizeof(si);
     si.fMask = SIF_ALL;
-    if (!GetScrollInfo(g_view, bar, &si)) return;
+    HWND h = ViewBarOf(bar);
+    if (!h || !GetScrollInfo(h, SB_CTL, &si)) return;
     int posmax = (si.nMax > 0 && si.nPage > 0) ? si.nMax - (int)si.nPage + 1 : 0;
     if (posmax <= 0) return;                       /* 内容没超窗：没得滚 */
     int *target = (bar == SB_VERT) ? &g_viewTargetY : &g_viewTargetX;
@@ -2176,8 +2209,8 @@ static void ViewAnimStep(void) {
     memset(&si, 0, sizeof(si));
     si.cbSize = sizeof(si);
     si.fMask = SIF_POS;
-    if (nx != px) { si.nPos = nx; SetScrollInfo(g_view, SB_HORZ, &si, TRUE); }
-    if (ny != py) { si.nPos = ny; SetScrollInfo(g_view, SB_VERT, &si, TRUE); }
+    if (nx != px) { si.nPos = nx; SetScrollInfo(ViewBarOf(SB_HORZ), SB_CTL, &si, TRUE); }
+    if (ny != py) { si.nPos = ny; SetScrollInfo(ViewBarOf(SB_VERT), SB_CTL, &si, TRUE); }
     if (nx != g_viewTargetX || ny != g_viewTargetY)
         ViewPaintSoon();               /* 还没到：下一帧继续 */
 }
@@ -2215,8 +2248,8 @@ static void ViewPaint(void) {
     const float cw = (float)rc.right, chh = (float)rc.bottom - g_headerH;
 
     /* 标题栏：与列表同一画法（纯白平涂 + 底边线），文字在下面 GDI 那一遍画。
-       布局一律按**客户区**走：常驻竖滚动条占窗口右缘一整列（标题栏右侧也在
-       内），照窗口宽画会把标题和按钮画进滚动条底下。
+       布局一律按**客户区**走：子滚动条盖住右缘/下缘一条，其余部分全归绘制
+       （被盖住的边条底下画什么都看不见）。
        ★ 分隔线与边框一律用**整数行的 FillRectangle**，不用 DrawLine /
          DrawRectangle 的 0.5 对齐画法：那些会触发 GDI+ 抗锯齿，在边界行上
          混出半透明像素 —— 预览的像素要被 memmove 整行搬动（条带重绘），
@@ -2419,31 +2452,41 @@ static LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_viewWinPos.x = g_viewX;
             g_viewWinPos.y = g_viewY;
             SetCapture(hwnd);
+            g_viewClickArm = FALSE;
+            return 0;
         }
-        /* 图片区按下无操作 —— Ditto 的图片查看没有点击/拖拽图片的行为 */
+        /* 图片区按下：**预备**点击（抬起才切换，Ditto 同款 —— 按着拖出窗外
+           松手不算点击）。 */
+        g_viewClickArm = TRUE;
         return 0;
     }
-    case WM_LBUTTONUP:
+    case WM_LBUTTONUP: {
         if (g_viewWinDrag) {
             g_viewWinDrag = FALSE;
             if (GetCapture() == hwnd) ReleaseCapture();
+            return 0;
         }
-        return 0;
-    case WM_CAPTURECHANGED:
-        g_viewWinDrag = FALSE;
-        return 0;
-    case WM_LBUTTONDBLCLK: {
-        float y = (float)(short)HIWORD(lp);
-        if (y >= g_headerH) {
-            /* 双击图片 = 100% 原大 ↔ 适应窗口；缩放锚 = 窗口中心 */
+        if (g_viewClickArm) {
+            g_viewClickArm = FALSE;
+            /* ★ 单击图片 = 切换「缩放图像以适应窗口」（Ditto 同款：
+               ImageViewer.cpp OnLButtonUp —— 切开关、重摆、滚回原点）。
+               适配比例也与它同式：**按客户区宽 / 图宽**（它把滚动条尺寸
+               加回客户区再除图宽，语义就是"可视宽"），不设放大上限。 */
             if (g_viewScale < 0.0f) g_viewScale = 0.0f;    /* 适应 → 100% */
             else                    g_viewScale = -1.0f;   /* 100%/其他 → 适应 */
             g_viewFullPaint = TRUE;      /* 采样变了：整帧 */
-            ViewSyncScroll(VIEW_ANCHOR_CENTER);
+            ViewSyncScroll(VIEW_ANCHOR_TOP);
             ViewPaintSoon();
         }
         return 0;
     }
+    case WM_CAPTURECHANGED:
+        g_viewWinDrag = FALSE;
+        g_viewClickArm = FALSE;
+        return 0;
+    case WM_SIZE:
+        LayoutViewBars();                /* 子滚动条跟随窗口尺寸 */
+        return 0;
     case WM_MOUSEWHEEL: {
         if (!g_viewImg) return 0;
         int d = GET_WHEEL_DELTA_WPARAM(wp);
@@ -2498,13 +2541,21 @@ static void ViewEnsureWindow(void) {
        · 没有 WS_EX_LAYERED —— 列表那 5% 整窗透明（CLIP_ALPHA）用来看文字
          无感，用来看图就是把图片和标题栏一起洗淡（用户实测：看不清）。
          预览要的是像素保真，普通窗口直出。
-       · 带两条**常驻**标准滚动条 —— Ditto 同款（图不超窗时灰显）。常驻而
-         不是按需增删：滚动条出现/消失会改变客户区，"算范围→决定滚动条→
-         客户区变→范围变"是个循环依赖，常驻则客户区恒定。 */
+       · 滚动条是**子控件**（见 g_vbar 处的说明）：窗口自带的滚动条从最顶上
+         开始，压着标题栏的 ✕；子控件从 ✕ 下方摆起。两条常驻（图不超窗时
+         置灰，Ditto 同款），客户区因此恒定。 */
     g_view = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
                              wc.lpszClassName, NULL,
-                             WS_POPUP | WS_VSCROLL | WS_HSCROLL,
+                             WS_POPUP,
                              0, 0, 0, 0, NULL, NULL, wc.hInstance, NULL);
+    if (!g_view) return;
+    g_vbar = CreateWindowExW(0, L"SCROLLBAR", NULL,
+                             WS_CHILD | WS_VISIBLE | SBS_VERT,
+                             0, 0, 0, 0, g_view, NULL, wc.hInstance, NULL);
+    g_hbar = CreateWindowExW(0, L"SCROLLBAR", NULL,
+                             WS_CHILD | WS_VISIBLE | SBS_HORZ,
+                             0, 0, 0, 0, g_view, NULL, wc.hInstance, NULL);
+    LayoutViewBars();
 }
 
 static void ViewToggle(void) {
@@ -2560,17 +2611,12 @@ static void ViewFitOnce(void) {
     if (nh < (int)g_headerH + 80) nh = (int)g_headerH + 80;
     g_viewFitted = TRUE;
     BOOL firstShow = !IsWindowVisible(g_view);
-    /* 窗口尺寸 = 目标客户区 + 窗口 chrome。chrome 里主要是两条**常驻**滚动
-       条，宽度不猜度量（SM_CXVSCROLL 这类跟屏幕 DPI 走）：现窗量出来
-       （GetWindowRect - GetClientRect）就是真值。首显前窗口还没有实尺寸，
-       先摆个临时的量完就重摆（此刻不可见，不闪）。 */
-    if (firstShow) MoveWindow(g_view, g_viewX, g_viewY, 200, 150, FALSE);
-    RECT crc, wrc;
-    if (GetClientRect(g_view, &crc) && GetWindowRect(g_view, &wrc)) {
-        nw += (wrc.right - wrc.left) - (crc.right - crc.left);
-        nh += (wrc.bottom - wrc.top) - (crc.bottom - crc.top);
-    }
-    if (nw > maxW) nw = maxW;   /* 加上 chrome 后再钳上限：大图超限就交给
+    /* 窗口尺寸 = 目标客户区 + 两条**子**滚动条占掉的边条（宽高按系统度量，
+       跟屏幕 DPI 走）。子滚动条盖在客户区上，内容可视区 = 客户区 - 边条，
+       所以要把边条尺寸加回来，"贴着原图"的观感才不变。 */
+    nw += GetSystemMetrics(SM_CXVSCROLL);
+    nh += GetSystemMetrics(SM_CYHSCROLL);
+    if (nw > maxW) nw = maxW;   /* 加上边条后再钳上限：大图超限就交给
                                    滚动条平移（100% + 滚动，Ditto 同款） */
     if (nh > maxH) nh = maxH;
     g_viewW = nw;  g_viewH = nh;
