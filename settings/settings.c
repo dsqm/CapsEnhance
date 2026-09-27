@@ -150,6 +150,28 @@ typedef struct {
     const WCHAR* group;     /* 归属段名（见上方说明；段头文字就是它） */
 } Field;
 
+/* 成对字段（宽+高并排一行）：kFields 里其余字段不受影响。
+   第一列 = 行首（宽）字段 id，第二列 = 行次（高）字段 id。 */
+static const int kPairs[][2] = {
+    { IDC_CLIP_W,     IDC_CLIP_H     },
+    { IDC_CLIP_VMW,   IDC_CLIP_VMH   },
+    { IDC_CLIP_VNW,   IDC_CLIP_VNH   },
+};
+
+/* id 是某对的行首（宽）？返回行次（高）的 id，否则 0。 */
+static int PairSecondId(int id) {
+    for (int i = 0; i < (int)(sizeof(kPairs) / sizeof(kPairs[0])); i++)
+        if (kPairs[i][0] == id) return kPairs[i][1];
+    return 0;
+}
+
+/* id 是某对的行次（高）？ */
+static BOOL IsPairSecond(int id) {
+    for (int i = 0; i < (int)(sizeof(kPairs) / sizeof(kPairs[0])); i++)
+        if (kPairs[i][1] == id) return TRUE;
+    return FALSE;
+}
+
 static Field kFields[] = {
     { IDC_RUN_ADMIN,  CFG_RUN_AS_ADMIN,        L"以管理员身份运行（会弹 UAC）",                   NULL,      1, 0, 0, 0, 0,      L"通用" },
     { IDC_LOG_KB,     CFG_LOG_MAX_KB,          L"日志大小上限（0 = 不限制）",                    L"KB",     0, 0, 0, 0, 0,      L"通用" },
@@ -172,13 +194,13 @@ static Field kFields[] = {
        字体对话框（对话框里本来就能同时选字体和字号，再给个独立字号框是重复）。
        它不承载配置值，所以 cfg = -1，Load / Save 都跳过。 */
     { IDC_CLIP_PICK, -1,                       L"快速粘贴字体",                                   NULL, 0, 0, 1, 0, 0, L"剪贴板" },
-    { IDC_CLIP_W,     CFG_CLIP_W,              L"快速粘贴窗口宽度（96 DPI 下的像素，实机按显示器 DPI 放大）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_H,     CFG_CLIP_H,              L"快速粘贴窗口高度（同上；排不下的条目用滚轮看）",           L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_W,     CFG_CLIP_W,              L"快速粘贴窗口大小（左框宽、右框高；96 DPI 下的像素，实机按显示器 DPI 放大）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_H,     CFG_CLIP_H,              L"快速粘贴窗口高度",                                          L"×",   0, 0, 0, 0, 0, L"剪贴板" },
     { IDC_CLIP_CLICK, CFG_CLIP_CLICK_PASTE,    L"单击条目直接上屏（取消勾选则单击只选中、双击才粘）", NULL, 1, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_VMW,   CFG_CLIP_VIEW_MAX_W,     L"F3 预览窗格最大宽度（不超屏幕工作区）",  L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_VMH,   CFG_CLIP_VIEW_MAX_H,     L"F3 预览窗格最大高度（超限的图用滚动条看）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_VNW,   CFG_CLIP_VIEW_MIN_W,     L"F3 预览窗格最小宽度（小图预览也撑到这么大，点图放大才明显）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_VNH,   CFG_CLIP_VIEW_MIN_H,     L"F3 预览窗格最小高度（同上）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_VMW,   CFG_CLIP_VIEW_MAX_W,     L"F3 预览窗格最大大小（左宽右高；不超屏幕工作区）",  L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_VMH,   CFG_CLIP_VIEW_MAX_H,     L"F3 预览窗格最大高度",                              L"×",   0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_VNW,   CFG_CLIP_VIEW_MIN_W,     L"F3 预览窗格最小大小（左宽右高；小图点一下放大才明显）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_VNH,   CFG_CLIP_VIEW_MIN_H,     L"F3 预览窗格最小高度",                                   L"×",   0, 0, 0, 0, 0, L"剪贴板" },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
 
@@ -698,20 +720,56 @@ static void Layout(int w, int h) {
                 MoveWindow(c, x, y - off, w - x * 2, S(22), TRUE);
             }
             y += S(24);
+        } else if (IsPairSecond(id)) {
+            /* 成对行次（高）：两个框、单位与"×"分隔符都由行首那一行摆好；
+               这里只把次字段自己的标签藏掉，不占行。 */
+            HWND lab2 = GetDlgItem(g_hwnd, id + 500);
+            if (lab2) ShowWindow(lab2, FALSE);
         } else {
-            /* 数字框放**左边**、单位紧跟在框右侧、标签吃剩下的空间：
-               标签是长句，把输入框放在标签之后的话，窗口一窄它就被挤出
-               客户区 —— 用户看到"有说明、没地方填"。输入框与单位宽固定。 */
-            HWND lab  = GetDlgItem(g_hwnd, id + 500);
-            HWND unit = GetDlgItem(g_hwnd, id + 600);
-            int ux = x + editW + S(4), unitW = S(52);
-            MoveWindow(c, x, y - off, editW, S(22), TRUE);
-            if (unit)
-                MoveWindow(unit, ux, y + S(4) - off, unitW, S(18), TRUE);
-            if (lab)
-                MoveWindow(lab, ux + unitW + S(8), y + S(4) - off,
-                           w - (ux + unitW + S(8)) - x, S(18), TRUE);
-            y += rowInt;
+            int pw2 = PairSecondId(id);
+            if (pw2) {
+                /* ---- 宽 + 高 一行两框（三组尺寸对）----
+                   行首字段（宽）的标签吃左边说明两个框，两个数字框并排，
+                   中间夹行次字段的单位控件（文字就是"×"），行首的单位
+                   （像素）收尾。行次字段的标签隐藏。 */
+                HWND lab  = GetDlgItem(g_hwnd, id + 500);
+                HWND unit = GetDlgItem(g_hwnd, id + 600);
+                HWND c2   = GetDlgItem(g_hwnd, pw2);
+                HWND cross = GetDlgItem(g_hwnd, pw2 + 600);
+                HWND lab2 = GetDlgItem(g_hwnd, pw2 + 500);
+                int boxW = S(56), xgap = S(4), crossW = S(16);
+                MoveWindow(c, x, y - off, boxW, S(22), TRUE);
+                if (cross)
+                    MoveWindow(cross, x + boxW + xgap, y + S(4) - off, crossW, S(18), TRUE);
+                if (c2)
+                    MoveWindow(c2, x + boxW + xgap + crossW, y - off, boxW, S(22), TRUE);
+                if (unit)
+                    MoveWindow(unit, x + boxW * 2 + xgap * 2 + crossW,
+                               y + S(4) - off, S(52), S(18), TRUE);
+                if (lab)
+                    MoveWindow(lab, x + boxW * 2 + xgap * 2 + crossW + S(52) + S(8),
+                               y + S(4) - off,
+                               w - (x + boxW * 2 + xgap * 2 + crossW + S(52) + S(8)) - x,
+                               S(18), TRUE);
+                if (lab2) ShowWindow(lab2, FALSE);
+                /* 次字段的输入框也要随页显隐（显隐轮只按 fieldPage 开关） */
+                ShowWindow(c2, TRUE);
+                y += rowInt;
+            } else {
+                /* 数字框放**左边**、单位紧跟在框右侧、标签吃剩下的空间：
+                   标签是长句，把输入框放在标签之后的话，窗口一窄它就被挤出
+                   客户区 —— 用户看到"有说明、没地方填"。输入框与单位宽固定。 */
+                HWND lab  = GetDlgItem(g_hwnd, id + 500);
+                HWND unit = GetDlgItem(g_hwnd, id + 600);
+                int ux = x + editW + S(4), unitW = S(52);
+                MoveWindow(c, x, y - off, editW, S(22), TRUE);
+                if (unit)
+                    MoveWindow(unit, ux, y + S(4) - off, unitW, S(18), TRUE);
+                if (lab)
+                    MoveWindow(lab, ux + unitW + S(8), y + S(4) - off,
+                               w - (ux + unitW + S(8)) - x, S(18), TRUE);
+                y += rowInt;
+            }
         }
         y += gap;
     }
