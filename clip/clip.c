@@ -173,7 +173,6 @@ float     g_headerH, g_gutterW, g_rowH1, g_rowH2, g_thumbPad;
 float     g_lineH = 20.0f;   /* 一行文字的行高（按字号算，见 FitMetrics） */
 HFONT     g_fontRow = NULL, g_fontSmall = NULL;
 HFONT     g_tipFont = NULL;        /* 提示字体：比列表小一档（Ditto 的提示也不用列表字号） */
-#define VIEW_BAR_W   10          /* 预览自绘滚动条的条宽（96 DPI 像素，FitMetrics 里 × g_k） */
 int       g_barW = 0, g_barH = 0;  /* 实际条宽/高（物理像素） */
 static HWND      g_target = NULL;
 static HWINEVENTHOOK g_evHook = NULL;
@@ -1048,11 +1047,6 @@ static void FitMetrics(void) {
     /* 图片行给足高度：缩略图要**占满整行**（Ditto 就是这样），行不够高图就小 */
     g_rowH2    = 76.0f * g_k;
     g_thumbPad = 3.0f * g_k;
-    /* 自绘滚动条的条宽/高（预览窗）：10 逻辑像素，太小的屏保底 8 物理像素 */
-    g_barW = (int)(VIEW_BAR_W * g_k);
-    g_barH = (int)(VIEW_BAR_W * g_k);
-    if (g_barW < 8) g_barW = 8;
-    if (g_barH < 8) g_barH = 8;
     /* 外框尺寸来自配置（主程序 --w/--h 传进来，手动启动时读 ini，见
        LoadIniFallback；设置界面里可改）—— 单位 96 DPI 像素，按显示器
        DPI 放大，与上面每一个 `* g_k` 同一套记法。窗口大小不读 Ditto：

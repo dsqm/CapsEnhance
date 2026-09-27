@@ -42,6 +42,8 @@ typedef struct {
 #define C_INDEX     0xFF6E6E6E   /* 序号 */
 #define C_THUMB_BG  0xFFF0F0F0   /* MainWindowBG */
 
+#define VIEW_BAR_W   10          /* 预览自绘滚动条的条宽（96 DPI 像素，用时 × g_k） */
+
 /* 浮层内部消息（clip_thumb.c -> 列表窗口 clip.c） */
 #define WM_THUMB_READY (WM_APP + 20)   /* 一张缩略图就绪（wParam=行下标） */
 #define WM_VIEW_READY  (WM_APP + 21)   /* 预览大图解码完成 */

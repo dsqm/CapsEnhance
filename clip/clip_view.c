@@ -160,31 +160,38 @@ static void ViewThumbRectH(RECT* out) {
     out->left = x;          out->right = x + tw;
 }
 
+/* 圆角矩形填充（拇指用；GDI+ 没有现成的圆角填充）。 */
+static void FillRounded(Gdiplus::Graphics* g, float x, float y, float w, float h,
+                        float rad, Gdiplus::Brush* br) {
+    Gdiplus::GraphicsPath p;
+    float d = rad * 2;
+    p.AddArc(x, y, d, d, 180, 90);
+    p.AddArc(x + w - d, y, d, d, 270, 90);
+    p.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+    p.AddArc(x, y + h - d, d, d, 90, 90);
+    p.CloseFigure();
+    g->FillPath(br, &p);
+}
+
 /* 画两条滚动条（整帧与条带帧都要调：滚动时拇指也在动）。
-   轨道 = 半透明黑一抹；拇指 = 圆角不做的纯色小条（悬停/拖动加深）。 */
+   样式：无轨道、无箭头 —— 只有半透明圆角细拇指，悬停/拖动加深；
+   图不超窗（max=0）时完全不画（旧版留一条空边条，看着像给内容加了个框）。 */
 static void ViewDrawBars(Gdiplus::Graphics* g) {
-    BYTE v = g_vDrag || g_hDrag ? 0x7F : (g_vHover || g_hHover) ? 0x99 : 0xB8;
-    Gdiplus::SolidBrush brThumb(Gdiplus::Color(255, v, v, v));
-    Gdiplus::SolidBrush brTrack(Gdiplus::Color(26, 0, 0, 0));
+    BYTE a = g_vDrag || g_hDrag ? 210 : (g_vHover || g_hHover) ? 160 : 120;
+    BYTE v = g_vDrag || g_hDrag ? 0x60 : (g_vHover || g_hHover) ? 0x78 : 0x8C;
+    Gdiplus::SolidBrush br(Gdiplus::Color(a, v, v, v));
+    float rad = 3.0f * g_k;
     if (g_vMax > 0) {
-        RECT t; ViewBarRects(&t, NULL);
-        g->FillRectangle(&brTrack, Gdiplus::RectF((float)t.left, (float)t.top,
-                                                  (float)(t.right - t.left),
-                                                  (float)(t.bottom - t.top)));
         RECT th; ViewThumbRectV(&th);
-        g->FillRectangle(&brThumb, Gdiplus::RectF((float)th.left, (float)th.top,
-                                                  (float)(th.right - th.left),
-                                                  (float)(th.bottom - th.top)));
+        FillRounded(g, (float)th.left, (float)th.top,
+                    (float)(th.right - th.left), (float)(th.bottom - th.top),
+                    rad, &br);
     }
     if (g_hMax > 0) {
-        RECT t; ViewBarRects(NULL, &t);
-        g->FillRectangle(&brTrack, Gdiplus::RectF((float)t.left, (float)t.top,
-                                                  (float)(t.right - t.left),
-                                                  (float)(t.bottom - t.top)));
         RECT th; ViewThumbRectH(&th);
-        g->FillRectangle(&brThumb, Gdiplus::RectF((float)th.left, (float)th.top,
-                                                  (float)(th.right - th.left),
-                                                  (float)(th.bottom - th.top)));
+        FillRounded(g, (float)th.left, (float)th.top,
+                    (float)(th.right - th.left), (float)(th.bottom - th.top),
+                    rad, &br);
     }
 }
 
@@ -1045,22 +1052,14 @@ static void ViewFitOnce(void) {
     if (maxH > work.bottom - work.top) maxH = work.bottom - work.top;
     /* 目标**客户区** = 100% 原图 + 四周 1px 边框 + 标题栏（"缩放图像以适应
        窗口"在这里生效：是窗口适应图像，图像自己保持原大）。 */
-    int nw = (int)iw + 2;
+    int nw0 = (int)iw + 2;
+    int nh0 = (int)ih + (int)g_headerH + 2;
+    int nw = nw0;
     if (nw > maxW) nw = maxW;
-    int nh = (int)ih + (int)g_headerH + 2;
-    if (nh > maxH) nh = maxH;
-    g_viewFitted = TRUE;
-    BOOL firstShow = !IsWindowVisible(g_view);
-    /* 窗口尺寸 = 内容可视区 + 两条**自绘**滚动条占掉的边条（宽高随 DPI，
-       见 FitMetrics）。边条盖在客户区上，内容可视区 = 客户区 - 边条，
-       所以要把边条尺寸加回来，"贴着原图"的观感才不变。 */
-    nw += g_barW;
-    nh += g_barH;
-    if (nw > maxW) nw = maxW;   /* 加上边条后再钳上限：大图超限就交给
-                                   滚动条平移（100% + 滚动，Ditto 同款） */
+    int nh = nh0;
     if (nh > maxH) nh = maxH;
     /* **最小尺寸**（ClipViewMinW/H）：小图的预览窗也撑到这么大 —— 不然
-       "适应窗口"跟 100% 没差别，点一下看不出放大。上限优先，最小值再往上抬。 */
+       "适应窗口"跟 100% 没差别，点一下看不出放大。 */
     int minW = (int)((float)g_viewMinW * g_k);
     int minH = (int)((float)g_viewMinH * g_k);
     if (nw < minW) nw = minW;
@@ -1070,6 +1069,18 @@ static void ViewFitOnce(void) {
     if (nh > maxH) nh = maxH;
     if (nw > work.right - work.left) nw = work.right - work.left;
     if (nh > work.bottom - work.top) nh = work.bottom - work.top;
+    /* ★ 滚动条**按需出现**：图装不下（窗口被上限/最小值压得比图小）才预留
+       边条并画拇指；装得下就一点都不留 —— 旧版无条件预留，图不超窗也挂着
+       一条空边 + 内缩边框，看着像给内容加了个框（用户实测）。缩放/切换
+       适配后若需要而没预留，拇指以半透明小条覆在图缘，不做二次摆窗。 */
+    int barPx = (int)(VIEW_BAR_W * g_k);
+    if (barPx < 8) barPx = 8;
+    g_barW = (nh < nh0) ? barPx : 0;    /* 高度装不下 → 竖条（占右缘） */
+    g_barH = (nw < nw0) ? barPx : 0;    /* 宽度装不下 → 横条（占底部） */
+    if (g_barW && nw - g_barW < nw0) g_barH = barPx;   /* 竖条挤出的宽度溢出 */
+    if (g_barH && nh - g_barH < nh0) g_barW = barPx;   /* 横条挤出的高度溢出 */
+    g_viewFitted = TRUE;
+    BOOL firstShow = !IsWindowVisible(g_view);
     g_viewW = nw;  g_viewH = nh;
     if (firstShow) {
         int row = (g_viewRow >= 0) ? g_viewRow : g_sel;
