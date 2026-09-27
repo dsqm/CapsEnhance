@@ -314,6 +314,9 @@ static CfgDef kCfg[CFG_COUNT] = {
       "; 相对路径的基准 = 本程序 exe 所在目录（也就是本文件所在目录）：\n"
       ";   DittoDir = ..\\Ditto          -> exe 同级的上一级里的 Ditto 文件夹\n"
       ";   DittoDir = C:\\Tools\\Ditto   -> 绝对路径，原样使用\n"
+      "; 数据库不在程序目录也能找到：会按 Ditto.Settings 里的 DBPath3 解析\n"
+      "; （绝对路径直用；相对路径先试程序目录、再试系统的「文档」文件夹）。\n"
+      "; ★ 窗口大小（ClipW/ClipH=0 时）也读 <DittoDir>\\Ditto.Settings。\n"
       "; 不做任何自动探测：便携版 Ditto 的目录在哪，只有你知道。\n" },
 
     { "clipfont", "ClipFont", CFG_F_TEXT, 0, 0, 0, CLIP_FONT_MAX, g_clipFont, 0,
@@ -327,9 +330,11 @@ static CfgDef kCfg[CFG_COUNT] = {
     { "clipw", "ClipW", 0, CLIP_W_DEFAULT, CLIP_W_MIN, CLIP_W_MAX, 0, NULL, 0,
       "; 快速粘贴窗口（Caps+V）的大小：单位是 96 DPI 下的像素，\n"
       "; 实际大小 = 值 × 显示器 DPI/96（换显示器不用改配置）。\n"
+      "; 设置界面（剪贴板段）里也可以直接改。\n"
       "; 宽 " STR(CLIP_W_MIN) ".." STR(CLIP_W_MAX)
       "，高 " STR(CLIP_H_MIN) ".." STR(CLIP_H_MAX) "\n"
-      "; 高度只定外框：条目按行高往下排，排不下的用滚轮看。\n" },
+      "; 高度只定外框：条目按行高往下排，排不下的用滚轮看。\n"
+      "; ★ 尺寸是浮层进程启动时读的，改完要重启 CapsEnhance 才生效。\n" },
     { "cliph", "ClipH", 0, CLIP_H_DEFAULT, CLIP_H_MIN, CLIP_H_MAX, 0, NULL, 0, NULL },
 
     { "clipclickpaste", "ClipClickPaste", CFG_F_BOOL, CLIP_CLICK_PASTE_DEFAULT, 0, 1, 0, NULL, 1,

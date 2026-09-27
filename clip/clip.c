@@ -155,7 +155,8 @@ static int      g_sel   = 0;
 static int      g_scrollY = 0;    /* 竖直滚动偏移（像素）—— 滚动的唯一真相 */
 static BOOL     g_pinned = FALSE;
 static WCHAR    g_dirPath[DITTO_DIR_MAX] = L"";  /* Ditto 文件夹（Ditto.db / Ditto.exe 都在里面） */
-static WCHAR    g_dbPath[DITTO_DIR_MAX] = L"";   /* = <dirPath>\Ditto.db，打开数据库用 */
+static WCHAR    g_dbPath[DITTO_DIR_MAX] = L"";   /* 实际打开的数据库路径（BuildDbPath 解析） */
+static WCHAR    g_dbRel[DITTO_DIR_MAX] = L"";    /* Ditto.Settings 的 DBPath3（可能不存在/是相对路径） */
 static BOOL     g_dittoOk = FALSE;               /* <dirPath>\Ditto.exe 存在（决定"转本体"按钮显隐） */
 static WCHAR    g_fontName[CLIP_FONT_MAX] = L"";  /* 空 = 内置 Microsoft YaHei UI */
 static int      g_fontPt = 10;                     /* 字号（磅） */
@@ -186,6 +187,9 @@ static HWINEVENTHOOK g_evHook = NULL;
 static HHOOK     g_mouseHook = NULL;
 static BOOL      g_pasting = FALSE;
 static BOOL      g_dragging = FALSE;   /* 正在拖标题栏挪窗口 */
+static BOOL      g_renderPending = FALSE;   /* 列表帧合并：有一帧待画（见 RenderSoon） */
+static int       g_listTargetY = 0;         /* 滚轮动画的目标滚动位（像素） */
+static BOOL      g_listAnim = FALSE;        /* 正在向目标滑（键盘导航会立即让位） */
 static POINT     g_dragCur;            /* 按下那一刻的光标位置 */
 static POINT     g_dragWin;            /* 按下那一刻的窗口位置 */
 
@@ -200,15 +204,21 @@ static POINT     g_dragWin;            /* 按下那一刻的窗口位置 */
 #define TID_TIP   6    /* 悬停提示的自动消失（TRACK 模式不会自己收） */
 #define TID_TIPSHOW 7  /* 悬停初始延迟：停稳 500ms 才弹（Ditto/系统同款） */
 #define TID_TIPFADE 8  /* 提示窗口渐显/渐隐的步进时钟 */
+#define TID_RENDER 9   /* 列表帧合并：滚轮/悬停/键盘导航只标脏，一个周期画一帧 */
 #define TIP_DELAY_MS 500
+#define LIST_FRAME_MS 15   /* 与预览窗的 VIEW_FRAME_MS 同款（≈66fps 上限） */
 
 static BOOL  Render(void);
+static void  RenderSoon(void);      /* 帧合并版 Render：高频来源只标脏（TID_RENDER） */
 static void  DoHideClose(void);
 static void  DittoAction(void);
 static void  DoPaste(BOOL plain);
 static float RowHeight(int idx);
 static BOOL  Utf8FromW(const WCHAR* w, char* out, int cap);
 static void  MoveSel(int delta);
+static void  ViewFollowSel(void);   /* 选中项变了：预览跟着换内容（F3 预览段） */
+static void  ViewFitOnce(void);     /* 按图像内容摆窗（ViewFollowSel/ViewToggle 要先调） */
+static void  ViewHide(void);        /* 收起预览（F3 预览段） */
 
 /* ================= Ditto 数据库（只读） ================= */
 
@@ -268,7 +278,7 @@ static void LabelFromFormats(const WCHAR* fmts, WCHAR* out, int cap) {
     wcscpy_s(out, (size_t)cap, L"[无描述]");
 }
 
-static void FreeThumbs(void);   /* 706 行：DbLoadItems 重载条目后按需作废缩略图 */
+static void FreeThumbs(void);   /* 796 行：进程退出时清空缩略图缓存 */
 /* 解码线程的唤醒事件与换代号：DbLoadItems 判定条目集变了就换代 + SetEvent，
    常驻的解码线程据此重做一轮。定义放这儿，因为 DbLoadItems 自己要用。 */
 static HANDLE        g_thumbWake = NULL;   /* 自动重置事件：有新活/退出 */
@@ -355,9 +365,12 @@ static void DbLoadItems(void) {
         for (int i = 0; i < g_count; i++)
             if (g_items[i].id != oldIds[i]) { same = FALSE; break; }
     if (!same) {
-        FreeThumbs();
+        /* 缩略图**不作废**：缓存按 id 走（Ditto 同款），重载后已解好的照用，
+           线程重走一轮时只解新增的 id —— 旧做法"重载即全部重解"是"缩略图
+           慢"的主因（Ditto 开着时每复制一条就要白解一遍全部）。 */
         g_sel = 0;  g_scrollY = 0;
-        /* 换代 + 唤醒：叫解码线程按新条目重做一轮（不叫醒就是"再开全灰"） */
+        g_listAnim = FALSE;  g_listTargetY = 0;   /* 旧目标对新条目没有意义 */
+        /* 换代 + 唤醒：叫解码线程按新条目重走一轮（缓存命中的直接跳过） */
         InterlockedIncrement(&g_thumbGen);
         if (g_thumbWake) SetEvent(g_thumbWake);
     }
@@ -716,15 +729,27 @@ static void TipTextOf(int idx) {
     }
 }
 
-/* ================= 缩略图 ================= */
-
-static Gdiplus::Bitmap* g_thumb[CLIP_MAX_ITEMS];
-/* 缩略图在**后台线程**解码并缩到目标尺寸：
-   第一版在渲染路径里现读库现解码，图片一多每滚一格都要卡一次 —— 磁盘 + 解码 +
-   高质量缩放全在 UI 线程上。现在后台一次做完，渲染只画现成的小图（1:1 贴）；
-   没画完的行先给占位框，解码完一条就 PostMessage 重画一次。
-   这也是 Ditto 的路子：缩略图缓存成小位图（它还额外提供"快速缩略图"选项，
-   把 HighQualityBicubic 换成 Bicubic —— 我们在后台做一次，直接用 Bicubic）。 */
+/* ================= 缩略图缓存（按条目 id，LRU 上限，Ditto 同款） =================
+   ★ 缓存按 **id** 而不是行下标：列表重载（复制了新条目 / 粘贴后重排）只是
+   条目集合变了，已解好的图照样有效 —— 旧做法"重载即全部作废重来"是"缩略图
+   加载慢"的主因（Ditto 开着时每复制一条，下次打开就要重解所有图；Ditto 自己
+   是 m_cf_dibCache[id] + 上限 50 条的 LRU，重载只解新增的那条，这里同构）。
+   解不出图的条目也进缓存（bm=NULL 的负缓存，Ditto 的 m_cf_NO_dibCache 同款），
+   否则每次显示都要为它白跑一趟库。
+   缩略图在**后台线程**解码并缩到目标尺寸：磁盘 + 解码 + 缩放全不在 UI 线程；
+   渲染只画现成的小图（1:1 贴），没解出来的行**不画占位灰框**（Ditto 同款：
+   行里只有文字，"没加载"不该是一个显眼的状态 —— 灰框才是"一直在加载"观感
+   的来源），文字预留缩略图宽度，图到了按实际宽度排。 */
+#define THUMB_CACHE_MAX 60
+typedef struct {
+    long long        id;
+    Gdiplus::Bitmap* bm;   /* NULL = 该条目解不出图（负缓存） */
+    float            w;    /* bm 的宽（渲染时文字让开用；负缓存为 0） */
+    unsigned         cnt;  /* LRU 计数（单调递增，越小越旧） */
+} ThumbEnt;
+static ThumbEnt         g_thumbCache[THUMB_CACHE_MAX];
+static int              g_thumbCacheN = 0;
+static unsigned         g_thumbCnt = 0;
 static CRITICAL_SECTION g_thumbLock;
 static HANDLE           g_thumbThread = NULL;
 static volatile LONG    g_thumbQuit = 0;
@@ -732,15 +757,63 @@ static volatile LONG    g_thumbQuit = 0;
    宽度是按原图比例算的，横图远比行高宽，拿行高当偏移文字就会压在图上。 */
 static float            g_thumbW[CLIP_MAX_ITEMS];
 
+/* 锁内查找：命中返回 TRUE（*bmOut 可为 NULL = 负缓存命中），并刷新 LRU。 */
+static BOOL ThumbFind(long long id, Gdiplus::Bitmap** bmOut, float* w) {
+    for (int i = 0; i < g_thumbCacheN; i++) {
+        if (g_thumbCache[i].id == id) {
+            g_thumbCache[i].cnt = ++g_thumbCnt;
+            *bmOut = g_thumbCache[i].bm;
+            *w = g_thumbCache[i].w;
+            return TRUE;
+        }
+    }
+    *bmOut = NULL;
+    *w = 0;
+    return FALSE;
+}
+
+/* 锁内写入：已存在就替换（旧图就地释放）；满了按 LRU 淘汰最旧的。 */
+static void ThumbPut(long long id, Gdiplus::Bitmap* bm, float w) {
+    int slot = -1, oldest = 0;
+    for (int i = 0; i < g_thumbCacheN; i++) {
+        if (g_thumbCache[i].id == id) { slot = i; break; }
+        if (g_thumbCache[i].cnt < g_thumbCache[oldest].cnt) oldest = i;
+    }
+    if (slot < 0) {
+        if (g_thumbCacheN < THUMB_CACHE_MAX) {
+            slot = g_thumbCacheN++;
+        } else {
+            slot = oldest;                     /* 淘汰最旧的（含负缓存项） */
+        }
+    }
+    delete g_thumbCache[slot].bm;
+    g_thumbCache[slot].id = id;
+    g_thumbCache[slot].bm = bm;
+    g_thumbCache[slot].w = w;
+    g_thumbCache[slot].cnt = ++g_thumbCnt;
+}
+
 static void FreeThumbs(void) {
     EnterCriticalSection(&g_thumbLock);
-    for (int i = 0; i < CLIP_MAX_ITEMS; i++) {
-        delete g_thumb[i];
-        g_thumb[i] = NULL;
-        g_thumbW[i] = 0.0f;
+    for (int i = 0; i < g_thumbCacheN; i++) {
+        delete g_thumbCache[i].bm;
+        g_thumbCache[i].bm = NULL;
     }
+    g_thumbCacheN = 0;
     LeaveCriticalSection(&g_thumbLock);
 }
+
+/* ---------- F3 图片预览的解码请求（与缩略图共用 g_thumbLock / g_thumbWake） ----------
+   预览与缩略图的解码都在同一条后台线程上排队：预览一次只要一张图，
+   另起线程与事件只会多一条唤醒路径要记（详见 ThumbThreadProc 的预览轮）。
+   lID 从 1 开始（Ditto 的主键），0 当"没有请求"用是安全的。 */
+static Gdiplus::Bitmap* g_viewImg = NULL;      /* 已解码的原图（主线程专有：只有 ViewHarvest 换指针） */
+static long long        g_viewImgId = 0;       /* g_viewImg 属于哪条；0 = 没有。重开同一条目时
+                                                  靠它免解码直接显示（F3 关了再开同一条） */
+static long long        g_viewWantId = 0;      /* 正在请求解码的条目 id（锁内读写） */
+static long long        g_viewDoneId = 0;      /* 线程最近解码完成的 id（仅线程读写） */
+static Gdiplus::Bitmap* g_viewDecoded = NULL;  /* 线程解好待收割的图（锁内交接，见 ViewHarvest） */
+static long long        g_viewDecodedId = 0;   /* 槽里这张图属于哪条（收割时对 g_viewId 防"旧图挂新窗"） */
 
 static Gdiplus::Bitmap* BitmapFromDib(const BYTE* blob, int len) {
     if (len < (int)sizeof(BITMAPINFOHEADER)) return NULL;
@@ -800,10 +873,9 @@ static Gdiplus::Bitmap* BitmapFromPng(const BYTE* blob, int len) {
     return bm;
 }
 
-/* 读库 + 解码 + **缩到目标尺寸**，返回缩好的小图（调用方负责 delete）。
-   缩放在这里一次做完 —— 渲染时就是 1:1 贴，不再每帧做大图高质量缩放
-   （HighQualityBicubic 对大图很贵，这正是"图片多滚动卡"的主要开销）。 */
-static Gdiplus::Bitmap* DecodeThumb(int idx) {
+/* 只读连接：一轮解码开一次（原来每张图开/关一次，纯开销）。
+   空闲的只读连接不持任何锁，不影响 Ditto 那边的写入。 */
+static sqlite3* DbOpen(void) {
     char pathU8[DITTO_DIR_MAX * 4];
     if (!Utf8FromW(g_dbPath, pathU8, (int)sizeof(pathU8))) return NULL;
     sqlite3* db = NULL;
@@ -812,19 +884,24 @@ static Gdiplus::Bitmap* DecodeThumb(int idx) {
         return NULL;
     }
     sqlite3_busy_timeout(db, 3000);
+    return db;
+}
+
+/* 解码**原图**（不缩放）：缩略图与 F3 预览大图共用这一个入口。
+   格式取舍照 Ditto（QPasteWndThread.cpp:349 起的取法）：先精确找 CF_DIB，
+   找不到才找 PNG，别的格式（含 CF_DIBV5）一律不用 —— 多格式条目两边解
+   同一个源。CASE 把 CF_DIB 排最前，取**首个命中行**（解码失败也不换源，
+   Ditto 同样只在"没有 CF_DIB"时才退 PNG）。db 由调用方开好传入。 */
+static Gdiplus::Bitmap* DecodeBig(sqlite3* db, long long id) {
     Gdiplus::Bitmap* big = NULL;
     sqlite3_stmt* st = NULL;
-    /* 格式取舍照 Ditto（QPasteWndThread.cpp:349 起的取法）：先精确找 CF_DIB，
-       找不到才找 PNG，别的格式（含 CF_DIBV5）一律不用 —— 多格式条目两边解
-       同一个源。CASE 把 CF_DIB 排最前，取**首个命中行**（解码失败也不换源，
-       Ditto 同样只在"没有 CF_DIB"时才退 PNG）。 */
     if (sqlite3_prepare_v2(db, "SELECT strClipBoardFormat, ooData FROM Data "
                               "WHERE lParentID = ? "
                               "AND strClipBoardFormat IN ('CF_DIB', 'PNG') "
                               "ORDER BY CASE strClipBoardFormat "
                               "WHEN 'CF_DIB' THEN 0 ELSE 1 END, Data.lID",
                            -1, &st, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(st, 1, g_items[idx].id);
+        sqlite3_bind_int64(st, 1, id);
         while (sqlite3_step(st) == SQLITE_ROW) {
             const WCHAR* nm = (const WCHAR*)sqlite3_column_text16(st, 0);
             const void* blob = sqlite3_column_blob(st, 1);
@@ -839,7 +916,14 @@ static Gdiplus::Bitmap* DecodeThumb(int idx) {
         }
         sqlite3_finalize(st);
     }
-    sqlite3_close(db);
+    return big;
+}
+
+/* 解码 + **缩到目标尺寸**，返回缩好的小图（调用方负责 delete）。
+   缩放在这里一次做完 —— 渲染时就是 1:1 贴，不再每帧做大图高质量缩放
+   （HighQualityBicubic 对大图很贵，这正是"图片多滚动卡"的主要开销）。 */
+static Gdiplus::Bitmap* DecodeThumb(sqlite3* db, int idx, float* outW) {
+    Gdiplus::Bitmap* big = DecodeBig(db, g_items[idx].id);
     if (!big) return NULL;
 
     UINT iw = big->GetWidth(), ih = big->GetHeight();
@@ -863,6 +947,7 @@ static Gdiplus::Bitmap* DecodeThumb(int idx) {
     sg.DrawImage(big, Gdiplus::RectF(0.0f, 0.0f, bw, bh),
                  0.0f, 0.0f, (float)iw, (float)ih, Gdiplus::UnitPixel);
     delete big;
+    *outW = bw;
     return out;
 }
 
@@ -871,21 +956,47 @@ static Gdiplus::Bitmap* DecodeThumb(int idx) {
    Ditto 重排序），DbLoadItems 作废全部缓存，却没人再解码 → 第一次开
    正常、再开全是占位灰框。现在 DbLoadItems 换代后 SetEvent 叫醒重做。 */
 #define WM_THUMB_READY (WM_APP + 20)
+#define WM_VIEW_READY  (WM_APP + 21)   /* 预览大图解码完成（wParam/lParam 未用） */
 static DWORD WINAPI ThumbThreadProc(LPVOID lp) {
     (void)lp;
+    /* 缩略图轮的续跑下标：-1 = 等下一次唤醒（从头做）；>=0 = 有半截轮次，
+       **不等唤醒**直接续跑。★ 0 也算"有半截"：预览请求可以在第 0 张之前
+       插队 —— 按"resume<=0 就回去等"的写法，这种打断会把整轮缩略图睡没，
+       而唤醒事件已经消费掉，不重载条目就再没有人叫它（实测：F3 之后
+       缩略图永远灰着）。 */
+    int resume = -1;
+    sqlite3* tdb = NULL;                     /* 本轮缩略图解码的只读连接（懒开） */
     for (;;) {
-        WaitForSingleObject(g_thumbWake, INFINITE);
-        if (g_thumbQuit) return 0;
-        LONG myGen = g_thumbGen;
-        for (int i = 0; i < g_count; i++) {
+        LONG myGen;
+        int i;
+        if (resume < 0) {
+            WaitForSingleObject(g_thumbWake, INFINITE);
+            if (g_thumbQuit) return 0;
+            myGen = g_thumbGen;
+            i = 0;
+        } else {
+            myGen = g_thumbGen;
+            i = resume;
+        }
+        if (!tdb) tdb = DbOpen();
+        for (; i < g_count; i++) {
             if (g_thumbQuit) return 0;
             if (g_thumbGen != myGen) break;   /* 条目又重载了：整轮重来 */
+            /* ★ 预览请求插队：F3 的"解码中…"是用户正盯着的加载，缩略图晚
+               一两秒没人看得出。打断点记进 resume，预览做完接着补。 */
+            if (g_viewWantId) break;
             if (!g_items[i].hasImage) continue;
             long long id = g_items[i].id;     /* 记下解的是谁，防中途重载串位 */
-            Gdiplus::Bitmap* bm = DecodeThumb(i);
+            Gdiplus::Bitmap* cached = NULL;
+            float w = 0;
+            EnterCriticalSection(&g_thumbLock);
+            BOOL have = ThumbFind(id, &cached, &w);
+            LeaveCriticalSection(&g_thumbLock);
+            if (have) continue;               /* 缓存里有结论（含解不出图的）：跳过 */
+            Gdiplus::Bitmap* bm = tdb ? DecodeThumb(tdb, i, &w) : NULL;
             EnterCriticalSection(&g_thumbLock);
             if (g_thumbGen == myGen && g_items[i].id == id) {
-                g_thumb[i] = bm;              /* 失败就是 NULL：占位框逻辑照旧 */
+                ThumbPut(id, bm, w);          /* 失败就是 NULL：负缓存，不再重试 */
                 bm = NULL;                    /* 缓存已接管 */
             }
             LeaveCriticalSection(&g_thumbLock);
@@ -894,6 +1005,61 @@ static DWORD WINAPI ThumbThreadProc(LPVOID lp) {
                 PostMessageW(g_hwnd, WM_THUMB_READY, (WPARAM)i, 0);
             Sleep(0);
         }
+        if (tdb) { sqlite3_close(tdb); tdb = NULL; }
+        /* ---- F3 预览的大图：一次解码一张，做完再睡 ----
+           与缩略图共用线程/事件/锁：预览一次只要一张，另起线程与事件只会
+           多一条唤醒路径要记。循环里每次都重读请求 —— 快速翻条目时永远追
+           最新那张，追上了（want == doneId）就睡。请求 0 = 没有活。
+           ★ 解好的图放 g_viewDecoded 槽里等主线程收割（ViewHarvest），
+           不直接换 g_viewImg：g_viewImg 归主线程专有，旧图的释放点就在
+           主线程消息处理里 —— 换成线程直接换指针+锁外 delete 旧图，主线程
+           ViewPaint 正画着的那张就可能被释放（use-after-free，窗口小但真实）。
+           ★ want == doneId 时**补发一次完成消息**再睡：重开同一条目（F3 关了
+             再开）或上次解码失败的条目再按 F3，主程序不知道"这个请求其实早
+             有结论"，没有这条消息它就永远停在"解码中"。消息幂等：收割没有
+             新图就不动，解码本身不重复。 */
+        for (;;) {
+            if (g_thumbQuit) return 0;
+            EnterCriticalSection(&g_thumbLock);
+            long long want = g_viewWantId;
+            LeaveCriticalSection(&g_thumbLock);
+            if (!want) break;
+            if (want == g_viewDoneId) {
+                PostMessageW(g_hwnd, WM_VIEW_READY, 0, 0);
+                /* 这个请求已经有结论了，清掉它：want 常驻非零会让"预览插队"
+                   的缩略图断点永远走不完（每圈都在这里 break），快路径直接
+                   变忙循环。主线程不依赖这个字段记状态，重开同一条目要么走
+                   ViewToggle 的现成图快路径、要么重新把它写上。 */
+                EnterCriticalSection(&g_thumbLock);
+                if (g_viewWantId == want) g_viewWantId = 0;
+                LeaveCriticalSection(&g_thumbLock);
+                break;
+            }
+            Gdiplus::Bitmap* bm = NULL;
+            {
+                sqlite3* db = DbOpen();
+                if (db) { bm = DecodeBig(db, want); sqlite3_close(db); }
+            }
+            Gdiplus::Bitmap* stale = NULL;
+            EnterCriticalSection(&g_thumbLock);
+            g_viewDoneId = want;
+            if (g_viewWantId == want) {
+                g_viewWantId = 0;               /* 请求已答复，清账（防插队断点空转，见上） */
+                stale = g_viewDecoded;          /* 上一张没被收割的（罕见）就位让出槽 */
+                g_viewDecoded = bm; g_viewDecodedId = want;
+                bm = NULL;
+            }
+            LeaveCriticalSection(&g_thumbLock);
+            delete stale;                       /* 锁外放：槽里的图主线程没在用（收割是串行消息处理） */
+            delete bm;                          /* 请求已变的这张（含 NULL）在这里释放 */
+            PostMessageW(g_hwnd, WM_VIEW_READY, 0, 0);
+            Sleep(0);
+        }
+        /* 收尾：换代 -> 等下一次唤醒；轮次没走完（被预览打断）-> 不等待直接
+           续跑（i==0 也一样，见上）；走完了 -> 等下一次唤醒。续跑态的每一圈
+           都至少解一张缩略图或消化一个预览请求，不会空转。 */
+        if (g_thumbQuit) return 0;
+        resume = (g_thumbGen == myGen && i < g_count) ? i : -1;
     }
 }
 
@@ -1049,6 +1215,7 @@ static void SendPasteKeystroke(void) {
 static void HideIfVisible(void) {
     if (!g_visible) return;
     TipHide();                                       /* 别把提示留在屏幕上 */
+    ViewHide();                                      /* 预览跟着列表一起退场 */
     ShowWindow(g_hwnd, SW_HIDE);
     g_visible = FALSE;
     /* ★ 告诉主程序"我关了"：否则 s_want 残留，钩子继续吞回车 —— 宽限期内
@@ -1216,7 +1383,10 @@ static HFONT MakeFont(const WCHAR* face, int px, int weight) {
 static void FitMetrics(void) {
     HMONITOR mon = CursorMonitor();
     g_k = (float)DpiOfMonitor(mon) / 96.0f;
-    g_headerH  = 34.0f * g_k;
+    /* ★ 头部高度取整：预览窗的像素要被 memmove 整行搬动（条带重绘），
+       任何 .5 边界都会让 GDI+ 在边界行上做半透明混合，滚动时变成一条
+       "洗不掉的细线"。头部相关的所有绘制因此全部落在整数行上。 */
+    g_headerH  = (float)(int)(34.0f * g_k);
     /* 序号栏只服务前 10 条（1..9, 0）：收窄到放得下单个数字即可，
        再宽就是白占行宽（后面的条目根本没有序号） */
     g_gutterW  = 13.5f * g_k;
@@ -1225,10 +1395,24 @@ static void FitMetrics(void) {
     g_rowH2    = 76.0f * g_k;
     g_thumbPad = 3.0f * g_k;
     /* 外框尺寸来自配置（主程序 --w/--h 传进来，手动启动时读 ini，见
-       LoadIniFallback）：单位是 96 DPI 下的像素，这里按显示器 DPI 放大，
-       与上面每一个 `* g_k` 同一套记法。 */
+       LoadIniFallback；设置界面里可改）—— 单位 96 DPI 像素，按显示器
+       DPI 放大，与上面每一个 `* g_k` 同一套记法。窗口大小不读 Ditto：
+       那套按分辨率分档的键语义对不上，用户要的是"自己定"。 */
     g_pxW = (int)((float)g_cfgW * g_k);
     g_pxH = (int)((float)g_cfgH * g_k);
+    if (g_pxW < CLIP_W_MIN) g_pxW = CLIP_W_MIN;
+    if (g_pxW > CLIP_W_MAX) g_pxW = CLIP_W_MAX;
+    if (g_pxH < CLIP_H_MIN) g_pxH = CLIP_H_MIN;
+    if (g_pxH > CLIP_H_MAX) g_pxH = CLIP_H_MAX;
+    /* 最后按本显示器工作区钳一道：配置里抄来一个大值换到小屏，
+       不钳就直接溢出屏幕。 */
+    {
+        RECT work;
+        MonitorWork(mon, &work);
+        int maxW = work.right - work.left, maxH = work.bottom - work.top;
+        if (g_pxW > maxW) g_pxW = maxW;
+        if (g_pxH > maxH) g_pxH = maxH;
+    }
 
     if (g_fontRow)   DeleteObject(g_fontRow);
     if (g_tipFont)   DeleteObject(g_tipFont);
@@ -1282,6 +1466,8 @@ static void EnsureVisible(int idx) {
     if (top < (float)g_scrollY)                 g_scrollY = (int)top;
     else if (bot > (float)g_scrollY + ViewH())  g_scrollY = (int)(bot - ViewH());
     ClampScroll();
+    g_listAnim = FALSE;              /* 键盘导航直接跟手，动画立即让位 */
+    g_listTargetY = g_scrollY;
 }
 
 static void MoveSel(int delta) {
@@ -1291,7 +1477,8 @@ static void MoveSel(int delta) {
     if (n > g_count - 1) n = g_count - 1;
     g_sel = n;
     EnsureVisible(n);
-    Render();
+    RenderSoon();
+    ViewFollowSel();     /* 预览开着：内容跟随、窗口不动（新条目非图片会自动收） */
 }
 
 
@@ -1347,21 +1534,23 @@ static COLORREF CR(unsigned argb) {
     return RGB((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF);
 }
 
-static void GdiText(const WCHAR* s, HFONT f, COLORREF c, float x, float y,
+/* 文字统一走这里：dc 由调用方给（列表 g_memDC / 预览 g_viewDC）—— 两个
+   窗口各有一块双缓冲 DIB，画法完全同源。 */
+static void GdiText(HDC dc, const WCHAR* s, HFONT f, COLORREF c, float x, float y,
                     float w, float h, UINT align, BOOL ellipsis) {
-    if (!s || !*s || !f || !g_memDC || h <= 0 || w <= 0) return;
+    if (!s || !*s || !f || !dc || h <= 0 || w <= 0) return;
     RECT rc;
     rc.left   = (int)(x + 0.5f);
     rc.top    = (int)(y + 0.5f);
     rc.right  = (int)(x + w + 0.5f);
     rc.bottom = (int)(y + h + 0.5f);
-    HGDIOBJ old = SelectObject(g_memDC, f);
-    SetTextColor(g_memDC, c);
-    SetBkMode(g_memDC, TRANSPARENT);
+    HGDIOBJ old = SelectObject(dc, f);
+    SetTextColor(dc, c);
+    SetBkMode(dc, TRANSPARENT);
     UINT fl = DT_SINGLELINE | DT_NOPREFIX | DT_VCENTER | align;
     if (ellipsis) fl |= DT_END_ELLIPSIS;
-    DrawTextW(g_memDC, s, -1, &rc, fl);
-    SelectObject(g_memDC, old);
+    DrawTextW(dc, s, -1, &rc, fl);
+    SelectObject(dc, old);
 }
 
 /* alpha 的通用表示法（Ditto / Photoshop 一个路子）：先铺棋盘格，再把半透明的
@@ -1425,19 +1614,20 @@ static BOOL Render(void) {
                不能靠 AddRef 借用。后台线程只在自己那把锁里换指针，
                这里最多等它一次解码的时间，不会卡住消息循环。 */
             EnterCriticalSection(&g_thumbLock);
-            Gdiplus::Bitmap* bm = g_thumb[i];
+            Gdiplus::Bitmap* bm = NULL;
+            float w = 0;
+            BOOL have = ThumbFind(g_items[i].id, &bm, &w);
+            LeaveCriticalSection(&g_thumbLock);
             if (bm) {
                 /* 缩略图在后台已经缩到目标尺寸：这里 1:1 贴，不做每帧缩放 */
                 float bw = (float)bm->GetWidth(), bh = (float)bm->GetHeight();
                 g.DrawImage(bm, bx, top + (h - bh) * 0.5f, bw, bh);
                 g_thumbW[i] = bw;
             } else {
-                /* 后台还没解码完：占位框（宽度按行高，载入后文字会自己让开） */
-                float boxH = h - 2.0f * g_thumbPad;
-                g.FillRectangle(&brGut, Gdiplus::RectF(bx, top + g_thumbPad, boxH, boxH));
-                g_thumbW[i] = boxH;
+                /* 还没解出来：不画占位灰框（Ditto 同款 —— 未加载不该是一块
+                   显眼的灰底，文字位置预留缩略图宽度，图到了按实际宽度排） */
+                g_thumbW[i] = have ? 0.0f : (h - 2.0f * g_thumbPad);
             }
-            LeaveCriticalSection(&g_thumbLock);
         }
         /* 色值条目：文字左侧一块颜色（照 Ditto）。
            尺寸比 Ditto 略收：Ditto 用满行高，我们一行里可能排两行字，
@@ -1476,18 +1666,18 @@ static BOOL Render(void) {
         WCHAR title[64];
         wcscpy_s(title, 64, APP_TITLE);
         if (g_pinned) wcscat_s(title, 64, L" 窗口置顶");
-        GdiText(title, g_fontRow, CR(C_TITLE),
+        GdiText(g_memDC, title, g_fontRow, CR(C_TITLE),
                 12.0f * g_k, 0.0f, (float)g_pxW - 120.0f * g_k, g_headerH,
                 DT_LEFT, TRUE);
 
         Gdiplus::RectF r;
         BtnRect(0, &r);
-        GdiText(L"✕", g_fontRow, CR(0xFF6E6E6E),
+        GdiText(g_memDC, L"✕", g_fontRow, CR(0xFF6E6E6E),
                 r.X, r.Y, r.Width, r.Height, DT_CENTER, FALSE);
         if (g_dittoOk) {                 /* Ditto.exe 在才画：点了没反应的按钮是骗局 */
             Gdiplus::RectF rb;
             BtnRect(1, &rb);
-            GdiText(L"Ditto", g_fontSmall, CR(0xFF6E6E6E),
+            GdiText(g_memDC, L"Ditto", g_fontSmall, CR(0xFF6E6E6E),
                     rb.X, rb.Y, rb.Width, rb.Height, DT_CENTER, FALSE);
         }
     }
@@ -1498,7 +1688,7 @@ static BOOL Render(void) {
                            : L"未配置 Ditto 文件夹：在 ini 的 DittoDir 里写路径")
             : L"（没有读到条目）";
         /* 空态没有任何序号，文字直接从左边起 */
-        GdiText(msg, g_fontRow, CR(C_TEXT_DIM),
+        GdiText(g_memDC, msg, g_fontRow, CR(C_TEXT_DIM),
                 8.0f * g_k, yList,
                 (float)g_pxW - 16.0f * g_k, g_rowH1 * 2.0f, DT_LEFT, TRUE);
     }
@@ -1516,7 +1706,7 @@ static BOOL Render(void) {
         /* 数字在「序号栏 + 文字前 6px 留白」这段完整空档里取中。
            只对序号栏取中会看着偏左：左边距量的是到窗缘，右边却还要
            再让出 6px 留白才到文字 —— 视觉两边距不相等。 */
-        GdiText(num, g_fontSmall, CR(C_INDEX),
+        GdiText(g_memDC, num, g_fontSmall, CR(C_INDEX),
                 0.0f, top, g_gutterW + 6.0f * g_k, h, DT_CENTER, FALSE);
 
         /* 前 10 条有序号，文字让开序号栏；之后没有序号，整行从左边起，
@@ -1528,19 +1718,19 @@ static BOOL Render(void) {
         if (g_items[i].hasSwatch)
             tx += (h - 2.0f * g_thumbPad) + 6.0f * g_k;   /* 让开色块 */
         if (g_items[i].hasImage && g_items[i].lines <= 1) {
-            GdiText(g_items[i].text[0], g_fontRow, CR(C_TEXT),
+            GdiText(g_memDC, g_items[i].text[0], g_fontRow, CR(C_TEXT),
                     tx, top, (float)g_pxW - tx - 8.0f * g_k, h, DT_LEFT, TRUE);
         } else if (g_items[i].lines > 1) {
             /* 两行**贴着行高**排，整块在行内垂直居中 —— Ditto 的行距就是这样，
                拿"行高 ÷ 2"当行距会让两行之间隔出一大条空白 */
             float y0 = top + (h - g_lineH * 2.0f) * 0.5f;
-            GdiText(g_items[i].text[0], g_fontRow, CR(C_TEXT),
+            GdiText(g_memDC, g_items[i].text[0], g_fontRow, CR(C_TEXT),
                     tx, y0, (float)g_pxW - tx - 8.0f * g_k, g_lineH, DT_LEFT, TRUE);
-            GdiText(g_items[i].text[1], g_fontRow, CR(C_TEXT),
+            GdiText(g_memDC, g_items[i].text[1], g_fontRow, CR(C_TEXT),
                     tx, y0 + g_lineH, (float)g_pxW - tx - 8.0f * g_k, g_lineH,
                     DT_LEFT, TRUE);
         } else {
-            GdiText(g_items[i].text[0], g_fontRow, CR(C_TEXT),
+            GdiText(g_memDC, g_items[i].text[0], g_fontRow, CR(C_TEXT),
                     tx, top, (float)g_pxW - tx - 8.0f * g_k, h, DT_LEFT, TRUE);
         }
     }
@@ -1548,6 +1738,890 @@ static BOOL Render(void) {
 
     InvalidateRect(g_hwnd, NULL, FALSE);
     return TRUE;
+}
+
+/* 按"待画一帧"合并列表的高频重绘来源（滚轮 / 悬停换行 / 键盘导航连续按）。
+   本进程主线程挂着低级鼠标钩子（点外关闭判定），每事件全量重画会把主线程
+   打满、钩子回调排队，**用户全系统的光标都会跟着卡** —— 预览窗（ViewPaintSoon）
+   因为同样的理由早已帧合并，列表的滚轮路径此前一直是每事件一次 Render()，
+   快速滚动时就是"卡顿"的来源。帧率上限 ~66fps，事件合并只留最新状态。 */
+static void RenderSoon(void) {
+    if (!g_hwnd || g_renderPending) return;
+    g_renderPending = TRUE;
+    SetTimer(g_hwnd, TID_RENDER, LIST_FRAME_MS, NULL);
+}
+
+/* 列表滚轮动画走一步：向目标位趋近 40%，到位即停（与预览窗同一套手感 ——
+   一档一档瞬跳正是"滚动条跳动"的观感来源，虽然列表没有滚动条，
+   条目本身的瞬跳是一样的）。键盘导航不经这里（EnsureVisible 让位）。 */
+static void ListAnimStep(void) {
+    if (!g_listAnim) return;
+    int max = (int)(ContentH() - ViewH());
+    if (max < 0) max = 0;
+    int ny = g_scrollY + (g_listTargetY - g_scrollY) * 2 / 5;
+    if (g_listTargetY - ny < 2 && ny - g_listTargetY < 2) ny = g_listTargetY;
+    if (ny < 0) ny = 0;
+    if (ny > max) ny = max;
+    if (ny == g_scrollY) { g_listAnim = FALSE; return; }
+    g_scrollY = ny;
+    if (g_scrollY != g_listTargetY) RenderSoon();
+}
+
+/* ================= F3 图片预览（Ditto 的 View Full Description 同位功能） =================
+   Ditto 主列表按 F3 弹的"查看完整说明"窗口（CToolTipEx + CImageViewer），这里
+   只取图片那一半：文本条目的全文预览已由悬停提示覆盖（TipTextOf），列表里那
+   76px 的缩略图才是真正看不清的东西。非图片条目按 F3 什么都不做 —— 按了没
+   反应比弹一个"没有图片"的空壳诚实。
+
+   交互（按用户实测的 Ditto 行为对齐；第一版"滚轮缩放+拖图平移"是猜错的）：
+     · 滚轮 = 上下滚动；Ctrl+滚轮 = 缩放（锚=窗口中心）；横向滚轮 = 左右滚动
+     · 横竖两条**标准滚动条**常驻（图不超窗时灰显）；没有拖图平移 —— Ditto 没有
+     · 双击图片 = 1:1 ↔ 适应窗口；标题栏可拖动挪窗、✕ 关闭、"复制"写回剪贴板
+     · 空格钉住（钩子代收转发）：钉住后"无关键退场"停用，Esc/F3 照常
+   窗口尺寸（Ditto 勾选项"根据内容调整窗口大小"+"缩放图像以适应窗口"）：
+     · 解码完成后窗口才显示，尺寸贴着图像内容（上限工作区 70%）—— 没有先弹
+       固定默认再收缩的跳变；图像显示即适应（小图不放大，放大只会糊）
+     · ↑↓ 跟随换条目：位置不动，尺寸随新内容重摆
+   生命周期（Ditto 同款）：
+     · 位置锚在选中行左下角往下展开；Esc / 再按 F3 / 点在两窗之外 / 列表收起
+       都会收掉。
+     · 窗口本体在本 exe 里的第三个窗口（类名独立，FindWindow(CLIP_CLASS) 的
+       握手才会继续命中列表窗），共享 g_items / g_sel / g_k / 字体，零 IPC。
+   硬约束：
+     · 不抢焦点（WS_EX_NOACTIVATE + SW_SHOWNOACTIVATE，与列表同一套），键盘
+       全部由主程序钩子代收转发（F3 / 空格），它自己只处理鼠标；
+     · ★ 本进程主线程挂着低级鼠标钩子 —— 重绘走帧合并（15ms 定时器），高频
+       mousemove/滚动只标记"脏"。每事件全量重画会把主线程打满，钩子回调排队，
+       **用户全系统的光标都会卡**（第一版实测踩过）；
+     · 大图解码在后台线程（ThumbThreadProc 的预览轮），主线程只画现成位图。
+       列表里的 g_thumb 缩略图已经缩到行高尺寸，不能拿来当大图用。 */
+static HWND      g_view = NULL;
+static UINT      g_msgView = 0;        /* 主程序 -> 本进程：toggle / 退场 */
+static UINT      g_msgViewState = 0;   /* 本进程 -> 主程序：状态报信 */
+static BOOL      g_viewOpen = FALSE;   /* 预览会话进行中（窗口可能还在解码） */
+static int       g_viewRow = -1;       /* 预览指向的条目；-1 = 没在显示 */
+static long long g_viewId = 0;         /* 同上（id 形式，解码请求用它） */
+static int       g_viewW = 0, g_viewH = 0;
+static int       g_viewX = 0, g_viewY = 0;
+static HDC       g_viewDC = NULL;
+static HBITMAP   g_viewBmp = NULL;
+static void*     g_viewBits = NULL;
+static int       g_viewSurfW = 0, g_viewSurfH = 0;   /* 内容 DIB 的现尺寸 */
+static float     g_viewScale = 0.0f;   /* 0 = 100% 原大（默认）；>0 = 显式比例；<0 = 适应窗口（双击切换） */
+static BOOL      g_viewFitted = FALSE; /* 本条目按内容定过窗口尺寸（换条目重置） */
+static BOOL      g_viewPinned = FALSE; /* 空格钉住：停用"无关键退场" */
+static BOOL      g_viewWinDrag = FALSE;     /* 正在拖标题栏挪窗 */
+static POINT     g_viewDragCur;             /* 按下那一刻的光标位置 */
+static POINT     g_viewWinPos;              /* 按下那一刻的窗口位置 */
+static BOOL      g_viewPaintPending = FALSE;/* 帧合并：有一帧待画 */
+#define VIEW_FRAME_MS     15                  /* 帧合并周期（≈66fps 上限） */
+#define VIEW_SCROLL_STEP  120                 /* 滚轮一档 / 滚动条一行（图像像素） */
+/* ---- 滚动动画与条带重绘 ----
+   滚轮不再一档一档地瞬跳（那正是"滚动条跳动"的观感来源）：每档只把**目标位**
+   挪 120px，帧合并时钟里每帧向目标趋近 40%，到了就停 —— 滚动条跟着连续滑。
+   重绘也不再整帧来：纯滚动只把已画好的像素 ScrollDC 平移、补画露出的那一条
+   （g_viewLastSX/SY 记上一帧位置，g_viewFullPaint 标记"内容变了必须整画"）。
+   本线程宿着低级鼠标钩子，整帧重画期间全系统的输入都在排队 —— 这两条把
+   单帧成本从"全表面填充+图像采样"压到"一次内存平移 + 一条"。 */
+static int  g_viewLastSX = 0, g_viewLastSY = 0;   /* 上一帧画到哪个滚动位 */
+static BOOL g_viewFullPaint = TRUE;               /* 下一帧必须整画（换图/缩放/首帧） */
+static int  g_viewTargetX = 0, g_viewTargetY = 0; /* 滚动动画的目标位 */
+static BOOL g_viewAnim = FALSE;                   /* 正在向目标滑 */
+#define VIEW_ANCHOR_KEEP    0                 /* ViewSyncScroll：现位 clamp 进新范围 */
+#define VIEW_ANCHOR_CENTER  1                 /*   滚到内容中心（缩放锚 = 窗口中心） */
+#define VIEW_ANCHOR_TOP     2                 /*   回到顶/左（新内容从头看） */
+#define VIEW_BTN_COUNT 2                    /* 0 = ✕，1 = 复制 */
+
+/* 当前生效缩放。Ditto 勾上"根据内容调整窗口大小 + 缩放图像以适应窗口"后
+   的显示态是 **100% 原大、顶对齐、超窗走滚动条**（实测澄清："缩放图像以
+   适应窗口"的真实语义是**窗口适应图像**，那件事由 ViewFitOnce 管，图像
+   自己不缩）。g_viewScale < 0 是"适应窗口"显式模式（双击图片切换）：
+   图像缩进客户区，基于客户区算（常驻滚动条已扣除），小图不放大（放大糊）。 */
+static float ViewEffScale(void) {
+    if (g_viewScale > 0.0f) return g_viewScale;
+    if (g_viewScale < 0.0f) {
+        UINT iw = g_viewImg ? g_viewImg->GetWidth() : 0;
+        UINT ih = g_viewImg ? g_viewImg->GetHeight() : 0;
+        if (!iw || !ih) return 1.0f;
+        RECT rc;
+        float cw = 1.0f, ch = 1.0f;
+        if (g_view && GetClientRect(g_view, &rc)) {
+            cw = (float)rc.right - 2.0f;
+            ch = (float)rc.bottom - g_headerH - 2.0f;
+        }
+        if (cw < 1.0f) cw = 1.0f;
+        if (ch < 1.0f) ch = 1.0f;
+        float fx = cw / (float)iw, fy = ch / (float)ih;
+        float fit = (fx < fy) ? fx : fy;
+        if (fit > 1.0f) fit = 1.0f;
+        if (fit < 0.01f) fit = 0.01f;
+        return fit;
+    }
+    return 1.0f;   /* 默认：100% 原大 */
+}
+
+/* 内容 DIB：窗口尺寸变了就重建（照 TipBuild 的做法）。重建后旧像素全部作废，
+   下一帧必须整画。 */
+static BOOL ViewSurface(void) {
+    if (g_viewDC && g_viewW == g_viewSurfW && g_viewH == g_viewSurfH) return TRUE;
+    if (g_viewDC)  { DeleteDC(g_viewDC);      g_viewDC  = NULL; }
+    if (g_viewBmp) { DeleteObject(g_viewBmp); g_viewBmp = NULL; }
+    g_viewBits = NULL;
+    HDC screen = GetDC(NULL);
+    if (!screen) return FALSE;
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth       = g_viewW;
+    bi.bmiHeader.biHeight      = -g_viewH;       /* 自上而下 */
+    bi.bmiHeader.biPlanes      = 1;
+    bi.bmiHeader.biBitCount    = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    g_viewBmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &g_viewBits, NULL, 0);
+    ReleaseDC(NULL, screen);
+    if (!g_viewBmp || !g_viewBits) return FALSE;
+    g_viewDC = CreateCompatibleDC(NULL);
+    if (!g_viewDC) return FALSE;
+    SelectObject(g_viewDC, g_viewBmp);
+    g_viewSurfW = g_viewW;  g_viewSurfH = g_viewH;
+    g_viewFullPaint = TRUE;              /* 新表面内容是垃圾：下一帧整画 */
+    return TRUE;
+}
+
+static void ViewBtnRect(int i, Gdiplus::RectF* out) {
+    /* 贴**客户区**右缘：常驻竖滚动条占窗口右缘一整列（标题栏右侧也在内），
+       按窗口宽定位 ✕ 会被滚动条压在底下（实测）。 */
+    RECT rc;
+    float cw = (float)g_viewW;
+    if (g_view && GetClientRect(g_view, &rc) && rc.right > 0) cw = (float)rc.right;
+    float s = 26.0f * g_k;
+    out->Y = (g_headerH - s) * 0.5f;
+    out->Height = s;
+    if (i == 0) {                            /* ✕ 贴最右 */
+        out->Width = s;
+        out->X = cw - s - 6.0f * g_k;
+    } else {                                 /* 复制 在 ✕ 左边 */
+        out->Width = 56.0f * g_k;
+        out->X = cw - s - 6.0f * g_k - 8.0f * g_k - out->Width;
+    }
+}
+
+static int ViewHitBtn(float x, float y) {
+    for (int i = 0; i < VIEW_BTN_COUNT; i++) {
+        Gdiplus::RectF r;
+        ViewBtnRect(i, &r);
+        if (x >= r.X && x <= r.X + r.Width && y >= r.Y && y <= r.Y + r.Height) return i;
+    }
+    return -1;
+}
+
+/* 复制原图回剪贴板：走现成的格式回写路径（DbLoadFormats + PutOnClipboard）——
+   Data 表里的原始字节原样进剪贴板（不经过 GDI+ 重编码），Ditto 的 ignore
+   标记也自动带上，这次复制不会又被记进历史。 */
+static void ViewCopy(void) {
+    if (g_viewRow < 0 || g_viewRow >= g_count) return;
+    DbLoadFormats(g_items[g_viewRow].id);
+    if (g_fmtCount > 0) PutOnClipboard(FALSE);
+    FreeFmts();
+}
+
+/* 主线程收割：把解码线程放进槽的图接进 g_viewImg，旧图就地释放。
+   ★ 旧图只能在**这里**释放：主线程所有用图的路径（ViewPaint / 滚轮 / 拖动 /
+   标题百分比）都在同一线程的消息处理里，与这里串行 —— 不存在"画着一半被
+   线程释放"的竞态（解码线程从不碰 g_viewImg）。槽图不是当前请求的（翻条目
+   后才解完）就不接，留给线程下次入槽时清理。 */
+static void ViewHarvest(void) {
+    Gdiplus::Bitmap* nm = NULL;
+    EnterCriticalSection(&g_thumbLock);
+    if (g_viewDecoded && g_viewDecodedId == g_viewId) {
+        nm = g_viewImg;
+        g_viewImg = g_viewDecoded;
+        g_viewDecoded = NULL;
+        g_viewImgId = g_viewDecodedId;
+    }
+    LeaveCriticalSection(&g_thumbLock);
+    delete nm;
+}
+
+/* ---- 滚动条与帧合并 ----
+   平移状态全部住在标准滚动条里（GetScrollInfo 即取即用，没有第二份要同步的
+   变量）：图不超窗时滚动条灰显、图像居中；超出后滚动条接管平移。 */
+
+static int ViewScrollPos(int bar) {
+    SCROLLINFO si;
+    memset(&si, 0, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_POS;
+    return GetScrollInfo(g_view, bar, &si) ? si.nPos : 0;
+}
+
+/* 按"待画一帧"合并高频重绘来源（mousemove / 滚轮 / 滚动条拖动）。本进程
+   主线程挂着低级鼠标钩子：每事件全量重画会把主线程打满，钩子回调排队，
+   用户全系统的光标都会卡 —— 帧率上限 ~66fps，事件合并只留最新状态。 */
+static void ViewPaintSoon(void) {
+    if (!g_view || g_viewPaintPending) return;
+    g_viewPaintPending = TRUE;
+    SetTimer(g_view, 1, VIEW_FRAME_MS, NULL);
+}
+
+/* 滚动专属快路径：把已画好的像素整体平移（ScrollDC），只补画露出的那一条。
+   整帧重画的代价全花在"本来就对"的像素上，而本线程宿着低级鼠标钩子 ——
+   画得越久，全系统的输入排队越久。返回 FALSE = 滚不出来（太怪/失败），
+   调用方退回整帧重画。 */
+static BOOL ScrollPaintStrip(int dx, int dy) {
+    if (!g_viewDC || !g_viewBits) return FALSE;
+    RECT rc;
+    if (!GetClientRect(g_view, &rc)) return FALSE;
+    /* ★ 位移用 memmove 自己搬，不用 ScrollDC：内存 DC 上 ScrollDC 的行为
+       不可靠 —— lprcClip=NULL 时"可见区域"不是客户区，位移整个不发生，
+       lprcUpdate 却照常报告（实测：只有补画的条带是新内容，上面全是旧帧，
+       表现就是"滚动图片破碎"）。DIB 是自上而下的 32bpp：垂直位移 = 整块行
+       memmove，水平位移 = 逐行行内 memmove，结果确定。
+       ★ 斜向（横竖同时）罕见，退回整帧。 */
+    if (dx != 0 && dy != 0) return FALSE;
+    /* ★ 搬动区域**不含边框**（bot = rc.bottom - 1，右列同理见横向分支）：
+       边框属于"窗框"，跟着内容搬就是一条随滚动游走、永远洗不掉的细线
+       （实测踩过：每滚一档，一条 #CCCCCC 细线在图里向上游 120px）。 */
+    int top = (int)g_headerH, bot = rc.bottom - 1;
+    int rowsN = bot - top;
+    int w = rc.right;
+    BYTE* base = (BYTE*)g_viewBits;
+    int stride = g_viewW * 4;
+    RECT up;
+    if (dy != 0) {
+        if (dy >= rowsN || -dy >= rowsN) return FALSE;          /* 搬不动/搬满：整帧 */
+        if (dy > 0) {
+            /* 往下滚：内容上移 dy 行，底部露出 dy 行（底边框行原地不动） */
+            memmove(base + (size_t)top * stride,
+                    base + (size_t)(top + dy) * stride,
+                    (size_t)(rowsN - dy) * stride);
+            up.left = 0;  up.right = w;  up.top = bot - dy;  up.bottom = bot;
+        } else {
+            int n = -dy;   /* 往上滚：内容下移 n 行，顶部露出 n 行 */
+            memmove(base + (size_t)(top + n) * stride,
+                    base + (size_t)top * stride,
+                    (size_t)(rowsN - n) * stride);
+            up.left = 0;  up.right = w;  up.top = top;  up.bottom = top + n;
+        }
+    } else {
+        /* ---- 横向：逐行行内 memmove ----
+           竖边框列同样不搬（dx>0 时右列会被搬走、dx<0 时左列会被搬走），
+           搬动区域把那一列排除，露出的条带里再补画边框。 */
+        if (dx > 0) {
+            if (dx >= w - 1) return FALSE;
+            for (int y = top; y < bot; y++) {
+                BYTE* row = base + (size_t)y * stride;
+                memmove(row, row + (size_t)dx * 4, (size_t)(w - 1 - dx) * 4);
+            }
+            up.left = w - 1 - dx;  up.right = w;  up.top = top;  up.bottom = bot;
+        } else {
+            int n = -dx;
+            if (n >= w - 1) return FALSE;
+            for (int y = top; y < bot; y++) {
+                BYTE* row = base + (size_t)y * stride;
+                memmove(row + (size_t)n * 4, row, (size_t)(w - 1 - n) * 4);
+            }
+            up.left = 0;  up.right = n + 1;  up.top = top;  up.bottom = bot;
+        }
+    }
+
+    Gdiplus::Bitmap bmp(g_viewW, g_viewH, g_viewW * 4, PixelFormat32bppPARGB,
+                        (BYTE*)g_viewBits);
+    if (bmp.GetLastStatus() != Gdiplus::Ok) return FALSE;
+    Gdiplus::Graphics g(&bmp);
+    Gdiplus::SolidBrush brGut(Gdiplus::Color(C_THUMB_BG));
+    Gdiplus::SolidBrush brBorder(Gdiplus::Color(C_BORDER));
+    g.FillRectangle(&brGut, Gdiplus::RectF((float)up.left, (float)up.top,
+                                           (float)(up.right - up.left),
+                                           (float)(up.bottom - up.top)));
+    UINT iw = 0, ih = 0;
+    if (g_viewImg) { iw = g_viewImg->GetWidth(); ih = g_viewImg->GetHeight(); }
+    if (g_viewImg && iw > 0 && ih > 0) {
+        float eff = ViewEffScale();
+        float dw = (float)iw * eff, dh = (float)ih * eff;
+        /* 图像在窗口里的落点（与整帧同一公式）：超窗方向被滚动位推走 */
+        float ix0 = -(float)ViewScrollPos(SB_HORZ);
+        float iy0 = g_headerH - (float)ViewScrollPos(SB_VERT);
+        float ix1 = ix0 + dw, iy1 = iy0 + dh;
+        float vx0 = (ix0 > 0.0f) ? ix0 : 0.0f;
+        float vy0 = (iy0 > g_headerH) ? iy0 : g_headerH;
+        float vx1 = (ix1 < (float)rc.right) ? ix1 : (float)rc.right;
+        float vy1 = (iy1 < bot) ? iy1 : (float)bot;
+        /* 只补条带：与露出的矩形求交。上下各多盖 1 行：盖住任何半像素
+           边缘残留（多盖的是相邻的正确内容或条带自身，无副作用）。 */
+        float ovTop = up.top > top ? up.top - 1.0f : (float)up.top;
+        float ovBot = up.bottom < bot ? up.bottom + 1.0f : (float)up.bottom;
+        if (vx0 < (float)up.left)   vx0 = (float)up.left;
+        if (vy0 < ovTop)            vy0 = ovTop;
+        if (vx1 > (float)up.right)  vx1 = (float)up.right;
+        if (vy1 > ovBot)            vy1 = ovBot;
+        if (vx0 < vx1 && vy0 < vy1) {
+            float sx0 = (vx0 - ix0) / eff, sy0 = (vy0 - iy0) / eff;
+            Gdiplus::RectF dst(vx0, vy0, vx1 - vx0, vy1 - vy0);
+            g.SetInterpolationMode(Gdiplus::InterpolationModeBilinear);
+            g.DrawImage(g_viewImg, dst, sx0, sy0,
+                        (vx1 - vx0) / eff, (vy1 - vy0) / eff, Gdiplus::UnitPixel);
+        }
+    }
+    /* 条带盖掉的外缘边框补回来（整帧的 DrawRectangle 只在整画时走） */
+    if (up.left == 0)
+        g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, (float)up.top, 1.0f,
+                                                  (float)(up.bottom - up.top)));
+    if (up.right == rc.right)
+        g.FillRectangle(&brBorder, Gdiplus::RectF((float)(rc.right - 1), (float)up.top,
+                                                  1.0f, (float)(up.bottom - up.top)));
+    g.Flush(Gdiplus::FlushIntentionSync);
+    /* ★ 呈现必须**整帧**：memmove 之后内存 DIB 已经全对，但屏幕（DWM 表面）
+       只有被 BitBlt 过的区域才更新 —— 只无效化条带的话，位移过的上面一大片
+       永远停在旧帧（实测就是"滚动图片破碎"：底部一条新的、上面全是旧的）。
+       贵的部分（GDI+ 填充/采样）已经只做了条带，整帧只是一次 BitBlt 搬运。 */
+    InvalidateRect(g_view, NULL, FALSE);
+    return TRUE;
+}
+
+/* 同步滚动条范围到当前缩放。anchor：CENTER = 滚到内容中心（缩放锚 = 窗口
+   中心，视图向四周均匀展开）；TOP = 回到顶/左（新内容从头看，Ditto 默认
+   态）；KEEP = 现位 clamp 进新范围（窗口尺寸变化时用）。 */
+static void ViewSyncScroll(int anchor) {
+    if (!g_view || !g_viewImg) return;
+    g_viewAnim = FALSE;   /* 范围要变（缩放/换图/适应）：动画目标作废，别跟新范围打架 */
+    UINT iw = g_viewImg->GetWidth(), ih = g_viewImg->GetHeight();
+    RECT rc;
+    if (!iw || !ih || !GetClientRect(g_view, &rc)) return;
+    float eff = ViewEffScale();
+    int cw = rc.right, ch = rc.bottom - (int)g_headerH;
+    int hmax = ((float)iw * eff > (float)cw) ? (int)((float)iw * eff - cw + 0.5f) : 0;
+    int vmax = ((float)ih * eff > (float)ch) ? (int)((float)ih * eff - ch + 0.5f) : 0;
+    SCROLLINFO si;
+    memset(&si, 0, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_RANGE | SIF_POS | SIF_PAGE;
+    for (int pass = 0; pass < 2; pass++) {
+        int bar = pass ? SB_VERT : SB_HORZ;
+        int max = pass ? vmax : hmax;
+        si.nMin = 0;
+        si.nMax = (max > 0) ? max + (pass ? ch : cw) - 1 : 0;
+        si.nPage = (max > 0) ? (pass ? ch : cw) : 0;
+        si.nPos = (anchor == VIEW_ANCHOR_CENTER) ? (max / 2)
+                : (anchor == VIEW_ANCHOR_TOP)    ? 0
+                : min(ViewScrollPos(bar), max);
+        SetScrollInfo(g_view, bar, &si, TRUE);
+    }
+}
+
+/* WM_VSCROLL / WM_HSCROLL：滚动条自身的拖动 / 行 / 页 / 端点。 */
+static void ViewScrollCmd(int bar, int cmd, int req) {
+    SCROLLINFO si;
+    memset(&si, 0, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_ALL;
+    if (!GetScrollInfo(g_view, bar, &si)) return;
+    int old = si.nPos;
+    switch (cmd) {
+    case SB_TOP:          si.nPos = 0; break;
+    case SB_BOTTOM:       si.nPos = si.nMax; break;
+    case SB_LINEUP:       si.nPos -= VIEW_SCROLL_STEP; break;
+    case SB_LINEDOWN:     si.nPos += VIEW_SCROLL_STEP; break;
+    case SB_PAGEUP:       si.nPos -= (int)si.nPage; break;
+    case SB_PAGEDOWN:     si.nPos += (int)si.nPage; break;
+    case SB_THUMBPOSITION:
+    case SB_THUMBTRACK:   si.nPos = req; break;
+    default:              return;
+    }
+    si.fMask = SIF_POS;
+    SetScrollInfo(g_view, bar, &si, TRUE);
+    if (ViewScrollPos(bar) != old) {
+        /* 拖动/点击滚动条是直接跟手的操作，动画要立刻让位 —— 目标同步成
+           现位，否则下一帧又把视图拽回目标上去（视图和拇指打架）。 */
+        g_viewAnim = FALSE;
+        g_viewTargetX = ViewScrollPos(SB_HORZ);
+        g_viewTargetY = ViewScrollPos(SB_VERT);
+        ViewPaintSoon();
+    }
+}
+
+/* 滚轮：steps 档（正 = 向下 / 右）。不直接挪滚动位，而是把**目标位**挪过去、
+   让帧合并时钟逐帧向它趋近 —— 一档一档瞬跳正是"滚动条跳动"的观感来源，
+   连续滑动后滚动条与图像是一起匀滑移动的。 */
+static void ViewScrollBy(int bar, int steps) {
+    if (!steps || !g_view) return;
+    SCROLLINFO si;
+    memset(&si, 0, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_ALL;
+    if (!GetScrollInfo(g_view, bar, &si)) return;
+    int posmax = (si.nMax > 0 && si.nPage > 0) ? si.nMax - (int)si.nPage + 1 : 0;
+    if (posmax <= 0) return;                       /* 内容没超窗：没得滚 */
+    int *target = (bar == SB_VERT) ? &g_viewTargetY : &g_viewTargetX;
+    if (!g_viewAnim)   /* 动画没在跑：目标从当前位置起算（上次的目标已过时） */
+        *target = ViewScrollPos(bar);
+    *target += steps * VIEW_SCROLL_STEP;
+    if (*target < 0)      *target = 0;
+    if (*target > posmax) *target = posmax;
+    g_viewAnim = TRUE;
+    ViewPaintSoon();
+}
+
+/* 帧合并时钟里走一步：向目标位趋近 40%（指数缓动，差 2px 内算到位）。
+   没到位就自己再约一帧 —— WM_TIMER 只在队列空时派发，连滚时也不会饿着。 */
+static void ViewAnimStep(void) {
+    if (!g_viewAnim || !g_view) return;
+    int px = ViewScrollPos(SB_HORZ), py = ViewScrollPos(SB_VERT);
+    int nx = px + (g_viewTargetX - px) * 2 / 5;
+    int ny = py + (g_viewTargetY - py) * 2 / 5;
+    if (g_viewTargetX - nx < 2 && nx - g_viewTargetX < 2) nx = g_viewTargetX;
+    if (g_viewTargetY - ny < 2 && ny - g_viewTargetY < 2) ny = g_viewTargetY;
+    if (nx == px && ny == py) { g_viewAnim = FALSE; return; }
+    SCROLLINFO si;
+    memset(&si, 0, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_POS;
+    if (nx != px) { si.nPos = nx; SetScrollInfo(g_view, SB_HORZ, &si, TRUE); }
+    if (ny != py) { si.nPos = ny; SetScrollInfo(g_view, SB_VERT, &si, TRUE); }
+    if (nx != g_viewTargetX || ny != g_viewTargetY)
+        ViewPaintSoon();               /* 还没到：下一帧继续 */
+}
+
+static void ViewPaint(void) {
+    if (!g_view) return;
+    if (!ViewSurface()) return;
+    ViewHarvest();
+    RECT rc;
+    if (!GetClientRect(g_view, &rc)) return;
+
+    int sx = ViewScrollPos(SB_HORZ), sy = ViewScrollPos(SB_VERT);
+    int dx = sx - g_viewLastSX, dy = sy - g_viewLastSY;
+
+    /* 纯滚动（内容没变）：条带快路径。位置都没动就更没什么可画的。 */
+    if (!g_viewFullPaint && dx == 0 && dy == 0) return;
+    if (!g_viewFullPaint && (dx || dy)) {
+        if (ScrollPaintStrip(dx, dy)) {
+            g_viewLastSX = sx;  g_viewLastSY = sy;
+            return;
+        }
+    }
+
+    Gdiplus::Bitmap bmp(g_viewW, g_viewH, g_viewW * 4, PixelFormat32bppPARGB,
+                        (BYTE*)g_viewBits);
+    if (bmp.GetLastStatus() != Gdiplus::Ok) return;
+    Gdiplus::Graphics g(&bmp);
+    /* 不再整面 Clear：标题栏与图片区两个填充正好盖满客户区（ClearType 的
+       不透明底由这两个填充给足），整面过一遍是纯浪费。 */
+
+    Gdiplus::SolidBrush brHead(Gdiplus::Color(C_HEAD));
+    Gdiplus::SolidBrush brGut(Gdiplus::Color(C_THUMB_BG));
+    Gdiplus::SolidBrush brBorder(Gdiplus::Color(C_BORDER));
+
+    const float cw = (float)rc.right, chh = (float)rc.bottom - g_headerH;
+
+    /* 标题栏：与列表同一画法（纯白平涂 + 底边线），文字在下面 GDI 那一遍画。
+       布局一律按**客户区**走：常驻竖滚动条占窗口右缘一整列（标题栏右侧也在
+       内），照窗口宽画会把标题和按钮画进滚动条底下。
+       ★ 分隔线与边框一律用**整数行的 FillRectangle**，不用 DrawLine /
+         DrawRectangle 的 0.5 对齐画法：那些会触发 GDI+ 抗锯齿，在边界行上
+         混出半透明像素 —— 预览的像素要被 memmove 整行搬动（条带重绘），
+         半透明行跟着搬就是滚不掉的细线。 */
+    g.FillRectangle(&brHead, 0, 0, (int)cw, (int)g_headerH);
+    g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, g_headerH - 1.0f, cw, 1.0f));
+
+    /* 图片区：暗灰底 + 图片（Bilinear：缩放跟手优先，预览不追求打印质量） */
+    g.FillRectangle(&brGut, Gdiplus::RectF(0.0f, g_headerH, cw, chh));
+    UINT iw = 0, ih = 0;
+    if (g_viewImg) { iw = g_viewImg->GetWidth(); ih = g_viewImg->GetHeight(); }
+    if (g_viewImg && iw > 0 && ih > 0) {
+        float eff = ViewEffScale();
+        float dw = (float)iw * eff, dh = (float)ih * eff;
+        /* 顶/左锚定（Ditto：100% 显示在顶部）：超窗方向被滚动条推着走，
+           不超窗时滚动条恒 0 —— 一条公式覆盖两种情况，没有居中分支。 */
+        float dx = -(float)ViewScrollPos(SB_HORZ);
+        float dy = g_headerH - (float)ViewScrollPos(SB_VERT);
+        /* 只采样**可见**部分：反算内容区与图面交集对应的源矩形，每帧的
+           采样量只跟窗口大小走，与图像尺寸和缩放比无关（4 倍放大时是
+           全图采样的 1/16）。交集反算天然保证源矩形在图内。 */
+        float vx0 = (dx > 0.0f) ? dx : 0.0f;
+        float vy0 = (dy > g_headerH) ? dy : g_headerH;
+        float vx1 = (dx + dw < cw) ? (dx + dw) : cw;
+        float vy1 = (dy + dh < (float)rc.bottom) ? (dy + dh) : (float)rc.bottom;
+        if (vx0 < vx1 && vy0 < vy1) {
+            float sx = (vx0 - dx) / eff, sy = (vy0 - dy) / eff;
+            float sw = (vx1 - vx0) / eff, sh = (vy1 - vy0) / eff;
+            Gdiplus::RectF dst(vx0, vy0, vx1 - vx0, vy1 - vy0);
+            g.SetInterpolationMode(Gdiplus::InterpolationModeBilinear);
+            g.DrawImage(g_viewImg, dst, sx, sy, sw, sh, Gdiplus::UnitPixel);
+        }
+    }
+
+    /* 边框最后画：压住可能溢出的图片（贴客户区，右侧压在滚动条内侧）。
+       四条边都是整数 1px 填充（理由见上）。 */
+    g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, 0.0f, cw, 1.0f));
+    g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, (float)(rc.bottom - 1), cw, 1.0f));
+    g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, 0.0f, 1.0f, (float)rc.bottom));
+    g.FillRectangle(&brBorder, Gdiplus::RectF(cw - 1.0f, 0.0f, 1.0f, (float)rc.bottom));
+    g.Flush(Gdiplus::FlushIntentionSync);
+
+    /* ---- GDI 文字（ClearType）---- */
+    WCHAR title[96];
+    if (g_viewImg && iw > 0 && ih > 0) {
+        int pct = (int)(ViewEffScale() * 100.0f + 0.5f);
+        _snwprintf_s(title, 96, _TRUNCATE, L"图片 %ux%u %d%%", iw, ih, pct);
+    } else if (g_viewId && g_viewDoneId == g_viewId) {
+        wcscpy_s(title, 96, L"解码失败");   /* 线程做完了还没有图 = 库里解不出来 */
+    } else {
+        wcscpy_s(title, 96, L"解码中…");
+    }
+    if (g_viewPinned) wcscat_s(title, 96, L" 已钉住");
+    GdiText(g_viewDC, title, g_fontRow, CR(C_TITLE),
+            12.0f * g_k, 0.0f, cw - 160.0f * g_k, g_headerH,
+            DT_LEFT, TRUE);
+    Gdiplus::RectF r;
+    ViewBtnRect(0, &r);
+    GdiText(g_viewDC, L"✕", g_fontRow, CR(0xFF6E6E6E),
+            r.X, r.Y, r.Width, r.Height, DT_CENTER, FALSE);
+    ViewBtnRect(1, &r);
+    GdiText(g_viewDC, L"复制", g_fontSmall, CR(0xFF6E6E6E),
+            r.X, r.Y, r.Width, r.Height, DT_CENTER, FALSE);
+
+    g_viewLastSX = sx;  g_viewLastSY = sy;
+    g_viewFullPaint = FALSE;
+    InvalidateRect(g_view, NULL, FALSE);
+}
+
+/* 状态报信：主程序在主线程上记两份镜像（s_viewOpen / s_viewPinned），钩子
+   据此决定"空格拦不拦、无关键要不要叫预览退场"。幂等：重复发只是再确认。 */
+static void ViewNotifyState(void) {
+    if (!g_msgViewState) return;
+    HWND mw = FindWindowW(CLIP_MAIN_CLASS, NULL);
+    if (mw) PostMessageW(mw, g_msgViewState, g_viewOpen ? 1 : 0,
+                         g_viewPinned ? 1 : 0);
+}
+
+static void ViewRequestDecode(void) {
+    EnterCriticalSection(&g_thumbLock);
+    g_viewWantId = g_viewId;
+    LeaveCriticalSection(&g_thumbLock);
+    if (g_thumbWake) SetEvent(g_thumbWake);
+}
+
+static void ViewHide(void) {
+    if (!g_viewOpen && g_viewRow < 0) return;
+    g_viewRow = -1;
+    g_viewId = 0;
+    g_viewPinned = FALSE;
+    g_viewWinDrag = FALSE;
+    if (g_viewPaintPending) {
+        g_viewPaintPending = FALSE;
+        if (g_view) KillTimer(g_view, 1);
+    }
+    /* 解码请求与槽里的图**都留着**：解了一半的让它解完（图进槽等收割），
+       解好的留在槽里。为的是"F3 关了再开同一条目"立即出图 —— 收起的只是
+       窗口，图已经是现成的。清掉它们（旧做法）省不下什么：在途的那张本来
+       就拦不回来；代价却是重开同一张图要再付一次解码，而更糟的是撞上下面的
+       线程短路与"解码中"卡死（见 ViewToggle）。最多驻留一张解码图，收场在
+       ViewDestroy。 */
+    g_viewLastSX = 0;  g_viewLastSY = 0;
+    g_viewFullPaint = TRUE;
+    g_viewAnim = FALSE;
+    if (g_view && IsWindowVisible(g_view)) ShowWindow(g_view, SW_HIDE);
+    g_viewOpen = FALSE;
+    ViewNotifyState();
+}
+
+/* 选中项变了：预览可见时跟着换内容 —— 窗口位置不动，尺寸随新内容重摆
+   （"根据内容调整窗口大小"的语义延伸到跟随）。缩放回 100% 默认态，解码
+   完成后 ViewFitOnce 重摆（顶/左从头看）。新条目不是图片 → 收。 */
+static void ViewFollowSel(void) {
+    if (!g_viewOpen) return;
+    if (g_sel < 0 || g_sel >= g_count || !g_items[g_sel].hasImage) { ViewHide(); return; }
+    if (g_viewRow == g_sel) return;
+    g_viewRow = g_sel;
+    g_viewId = g_items[g_sel].id;
+    g_viewScale = 0.0f;
+    g_viewFitted = FALSE;
+    g_viewFullPaint = TRUE;      /* 换条目：内容与标题全变 */
+    ViewHarvest();
+    if (g_viewImg && g_viewImgId == g_viewId) {
+        ViewFitOnce();           /* 这条的图已经解好（刚才看过又翻回来）：直接摆窗 */
+        ViewPaint();
+        return;
+    }
+    ViewRequestDecode();
+    ViewPaint();                 /* 立即切到"解码中"，图好了 WM_VIEW_READY 再画 */
+}
+
+static void ViewPinToggle(void) {
+    g_viewPinned = !g_viewPinned;
+    ViewNotifyState();           /* 开着没变，但 pinned 位变了 */
+    g_viewFullPaint = TRUE;      /* 标题文字变了 */
+    ViewPaint();                 /* 标题里带"已钉住" */
+}
+
+/* 条目集重载（DbLoadItems）后校验预览：g_viewRow 是 g_items 的下标，重载后
+   索引意义全变（Ditto 会重排/插入），沿用就是指着错的条目复制错的内容。
+   按 id 在新表里找回，找不到了（被清掉）就收。 */
+static void ViewRevalidate(void) {
+    if (!g_viewOpen) return;
+    for (int i = 0; i < g_count; i++)
+        if (g_items[i].id == g_viewId) { g_viewRow = i; return; }
+    ViewHide();
+}
+
+static LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        if (g_viewDC && dc)
+            BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top,
+                   ps.rcPaint.right - ps.rcPaint.left,
+                   ps.rcPaint.bottom - ps.rcPaint.top,
+                   g_viewDC, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;                       /* 内容全来自双缓冲，别让系统擦出白闪 */
+    case WM_TIMER:
+        if (wp == 1) {                  /* 帧合并：一个周期只画最新状态 */
+            KillTimer(hwnd, 1);
+            g_viewPaintPending = FALSE;
+            ViewAnimStep();             /* 滚动动画先走一步（没到位它会再约帧） */
+            ViewPaint();
+        }
+        return 0;
+    case WM_MOUSEMOVE:
+        /* ---- 拖标题栏挪窗（与列表同套路：NOACTIVATE 收不到 WM_NCLBUTTONDOWN） ---- */
+        if (g_viewWinDrag && (wp & MK_LBUTTON)) {
+            POINT cur;
+            if (GetCursorPos(&cur)) {
+                /* 高频重复事件（光标没动系统也派发）提前走：MoveWindow 不便宜 */
+                if (cur.x == g_viewDragCur.x && cur.y == g_viewDragCur.y) return 0;
+                RECT work;
+                MonitorWork(MonitorFromPoint(cur, MONITOR_DEFAULTTONEAREST), &work);
+                g_viewX = g_viewWinPos.x + cur.x - g_viewDragCur.x;
+                g_viewY = g_viewWinPos.y + cur.y - g_viewDragCur.y;
+                if (g_viewX < work.left) g_viewX = work.left;
+                if (g_viewY < work.top)  g_viewY = work.top;
+                if (g_viewX + g_viewW > work.right)  g_viewX = work.right - g_viewW;
+                if (g_viewY + g_viewH > work.bottom) g_viewY = work.bottom - g_viewH;
+                MoveWindow(hwnd, g_viewX, g_viewY, g_viewW, g_viewH, FALSE);
+            }
+            return 0;
+        }
+        return 0;
+    case WM_LBUTTONDOWN: {
+        float x = (float)(short)LOWORD(lp), y = (float)(short)HIWORD(lp);
+        int hb = ViewHitBtn(x, y);
+        if (hb == 0) { ViewHide(); return 0; }    /* ✕ */
+        if (hb == 1) { ViewCopy(); return 0; }    /* 复制原图 */
+        if (y < g_headerH) {                      /* 标题栏：拖窗 */
+            GetCursorPos(&g_viewDragCur);
+            g_viewWinDrag = TRUE;
+            g_viewWinPos.x = g_viewX;
+            g_viewWinPos.y = g_viewY;
+            SetCapture(hwnd);
+        }
+        /* 图片区按下无操作 —— Ditto 的图片查看没有点击/拖拽图片的行为 */
+        return 0;
+    }
+    case WM_LBUTTONUP:
+        if (g_viewWinDrag) {
+            g_viewWinDrag = FALSE;
+            if (GetCapture() == hwnd) ReleaseCapture();
+        }
+        return 0;
+    case WM_CAPTURECHANGED:
+        g_viewWinDrag = FALSE;
+        return 0;
+    case WM_LBUTTONDBLCLK: {
+        float y = (float)(short)HIWORD(lp);
+        if (y >= g_headerH) {
+            /* 双击图片 = 100% 原大 ↔ 适应窗口；缩放锚 = 窗口中心 */
+            if (g_viewScale < 0.0f) g_viewScale = 0.0f;    /* 适应 → 100% */
+            else                    g_viewScale = -1.0f;   /* 100%/其他 → 适应 */
+            g_viewFullPaint = TRUE;      /* 采样变了：整帧 */
+            ViewSyncScroll(VIEW_ANCHOR_CENTER);
+            ViewPaintSoon();
+        }
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        if (!g_viewImg) return 0;
+        int d = GET_WHEEL_DELTA_WPARAM(wp);
+        if (wp & MK_CONTROL) {
+            /* Ctrl+滚轮 = 缩放（Ditto 同款）。锚 = 窗口中心：拖图平移没有
+               之后，"中心不动"是最可预期的行为（视图向四周均匀展开） */
+            float eff = ViewEffScale();
+            float ns = (g_viewScale > 0.0f) ? g_viewScale : eff;
+            ns *= powf(1.25f, (float)d / (float)WHEEL_DELTA);
+            if (ns < 0.05f) ns = 0.05f;
+            if (ns > 8.0f)  ns = 8.0f;
+            g_viewScale = ns;
+            ViewSyncScroll(VIEW_ANCHOR_CENTER);
+            ViewPaintSoon();
+        } else {
+            /* 滚轮 = 上下滚动（Ditto 同款）：上滚看上方 */
+            ViewScrollBy(SB_VERT, -d / WHEEL_DELTA);
+        }
+        return 0;
+    }
+    case WM_MOUSEHWHEEL:
+        if (g_viewImg) {
+            int d = GET_WHEEL_DELTA_WPARAM(wp);
+            ViewScrollBy(SB_HORZ, d / WHEEL_DELTA);   /* 右滚看右方 */
+        }
+        return 0;
+    case WM_VSCROLL:
+        ViewScrollCmd(SB_VERT, LOWORD(wp), (short)HIWORD(wp));
+        return 0;
+    case WM_HSCROLL:
+        ViewScrollCmd(SB_HORZ, LOWORD(wp), (short)HIWORD(wp));
+        return 0;
+    case WM_DESTROY:
+        return 0;   /* 收尾统一在主窗口的 WM_DESTROY（那里才 PostQuitMessage） */
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void ViewEnsureWindow(void) {
+    if (g_view) return;
+    WNDCLASSW wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.lpfnWndProc   = ViewWndProc;
+    wc.hInstance     = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"CapsEnhanceClipView";
+    wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    RegisterClassW(&wc);
+    /* 与列表同一套样式，但有三处**故意**不同：
+       · 没有 WS_EX_TRANSPARENT —— 它要吃鼠标（滚轮/滚动条/按钮），穿透了就
+         什么都点不到。"点外面就关"的鼠标钩子已把它的矩形并进 inside 判定
+         （见 MouseProc）。
+       · 没有 WS_EX_LAYERED —— 列表那 5% 整窗透明（CLIP_ALPHA）用来看文字
+         无感，用来看图就是把图片和标题栏一起洗淡（用户实测：看不清）。
+         预览要的是像素保真，普通窗口直出。
+       · 带两条**常驻**标准滚动条 —— Ditto 同款（图不超窗时灰显）。常驻而
+         不是按需增删：滚动条出现/消失会改变客户区，"算范围→决定滚动条→
+         客户区变→范围变"是个循环依赖，常驻则客户区恒定。 */
+    g_view = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                             wc.lpszClassName, NULL,
+                             WS_POPUP | WS_VSCROLL | WS_HSCROLL,
+                             0, 0, 0, 0, NULL, NULL, wc.hInstance, NULL);
+}
+
+static void ViewToggle(void) {
+    if (g_viewOpen) { ViewHide(); return; }
+    if (g_sel < 0 || g_sel >= g_count || !g_items[g_sel].hasImage) return;
+    ViewEnsureWindow();
+    if (!g_view) return;
+    g_viewRow = g_sel;
+    g_viewId = g_items[g_sel].id;
+    g_viewScale = 0.0f;
+    g_viewFitted = FALSE;
+    g_viewPinned = FALSE;
+    /* 窗口不在这里显示："根据内容调整窗口大小"（Ditto 勾选项同款）意味着
+       尺寸依赖解码结果 —— WM_VIEW_READY 里按内容摆好再 SHOW。逻辑上预览
+       此刻已"开着"（g_viewOpen），空格钉住 / 无关键退场从这一刻就生效。 */
+    g_viewOpen = TRUE;
+    ViewNotifyState();
+    g_viewFullPaint = TRUE;      /* 新会话第一帧必须整画 */
+    /* ★ 先收割再判"图是不是现成的"：解码线程对**已经解过的同一请求**不再
+       回应（want == doneId 时直接睡回，也不发完成消息）—— 旧代码在这里
+       请求解码就永远等不到 WM_VIEW_READY，而窗口又只在 ViewFitOnce 里
+       首显，于是"F3 开 -> F3 关 -> 再 F3"第三下再也没反应（实测）。
+       现成图（刚关的那张，或槽里解好还没收割的）直接摆窗显示，顺带把
+       重开同一张图的延迟也省了。 */
+    ViewHarvest();
+    if (g_viewImg && g_viewImgId == g_viewId) {
+        ViewFitOnce();
+        ViewPaint();
+        return;
+    }
+    ViewRequestDecode();
+}
+
+/* 解码完成：按图像内容定窗口尺寸（Ditto"根据内容调整窗口大小"同款），
+   上限工作区 70%、下限标题栏可读。首次调用（窗口尚未显示）负责定位+首显：
+   锚在选中行左下角往下展开，底下放不下翻到行上方；之后跟随换条目时
+   位置不动、尺寸随新内容。 */
+static void ViewFitOnce(void) {
+    if (!g_viewImg || !g_view || g_viewFitted) return;
+    UINT iw = g_viewImg->GetWidth(), ih = g_viewImg->GetHeight();
+    if (!iw || !ih) return;
+    RECT work;
+    MonitorWork(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST), &work);
+    int maxW = (int)(((float)(work.right - work.left)) * 0.7f);
+    int maxH = (int)(((float)(work.bottom - work.top)) * 0.7f);
+    /* 目标**客户区** = 100% 原图 + 四周 1px 边框 + 标题栏（"缩放图像以适应
+       窗口"在这里生效：是窗口适应图像，图像自己保持原大）。 */
+    int nw = (int)iw + 2;
+    if (nw > maxW) nw = maxW;
+    if (nw < 120) nw = 120;
+    int nh = (int)ih + (int)g_headerH + 2;
+    if (nh > maxH) nh = maxH;
+    if (nh < (int)g_headerH + 80) nh = (int)g_headerH + 80;
+    g_viewFitted = TRUE;
+    BOOL firstShow = !IsWindowVisible(g_view);
+    /* 窗口尺寸 = 目标客户区 + 窗口 chrome。chrome 里主要是两条**常驻**滚动
+       条，宽度不猜度量（SM_CXVSCROLL 这类跟屏幕 DPI 走）：现窗量出来
+       （GetWindowRect - GetClientRect）就是真值。首显前窗口还没有实尺寸，
+       先摆个临时的量完就重摆（此刻不可见，不闪）。 */
+    if (firstShow) MoveWindow(g_view, g_viewX, g_viewY, 200, 150, FALSE);
+    RECT crc, wrc;
+    if (GetClientRect(g_view, &crc) && GetWindowRect(g_view, &wrc)) {
+        nw += (wrc.right - wrc.left) - (crc.right - crc.left);
+        nh += (wrc.bottom - wrc.top) - (crc.bottom - crc.top);
+    }
+    if (nw > maxW) nw = maxW;   /* 加上 chrome 后再钳上限：大图超限就交给
+                                   滚动条平移（100% + 滚动，Ditto 同款） */
+    if (nh > maxH) nh = maxH;
+    g_viewW = nw;  g_viewH = nh;
+    if (firstShow) {
+        int row = (g_viewRow >= 0) ? g_viewRow : g_sel;
+        float rowTop = (float)g_py + RowTop(row);
+        float rowBot = rowTop + RowHeight(row);
+        g_viewX = g_px;
+        g_viewY = (int)rowBot;
+        if (g_viewY + g_viewH > work.bottom) g_viewY = (int)(rowTop - (float)g_viewH);
+        if (g_viewX + g_viewW > work.right)  g_viewX = work.right - g_viewW;
+        if (g_viewX < work.left) g_viewX = work.left;
+        if (g_viewY < work.top)  g_viewY = work.top;
+        if (g_viewY + g_viewH > work.bottom) g_viewY = work.bottom - g_viewH;
+    } else {
+        /* 跟随换条目：位置不动，尺寸随新内容，越界收进工作区 */
+        if (g_viewX + g_viewW > work.right)  g_viewX = work.right - g_viewW;
+        if (g_viewY + g_viewH > work.bottom) g_viewY = work.bottom - g_viewH;
+        if (g_viewX < work.left) g_viewX = work.left;
+        if (g_viewY < work.top)  g_viewY = work.top;
+    }
+    MoveWindow(g_view, g_viewX, g_viewY, g_viewW, g_viewH, FALSE);
+    ViewSyncScroll(VIEW_ANCHOR_TOP);   /* 新内容从头看（Ditto：100% 显示在顶部） */
+    if (firstShow) {
+        ShowWindow(g_view, SW_SHOWNOACTIVATE);
+        SetWindowPos(g_view, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+}
+
+static void ViewDestroy(void) {
+    /* 退出前把解码线程的账清掉：请求归零（线程醒来发现没活就睡回去）、
+       槽里的图就地退役 —— 它们已无人引用（收割是主线程消息处理，此刻串行）。 */
+    EnterCriticalSection(&g_thumbLock);
+    g_viewWantId = 0;
+    Gdiplus::Bitmap* drop = g_viewDecoded;
+    g_viewDecoded = NULL;
+    LeaveCriticalSection(&g_thumbLock);
+    delete drop;
+    delete g_viewImg;                       /* 主线程专有：这里释放它最后一张 */
+    g_viewImg = NULL;
+    g_viewImgId = 0;
+    if (g_viewDC)  { DeleteDC(g_viewDC);      g_viewDC  = NULL; }
+    if (g_viewBmp) { DeleteObject(g_viewBmp); g_viewBmp = NULL; }
+    g_viewBits = NULL;
+    g_viewSurfW = 0;  g_viewSurfH = 0;
+    if (g_view) { DestroyWindow(g_view); g_view = NULL; }
+    g_viewOpen = FALSE;
+    g_viewRow = -1;
+    g_viewId = 0;
+    g_viewPinned = FALSE;
 }
 
 static void MakeSurface(void) {
@@ -1642,6 +2716,7 @@ static void DoShow(void) {
            还没 SHOW，无闪烁；只读本地库 + LIMIT CLIP_MAX_ITEMS，毫秒级）。
            缩略图在 DbLoadItems 里按 lID 序列对比决定去留，条目集没变就不重解。 */
         DbLoadItems();        PlaceWindow();                 /* ★ 只在这里定位 */
+        ViewRevalidate();     /* 重载后索引可能换位/失效：按 id 找回，找不到就收 */
         MoveWindow(g_hwnd, g_px, g_py, g_pxW, g_pxH, FALSE);
         Render();
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
@@ -1650,6 +2725,7 @@ static void DoShow(void) {
         g_visible = TRUE;
     } else {
         DbLoadItems();                 /* 可见时重复触发：同样刷新（置顶模式） */
+        ViewRevalidate();
         Render();
     }
 }
@@ -1658,7 +2734,10 @@ static void DoShow(void) {
    ★ 为什么不能只靠 SetWinEventHook(EVENT_SYSTEM_FOREGROUND)：用户点的是**本来就
    是前台**的那个程序（在记事本里点一下），前台根本没变，事件不会来 —— 于是
    "点外面"判不出来。所以再装一个低级鼠标钩子，只看落点是不是在自己身上。
-   只判定、不吞事件（一律 CallNextHookEx）：浮层不该吃掉任何点击。 */
+   只判定、不吞事件（一律 CallNextHookEx）：浮层不该吃掉任何点击。
+   预览窗要吃鼠标（缩放/平移/按钮），不能像提示窗那样靠 WS_EX_TRANSPARENT 穿透，
+   所以它的矩形必须并进 inside 判定 —— 不然点预览窗会被判成"点外面"把列表
+   一起关掉。点在两窗之外才关（列表和预览一起退）。 */
 static LRESULT CALLBACK MouseProc(int nCode, WPARAM wp, LPARAM lp) {
     if (nCode == HC_ACTION) {
         MSLLHOOKSTRUCT* s = (MSLLHOOKSTRUCT*)lp;
@@ -1668,6 +2747,12 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wp, LPARAM lp) {
             GetWindowRect(g_hwnd, &rc);
             BOOL inside = (s->pt.x >= rc.left && s->pt.x < rc.right &&
                            s->pt.y >= rc.top  && s->pt.y < rc.bottom);
+            if (!inside && g_viewOpen && g_view) {
+                RECT rv;
+                GetWindowRect(g_view, &rv);
+                inside = (s->pt.x >= rv.left && s->pt.x < rv.right &&
+                          s->pt.y >= rv.top  && s->pt.y < rv.bottom);
+            }
             if (!inside && !g_pinned && !g_pasting) DoHideClose();
         }
     }
@@ -1689,7 +2774,26 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (g_msgShow && msg == g_msgShow) { DoShow(); return 0; }
     if (g_msgHide && msg == g_msgHide) { DoHideClose(); return 0; }
     if (g_msgEsc  && msg == g_msgEsc)  { DoHideClose(); return 0; }
+    /* 主程序钩子代收的裸 F3（toggle）与"按了无关键"（退场）—— 见 src/clip.c */
+    if (g_msgView && msg == g_msgView) {
+        if (wp) ViewToggle();
+        else    ViewHide();
+        return 0;
+    }
     if (msg == WM_THUMB_READY) { Render(); return 0; }
+    if (msg == WM_VIEW_READY) {
+        /* ★ 预览已收起才解完的：什么都不做 —— 图留在槽里，等下次打开同一条目
+           时由 ViewToggle 收割。不做这个守卫的话，ViewFitOnce 会拿 g_viewImg
+           里**上一条**的旧图把已经关掉的窗口再摆出来。 */
+        if (!g_viewOpen) return 0;
+        /* 大图解好了：先收割（ViewPaint 里也会做，这里先收割才能按真实图
+           尺寸收缩窗口），再按原图调一次尺寸，最后重画。 */
+        g_viewFullPaint = TRUE;  /* 新图入座：整帧 */
+        ViewHarvest();
+        ViewFitOnce();
+        ViewPaint();
+        return 0;
+    }
     if (g_msgKey  && msg == g_msgKey) {
         if (!g_visible) return 0;   /* 已收起、销毁宽限期内：忽略残留按键 */
         int vk = (int)wp;
@@ -1699,6 +2803,9 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (vk == VK_DOWN)        { MoveSel(1); return 0; }
         if (vk == VK_PRIOR)       { MoveSel(-ROWS_VISIBLE); return 0; }
         if (vk == VK_NEXT)        { MoveSel(ROWS_VISIBLE); return 0; }
+        /* 空格 = 预览钉住 toggle。钩子只在预览开着时才转发（g_viewOpen 再判
+           一次：镜像报信到钩子生效之间有窗口期，防御残留转发）。 */
+        if (vk == VK_SPACE && g_viewOpen) { ViewPinToggle(); return 0; }
         if (vk >= '0' && vk <= '9') {
             int i = (vk == '0') ? 9 : (vk - '1');
             if (i < g_count) { g_sel = i; EnsureVisible(i); Render(); DoPaste(shift); }
@@ -1708,6 +2815,14 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     switch (msg) {
     case WM_TIMER:
+        if (wp == TID_RENDER) {
+            /* 列表帧合并：一个周期只画最新状态（滚轮/悬停/导航都已落定） */
+            KillTimer(g_hwnd, TID_RENDER);
+            g_renderPending = FALSE;
+            ListAnimStep();               /* 滚轮动画先走一步（没到位会再约帧） */
+            Render();
+            return 0;
+        }
         if (wp == TID_TIP)  { TipHide(); return 0; }   /* Ditto 的 ToolTipTimeout */
         if (wp == TID_TIPFADE) {
             /* 渐显/渐隐步进：每步重发一次 ULW，SourceConstantAlpha 当乘数 */
@@ -1769,8 +2884,9 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         float y = (float)(short)HIWORD(lp);
         int row = RowAt(y);
-        /* 只改选中，**不滚动** —— 悬停滚动会让窗口跟着光标跑 */
-        if (row >= 0 && row != g_sel) { g_sel = row; Render(); }
+        /* 只改选中，**不滚动** —— 悬停滚动会让窗口跟着光标跑。
+           重绘同样走帧合并：划过列表时 mousemove 一串过来，一帧就够。 */
+        if (row >= 0 && row != g_sel) { g_sel = row; RenderSoon(); }
         /* 悬停提示按 Ditto 的节奏分两段：
            · 没显示时：行变了就重计 500ms 延迟 —— 停稳才弹（TID_TIPSHOW），
              划过列表不会连珠炮地弹，NEEDTEXT 的回库查询也只有停稳那一次；
@@ -1845,15 +2961,26 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_count > 0) {
             int d = GET_WHEEL_DELTA_WPARAM(wp);
             /* 按像素滚：行高不一时按"几行"滚会跳，按像素才跟手。
-               一档 = 3 个单行高（系统默认也是三行） */
-            g_scrollY -= (d / WHEEL_DELTA) * (int)(g_rowH1 * 3.0f);
-            ClampScroll();
-            Render();
+               一档 = 3 个单行高（系统默认也是三行）。滚动量进**目标位**，
+               帧合并时钟逐帧趋近（ListAnimStep）—— 重绘走 RenderSoon 合并，
+               高速滚轮一秒几十个事件也不会每事件全量重画（低级钩子在本线程，
+               画满了全系统的光标都卡）。 */
+            int max = (int)(ContentH() - ViewH());
+            if (max < 0) max = 0;
+            if (max > 0) {
+                if (!g_listAnim) g_listTargetY = g_scrollY;
+                g_listTargetY -= (d / WHEEL_DELTA) * (int)(g_rowH1 * 3.0f);
+                if (g_listTargetY < 0)      g_listTargetY = 0;
+                if (g_listTargetY > max)    g_listTargetY = max;
+                g_listAnim = TRUE;
+                RenderSoon();
+            }
             TipHide();                    /* 行位全变了，旧提示已经指错行 */
         }
         return 0;
     }
     case WM_DESTROY:
+        ViewDestroy();
         TipDestroy();
         PostQuitMessage(0);
         return 0;
@@ -1874,23 +3001,71 @@ static void DpiAware(void) {
     if (q) q();
 }
 
-/* <DittoDir>\Ditto.db：数据库与 exe 同文件夹，DB 路径永远是派生值，不单独配置。 */
+/* 数据库路径。常态是 <DittoDir>\Ditto.db（库与 exe 同目录）；但 Ditto 的
+   DBPath3 可以把库指到别处，相对路径的实际落点还跟着它的启动目录走 ——
+   用户机器上就拆成了"程序在 rj\ditto、库在 Documents"两半。解析顺序：
+     1. <DittoDir>\Ditto.db（存在即用，绝大多数安装到这里就完了）
+     2. DBPath3 是绝对路径 -> 直用
+     3. DBPath3 是相对路径 -> 先 <DittoDir>\<rel>，再 <Documents>\<rel>
+        （Ditto 对相对 DBPath3 的实际落点就是它的启动目录，兜 Documents）
+     4. 最后试 <Documents>\Ditto.db（DBPath3 没配时的 Ditto 默认落点）
+   全部落空就留在 1 —— 浮层会显示"打不开数据库"，比瞎猜强。 */
 static void BuildDbPath(void) {
     if (!g_dirPath[0]) return;
     _snwprintf_s(g_dbPath, DITTO_DIR_MAX, _TRUNCATE, L"%s\\Ditto.db", g_dirPath);
+    if (GetFileAttributesW(g_dbPath) != INVALID_FILE_ATTRIBUTES) return;
+
+    WCHAR docs[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"USERPROFILE", docs, MAX_PATH);
+    BOOL haveDocs = (n > 0 && n < MAX_PATH);
+    if (haveDocs) wcscat_s(docs, MAX_PATH, L"\\Documents");
+
+    if (g_dbRel[0]) {
+        BOOL abs = (g_dbRel[0] == L'\\') || (g_dbRel[1] == L':' && g_dbRel[2] == L'\\');
+        if (abs) {
+            if (GetFileAttributesW(g_dbRel) != INVALID_FILE_ATTRIBUTES) {
+                wcscpy_s(g_dbPath, DITTO_DIR_MAX, g_dbRel);
+                return;
+            }
+        } else {
+            WCHAR cand[DITTO_DIR_MAX];
+            _snwprintf_s(cand, DITTO_DIR_MAX, _TRUNCATE, L"%s\\%s", g_dirPath, g_dbRel);
+            if (GetFileAttributesW(cand) != INVALID_FILE_ATTRIBUTES) {
+                wcscpy_s(g_dbPath, DITTO_DIR_MAX, cand);
+                return;
+            }
+            if (haveDocs) {
+                _snwprintf_s(cand, DITTO_DIR_MAX, _TRUNCATE, L"%s\\%s", docs, g_dbRel);
+                if (GetFileAttributesW(cand) != INVALID_FILE_ATTRIBUTES) {
+                    wcscpy_s(g_dbPath, DITTO_DIR_MAX, cand);
+                    return;
+                }
+            }
+        }
+    }
+    if (haveDocs) {
+        WCHAR cand[MAX_PATH];
+        _snwprintf_s(cand, MAX_PATH, _TRUNCATE, L"%s\\Ditto.db", docs);
+        if (GetFileAttributesW(cand) != INVALID_FILE_ATTRIBUTES)
+            wcscpy_s(g_dbPath, DITTO_DIR_MAX, cand);
+    }
 }
 
 /* ================= Ditto 的设置（便携版：<DittoDir>\Ditto.Settings） =================
    便携版 Ditto 把自己的设置写在这个文件里 —— **UTF-16 LE 带 BOM 的 INI**，
-   不是注册表。我们只读关心的四项，读不到就用 Ditto 自己的默认值：
+   不是注册表。我们只读关心的几项，读不到就用 Ditto 自己的默认值：
        DrawCopiedColorCode  1     色值条目画色块
        MaxToolTipCharacters 1000  悬停提示的字符上限
        MaxToolTipLines      30    悬停提示的行数上限
        ToolTipTimeout       -1    -1 = 默认 5 秒，0 = 不显示
+       DBPath3                    数据库不在程序目录时，按它兜底找库
    ★★ 这些键在用户的 Ditto.Settings 里通常**根本不存在**（Ditto 只在改过时才写），
       所以"读不到"是常态，不是失败 —— 别把它记成错误。
-   ★ 不把它们做成 CapsEnhance.ini 的配置项：开关应该只有一处（在 Ditto 里改），
-      两边各有一个开关、值还不一致，是最难排查的那类问题（也省掉"八处"改动）。 */
+   ★ 不把提示这些做成 CapsEnhance.ini 的配置项：开关应该只有一处（在 Ditto 里改），
+      两边各有一个开关、值还不一致，是最难排查的那类问题（也省掉"八处"改动）。
+   ★ 窗口大小**不再**读 Ditto（(分辨率)_QuickPasteCX/CY）：那套分档键跟着它的
+      分辨率历史走，跨机器/换屏的语义对不上，用户要的是"自己定"—— 尺寸现在是
+      CapsEnhance.ini 的 ClipW/ClipH（设置界面里可改）。 */
 /* 在一段 UTF-16 文本里按行找 key=value */
 static BOOL DsFindInt(const WCHAR* txt, size_t nch, const WCHAR* key, int* out) {
     size_t kl = wcslen(key);
@@ -1903,6 +3078,37 @@ static BOOL DsFindInt(const WCHAR* txt, size_t nch, const WCHAR* key, int* out) 
             size_t e = s + kl;
             while (e < j && (txt[e] == L' ' || txt[e] == L'\t')) e++;
             if (e < j && txt[e] == L'=') { *out = _wtoi(txt + e + 1); return TRUE; }
+        }
+        i = (j < nch) ? j + 1 : nch;
+    }
+    return FALSE;
+}
+
+/* 字符串版（DBPath3 用）：取 = 到行尾，去掉 \r 与尾随空白 */
+static BOOL DsFindString(const WCHAR* txt, size_t nch, const WCHAR* key, WCHAR* out, int cap) {
+    size_t kl = wcslen(key);
+    for (size_t i = 0; i < nch; ) {
+        size_t j = i;
+        while (j < nch && txt[j] != L'\n') j++;
+        size_t s = i;
+        while (s < j && (txt[s] == L' ' || txt[s] == L'\t' || txt[s] == L'\r')) s++;
+        if (s + kl < j && _wcsnicmp(txt + s, key, kl) == 0) {
+            size_t e = s + kl;
+            while (e < j && (txt[e] == L' ' || txt[e] == L'\t')) e++;
+            if (e < j && txt[e] == L'=') {
+                e++;
+                size_t vlen = j - e;
+                while (vlen > 0 && (txt[e + vlen - 1] == L'\r' ||
+                                    txt[e + vlen - 1] == L' ' || txt[e + vlen - 1] == L'\t')) vlen--;
+                if (vlen > 0) {
+                    int n = (int)vlen;
+                    if (n > cap - 1) n = cap - 1;
+                    memcpy(out, txt + e, (size_t)n * sizeof(WCHAR));
+                    out[n] = 0;
+                    return TRUE;
+                }
+                return FALSE;
+            }
         }
         i = (j < nch) ? j + 1 : nch;
     }
@@ -1931,6 +3137,7 @@ static void DsLoad(void) {
     if (DsFindInt(txt, nch, L"MaxToolTipCharacters", &v) && v > 0)  g_dc.tipChars = v;
     if (DsFindInt(txt, nch, L"MaxToolTipLines", &v) && v > 0)       g_dc.tipLines = v;
     if (DsFindInt(txt, nch, L"ToolTipTimeout", &v))                 g_dc.tipTimeoutMs = v;
+    DsFindString(txt, nch, L"DBPath3", g_dbRel, DITTO_DIR_MAX);
 }
 
 /* 手动双击（不带 --dir）时兜底读一次 ini：与 help/help.c 读 ImeCapsMode 同一个
@@ -2013,12 +3220,19 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     /* 自测起点：进程生命周期都从这里算，主程序日志里那两个 ms 就是它。 */
     ULONGLONG t0 = GetTickCount64();
     DWORD dbMs = 0;                  /* 读库那一段的耗时（见下面报信时才带上） */
+    /* ★ DPI 感知必须最先声明：下面 DsLoad 要用 GetSystemMetrics 取**物理**
+       分辨率拼 Ditto.Settings 的键名（(宽x高)_QuickPasteCX），在虚拟化坐标里
+       拼出来的键永远对不上（2560 宽的屏会拼成 1463）。原来它站在建窗前
+       就够了，现在读设置的代码跑得比建窗更早。 */
+    DpiAware();
     g_msgShow = RegisterWindowMessageW(CLIP_MSG_SHOW);
     g_msgHide = RegisterWindowMessageW(CLIP_MSG_HIDE);
     g_msgEsc  = RegisterWindowMessageW(CLIP_MSG_ESC);
     g_msgKey  = RegisterWindowMessageW(CLIP_MSG_KEY);
     g_msgClosed = RegisterWindowMessageW(CLIP_MSG_CLOSED);
     g_msgBorn = RegisterWindowMessageW(CLIP_MSG_BORN);
+    g_msgView = RegisterWindowMessageW(CLIP_MSG_VIEW);        /* 钩子代收的 F3 / 无关键 */
+    g_msgViewState = RegisterWindowMessageW(CLIP_MSG_VIEWSTATE); /* 反向报 open/pinned */
 
     if (cmdLine) {
         const WCHAR* p = wcsstr(cmdLine, L"--dir");
@@ -2029,6 +3243,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                 p++;
                 const WCHAR* e = wcschr(p, L'"');
                 size_t n = e ? (size_t)(e - p) : wcslen(p);
+                if (n >= DITTO_DIR_MAX) n = DITTO_DIR_MAX - 1;
+                wcsncpy_s(g_dirPath, DITTO_DIR_MAX, p, n);
+            } else {
+                /* 裸值（没带引号）：读到下一个 " --" 参数或串尾。主程序恒用
+                   引号传，但手动/脚本启动很容易忘 —— 静默忽略一个"看起来传了"
+                   的参数，比少支持一种写法糟糕得多（实测踩过）。 */
+                const WCHAR* e = wcsstr(p, L" --");
+                size_t n = e ? (size_t)(e - p) : wcslen(p);
+                while (n > 0 && (p[n - 1] == L' ' || p[n - 1] == L'\t' || p[n - 1] == L'\r')) n--;
                 if (n >= DITTO_DIR_MAX) n = DITTO_DIR_MAX - 1;
                 wcsncpy_s(g_dirPath, DITTO_DIR_MAX, p, n);
             }
@@ -2071,8 +3294,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     }
     LoadIniFallback();      /* 命令行没给的：DittoDir / 字体 / 窗口尺寸 */
 
+    DsLoad();                       /* Ditto.Settings：读不到就全用 Ditto 的默认值。
+                                       ★ 必须在 BuildDbPath 之前 —— 库不在程序目录时，
+                                       数据库路径要从它里面的 DBPath3 兜底解析。 */
     BuildDbPath();
-    DsLoad();                       /* Ditto.Settings：读不到就全用 Ditto 的默认值 */
     /* "转 Ditto 本体"按钮只在 Ditto.exe 真的存在时才画/才响应 —— 靠猜的
        按钮点了没反应是最差的那种 UI。检测一次就够：一次会话里目录不会变。 */
     {
@@ -2087,16 +3312,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         return 0;
     }
 
-    DpiAware();
+    /* DpiAware 已在入口最先调用（DsLoad 的物理分辨率依赖它）——这里不再调 */
     Gdiplus::GdiplusStartupInput gsi;
     ULONG_PTR token = 0;
     if (Gdiplus::GdiplusStartup(&token, &gsi, NULL) != Gdiplus::Ok) return 1;
 
-    memset(g_thumb, 0, sizeof(g_thumb));
-    /* ★ 临界区必须在第一次 DbLoadItems 之前初始化：DbLoadItems 重载条目后
-       会按需 FreeThumbs()（进去就 EnterCriticalSection），而启动路径的
-       DbLoadItems 就在这一行 —— 初始化放后面就是"未初始化临界区"，
-       进程起来即崩（实测踩过：浮层完全不显示）。 */
+    /* ★ 临界区必须在第一次 DbLoadItems 之前初始化：渲染与解码线程都要进它，
+       而启动路径的 DbLoadItems 就在下面几行 —— 初始化放后面就是"未初始化
+       临界区"，进程起来即崩（实测踩过：浮层完全不显示）。 */
     InitializeCriticalSection(&g_thumbLock);
     /* 唤醒事件也要在第一次 DbLoadItems 之前建好：那次加载 oldCount=0 必判
        "条目集变了"，会在里面 SetEvent —— 第一轮解码的开工信号就来自它。 */

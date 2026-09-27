@@ -87,14 +87,16 @@ void CfgSetStr(int id, const WCHAR* v);   /* NULL = 清空；过长按缓冲截�
 #define CLIP_FONT_SIZE_MAX     72
 /* 快速粘贴窗口的大小：单位是 **96 DPI 下的像素**（与窗口里其它尺寸同一套
    记法），实际像素 = 值 × 显示器 DPI/96 —— 存"当前显示器上看到的像素"会让
-   同一份配置换个屏就变成另一个尺寸。
-   默认高 374 = 标题栏 34 + 10 行 × 34（原先行数与行高都写死在浮层里，
-   现在行数由高度间接决定：改字号不改行高，所以这两个数仍然对得上）。 */
-#define CLIP_W_DEFAULT 560
-#define CLIP_W_MIN     320
+   同一份配置换个屏就变成另一个尺寸。设置界面里直接可改（剪贴板段）。
+   默认 220x300 是按"与 Ditto 的快速粘贴窗口观感相近"取的（在 175% 缩放的
+   屏幕上约为 385x525 物理像素）；嫌大嫌小都在设置里改。 */
+#define CLIP_W_DEFAULT 220
+#define CLIP_W_FALLBACK 220
+#define CLIP_W_MIN     160
 #define CLIP_W_MAX     1600
-#define CLIP_H_DEFAULT 374
-#define CLIP_H_MIN     120
+#define CLIP_H_DEFAULT 300
+#define CLIP_H_FALLBACK 300
+#define CLIP_H_MIN     140
 #define CLIP_H_MAX     1600
 #define CLIP_CLICK_PASTE_DEFAULT 1  /* 单击条目直接上屏（默认开） */
 /* 单键切换输入法：key 为 IME_KEY_*，返回 IME_MODE_*（0=不处理 1=中文 2=英文） */

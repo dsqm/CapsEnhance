@@ -21,6 +21,8 @@
 #define WM_CLIP_KEY      (WM_APP + 16) /* 钩子 -> 主线程：浮层打开期间的导航键（wParam=vk，lParam=CLIPKF_*） */
 #define WM_CLIP_DITTO    (WM_APP + 17) /* 钩子 -> 主线程：浮层开着时单击了 Caps -> 转 Ditto 本体（见 ClipCallDitto） */
 #define WM_CLIP_GONE     (WM_APP + 18) /* 子进程死亡通知（实现在 src/child.c）-> 主线程：清 s_want、恢复按键放行 */
+#define WM_CLIP_VIEW     (WM_APP + 19) /* 钩子 -> 主线程：浮层打开期间的裸 F3（wParam=1 toggle 图片预览）
+                                        或"用户按了别的键"（wParam=0 让预览退场）。见 src/clip.c 的 ClipViewToggle */
 #define CLIPKF_SHIFT     0x1           /* 那一刻 Shift 按着（= 纯文本粘贴） */
 #define CLIPKF_ALT       0x2           /* 那一刻 Alt 按着（Alt+数字 才拦，见 hook.c） */
 #define WM_FOLDER_OPEN (WM_APP + 14) /* 打开所在文件夹**失败**：wParam=FOLDER_ERR_*（一次性线程 -> 主线程弹气泡）。

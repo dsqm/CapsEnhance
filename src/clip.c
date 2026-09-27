@@ -67,12 +67,20 @@ static UINT  s_msgEsc  = 0;
 static UINT  s_msgKey  = 0;
 static UINT  s_msgClosed = 0;
 static UINT  s_msgBorn = 0;
+static UINT  s_msgView = 0;       /* 主 -> 浮层：预览 toggle / 退场 */
+static UINT  s_msgViewState = 0;  /* 浮层 -> 主：预览状态报信 */
 static BOOL  s_want    = FALSE;   /* 期望：可见？ */
 static int   s_delivered = 0;     /* 已送达：-1 未知 / 0 已隐 / 1 已显 */
 static BOOL  s_spawned = FALSE;   /* 本轮是否已经 CreateProcess 过 */
 static ULONGLONG s_spawnMs = 0;   /* 本轮拉起的时间点（0 = 这一轮没有拉起，复用驻留那份） */
 static ChildWatch s_watch;        /* 浮层进程的死亡通知（见 ClipGone） */
 static int   s_ticks   = 0;
+/* 图片预览窗的两份镜像（浮层随 CLIP_MSG_VIEWSTATE 报上来）。钩子在主线程上
+   读它们决定"空格拦不拦、无关键要不要叫预览退场"；与消息处理同线程串行
+   （cap_core.h 的分界说明），不需要同步原语。浮层关闭/进程死亡时一并清掉
+   —— 预览依附于列表，列表没了它必然也没了。 */
+static BOOL  s_viewOpen = FALSE;
+static BOOL  s_viewPinned = FALSE;
 
 static void EnsureMsgs(void) {
     if (!s_msgShow) s_msgShow = RegisterWindowMessageW(CLIP_MSG_SHOW);
@@ -81,10 +89,46 @@ static void EnsureMsgs(void) {
     if (!s_msgKey)  s_msgKey  = RegisterWindowMessageW(CLIP_MSG_KEY);
     if (!s_msgClosed) s_msgClosed = RegisterWindowMessageW(CLIP_MSG_CLOSED);
     if (!s_msgBorn) s_msgBorn = RegisterWindowMessageW(CLIP_MSG_BORN);
+    if (!s_msgView) s_msgView = RegisterWindowMessageW(CLIP_MSG_VIEW);
+    if (!s_msgViewState) s_msgViewState = RegisterWindowMessageW(CLIP_MSG_VIEWSTATE);
 }
 
 BOOL ClipIsOpen(void) {
     return s_want;
+}
+
+/* ---------- 图片预览（裸 F3）----------
+   浮层开着时钩子替它收裸 F3（g_cMod 按着时例外 —— caps+F3 仍是打开所在
+   文件夹，走和弦）。F3 只是"把 toggle 这件事转达给浮层"：当前条目是不是
+   图片、开了还是关了，只有浮层自己知道，主程序不越权判断。 */
+void ClipViewToggle(void) {
+    EnsureMsgs();
+    HWND w = FindWindowW(CLIP_CLASS, NULL);
+    if (w && s_msgView) PostMessageW(w, s_msgView, 1, 0);
+}
+
+/* 用户按了别的键（钩子判定"别的"，修饰键除外）：预览退场。钉住中忽略 ——
+   钉住的全部意义就是"别自动关我"。不吞键：这颗键该怎么走还怎么走。 */
+void ClipViewHide(void) {
+    if (!s_viewOpen || s_viewPinned) return;
+    EnsureMsgs();
+    HWND w = FindWindowW(CLIP_CLASS, NULL);
+    if (w && s_msgView) PostMessageW(w, s_msgView, 0, 0);
+    s_viewOpen = FALSE;   /* 浮层的 VIEWSTATE(0) 也会来，幂等 */
+}
+
+BOOL ClipViewIsOpen(void) {
+    return s_viewOpen;
+}
+
+BOOL ClipViewIsStateMsg(UINT msg) {
+    EnsureMsgs();
+    return s_msgViewState && msg == s_msgViewState;
+}
+
+void ClipViewState(int open, int pinned) {
+    s_viewOpen   = (open != 0);
+    s_viewPinned = (pinned != 0);
 }
 
 static void StopTick(void) {
@@ -193,6 +237,31 @@ static void Kick(void) {
     ClipTick();
 }
 
+/* ---------- 预热：主程序启动后把浮层进程先拉起来 ----------
+   驻留策略已经把"第二次起"的冷启动消掉了，剩下的是**每一次主程序启动之后的
+   第一次** Caps+V：进程拉起 + 杀软扫描 + 装载 sqlite3mc + 起 GDI+，全在用户
+   干等的那一下。预热把这笔账挪到启动后 3 秒（main.c 的 CLIP_PREWARM_TIMER）
+   —— 那时用户还没按 V，慢就慢了。
+   流程与正常拉起完全同源（SpawnClip -> 报信 -> Deliver），差别只在期望值：
+   s_want 仍是 FALSE，所以报信落到 Deliver 的 HIDE 分支 —— 浮层出生、读完库、
+   收到 HIDE、继续驻留。第一次 Caps+V 时窗口已存在，纯 SHOW。
+   起失败不重试也不提示：ClipShow 每次都会复位 s_spawned，正常路径本来就会
+   再拉一次；预热只是把大概率成功的第一次提前，失败就当没这回事。 */
+void ClipPrewarm(void) {
+    EnsureMsgs();
+    if (FindWindowW(CLIP_CLASS, NULL)) return;   /* 已经在（驻留/手动开过） */
+    const WCHAR* dd = CfgStr(CFG_DITTO_DIR);
+    if (!dd || !dd[0]) return;                   /* 没配 Ditto：拉起来也只能显示"未配置" */
+    s_spawned = TRUE;
+    if (SpawnClip()) {
+        s_spawnMs = GetTickCount64();
+        if (g_recording.load())
+            CapLog("  [剪贴板] 已预热浮层进程");
+    } else {
+        s_spawned = FALSE;
+    }
+}
+
 void ClipShow(void) {
     EnsureMsgs();
     if (s_want) {
@@ -227,10 +296,16 @@ void ClipHide(void) {
 
 /* 钩子代收的 Esc：转发给浮层。为什么不直接"主程序自己把 s_want 置假"就算完 ——
    浮层那边还有"置顶/钉住"状态与它自己的退出定时器，让它自己收到关闭指令才能
-   把那些状态一并收干净；这里是同一条指令的两个副本（一个给浮层、一个记账）。 */
+   把那些状态一并收干净；这里是同一条指令的两个副本（一个给浮层、一个记账）。
+   ★ 预览窗开着时 Esc 只关预览（Ditto 同款：一层一层退）—— 第二下才轮到列表。 */
 void ClipEsc(void) {
     EnsureMsgs();
     HWND w = FindWindowW(CLIP_CLASS, NULL);
+    if (s_viewOpen) {
+        if (w && s_msgView) PostMessageW(w, s_msgView, 0, 0);
+        s_viewOpen = FALSE;
+        return;
+    }
     if (w && s_msgEsc) PostMessageW(w, s_msgEsc, 0, 0);
     if (s_want) ClipHide();
 }
@@ -240,6 +315,7 @@ void ClipEsc(void) {
    WM_CLIP_KEY 进隐藏浮层（= 再粘一次），窗口销毁后按键凭空消失
    （= 回车永远发不出去）。 */
 void ClipClosed(void) {
+    s_viewOpen = FALSE;   /* 预览依附于列表：列表收起它必然跟着没了 */
     if (!s_want) return;
     s_want = FALSE;
     if (g_recording.load())
@@ -263,6 +339,7 @@ void ClipGone(void) {
     /* 进程没了就没有再等的道理 —— 死亡通知常比报信/轮询先到（子进程可能连窗口
        都没建起来就退了），不多此一举的话就得干等到 10 秒预算。 */
     StopTick();
+    s_viewOpen = FALSE;              /* 同上：预览随进程一起没了 */
     if (!s_want) return;
     s_want      = FALSE;
     s_delivered = 0;
@@ -386,7 +463,9 @@ static void Deliver(HWND w, DWORD selfMs, DWORD dbMs) {
     if (pid) ChildWatchPid(&s_watch, pid, g_mainWnd, WM_CLIP_GONE);
 
     if (g_recording.load()) {
-        if (selfMs)
+        if (!s_want)
+            CapLog("  [剪贴板] 浮层就绪（预热完毕，隐藏驻留）");
+        else if (selfMs)
             CapLog("  [剪贴板] 已显示（浮层自报启动 %ums、其中读库 %ums；自拉起计 %llums）",
                    selfMs, dbMs, (unsigned long long)(GetTickCount64() - s_spawnMs));
         else

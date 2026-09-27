@@ -352,6 +352,54 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 else      SwallowTake(vk);
                 return 1;
             }
+            /* ---- 裸 F3 = 图片预览 toggle（仅浮层可见时）----
+               ★ 只在 Caps 没按着时拦：caps+F3 是"打开所在文件夹"（和弦触发键），
+               它的判定在下面的触发键分支 —— 这里抢先吞掉的话那个功能就死了
+               （代收段在触发键分支之前，顺序是天生的，只能自己让开）。
+               ★ ClipIsOpen 门同样是硬约束：浮层关着时一个字节都不碰，浏览器
+               查找 / IDE"查找下一个"照常。没有这扇门的实测后果：浮层藏起后
+               F3 还在 toggle 一个看不见的预览，前台应用反而收不到 F3 ——
+               表现就是"有些时候按 F3 没反应"。
+               ★ 系统自动重复只吞不转发。LL 钩子没有 repeat 标志（KBDLLHOOKSTRUCT
+               的 flags 里没有那一位），自动重复表现为"up 之前又来 down"——
+               恰好就是记账表能回答的问题：表里没有才记上并 toggle，repeat
+               只吞（否则按住 F3，预览开关闪个不停）。 */
+            if (!g_cMod && ClipIsOpen() && vk == VK_F3) {
+                if (down) {
+                    BOOL noted = FALSE;
+                    for (int i = 0; i < g_swallowN; i++)
+                        if (g_swallowVk[i] == vk) { noted = TRUE; break; }
+                    if (!noted) {
+                        SwallowNote(vk);
+                        PostMessageW(g_mainWnd, WM_CLIP_VIEW, 1, 0);
+                    }
+                } else {
+                    SwallowTake(vk);
+                }
+                return 1;
+            }
+            /* ---- 预览开着时空格 = 钉住 toggle ----
+               拦它必须真知道预览开着（ClipViewIsOpen 是主线程镜像，钩子与消息
+               处理同线程，读它就是一次内存读）—— 否则"浮层开着、预览没开"时
+               打字空格就丢了。toggle 的执行在浮层侧（WM_CLIP_KEY 里的 VK_SPACE）。 */
+            if (!g_cMod && ClipViewIsOpen() && vk == VK_SPACE) {
+                if (down) { SwallowNote(vk); PostMessageW(g_mainWnd, WM_CLIP_KEY, (WPARAM)VK_SPACE, 0); }
+                else      SwallowTake(vk);
+                return 1;
+            }
+            /* ---- 预览开着时按了无关键 = 用户已经回去干别的了 ----
+               预览退场。**只通知，不吞** —— 这颗键该怎么走还怎么走，预览从不
+               拥有键盘（Ditto 同款语义：预览开着时开始打字，预览自己消失）。
+               修饰键除外：Shift+回车 纯文本粘贴这类组合里修饰键先到，不能把
+               "正要粘贴"误判成"开始打字"。钉住中 ClipViewHide 会自己忽略。 */
+            if (down && ClipViewIsOpen()) {
+                static const int kViewMods[] = { VK_LSHIFT, VK_RSHIFT, VK_LCONTROL,
+                    VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN };
+                BOOL mod = FALSE;
+                for (int i = 0; i < (int)(sizeof(kViewMods) / sizeof(kViewMods[0])); i++)
+                    if (vk == kViewMods[i]) { mod = TRUE; break; }
+                if (!mod) PostMessageW(g_mainWnd, WM_CLIP_VIEW, 0, 0);
+            }
         }
 
         /* ---- "按任意键打断持续滚动"（2026-09-11 第二版） ----

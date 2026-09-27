@@ -72,6 +72,7 @@ void HelpTick(void);   /* HELP_TIMER 到点：把期望状态再送一次（见�
        `CLIP_TIMER` 轮询降为**兜底**，预算放宽到 10 秒，**到点不再杀进程**（见下面
        CLIP_TRIES_MAX 的注释）。 */
 #define CLIP_TIMER   6                    /* 主窗口定时器 id（4=帮助对账） */
+#define CLIP_PREWARM_TIMER 7              /* 主窗口定时器 id：启动后预热浮层进程（见 ClipPrewarm） */
 #define CLIP_TICK_MS  40                  /* 兜底轮询间隔（正常路径用不上，见 ClipBorn） */
 #define CLIP_TRIES_MAX 250                /* 40ms x 250 ≈ 10s：报信始终没来才判异常 */
 #define CLIP_CLASS   L"CapsEnhanceClip"   /* 剪贴板窗口类名（跨进程握手靠它 FindWindow） */
@@ -90,6 +91,17 @@ void HelpTick(void);   /* HELP_TIMER 到点：把期望状态再送一次（见�
 #define CLIP_MSG_ESC  L"CapsEnhanceClipEsc"   /* 注册消息：主程序代收的 Esc */
 #define CLIP_MSG_KEY  L"CapsEnhanceClipKey"   /* 注册消息：主程序代收的导航键（wParam=vk，lParam=CLIPKF_*） */
 #define CLIP_MSG_CLOSED L"CapsEnhanceClipClosed" /* 注册消息：浮层自行关闭（粘贴/Esc/超时收起）-> 主程序清 s_want */
+/* 浮层 -> 主程序：图片预览窗状态变了（注册消息）。wParam = 1 开 / 0 关，
+   lParam bit0 = 钉住中（空格开关）。主程序据此记两份镜像（s_viewOpen /
+   s_viewPinned），钩子在**主线程上**直接读 —— 两个低级钩子与消息处理同在
+   主线程串行（见 cap_core.h 的分界说明），这两份镜像不需要任何同步原语。
+   为什么必须让主程序知道：预览窗是 NOACTIVATE 的，键盘全部由钩子代收；
+   "预览开着时空格=钉住、按了别的键=预览退场"这两条规则只有钩子能执行，
+   它就得知道预览开没开、钉没钉。 */
+#define CLIP_MSG_VIEWSTATE L"CapsEnhanceClipViewState"
+/* 主程序 -> 浮层：wParam=1 切换图片预览（裸 F3，浮层自己判当前条目是不是
+   图片）；wParam=0 让预览退场（用户按了无关键）。 */
+#define CLIP_MSG_VIEW  L"CapsEnhanceClipView"
 /* 浮层 -> 主程序：我的窗口已经出生，可以说话了（注册消息）。
    wParam = 浮层自报的启动耗时 ms（进程入口 -> 建窗成功），lParam = 其中读库那一段的 ms。
    为什么要有这条：握手原来全靠主程序 40ms 一次 `FindWindow` 去**猜**它出生了没有 ——
@@ -99,12 +111,18 @@ void HelpTick(void);   /* HELP_TIMER 到点：把期望状态再送一次（见�
    或在没有任何人等待它时到达，都只是让主程序把账补齐，不会有副作用。 */
 #define CLIP_MSG_BORN L"CapsEnhanceClipBorn"
 #define CLIP_EXE     L"CapsEnhanceClip.exe"
+void ClipPrewarm(void); /* 主程序启动后把浮层进程先拉起来（隐藏驻留），首次 Caps+V 免冷启动 */
 void ClipShow(void);    /* Caps+V 按下：显示（已在显示则 toggle 成隐藏） */
 void ClipHide(void);    /* 明确关闭（Esc / toggle / 引擎复位） */
 void ClipTick(void);    /* CLIP_TIMER 到点：把期望状态再送一次（送达后开始盯它） */
 void ClipEsc(void);     /* WM_CLIP_ESC：钩子代收的 Esc -> 通知浮层关闭 */
 void ClipCallDitto(void); /* 单击 Caps（浮层开着时）/ 浮层按钮：关浮层并拉起 Ditto 本体 -open */
 void ClipKey(int vk, unsigned flags); /* WM_CLIP_KEY：钩子代收的导航键 -> 转给浮层 */
+void ClipViewToggle(void);  /* WM_CLIP_VIEW(1)：钩子代收的裸 F3 -> 转给浮层（浮层自己 toggle） */
+void ClipViewHide(void);    /* WM_CLIP_VIEW(0)：用户按了无关键 -> 让预览退场（钉住时忽略） */
+BOOL ClipViewIsOpen(void);  /* 预览窗当前开着吗（钩子据此拦空格/发退场通知；镜像值） */
+BOOL ClipViewIsStateMsg(UINT msg); /* 主窗口收到这条注册消息 = 预览窗状态变了 */
+void ClipViewState(int open, int pinned); /* 收到 CLIP_MSG_VIEWSTATE：更新镜像 */
 BOOL ClipIsOpen(void);  /* 浮层当前是否"该开着"（钩子据此决定要不要拦 Esc） */
 BOOL ClipIsClosedMsg(UINT msg); /* 主窗口收到这条注册消息 = 浮层自行关闭了 */
 void ClipClosed(void);  /* 收到 CLIP_MSG_CLOSED：清 s_want，恢复按键放行 */
