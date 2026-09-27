@@ -455,7 +455,12 @@ void ClipKey(int vk, unsigned flags) {
 static void Deliver(HWND w, DWORD selfMs, DWORD dbMs) {
     StopTick();
     s_delivered = s_want ? 1 : 0;
-    PostMessageW(w, s_want ? s_msgShow : s_msgHide, 0, 0);
+    /* ★ wParam 捎带记录状态：浮层的写回日志只在 caps+` 记录模式下写
+       （用户要求：平时零开销、不留文件）。浮层进程驻留复用、环境变量
+       在出生时就冻住了，靠每次显示时推一遍最省事 —— 记录在浮层开着
+       期间才开启的那次粘贴拿不到旗标（下次显示才更新），可接受。 */
+    PostMessageW(w, s_want ? s_msgShow : s_msgHide,
+                 (WPARAM)(g_recording.load() ? 1 : 0), 0);
 
     /* 送达成功 = 从现在起盯住它的进程：它一死（崩溃 / 被杀 / 被 job 收掉）
        就给主窗口发 WM_CLIP_GONE，钩子立刻恢复放行。

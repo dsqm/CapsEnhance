@@ -42,7 +42,8 @@ static HCURSOR MakeZoomCursor(BOOL plus);
 
    交互（按用户实测的 Ditto 行为对齐；第一版"滚轮缩放+拖图平移"是猜错的）：
      · 滚轮 = 上下滚动；Ctrl+滚轮 = 缩放（锚=窗口中心）；横向滚轮 = 左右滚动
-     · 横竖两条**标准滚动条**常驻（图不超窗时灰显）；没有拖图平移 —— Ditto 没有
+     · 横竖两条**自绘**滚动条按需出现（图装不下才预留边条画拇指，见
+       ViewFitOnce）；没有拖图平移 —— Ditto 没有
      · 双击图片 = 1:1 ↔ 适应窗口；标题栏可拖动挪窗、✕ 关闭、"复制"写回剪贴板
      · 空格钉住（钩子代收转发）：钉住后"无关键退场"停用，Esc/F3 照常
    窗口尺寸（Ditto 勾选项"根据内容调整窗口大小"+"缩放图像以适应窗口"）：
@@ -98,7 +99,10 @@ static BOOL      g_viewPaintPending = FALSE;/* 帧合并：有一帧待画 */
 static int  g_viewLastSX = 0, g_viewLastSY = 0;   /* 上一帧画到哪个滚动位 */
 static BOOL g_viewFullPaint = TRUE;               /* 下一帧必须整画（换图/缩放/首帧） */
 static int  g_viewTargetX = 0, g_viewTargetY = 0; /* 滚动动画的目标位 */
-static BOOL g_viewAnim = FALSE;                   /* 正在向目标滑 */
+static BOOL g_animX = FALSE, g_animY = FALSE;     /* 各轴动画进行中（横竖独立：
+   拖动只停自己那轴；若共用一个旗标，拖完横向再滚轮会把纵向动画启动成
+   "横竖两轴一起滑"，横向就向过期的旧目标滑回去 —— 实测即"横滚后再滚轮
+   回到最左"） */
 #define VIEW_ANCHOR_KEEP    0                 /* ViewSyncScroll：现位 clamp 进新范围 */
 #define VIEW_ANCHOR_CENTER  1                 /*   滚到内容中心（缩放锚 = 窗口中心） */
 #define VIEW_ANCHOR_TOP     2                 /*   回到顶/左（新内容从头看） */
@@ -108,10 +112,11 @@ static BOOL g_viewAnim = FALSE;                   /* 正在向目标滑 */
    的显示态是 **100% 原大、顶对齐、超窗走滚动条**（实测澄清："缩放图像以
    适应窗口"的真实语义是**窗口适应图像**，那件事由 ViewFitOnce 管，图像
    自己不缩）。g_viewScale < 0 是"适应窗口"显式模式（双击图片切换）：
-   图像缩进客户区，基于客户区算（常驻滚动条已扣除），小图不放大（放大糊）。 */
+   图像缩进客户区，基于客户区算（滚动条边条已扣除），小图不放大（放大糊）。 */
 /* ---- 自绘滚动条（替换系统 SCROLLBAR 控件）----
    系统滚动条带箭头、体量笨重（用户嫌丑），改成细条 + 圆角拇指的现代画法：
-   无箭头，轨道即所在背景，拇指 #B8B8B8（悬停 #999、拖动 #7F7F7F）。
+   无箭头无轨道，只有半透明灰拇指（常态 alpha 120、悬停 160、拖动 210，
+   颜色随状态加深），图不超窗时完全不画、边条也不预留（按需出现）。
    位置：垂直条 = 标题栏以下的一条右缘窄带；水平条 = 底部一整条窄带；
    右下角交叉处留空。滚动位/范围是自己的状态（不再有 SetScrollInfo）。 */
 static int  g_vPos = 0, g_vMax = 0, g_vPage = 1;   /* 垂直：现位 / 可滚上限 / 视口高 */
@@ -354,8 +359,8 @@ static void ViewHarvest(void) {
 }
 
 /* ---- 滚动条与帧合并 ----
-   平移状态全部住在滚动条里（GetScrollInfo 即取即用，没有第二份要同步的
-   变量）：图不超窗时滚动条置灰；超出后滚动条接管平移。 */
+   平移状态就是 g_vPos/g_hPos 那一组变量（自绘滚动条没有 SetScrollInfo 可
+   存）：图不超窗（max=0）时没有边条也没有拇指；超出后滚动接管平移。 */
 
 
 /* 按"待画一帧"合并高频重绘来源（mousemove / 滚轮 / 滚动条拖动）。本进程
@@ -395,17 +400,23 @@ static BOOL ScrollPaintStrip(int dx, int dy) {
     RECT up;
     if (dy != 0) {
         if (dy >= rowsN || -dy >= rowsN) return FALSE;          /* 搬不动/搬满：整帧 */
+        /* ★ 竖向也**逐行**搬，且每行只搬内容区前 cw2 像素（整行大 memmove
+           会把右侧滚动条边条的旧拇指/旧像素一起搬着游走 = "拖影"）。边条
+           列留在原地，由下面的边条重刷统一洗净。 */
         if (dy > 0) {
             /* 往下滚：内容上移 dy 行，底部露出 dy 行（内容底边框行原地不动） */
-            memmove(base + (size_t)top * stride,
-                    base + (size_t)(top + dy) * stride,
-                    (size_t)(rowsN - dy) * stride);
+            for (int y = top; y < bot2 - dy; y++)
+                memmove(base + (size_t)y * stride,
+                        base + (size_t)(y + dy) * stride,
+                        (size_t)cw2 * 4);
             up.left = 0;  up.right = cw2;  up.top = bot2 - dy;  up.bottom = bot2;
         } else {
-            int n = -dy;   /* 往上滚：内容下移 n 行，顶部露出 n 行 */
-            memmove(base + (size_t)(top + n) * stride,
-                    base + (size_t)top * stride,
-                    (size_t)(rowsN - n) * stride);
+            int n = -dy;   /* 往上滚：内容下移 n 行，顶部露出 n 行（倒序搬，
+                              先写低行会覆掉还没读的高行） */
+            for (int y = bot2 - 1; y >= top + n; y--)
+                memmove(base + (size_t)y * stride,
+                        base + (size_t)(y - n) * stride,
+                        (size_t)cw2 * 4);
             up.left = 0;  up.right = cw2;  up.top = top;  up.bottom = top + n;
         }
     } else {
@@ -468,14 +479,26 @@ static BOOL ScrollPaintStrip(int dx, int dy) {
                         (vx1 - vx0) / eff, (vy1 - vy0) / eff, Gdiplus::UnitPixel);
         }
     }
-    /* 条带盖掉的内容边框补回来（左列 / 内容右缘列；底边框行不搬不用补），
-       再画两条滚动条（thumb 跟随新滚动位）。 */
-    if (up.left == 0)
-        g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, (float)up.top, 1.0f,
-                                                  (float)(up.bottom - up.top)));
-    if (up.right == cw2)
-        g.FillRectangle(&brBorder, Gdiplus::RectF((float)(cw2 - 1), (float)up.top,
-                                                  1.0f, (float)(up.bottom - up.top)));
+    /* 条带盖掉的内容边框补回来（左列 / 内容右缘列；底边框行不搬不用补）。
+       与整帧同一守卫：无边条时不补（整帧也没画，补了就是条带帧独有的线）。 */
+    if (g_barW > 0 || g_barH > 0) {
+        if (up.left == 0)
+            g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, (float)up.top, 1.0f,
+                                                      (float)(up.bottom - up.top)));
+        if (up.right == cw2)
+            g.FillRectangle(&brBorder, Gdiplus::RectF((float)(cw2 - 1), (float)up.top,
+                                                      1.0f, (float)(up.bottom - up.top)));
+    }
+    /* ★ 两条边条整条洗净再画：条带搬移与补画都不碰边条（列/行在搬动区域
+       外），上一帧的拇指像素会一直留在上面 —— 不洗就是一串不动的"拖影"，
+       横条区域也像冻住不跟滚（实测）。洗成净底后当前拇指是唯一在动的。 */
+    if (g_barW > 0)
+        g.FillRectangle(&brGut, Gdiplus::RectF((float)cw2, (float)top,
+                                               (float)(rc.right - cw2),
+                                               (float)(rc.bottom - top)));
+    if (g_barH > 0)
+        g.FillRectangle(&brGut, Gdiplus::RectF(0.0f, (float)(rc.bottom - g_barH),
+                                               (float)cw2, (float)g_barH));
     ViewDrawBars(&g);
     g.Flush(Gdiplus::FlushIntentionSync);
     ThumbUpdateVisRange();           /* 滚动改了可见范围：解码线程按需补图 */
@@ -492,12 +515,17 @@ static BOOL ScrollPaintStrip(int dx, int dy) {
    态）；KEEP = 现位 clamp 进新范围（窗口尺寸变化时用）。 */
 static void ViewSyncScroll(int anchor) {
     if (!g_view || !g_viewImg) return;
-    g_viewAnim = FALSE;   /* 范围要变（缩放/换图/适应）：动画目标作废，别跟新范围打架 */
+    g_animX = FALSE;  g_animY = FALSE;   /* 范围要变（缩放/换图/适应）：动画目标作废，别跟新范围打架 */
     UINT iw = g_viewImg->GetWidth(), ih = g_viewImg->GetHeight();
     RECT rc;
     if (!iw || !ih || !GetClientRect(g_view, &rc)) return;
     float eff = ViewEffScale();
-    int cw = rc.right, ch = rc.bottom - (int)g_headerH;
+    /* 视口 = 客户区**去掉滚动条边条**（边条按需预留，见 ViewFitOnce）。
+       不减的话可滚范围比真实溢出多出一条边条宽，能滚过图片尽头 —— 尽头
+       外露的就是灰底。 */
+    int cw = rc.right - g_barW, ch = rc.bottom - (int)g_headerH - g_barH;
+    if (cw < 1) cw = 1;
+    if (ch < 1) ch = 1;
     int hmax = ((float)iw * eff > (float)cw) ? (int)((float)iw * eff - cw + 0.5f) : 0;
     int vmax = ((float)ih * eff > (float)ch) ? (int)((float)ih * eff - ch + 0.5f) : 0;
     SCROLLINFO si;
@@ -524,27 +552,35 @@ static void ViewScrollBy(int bar, int steps) {
     int posmax = (bar == SB_VERT) ? g_vMax : g_hMax;
     if (posmax <= 0) return;                       /* 内容没超窗：没得滚 */
     int *target = (bar == SB_VERT) ? &g_viewTargetY : &g_viewTargetX;
-    if (!g_viewAnim)   /* 动画没在跑：目标从当前位置起算（上次的目标已过时） */
+    BOOL *anim  = (bar == SB_VERT) ? &g_animY : &g_animX;
+    if (!*anim)   /* 该轴动画没在跑：目标从当前位置起算（上次的目标已过时） */
         *target = ViewScrollPos(bar);
     *target += steps * VIEW_SCROLL_STEP;
     if (*target < 0)      *target = 0;
     if (*target > posmax) *target = posmax;
-    g_viewAnim = TRUE;
+    *anim = TRUE;
     ViewPaintSoon();
 }
 
 /* 帧合并时钟里走一步：向目标位趋近 40%（指数缓动，差 2px 内算到位）。
    没到位就自己再约一帧 —— WM_TIMER 只在队列空时派发，连滚时也不会饿着。 */
 static void ViewAnimStep(void) {
-    if (!g_viewAnim || !g_view) return;
+    if (!g_view || (!g_animX && !g_animY)) return;
     int px = ViewScrollPos(SB_HORZ), py = ViewScrollPos(SB_VERT);
-    int nx = px + (g_viewTargetX - px) * 2 / 5;
-    int ny = py + (g_viewTargetY - py) * 2 / 5;
-    if (g_viewTargetX - nx < 2 && nx - g_viewTargetX < 2) nx = g_viewTargetX;
-    if (g_viewTargetY - ny < 2 && ny - g_viewTargetY < 2) ny = g_viewTargetY;
-    if (nx == px && ny == py) { g_viewAnim = FALSE; return; }
+    int nx = px, ny = py;
+    if (g_animX) {
+        nx = px + (g_viewTargetX - px) * 2 / 5;
+        if (g_viewTargetX - nx < 2 && nx - g_viewTargetX < 2) nx = g_viewTargetX;
+        if (nx == px) g_animX = FALSE;
+    }
+    if (g_animY) {
+        ny = py + (g_viewTargetY - py) * 2 / 5;
+        if (g_viewTargetY - ny < 2 && ny - g_viewTargetY < 2) ny = g_viewTargetY;
+        if (ny == py) g_animY = FALSE;
+    }
+    if (nx == px && ny == py) return;
     g_hPos = nx;  g_vPos = ny;
-    if (nx != g_viewTargetX || ny != g_viewTargetY)
+    if (g_animX || g_animY)
         ViewPaintSoon();               /* 还没到：下一帧继续 */
 }
 
@@ -603,11 +639,15 @@ static void ViewPaint(void) {
         float dy = g_headerH - (float)ViewScrollPos(SB_VERT);
         /* 只采样**可见**部分：反算内容区与图面交集对应的源矩形，每帧的
            采样量只跟窗口大小走，与图像尺寸和缩放比无关（4 倍放大时是
-           全图采样的 1/16）。交集反算天然保证源矩形在图内。 */
+           全图采样的 1/16）。交集反算天然保证源矩形在图内。
+           ★ 可见范围裁到**内容区**为止（右/下让出滚动条边条）：图溢进
+             边条的话，条带路径不搬不补那两块，溢进去的像素会冻在旧滚动
+             位 —— 看起来就是"边条里的图不跟着滚"（实测）。 */
+        float cwv = cw - (float)g_barW, rcv = (float)rc.bottom - (float)g_barH;
         float vx0 = (dx > 0.0f) ? dx : 0.0f;
         float vy0 = (dy > g_headerH) ? dy : g_headerH;
-        float vx1 = (dx + dw < cw) ? (dx + dw) : cw;
-        float vy1 = (dy + dh < (float)rc.bottom) ? (dy + dh) : (float)rc.bottom;
+        float vx1 = (dx + dw < cwv) ? (dx + dw) : cwv;
+        float vy1 = (dy + dh < rcv) ? (dy + dh) : rcv;
         if (vx0 < vx1 && vy0 < vy1) {
             float sx = (vx0 - dx) / eff, sy = (vy0 - dy) / eff;
             float sw = (vx1 - vx0) / eff, sh = (vy1 - vy0) / eff;
@@ -618,11 +658,19 @@ static void ViewPaint(void) {
     }
 
     /* 边框最后画：压住可能溢出的图片。右/下边框画在**内容区**内缘
-       （滚动条边条画在它们外侧的自绘条上）。四条边都是整数 1px 填充。 */
-    g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, 0.0f, cw, 1.0f));
-    g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, (float)(rc.bottom - g_barH - 1), cw - (float)g_barW, 1.0f));
-    g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, 0.0f, 1.0f, (float)(rc.bottom - g_barH)));
-    g.FillRectangle(&brBorder, Gdiplus::RectF(cw - (float)g_barW - 1.0f, 0.0f, 1.0f, (float)(rc.bottom - g_barH)));
+       （滚动条边条画在它们外侧的自绘条上）。四条边都是整数 1px 填充。
+       ★ 图装得下（无边条）时一条都不画：图贴着窗缘本身就是干净的，
+        外框反而是"给内容加框"（实测嫌丑）。
+       ★ 左右两条**从标题栏下缘起**：标题栏（✕ 那行）两侧不竖线 —— 线
+        贴着 ✕ 很难看（实测），左右框只为圈住图片区。 */
+    if (g_barW > 0 || g_barH > 0) {
+        g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, 0.0f, cw, 1.0f));
+        g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, (float)(rc.bottom - g_barH - 1), cw - (float)g_barW, 1.0f));
+        g.FillRectangle(&brBorder, Gdiplus::RectF(0.0f, (float)g_headerH, 1.0f,
+                                                  (float)(rc.bottom - g_barH) - (float)g_headerH));
+        g.FillRectangle(&brBorder, Gdiplus::RectF(cw - (float)g_barW - 1.0f, (float)g_headerH, 1.0f,
+                                                  (float)(rc.bottom - g_barH) - (float)g_headerH));
+    }
     ViewDrawBars(&g);                /* 自绘滚动条（thumb 跟随滚动位） */
     g.Flush(Gdiplus::FlushIntentionSync);
 
@@ -689,7 +737,7 @@ void ViewHide(void) {
        ViewDestroy。 */
     g_viewLastSX = 0;  g_viewLastSY = 0;
     g_viewFullPaint = TRUE;
-    g_viewAnim = FALSE;
+    g_animX = FALSE;  g_animY = FALSE;
     if (g_view && IsWindowVisible(g_view)) ShowWindow(g_view, SW_HIDE);
     g_viewOpen = FALSE;
     ViewNotifyState();
@@ -791,7 +839,7 @@ static LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                      ? (int)((float)(y - v.top - 2) * g_vMax / (trackH - thumbH) + 0.5f) : 0;
             if (npos < 0) npos = 0;
             if (npos > g_vMax) npos = g_vMax;
-            if (npos != g_vPos) { g_vPos = npos; g_viewAnim = FALSE; ViewPaintSoon(); }
+            if (npos != g_vPos) { g_vPos = npos; g_animY = FALSE; ViewPaintSoon(); }
             return 0;
         }
         if (g_hDrag) {
@@ -805,7 +853,7 @@ static LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                      ? (int)((float)(x - h.left - 2) * g_hMax / (trackW - thumbW) + 0.5f) : 0;
             if (npos < 0) npos = 0;
             if (npos > g_hMax) npos = g_hMax;
-            if (npos != g_hPos) { g_hPos = npos; g_viewAnim = FALSE; ViewPaintSoon(); }
+            if (npos != g_hPos) { g_hPos = npos; g_animX = FALSE; ViewPaintSoon(); }
             return 0;
         }
         {
@@ -856,7 +904,7 @@ static LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_vPos += (pt.y < th.top) ? -page : page;
                 if (g_vPos < 0) g_vPos = 0;
                 if (g_vPos > g_vMax) g_vPos = g_vMax;
-                g_viewAnim = FALSE;
+                g_animY = FALSE;
                 RECT t2; ViewThumbRectV(&t2);
                 g_vDrag = TRUE;
                 g_vDragGrab = pt.y - t2.top;
@@ -875,7 +923,7 @@ static LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_hPos += (pt.x < th.left) ? -page : page;
                 if (g_hPos < 0) g_hPos = 0;
                 if (g_hPos > g_hMax) g_hPos = g_hMax;
-                g_viewAnim = FALSE;
+                g_animX = FALSE;
                 RECT t2; ViewThumbRectH(&t2);
                 g_hDrag = TRUE;
                 g_hDragGrab = pt.x - t2.left;

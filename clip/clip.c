@@ -44,6 +44,7 @@
 #pragma warning(pop)
 
 #include <stdio.h>
+#include <stdarg.h>     /* ClipLog 的可变参 */
 #include <string.h>
 #include <wchar.h>
 #include <stdlib.h>
@@ -716,6 +717,71 @@ static void TipTextOf(int idx) {
 
 /* ================= 粘贴 ================= */
 
+/* ---- 浮层自己的日志 ----
+   粘贴的**写回**发生在浮层进程里，主程序的会话日志看不见 —— "大图片粘不
+   上"这类失败此前完全是盲区（会话日志里只有注入序列，写回成败无痕）。
+   ★ 只在 caps+` 记录模式下才写（主程序随 g_msgShow 推旗标，见 ClipProc）：
+     平时零文件 I/O、也不生成文件。写进 exe 同目录 log\CapsEnhanceClip.log：
+     独立常驻，不跟主程序的会话轮换（浮层进程驻留复用，生命周期对不上任何
+     一个会话），格式与主日志同款（行首 HH:MM:SS.mmm，文本 UTF-8），前缀
+     [浮层] 便于混在一起翻。
+   开-写-关，与主程序 CapLog 同一条纪律：不留常驻句柄 —— 文件共享规则下
+   留着句柄会让 Get-Content 一类的读者打不开它（见 src/main.c 的注释）。 */
+static BOOL g_logOn = FALSE;    /* 主程序推来的记录态（随 g_msgShow 刷新） */
+static void ClipLog(const char* fmt, ...) {
+    if (!g_logOn) return;       /* 不在记录模式：一行都不写、一次盘都不碰 */
+    WCHAR exe[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+    WCHAR* slash = NULL;
+    for (DWORD i = 0; i < n; i++) if (exe[i] == L'\\') slash = &exe[i];
+    if (slash) *slash = 0;
+    wcscpy_s(dir, MAX_PATH, exe);
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\log", dir);
+    if (!CreateDirectoryW(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        wcscpy_s(path, MAX_PATH, dir);          /* 目录建不出来：退 exe 目录 */
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\CapsEnhanceClip.log", path);
+
+    /* 体量自管：超 512KB 砍掉前一半（主程序 log_rotate 同思路，这里没有
+       LogMaxKB 配置可调，写死即可 —— 纯诊断日志，丢老内容无所谓）。 */
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (GetFileAttributesExW(path, GetFileExInfoStandard, &fad)) {
+        LONGLONG sz = ((LONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+        if (sz > 512 * 1024) {
+            FILE* r = NULL;
+            if (_wfopen_s(&r, path, L"rb") == 0 && r) {
+                fseek(r, 0, SEEK_END);
+                long len = ftell(r), keep = len / 2;
+                fseek(r, keep, SEEK_SET);
+                while (keep < len && fgetc(r) != '\n') keep++;   /* 对齐到行首 */
+                long rest = len - keep;
+                char* buf = (char*)malloc((size_t)rest + 1);
+                if (buf) {
+                    size_t got = fread(buf, 1, (size_t)rest, r);
+                    fclose(r);
+                    FILE* w = NULL;
+                    if (_wfopen_s(&w, path, L"wb") == 0 && w) {
+                        fprintf(w, "----- 浮层日志超 512KB，较旧的内容已丢弃 -----\n");
+                        fwrite(buf, 1, got, w);
+                        fclose(w);
+                    }
+                    free(buf);
+                } else {
+                    fclose(r);
+                }
+            }
+        }
+    }
+
+    FILE* f = NULL;
+    if (_wfopen_s(&f, path, L"a") == 0 && f) {
+        SYSTEMTIME st; GetLocalTime(&st);
+        fprintf(f, "%02d:%02d:%02d.%03d  [浮层] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+        va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+        fputc('\n', f);
+        fclose(f);
+    }
+}
+
 typedef struct { UINT cf; BYTE* data; int len; } ClipFormat;
 static ClipFormat g_fmts[32];
 static int        g_fmtCount = 0;
@@ -728,15 +794,20 @@ void FreeFmts(void) {
 int ClipLoadFormats(long long id) {
     FreeFmts();
     char pathU8[DITTO_DIR_MAX * 4];
-    if (!Utf8FromW(g_dbPath, pathU8, (int)sizeof(pathU8))) return 0;
+    if (!Utf8FromW(g_dbPath, pathU8, (int)sizeof(pathU8))) {
+        ClipLog("取格式 id=%lld：路径转 UTF-8 失败", id);
+        return 0;
+    }
 
     sqlite3* db = NULL;
     if (sqlite3_open_v2(pathU8, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        ClipLog("取格式 id=%lld：打不开 Ditto 库（%s）", id, db ? sqlite3_errmsg(db) : "?");
         if (db) sqlite3_close(db);
         return 0;
     }
     sqlite3_busy_timeout(db, 3000);
     sqlite3_stmt* st = NULL;
+    LONGLONG total = 0;
     if (sqlite3_prepare_v2(db, "SELECT strClipBoardFormat, ooData FROM Data "
                               "WHERE lParentID = ? ORDER BY Data.lID",
                            -1, &st, NULL) == SQLITE_OK) {
@@ -755,16 +826,21 @@ int ClipLoadFormats(long long id) {
                 if (cf == (UINT)kSkipFormatIds[i]) { skip = TRUE; break; }
             if (skip) continue;
             BYTE* buf = (BYTE*)malloc((size_t)len);
-            if (!buf) continue;
+            if (!buf) { ClipLog("  fmt %ls len=%d：malloc 失败", nm, len); continue; }
             memcpy(buf, blob, (size_t)len);
             g_fmts[g_fmtCount].cf = cf;
             g_fmts[g_fmtCount].data = buf;
             g_fmts[g_fmtCount].len = len;
+            ClipLog("  fmt[%d] %ls len=%d", g_fmtCount, nm, len);
             g_fmtCount++;
+            total += len;
         }
         sqlite3_finalize(st);
+    } else {
+        ClipLog("取格式 id=%lld：prepare 失败（%s）", id, sqlite3_errmsg(db));
     }
     sqlite3_close(db);
+    ClipLog("取格式 id=%lld 完成：%d 个格式，共 %lld 字节", id, g_fmtCount, total);
     return g_fmtCount;
 }
 
@@ -879,7 +955,10 @@ static void HideIfVisible(void) {
 }
 
 BOOL PutOnClipboard(BOOL plain) {
-    if (!OpenClipboard(g_hwnd)) return FALSE;
+    if (!OpenClipboard(g_hwnd)) {
+        ClipLog("写回：OpenClipboard 失败 err=%lu", GetLastError());
+        return FALSE;
+    }
     EmptyClipboard();
 
     UINT cfIgnore = RegisterClipboardFormatW(L"Clipboard Viewer Ignore");
@@ -918,15 +997,24 @@ BOOL PutOnClipboard(BOOL plain) {
         }
     }
     if (!ok) {
-        ok = TRUE;
+        /* ★ 返回值如实反映"真写进了至少一个格式"：原先 ok 无条件置 TRUE，
+           全部 SetClipboardData 失败也照发 Ctrl+V —— 把上一次的旧剪贴板
+           内容粘出去（与 OpenClipboard 失败时中止的同一条道理）。
+           ★ 每一步成败都进浮层日志：大图片写回失败此前无迹可循。 */
         for (int i = 0; i < g_fmtCount; i++) {
             HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)g_fmts[i].len);
-            if (!h) continue;
+            if (!h) { ClipLog("  fmt[%d] GlobalAlloc(%d) 失败 err=%lu", i, g_fmts[i].len, GetLastError()); continue; }
             void* p = GlobalLock(h);
-            if (!p) { GlobalFree(h); continue; }
+            if (!p) { ClipLog("  fmt[%d] GlobalLock 失败 err=%lu", i, GetLastError()); GlobalFree(h); continue; }
             memcpy(p, g_fmts[i].data, (size_t)g_fmts[i].len);
             GlobalUnlock(h);
-            if (!SetClipboardData(g_fmts[i].cf, h)) GlobalFree(h);
+            if (SetClipboardData(g_fmts[i].cf, h)) {
+                ClipLog("  fmt[%d] cf=%lu len=%d ok", i, g_fmts[i].cf, g_fmts[i].len);
+                ok = TRUE;
+            } else {
+                ClipLog("  fmt[%d] cf=%lu SetClipboardData 失败 err=%lu", i, g_fmts[i].cf, GetLastError());
+                GlobalFree(h);
+            }
         }
     }
     if (cfIgnore) {
@@ -939,19 +1027,23 @@ BOOL PutOnClipboard(BOOL plain) {
         }
     }
     CloseClipboard();
+    ClipLog("写回结束 ok=%d（格式 %d 个）", ok, g_fmtCount);
     return ok;
 }
 
 static void DoPaste(BOOL plain) {
     if (g_count <= 0 || g_sel < 0 || g_sel >= g_count) return;
+    ClipLog("粘贴开始 id=%lld plain=%d", g_items[g_sel].id, plain);
     g_pasting = TRUE;
     ClipLoadFormats(g_items[g_sel].id);
-    if (g_fmtCount <= 0) { g_pasting = FALSE; return; }
+    if (g_fmtCount <= 0) { ClipLog("粘贴中止：库里没有可写格式"); g_pasting = FALSE; return; }
 
     if (!PutOnClipboard(plain)) {
-        /* 剪贴板被别的程序占着（OpenClipboard 失败）：此刻剪贴板里还是**上一次**
-           的内容，照发 Ctrl+V 就是把不相干的旧内容粘进用户的文档 —— "粘错东西"
-           比"什么都没发生"糟糕得多。格式表照旧释放，浮层留着让用户再试一次。 */
+        /* 剪贴板被别的程序占着（OpenClipboard 失败）或一个格式都没写进去：
+           此刻剪贴板里还是**上一次**的内容（或已被清空），照发 Ctrl+V 就是
+           把不相干的旧内容粘进用户的文档 —— "粘错东西"比"什么都没发生"
+           糟糕得多。格式表照旧释放，浮层留着让用户再试一次。 */
+        ClipLog("粘贴中止：写回失败（原因见上）");
         FreeFmts();
         g_pasting = FALSE;
         return;
@@ -1585,7 +1677,9 @@ static void CALLBACK WinEventProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd,
 }
 
 static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    if (g_msgShow && msg == g_msgShow) { DoShow(); return 0; }
+    /* 主程序随 g_msgShow 推来的记录态：wParam=1 = caps+` 记录中，浮层日志
+       才开始写（ClipLog 门口据此拦）。 */
+    if (g_msgShow && msg == g_msgShow) { g_logOn = (wp != 0); DoShow(); return 0; }
     if (g_msgHide && msg == g_msgHide) { DoHideClose(); return 0; }
     if (g_msgEsc  && msg == g_msgEsc)  { DoHideClose(); return 0; }
     /* 主程序钩子代收的裸 F3（toggle）与"按了无关键"（退场）—— 见 src/clip.c */
@@ -2137,7 +2231,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     HWND prev = FindWindowW(CLIP_CLASS, NULL);
     if (prev) {
-        if (g_msgShow) PostMessageW(prev, g_msgShow, 0, 0);
+        /* 第二实例并入驻留实例：转发的旗标只能转交本实例的记录态（入口处
+           还没收到过主程序推送，恒 FALSE —— 手动双击并进来的这次不记日志；
+           正常的 caps+V 走主程序 Deliver，会带旗标）。 */
+        if (g_msgShow) PostMessageW(prev, g_msgShow, (WPARAM)g_logOn, 0);
         return 0;
     }
 
