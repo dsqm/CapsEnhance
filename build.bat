@@ -139,7 +139,7 @@ if errorlevel 1 (
 
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc /Ithirdparty ^
    /Foobj\ ^
-   clip\clip.c ^
+   clip\clip.c clip\clip_thumb.c clip\clip_view.c ^
    /link /OUT:bin/CapsEnhanceClip.exe ^
    obj\sqlite3mc.obj obj\colorcode.obj ^
    user32.lib gdi32.lib shell32.lib ole32.lib gdiplus.lib bcrypt.lib advapi32.lib ^
