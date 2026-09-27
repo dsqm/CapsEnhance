@@ -194,13 +194,13 @@ static Field kFields[] = {
        字体对话框（对话框里本来就能同时选字体和字号，再给个独立字号框是重复）。
        它不承载配置值，所以 cfg = -1，Load / Save 都跳过。 */
     { IDC_CLIP_PICK, -1,                       L"快速粘贴字体",                                   NULL, 0, 0, 1, 0, 0, L"剪贴板" },
-    { IDC_CLIP_W,     CFG_CLIP_W,              L"快速粘贴窗口大小（左框宽、右框高；96 DPI 下的像素，实机按显示器 DPI 放大）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_H,     CFG_CLIP_H,              L"快速粘贴窗口高度",                                          L"×",   0, 0, 0, 0, 0, L"剪贴板" },
     { IDC_CLIP_CLICK, CFG_CLIP_CLICK_PASTE,    L"单击条目直接上屏（取消勾选则单击只选中、双击才粘）", NULL, 1, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_VMW,   CFG_CLIP_VIEW_MAX_W,     L"F3 预览窗格最大大小（左宽右高；不超屏幕工作区）",  L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_VMH,   CFG_CLIP_VIEW_MAX_H,     L"F3 预览窗格最大高度",                              L"×",   0, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_VNW,   CFG_CLIP_VIEW_MIN_W,     L"F3 预览窗格最小大小（左宽右高；小图点一下放大才明显）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_VNH,   CFG_CLIP_VIEW_MIN_H,     L"F3 预览窗格最小高度",                                   L"×",   0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_W,     CFG_CLIP_W,              L"快速粘贴窗口大小（96 DPI 像素）",  L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_H,     CFG_CLIP_H,              L"快速粘贴窗口高度",                 L"×",   0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_VMW,   CFG_CLIP_VIEW_MAX_W,     L"F3 预览窗格最大大小（96 DPI 像素）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_VMH,   CFG_CLIP_VIEW_MAX_H,     L"F3 预览窗格最大高度",                L"×",   0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_VNW,   CFG_CLIP_VIEW_MIN_W,     L"F3 预览窗格最小大小（96 DPI 像素）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_VNH,   CFG_CLIP_VIEW_MIN_H,     L"F3 预览窗格最小高度",                L"×",   0, 0, 0, 0, 0, L"剪贴板" },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
 
@@ -695,7 +695,15 @@ static void Layout(int w, int h) {
         HWND c = GetDlgItem(g_hwnd, id);
         if (!c) continue;
         if (kFields[i].isBtn) {
-            MoveWindow(c, x, y - off, w - x * 2, S(24), TRUE);
+            if (id == IDC_CLIP_PICK) {
+                /* 字体行：左侧"显示字体："说明 + 定宽按钮
+                   （按钮文字就是当前字体 + 字号，UpdateClipFontBtn 刷） */
+                HWND lab = GetDlgItem(g_hwnd, id + 500);
+                if (lab) MoveWindow(lab, x, y + S(3) - off, S(84), S(18), TRUE);
+                MoveWindow(c, x + S(88), y - off, S(320), S(24), TRUE);
+            } else {
+                MoveWindow(c, x, y - off, w - x * 2, S(24), TRUE);
+            }
             y += rowBool;
         } else if (kFields[i].isBool) {
             MoveWindow(c, x, y - off, w - x * 2, rowBool - S(2), TRUE);
@@ -1943,6 +1951,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
                                      0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)id, hInst, NULL);
             HookChild(b);
+            if (id == IDC_CLIP_PICK)
+                MakeLabel(hInst, g_hwnd, L"显示字体：", id + 500);   /* 按钮左侧的说明 */
         } else if (kFields[i].isBool) {
             HWND b = CreateWindowExW(0, L"BUTTON", kFields[i].label,
                                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX | WS_TABSTOP,
