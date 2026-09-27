@@ -162,6 +162,8 @@ static WCHAR    g_fontName[CLIP_FONT_MAX] = L"";  /* 空 = 内置 Microsoft YaHe
 static int      g_fontPt = 10;                     /* 字号（磅） */
 static int      g_cfgW = CLIP_W_DEFAULT;           /* 窗口宽（96 DPI 下的像素，按 DPI 放大） */
 static int      g_cfgH = CLIP_H_DEFAULT;           /* 窗口高（同上） */
+static int      g_viewMaxW = CLIP_VIEW_MAX_W_DEFAULT;  /* F3 预览窗格最大宽（96 DPI 像素） */
+static int      g_viewMaxH = CLIP_VIEW_MAX_H_DEFAULT;  /* 同上；仍会被工作区钳一道 */
 static BOOL     g_sizeArg = FALSE;                 /* --w/--h 传过：不再回落到 ini */
 static BOOL     g_clickPaste = TRUE;               /* 单击条目直接上屏 */
 static BOOL     g_dbErr = FALSE;
@@ -1779,7 +1781,8 @@ static void ListAnimStep(void) {
      · 双击图片 = 1:1 ↔ 适应窗口；标题栏可拖动挪窗、✕ 关闭、"复制"写回剪贴板
      · 空格钉住（钩子代收转发）：钉住后"无关键退场"停用，Esc/F3 照常
    窗口尺寸（Ditto 勾选项"根据内容调整窗口大小"+"缩放图像以适应窗口"）：
-     · 解码完成后窗口才显示，尺寸贴着图像内容（上限工作区 70%）—— 没有先弹
+     · 解码完成后窗口才显示，尺寸贴着图像内容（上限 = ClipViewMaxW/H 配置，
+       仍不超过工作区）—— 没有先弹
        固定默认再收缩的跳变；图像显示即适应（小图不放大，放大只会糊）
      · ↑↓ 跟随换条目：位置不动，尺寸随新内容重摆
    生命周期（Ditto 同款）：
@@ -2590,17 +2593,20 @@ static void ViewToggle(void) {
 }
 
 /* 解码完成：按图像内容定窗口尺寸（Ditto"根据内容调整窗口大小"同款），
-   上限工作区 70%、下限标题栏可读。首次调用（窗口尚未显示）负责定位+首显：
-   锚在选中行左下角往下展开，底下放不下翻到行上方；之后跟随换条目时
-   位置不动、尺寸随新内容。 */
+   上限 = 配置的 ClipViewMaxW/H（设置界面可改；不读 Ditto 配置），且仍被
+   工作区钳一道（配得再大，超过屏幕也没有意义）、下限标题栏可读。
+   首次调用（窗口尚未显示）负责定位+首显：锚在选中行左下角往下展开，
+   底下放不下翻到行上方；之后跟随换条目时位置不动、尺寸随新内容。 */
 static void ViewFitOnce(void) {
     if (!g_viewImg || !g_view || g_viewFitted) return;
     UINT iw = g_viewImg->GetWidth(), ih = g_viewImg->GetHeight();
     if (!iw || !ih) return;
     RECT work;
     MonitorWork(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST), &work);
-    int maxW = (int)(((float)(work.right - work.left)) * 0.7f);
-    int maxH = (int)(((float)(work.bottom - work.top)) * 0.7f);
+    int maxW = (int)((float)g_viewMaxW * g_k);
+    int maxH = (int)((float)g_viewMaxH * g_k);
+    if (maxW > work.right - work.left) maxW = work.right - work.left;
+    if (maxH > work.bottom - work.top) maxH = work.bottom - work.top;
     /* 目标**客户区** = 100% 原图 + 四周 1px 边框 + 标题栏（"缩放图像以适应
        窗口"在这里生效：是窗口适应图像，图像自己保持原大）。 */
     int nw = (int)iw + 2;
@@ -3255,6 +3261,10 @@ static void LoadIniFallback(void) {
             g_cfgW = IniReadInt(buf, got, "ClipW", CLIP_W_DEFAULT, CLIP_W_MIN, CLIP_W_MAX);
             g_cfgH = IniReadInt(buf, got, "ClipH", CLIP_H_DEFAULT, CLIP_H_MIN, CLIP_H_MAX);
         }
+        g_viewMaxW = IniReadInt(buf, got, "ClipViewMaxW", CLIP_VIEW_MAX_W_DEFAULT,
+                                CLIP_VIEW_MAX_W_MIN, CLIP_VIEW_MAX_W_MAX);
+        g_viewMaxH = IniReadInt(buf, got, "ClipViewMaxH", CLIP_VIEW_MAX_H_DEFAULT,
+                                CLIP_VIEW_MAX_H_MIN, CLIP_VIEW_MAX_H_MAX);
     }
     CloseHandle(f);
 }
@@ -3337,6 +3347,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         }
         const WCHAR* pc = wcsstr(cmdLine, L"--click");
         if (pc) g_clickPaste = (_wtoi(pc + 7) != 0);
+        const WCHAR* pvw = wcsstr(cmdLine, L"--vw");
+        if (pvw) {
+            int v = _wtoi(pvw + 4);
+            if (v >= CLIP_VIEW_MAX_W_MIN && v <= CLIP_VIEW_MAX_W_MAX) g_viewMaxW = v;
+        }
+        const WCHAR* pvh = wcsstr(cmdLine, L"--vh");
+        if (pvh) {
+            int v = _wtoi(pvh + 4);
+            if (v >= CLIP_VIEW_MAX_H_MIN && v <= CLIP_VIEW_MAX_H_MAX) g_viewMaxH = v;
+        }
     }
     LoadIniFallback();      /* 命令行没给的：DittoDir / 字体 / 窗口尺寸 */
 

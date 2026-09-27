@@ -208,10 +208,13 @@ static BOOL SpawnClip(void) {
                      L" --font \"%s\" --size %d", font, sizePt);
         wcscat_s(cmd, CMD_CAP, add);
     }
-    /* 尺寸与单击粘贴**恒传**：它们始终有值（配置表里带默认与值域），
+    /* 尺寸、预览上限与单击粘贴**恒传**：它们始终有值（配置表里带默认与值域），
        不传就等于让浮层用自己的一份默认 —— 于是界面里改了没有效果。 */
-    _snwprintf_s(add, (size_t)(CLIP_FONT_MAX + 96), _TRUNCATE, L" --w %d --h %d --click %d",
-                 CfgInt(CFG_CLIP_W), CfgInt(CFG_CLIP_H), CfgBool(CFG_CLIP_CLICK_PASTE) ? 1 : 0);
+    _snwprintf_s(add, (size_t)(CLIP_FONT_MAX + 96), _TRUNCATE,
+                 L" --w %d --h %d --click %d --vw %d --vh %d",
+                 CfgInt(CFG_CLIP_W), CfgInt(CFG_CLIP_H),
+                 CfgBool(CFG_CLIP_CLICK_PASTE) ? 1 : 0,
+                 CfgInt(CFG_CLIP_VIEW_MAX_W), CfgInt(CFG_CLIP_VIEW_MAX_H));
     wcscat_s(cmd, CMD_CAP, add);
 
     /* 交给 child.c：挂起起 -> 挂进 job（父死子退）-> 放行。

@@ -60,6 +60,8 @@ enum {
     CFG_CLIP_W,                /* [General] ClipW（窗口宽，96 DPI 下的像素） */
     CFG_CLIP_H,                /* [General] ClipH（窗口高，同上） */
     CFG_CLIP_CLICK_PASTE,      /* [General] ClipClickPaste */
+    CFG_CLIP_VIEW_MAX_W,       /* [General] ClipViewMaxW（F3 预览窗格最大宽，96 DPI 下的像素） */
+    CFG_CLIP_VIEW_MAX_H,       /* [General] ClipViewMaxH（F3 预览窗格最大高，同上） */
     CFG_COUNT
 };
 
@@ -98,6 +100,17 @@ void CfgSetStr(int id, const WCHAR* v);   /* NULL = 清空；过长按缓冲截�
 #define CLIP_H_FALLBACK 300
 #define CLIP_H_MIN     140
 #define CLIP_H_MAX     1600
+/* [General] ClipViewMaxW / ClipViewMaxH：**F3 图片预览窗格**的最大宽/高
+   （96 DPI 像素，实际 = 值 × 显示器 DPI/96，且仍不超过所在屏幕工作区）。
+   默认取"工作区 70%"在 175% 缩放屏幕上的等效值（1024x530 逻辑像素），
+   与旧版按百分比限制的行为在用户机器上完全一致。纯本程序配置，
+   **不读 Ditto.Settings**。 */
+#define CLIP_VIEW_MAX_W_DEFAULT 1024
+#define CLIP_VIEW_MAX_W_MIN     160
+#define CLIP_VIEW_MAX_W_MAX     8192
+#define CLIP_VIEW_MAX_H_DEFAULT 530
+#define CLIP_VIEW_MAX_H_MIN     140
+#define CLIP_VIEW_MAX_H_MAX     8192
 #define CLIP_CLICK_PASTE_DEFAULT 1  /* 单击条目直接上屏（默认开） */
 /* 单键切换输入法：key 为 IME_KEY_*，返回 IME_MODE_*（0=不处理 1=中文 2=英文） */
 int  ConfigGetImeMode(int key);

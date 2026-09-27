@@ -100,6 +100,8 @@
 #define IDC_DITTO_CONV   216 /* 按钮：DittoDir 相对/绝对路径互转（跨盘禁用） */
 #define IDC_CLIP_W       217 /* 快速粘贴窗口宽（96 DPI 像素） */
 #define IDC_CLIP_H       218 /* 快速粘贴窗口高（同上） */
+#define IDC_CLIP_VMW     219 /* F3 预览窗格最大宽（96 DPI 像素） */
+#define IDC_CLIP_VMH     220 /* F3 预览窗格最大高（同上） */
 
 /* 五份名单各一组：列表框 / 输入框 / 添加 / 删除 / 标题 / 选取窗口 */
 #define IDC_LIST0  300
@@ -171,6 +173,8 @@ static Field kFields[] = {
     { IDC_CLIP_W,     CFG_CLIP_W,              L"快速粘贴窗口宽度（96 DPI 下的像素，实机按显示器 DPI 放大）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
     { IDC_CLIP_H,     CFG_CLIP_H,              L"快速粘贴窗口高度（同上；排不下的条目用滚轮看）",           L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
     { IDC_CLIP_CLICK, CFG_CLIP_CLICK_PASTE,    L"单击条目直接上屏（取消勾选则单击只选中、双击才粘）", NULL, 1, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_VMW,   CFG_CLIP_VIEW_MAX_W,     L"F3 预览窗格最大宽度（不超屏幕工作区）",  L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
+    { IDC_CLIP_VMH,   CFG_CLIP_VIEW_MAX_H,     L"F3 预览窗格最大高度（超限的图用滚动条看）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
 

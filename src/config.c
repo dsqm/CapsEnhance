@@ -340,6 +340,14 @@ static CfgDef kCfg[CFG_COUNT] = {
     { "clipclickpaste", "ClipClickPaste", CFG_F_BOOL, CLIP_CLICK_PASTE_DEFAULT, 0, 1, 0, NULL, 1,
       "; 单击条目直接上屏（默认开）：挑中就粘，不必先选中再双击。\n"
       "; 0 = 关闭（单击只选中，双击才粘）\n" },
+
+    { "clipviewmaxw", "ClipViewMaxW", 0, CLIP_VIEW_MAX_W_DEFAULT, CLIP_VIEW_MAX_W_MIN, CLIP_VIEW_MAX_W_MAX, 0, NULL, 0,
+      "; F3 图片预览窗格的最大宽度：单位 96 DPI 下的像素，\n"
+      "; 实际 = 值 × 显示器 DPI/96，且仍不超过所在屏幕的工作区。\n"
+      "; 设置界面（剪贴板段）里也可以直接改。超限的图用滚动条平移。\n"
+      "; ★ 浮层进程启动时读，改完要重启 CapsEnhance 才生效。\n" },
+    { "clipviewmaxh", "ClipViewMaxH", 0, CLIP_VIEW_MAX_H_DEFAULT, CLIP_VIEW_MAX_H_MIN, CLIP_VIEW_MAX_H_MAX, 0, NULL, 0,
+      "; F3 图片预览窗格的最大高度（同上）。\n" },
 };
 
 /* 三键与 CFG_IME_* 三个编号必须同序连排（ConfigGetImeMode 靠下标直取） */
