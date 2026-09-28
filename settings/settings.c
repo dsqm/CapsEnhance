@@ -132,6 +132,7 @@ static BOOL IsPairSecond(int id) {
 static Field kFields[] = {
     { IDC_RUN_ADMIN,  CFG_RUN_AS_ADMIN,        L"以管理员身份运行（会弹 UAC）",                   NULL,      1, 0, 0, 0, 0,      L"通用" },
     { IDC_LOG_KB,     CFG_LOG_MAX_KB,          L"日志大小上限（0 = 不限制）",                    L"KB",     0, 0, 0, 0, 0,      L"通用" },
+    { IDC_HYPER,      CFG_HYPER_PASSTHROUGH,   L"Hyper 透传：未映射键带 RWin+RCtrl+RShift+RAlt 漏给系统（AHK 绑 Hyper 用）", NULL, 1, 0, 0, 0, 0, L"通用" },
     { IDC_STEPS,      CFG_MAX_ARROW_STEPS,     L"按词跳转逐格上限（0 = 不限制，上限 256）",       L"格",     0, 0, 0, 0, 0,      L"按词跳转" },
     { IDC_OVER_CTRL,  CFG_OVER_STEP_CTRL,      L"超过逐格上限时改发 Ctrl+方向（取消勾选只发一次方向键）", NULL, 1, 0, 0, 0, 0, L"按词跳转" },
     { IDC_SCI,        CFG_ALLOW_SCINTILLA_READ, L"允许读取 Scintilla 程序内存（关掉则退回逐格）", NULL,    1, 0, 0, 0, 0,      L"按词跳转" },

@@ -355,6 +355,20 @@ static CfgDef kCfg[CFG_COUNT] = {
       "; 不超工作区；设置界面（剪贴板段）里可改。\n" },
     { "clipviewminh", "ClipViewMinH", 0, CLIP_VIEW_MIN_H_DEFAULT, CLIP_VIEW_MIN_H_MIN, CLIP_VIEW_MIN_H_MAX, 0, NULL, 0,
       "; F3 图片预览窗格的最小高度（同上）。\n" },
+
+    { "hyperpassthrough", "HyperPassthrough", CFG_F_BOOL, 0, 0, 1, 0, NULL, 0,
+      "; Hyper 透传（进阶功能，默认关）：按住 C 的整个期间，程序替你按住右侧\n"
+      "; RWin+RCtrl+RShift+RAlt 四个修饰键（macOS Capslock 的 Hyper 方案），\n"
+      "; 此时**未映射**的键（如 G、H、数字）会带着这组修饰键漏给系统 ——\n"
+      "; 供 AutoHotkey 等外部工具绑定 Hyper 热键（>#^!+X）用。\n"
+      ";   1 = 启用   0 = 关闭（默认；关闭时按住 C 的行为与原来完全一致）\n"
+      "; 已映射键（J/K/...）不受影响：仍被拦截重发，发键前会临时摘掉这组修饰键\n"
+      "; （否则我们的方向键会变成 Win+方向，直接把窗口贴边）。\n"
+      "; 系统组合键不会误触：Win+E、Win+数字这类热键要求修饰键精确匹配，\n"
+      "; 四键齐按时它们全部失配（test/hyperprobe*.cpp 实测）；Win+L 是例外，\n"
+      "; 但 L 是本程序的映射键，够不到。RWin 抬起前会插掩码键，不弹开始菜单。\n"
+      "; 副作用须知：按住 C 期间点击鼠标会带着修饰键态（如浏览器里 Shift+点击\n"
+      "; = 新窗口打开）；Caps+滚轮改为整格注入（物理格也吞，见 hook.c）。\n" },
 };
 
 /* 三键与 CFG_IME_* 三个编号必须同序连排（ConfigGetImeMode 靠下标直取） */

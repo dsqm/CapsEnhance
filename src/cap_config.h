@@ -64,6 +64,7 @@ enum {
     CFG_CLIP_VIEW_MAX_H,       /* [General] ClipViewMaxH（F3 预览窗格最大高，同上） */
     CFG_CLIP_VIEW_MIN_W,       /* [General] ClipViewMinW（F3 预览窗格最小宽，同上） */
     CFG_CLIP_VIEW_MIN_H,       /* [General] ClipViewMinH（F3 预览窗格最小高，同上） */
+    CFG_HYPER_PASSTHROUGH,     /* [General] HyperPassthrough（Hyper 透传，默认关） */
     CFG_COUNT
 };
 

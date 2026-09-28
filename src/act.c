@@ -47,6 +47,22 @@ static volatile LONG s_busy = 0;         /* 1 = 正在执行某个动作        
 static ActJob  s_q[ACT_QUEUE_MAX];
 static int     s_head = 0, s_tail = 0, s_n = 0;
 
+/* ---------- Hyper 意图信箱（HyperPassthrough，语义见 send.c） ----------
+   钩子线程只写一个 int（1=按下 / -1=抬起 / 0=无），动作线程每轮循环开头
+   消费一次。为什么不排队列：Hyper 的按下/抬起必须与"正在发键的突发"串行
+   —— 列在 FIFO 里会排到长按词跳转后面（几百毫秒才生效），直接插队又可能
+   落进某个突发的中间。信箱语义恰好折中：**只在两次动作之间**执行，突发
+   进行中最多等一个突发（几十毫秒），突发结束后立即生效。
+   collapse 是安全的：信箱只表达"最终想要的状态"，重复 apply 幂等。
+   程序退出（ActStop）时未消费的意图被丢弃 —— 按下的四键由
+   SendClearStuckModifiers 兜底抬起（都在 kMods 记账里）。 */
+static std::atomic<int> s_hyperWish{ 0 };
+
+void ActHyperSet(BOOL on) {
+    s_hyperWish.store(on ? 1 : -1);
+    LanePoke(&s_lane);          /* 线程可能在空闲等待，戳一下 */
+}
+
 /* 执行一条请求。顺序必须与"开火 -> 补齐"的原始语义一致。
    走哪条分支由动作标志决定（见 keymap.c），这里不再列举动作 id ——
    加一个按词跳转/诊断类动作不必再回来改这个函数。 */
@@ -109,6 +125,9 @@ static DWORD WINAPI ActThread(LPVOID p) {
         if (LaneStopped(&s_lane)) break;
         WaitForSingleObject(s_lane.ev, 1000);
         for (;;) {
+            /* Hyper 意图在每轮动作之间消化：突发进行中不插手（见信箱注释） */
+            int wish = s_hyperWish.exchange(0);
+            if (wish != 0) SendHyperApply(wish > 0);
             ActJob j;
             EnterCriticalSection(&s_lane.cs);
             if (LaneStopped(&s_lane)) { LeaveCriticalSection(&s_lane.cs); return 0; }
@@ -162,6 +181,8 @@ static Lane    s_wLane;            /* 车道四件套（见 lane.h）           
 static int     s_wDelta[ACT_WHEEL_QMAX];  /* 方向（符号有意义，幅度由注入端归一） */
 static int     s_wMul[ACT_WHEEL_QMAX];    /* 纵向：放大倍数；横向：注入格数 */
 static BOOL    s_wHorz[ACT_WHEEL_QMAX];   /* 本条是横向吗（Caps+Shift+滚轮） */
+static BOOL    s_wFull[ACT_WHEEL_QMAX];   /* 纵向全量注入（Hyper 下物理格也被吞，
+                                              mul 格全部由我们补发，见 WheelPost） */
 static int     s_wHead = 0, s_wTail = 0, s_wN = 0;
 
 static DWORD WINAPI WheelThread(LPVOID p) {
@@ -177,11 +198,13 @@ static DWORD WINAPI WheelThread(LPVOID p) {
             delta = s_wDelta[s_wHead];
             mul   = s_wMul[s_wHead];
             horz  = s_wHorz[s_wHead];
+            BOOL full = s_wFull[s_wHead];
             s_wHead = (s_wHead + 1) % ACT_WHEEL_QMAX;
             s_wN--;
             LeaveCriticalSection(&s_wLane.cs);
             /* 里面的 Sleep 只阻塞本线程 */
             if (horz) SendWheelHNotches(delta, mul);   /* 横向：注入 mul 格 */
+            else if (full) SendWheelNotches(delta, mul); /* 纵向全量：物理格已被吞 */
             else      SendWheelAccel(delta, mul);      /* 纵向：物理格已送达，补 mul-1 */
         }
     }
@@ -191,11 +214,14 @@ static DWORD WINAPI WheelThread(LPVOID p) {
 /* 投递一次滚轮请求。**主线程调用，绝不阻塞**（原来的 Sleep 就是缺陷根源）。
    horz=FALSE：纵向放大，n = 倍数（只补 n-1 格，物理那格系统照常送达）；
    horz=TRUE ：横向滚动，n = 注入格数（物理那格是纵向、已被钩子吞掉，
-               所以全部由我们注入）。 */
-static void WheelPost(int delta, int n, BOOL horz) {
+               所以全部由我们注入）。
+   full：纵向**全量**注入（n 格全由我们发）—— Hyper 透传下物理那格也必须
+   吞掉（它带着按住的 RShift 到达目标会被当成横向/缩放手势），改由我们摘掉
+   Hyper 后整量注入。 */
+static void WheelPost(int delta, int n, BOOL horz, BOOL full) {
     if (delta == 0) return;
     if (n <= 0) return;
-    if (!horz && SendWheelExtraCount(n) <= 0) return;   /* 倍数 <2：不放大 */
+    if (!horz && !full && SendWheelExtraCount(n) <= 0) return;   /* 倍数 <2：不放大 */
     if (!LaneLive(&s_wLane)) {
         /* 分两种，不能一概"同步兜底"：
              · 线程**从未**起来（CreateThread 失败）-> 同步注入，宁可损失
@@ -206,6 +232,7 @@ static void WheelPost(int delta, int n, BOOL horz) {
                SendWheelAxis 的 Sleep —— 正是本文件头要消灭的根因。 */
         if (STOPPED(&s_dead)) return;
         if (horz) SendWheelHNotches(delta, n);
+        else if (full) SendWheelNotches(delta, n);
         else      SendWheelAccel(delta, n);
         return;
     }
@@ -218,14 +245,15 @@ static void WheelPost(int delta, int n, BOOL horz) {
     s_wDelta[s_wTail] = delta;
     s_wMul[s_wTail]   = n;
     s_wHorz[s_wTail]  = horz;
+    s_wFull[s_wTail]  = full;
     s_wTail = (s_wTail + 1) % ACT_WHEEL_QMAX;
     s_wN++;
     LeaveCriticalSection(&s_wLane.cs);
     LanePoke(&s_wLane);
 }
 
-void ActWheelPost(int delta, int mul)  { WheelPost(delta, mul, FALSE); }
-void ActWheelPostH(int delta, int n)   { WheelPost(delta, n,   TRUE);  }
+void ActWheelPost(int delta, int mul)  { WheelPost(delta, mul, FALSE, SendHyperLive()); }
+void ActWheelPostH(int delta, int n)   { WheelPost(delta, n,   TRUE,  FALSE);          }
 
 /* 丢弃还没补发的滚轮请求（松开 C / 引擎复位时）。
    预期是"松开 C 就是普通滚轮"，所以松手后不该再有加速尾流。 */
@@ -240,6 +268,7 @@ void ActWheelClear(void) {
 static void WheelLaneStart(void) {
     s_wHead = s_wTail = s_wN = 0;
     memset(s_wHorz, 0, sizeof(s_wHorz));
+    memset(s_wFull, 0, sizeof(s_wFull));
     LaneStart(&s_wLane, WheelThread);
 }
 static void WheelLaneStop(void) {

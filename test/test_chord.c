@@ -2278,6 +2278,55 @@ int main(void) {
               "AI4: 两条都可长按重复、都吃选区修饰（与 Home/End 一致）");
     }
 
+    /* ---- 场景AI5：Hyper 透传（HyperPassthrough，默认关）----
+       按住 C 期间程序替用户按下右侧四修饰键（RWin+RCtrl+RShift+RAlt），
+       未映射键带四键放行，供 AutoHotkey 等外部工具绑定 Hyper 热键。
+       测试直驱钩子过程；CAP_TEST 下 Apply 的真注入是空实现（绝不往测试机
+       注入修饰键），就绪标志用测试缝直设。真机的注入序列（四键 down/up +
+       掩码键防开始菜单）属于 OS 行为，test/hyperprobe*.cpp 已单独验证过。
+       这里离线钉住 hook 侧的判定语义：
+         ① 就绪前未映射键照旧吞（不比关闭时差）；
+         ② 就绪后未映射键放行、抬起同放行、修饰键仍吞；
+         ③ 松开 Caps -> 就绪清零，恢复原行为；
+         ④ 透传算"和弦做过事"：之后松手不得触发单击 Caps 切输入法。 */
+    {
+        CfgSetInt(CFG_HYPER_PASSTHROUGH, 1);
+        Sim(CLI_CAPS, TRUE);  Pump(20);
+        /* 等 ON 意图被动作线程消费（CAP_TEST 下只置标志，不注入） */
+        for (int i = 0; i < 200 && !SendHyperLive(); i++) { Pump(5); Sleep(2); }
+        CHECK(SendHyperLive(), "AI5: 按下 Caps -> Hyper 意图被动作线程消费（就绪）");
+
+        SendHyperTestSetReady(FALSE);        /* 人为回到"注入未完成" */
+        LRESULT r0 = Sim('G', TRUE);
+        CHECK(r0 == 1, "AI5: 未就绪 -> 未映射键照旧吞掉（不比关闭时差）");
+        Sim('G', FALSE); Pump(2);
+
+        SendHyperTestSetReady(TRUE);         /* 模拟注入完成 */
+        LRESULT r1 = Sim('G', TRUE);
+        CHECK(r1 == 0, "AI5: 就绪后未映射键放行（带四修饰键漏给系统）");
+        LRESULT r2 = Sim('G', FALSE);
+        CHECK(r2 == 0, "AI5: 放行键的抬起同样放行（吞放配对不被破坏）");
+        LRESULT r3 = Sim(VK_RCONTROL, TRUE);
+        CHECK(r3 == 1, "AI5: 修饰键始终吞（不透传）");
+        Sim(VK_RCONTROL, FALSE); Pump(2);
+
+        int imeCaps = g_imeReq[IME_KEY_CAPS];   /* 单击切输入法的请求计数（场景AG 的桩） */
+        Sim(CLI_CAPS, FALSE); Pump(20);
+        for (int i = 0; i < 200 && SendHyperLive(); i++) { Pump(5); Sleep(2); }
+        CHECK(!SendHyperLive(), "AI5: 松开 Caps -> OFF 意图清就绪，恢复原行为");
+        CHECK(g_imeReq[IME_KEY_CAPS] == imeCaps,
+              "AI5: 透传算动作 -> 松手不触发单击 Caps 切输入法");
+        /* 关闭后再开一次和弦：ON 意图不再投递，未映射键回到"吞"的既有承诺。
+           （和弦外普通键本来就该放行 —— 那是正常打字，不是透传。） */
+        CfgSetInt(CFG_HYPER_PASSTHROUGH, 0);
+        Sim(CLI_CAPS, TRUE);  Pump(20);
+        LRESULT r4 = Sim('G', TRUE);
+        CHECK(r4 == 1, "AI5: 功能关闭后新和弦未映射键照常吞");
+        Sim('G', FALSE); Pump(2);
+        Sim(CLI_CAPS, FALSE); Pump(20);
+        Drain();
+    }
+
     /* ---- 场景AJ：记录日志结束的通知**可点击**（点了打开并选中那份日志）----
        这条链路的末端（真的弹出文件管理器）与打开文件夹那条一样测不了，能离线钉住的
        是几件容易在以后改坏的事：

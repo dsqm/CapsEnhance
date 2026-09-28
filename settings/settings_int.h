@@ -62,6 +62,7 @@
 #define IDC_CLIP_SIZE_BTN 223   /* 快速粘贴窗口（列表窗样式） */
 #define IDC_VIEWMAX_BTN   224   /* F3 预览：最大（预览窗样式） */
 #define IDC_VIEWMIN_BTN   225   /* F3 预览：最小（同上，同一套样式） */
+#define IDC_HYPER         226   /* 勾选框：Hyper 透传（HyperPassthrough） */
 
 /* 五份名单各一组：列表框 / 输入框 / 添加 / 删除 / 标题 / 选取窗口 */
 #define IDC_LIST0  300

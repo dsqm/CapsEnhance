@@ -182,6 +182,9 @@ ImeRShiftMode = 1   ; 右Shift -> 中文
 | `ClipViewMaxW` / `MaxH` | `1024` / `530` | F3 预览窗格**最大**宽 / 高（96 DPI 像素），`160..8192` / `140..8192`，仍不超过工作区 |
 | `ClipViewMinW` / `MinH` | `480` / `320` | F3 预览窗格**最小**宽 / 高，`40..4096` / `80..4096` |
 | `ClipClickPaste` | `1` | 单击条目直接上屏；`0` = 单击选中、双击才粘 |
+| `HyperPassthrough` | `0` | Hyper 透传（进阶，默认关）：按住 C 期间替你按住右侧 `RWin+RCtrl+RShift+RAlt`，未映射的键带这组修饰键漏给系统 |
+
+> **Hyper 透传是给谁用的**：外部自动化工具（AutoHotkey 等）可以把 `>#^!+某键` 绑成 Hyper 热键，例如 AHK 里 `>#^!+g::` 对应按住 Caps 再按 G（G 未映射，会带四键透传出去）。已映射键（J/K/…）不受影响，程序发键前会临时摘掉四键（否则方向键会变成 Win+方向把窗口贴边）。系统组合键不会误触——Win+E、Win+数字这类热键要求修饰键精确匹配，四键齐按即失配（`test/hyperprobe*.cpp` 实测）；Win+L 例外但 L 是映射键，够不到。副作用：按住 C 期间点击鼠标会带修饰键态（如浏览器里 Shift+点击 = 新窗口打开）；Caps+滚轮改为整格注入。
 
 > 想换增强键 / 选区键？不支持：`Alt+D` 与 `F` 属于和弦语法本身（刻意为之，理由见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)）。
 

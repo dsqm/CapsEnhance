@@ -233,6 +233,10 @@ void ModHoldReset(void) {
        还在跟手、而左键的抬起被吞掉。DragEnd 不依赖拖拽是否在进行。 */
     DragEnd();
     g_dragSwallowUp = FALSE;
+    /* Hyper 透传也在这里收手：暂停/重启会跳过钩子的"松开 C"路径（同上面
+       DragEnd 的理由），按下的四修饰键不能留到恢复之后。幂等：本来就没
+       按下时这是一次空操作。 */
+    ActHyperSet(FALSE);
     /* ★ g_phys 必须**重新播种**，不是"留着不动"：暂停期间钩子在记录它之前就
        早退了（见本文件 paused 分支），所以"暂停时按住、恢复以后才松"的
        Alt/Ctrl/Shift 从没进过这张表。恢复后按下 Caps 时 ChordKeyHeldBeforeCaps
@@ -495,6 +499,10 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 g_downMask = 0;
                 s_capsUsed = FALSE;      /* 新一轮和弦：还没有任何动作发生 */
                 g_probeArmed = FALSE;   /* 新一轮和弦：探测键从"未按过"开始 */
+                /* Hyper 透传（HyperPassthrough，默认关）：和弦开始 -> 动作线程
+                   按下右侧四修饰键（见 send.c）。就绪前的未映射键照旧吞掉，
+                   行为不比关闭时差；已映射键的注入会临时摘掉四键。 */
+                if (CfgBool(CFG_HYPER_PASSTHROUGH)) ActHyperSet(TRUE);
                 PostMessageW(g_mainWnd, WM_CAPS_DOWN, 0, 0);   /* 通知主线程复位 */
                 return 1;
             }
@@ -516,6 +524,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                    会在上面 `if (!g_cMod) 放行` 分支出去，没人再清闩锁 ——
                    下一次 C+` 的首次按下就哑了。 */
                 g_probeArmed = FALSE;
+                ActHyperSet(FALSE);             /* Hyper 透传：抬起四修饰键（幂等） */
                 DragEnd();                      /* C 松开：拖拽立即收手（若在拖） */
                 SendArrowsRequestInterrupt();   /* C 松开：立即打断逐格输出 */
                 PostMessageW(g_mainWnd, WM_CAPS_UP, 0, 0);
@@ -604,12 +613,26 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             return 1;
         }
 
-        /* C 按住期间其它普通键：屏蔽。
-           修饰键（不在模式表里的真实 Ctrl/Shift/Win 等）要**记账** —— 它的
-           down 被我们吞了，up 也必须吞（见 g_swallowVk）。普通字母键量大且
-           遗孤的 up 无害，不占表。 */
-        if (down) { if (IsModifierVk(vk)) SwallowNote(vk); }
-        else      SwallowTake(vk);
+        /* C 按住期间其它普通键。
+           Hyper 透传（HyperPassthrough，默认关）就绪时：未映射键**原样放行**
+           —— 它们带着按住的 RWin+RCtrl+RShift+RAlt 漏给系统，供 AutoHotkey
+           等外部工具绑定 Hyper 热键（macOS Capslock 的同款语义）。
+           修饰键例外：始终吞（配对记账），不透传 —— 它们只会徒增"Alt 菜单/
+           开始菜单/组合键失控"一类副作用，外部工具要的只是普通键 + 四键态。
+           PASS_OR_SWALLOW 保证"down 曾被吞过的键 up 必吞"：透传就绪前那几毫秒
+           竞态窗口里吞掉的 down，其 up 仍走吞，两侧永远配对。 */
+        if (IsModifierVk(vk)) {
+            if (down) SwallowNote(vk);
+            else      SwallowTake(vk);
+            return 1;
+        }
+        if (SendHyperLive()) {
+            if (down) s_capsUsed = TRUE;   /* 透传也算"和弦做过事"：之后松手不切输入法 */
+            return PASS_OR_SWALLOW(vk, down);
+        }
+        /* 关闭（或未就绪）：维持既有承诺 —— 全部屏蔽（修饰键已在上面记账
+           返回；普通字母键量大且遗孤的 up 无害，不占表）。 */
+        if (!down) SwallowTake(vk);
         return 1;
     }
     return CallNextHookEx(g_hook, nCode, wParam, lParam);
@@ -753,11 +776,17 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
         }
 
         /* 普通（只按住 C）：快速滚动 N 倍 —— 见 main.c 的 WM_WHEEL_ACCEL。
-           物理格不吞（它是"加强"，不是"替换"）。 */
+           物理格不吞（它是"加强"，不是"替换"）。
+           ★ Hyper 透传就绪时例外：物理格**也吞** —— 它带着按住的 RShift
+           到达目标，会被当成横向/缩放手势（浏览器 Shift+滚轮 = 横向）。
+           吞掉之后 mul 格全部由滚轮通道摘着 Hyper 注入（act.c 的 full 变体），
+           总滚动量不变。 */
         if (vert && chord && delta != 0) {
             int mul = CfgInt(CFG_WHEEL_SCROLL_MUL);
-            if (mul > 1)
+            if (mul > 1) {
                 PostMessageW(g_mainWnd, WM_WHEEL_ACCEL, (WPARAM)delta, (LPARAM)mul);
+                if (SendHyperLive()) return 1;
+            }
         }
 
         /* 走到这里的滚轮都不是控制杆（横向 / 放大 / 横滚轮 / 没按 Caps 的普通滚轮）
