@@ -22,6 +22,7 @@ HHOOK g_hook = NULL;
 void CapLog(const char* fmt, ...) { (void)fmt; }
 /* 未链接 hook.c：物理按键状态桩 */
 BOOL PhysKeyDown(int vk) { (void)vk; return FALSE; }
+BOOL PhysKeyObservedDown(int vk) { (void)vk; return FALSE; }
 /* 未链接 wps.c：WPS 通道桩（真实现要链接 wps.c + autodisp.c + bridge.c，
    本测试只测词边界算法/其它通道，这里让它"读不到"即可）。
    签名从 src/auto.h 抄，改了接口这里要跟着改 —— 编译器会立刻提醒。 */

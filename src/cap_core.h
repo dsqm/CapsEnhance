@@ -149,8 +149,9 @@
 
      · g_recording —— 主线程写（C+` 切换），而 act.c / send.c / nav.c 的
        **工作线程**读它，决定要不要写诊断日志。→ std::atomic<bool>（本文件）
-     · send.c 的 g_injectedDown —— 方向相反：act.c **工作线程**注入修饰键时写，
-       主线程退出 / 重启时读。→ std::atomic<bool>（定义在 send.c，不在头文件）
+     · send.c 的 g_injMask（注入记账位图）—— 方向相反：act.c **工作线程**注入
+       键时写（SendEvent），主线程退出 / 重启时读。→ volatile LONG + Interlocked
+       （定义在 send.c，不在头文件；Interlocked 原生操作自身线程安全，理由同上）
      · send.c 的逐格打断标志 g_arrBusy / g_arrDir / g_arrBreak —— 前两个 act.c
        **工作线程**写（ArrowsEmit）、主线程钩子读（SendArrowsConflicts）；
        g_arrBreak 反过来（主线程写、工作线程读）。→ 仍用 volatile：它们是

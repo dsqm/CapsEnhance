@@ -55,7 +55,7 @@ static int     s_head = 0, s_tail = 0, s_n = 0;
    进行中最多等一个突发（几十毫秒），突发结束后立即生效。
    collapse 是安全的：信箱只表达"最终想要的状态"，重复 apply 幂等。
    程序退出（ActStop）时未消费的意图被丢弃 —— 按下的四键由
-   SendClearStuckModifiers 兜底抬起（都在 kMods 记账里）。 */
+   SendClearStuckModifiers 兜底抬起（都在注入记账 g_injMask 里）。 */
 static std::atomic<int> s_hyperWish{ 0 };
 
 void ActHyperSet(BOOL on) {
@@ -684,7 +684,7 @@ void ActStop(void) {
     /* 等当前动作收尾：所有发送都是有限步的，被打断后最坏也只是几次
        SendMsg 超时。加超时兜底，避免退出流程被卡死。
        必须等它退出 —— 之后 SendClearStuckModifiers 要读 send.c 的
-       g_injectedDown，那是工作线程会写的状态。
+       g_injMask（注入记账），那是工作线程会写的状态。
        ★ 超时（线程还活着，可能卡在某个跨进程调用里）时由 lane.c 保留临界区与
        两只事件、把车道标成 zombie 并拒绝重起：**绝不能拆它仍在用的共享对象**
        —— 删掉的临界区会被它再次 EnterCriticalSection（未定义），关掉的事件句柄

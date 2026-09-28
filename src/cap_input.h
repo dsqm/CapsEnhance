@@ -109,7 +109,9 @@ void HookUninstall(void);
 BOOL HookMouseAvailable(void); /* 滚轮加速用的鼠标钩子是否装上了（装不上不影响主映射） */
 BOOL HookAutoDisabled(void);   /* [AutoDisable] 名单程序是否在前台（上次判定结果）—— 托盘提示重建用 */
 BOOL PhysKeyDown(int vk);   /* 真实（非注入）按键是否物理按住 —— 判断卡键用 */
-void PhysSeedFromLogical(void); /* 装钩子后：把当前已按下的键视为物理按住，防误清 */
+BOOL PhysKeyObservedDown(int vk); /* 同上，但只认钩子亲眼见过的按下（g_phys==1）；
+                                     启动播种的按住（==2）不算 —— 清卡键的重启语义用，见 send.c */
+void PhysSeedFromLogical(void); /* 装钩子后：把当前已按下的键标记为"播种按住"（g_phys==2），见 hook.c 三态说明 */
 void ModHoldReset(void);    /* 清"按住状态"（C / 真实 Shift / 模式门闩）—— 暂停、重启用 */
 
 /* ---------- 发送/补齐 ---------- */
@@ -145,7 +147,11 @@ int  SendWheelExtraCount(int mul);           /* 倍数 -> 补发格数（单测�
 void SendWheelNotches(int delta, int n);     /* 补发 n 个同值刻度（持续滚动用） */
 void SendWheelHNotches(int delta, int n);    /* 横向：n 个 ±120 刻度（Caps+Shift+滚轮） */
 #define WHEEL_STD_DELTA 120                  /* 标准滚轮刻度（WHEEL_DELTA） */
-void SendClearStuckModifiers(void);          /* 清卡键：逻辑按下且物理未按的补抬起（重启/退出用） */
+void SendClearStuckModifiers(BOOL protectSeededHolds);
+/* 清卡键：① 注入记账无条件补抬 + ② 全VK扫描"逻辑按下且物理未按"（无论卡键
+   是谁造成的，别的程序留下的也一并清）。protectSeededHolds=TRUE（启动用）时
+   "启动播种的按住"也受保护；FALSE（重启/退出用）只保护钩子亲眼见过的按住。
+   详见 send.c。 */
 
 /* ---------- Hyper 透传（HyperPassthrough，默认关；语义见 send.c） ----------
    按住 C 期间由程序替用户按住右侧 RWin+RCtrl+RShift+RAlt，未映射键经 hook

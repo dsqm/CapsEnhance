@@ -45,34 +45,33 @@ static BOOL IsExtendedVk(int vk) {
     }
 }
 
-/* 我们注入过"按下"但还没配"抬起"的修饰键：进程在组合键中途退出/重启时
-   会留下真正的卡键，退出前无条件补发抬起（与用户是否物理按住无关，
-   因为这些键本来就只该由我们按下）。 */
-#define MOD_COUNT 8
-static const int kMods[MOD_COUNT] = {
-    VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL,
-    VK_LMENU,  VK_RMENU,  VK_LWIN,     VK_RWIN
-};
-/* 跨线程标志，所以用 std::atomic 而不是 volatile（volatile 不是同步原语，
-   见 cap.h 的"atomic / volatile 的分界"）。
+/* ---------- 注入记账：本进程注入过"按下"还没配"抬起"的所有键 ----------
+   进程死在注入对的中间（崩溃 / 任务管理器 / 车道 join 超时兜底）时，这些键
+   会留在"逻辑按下"状态 —— 目标程序认为它们一直按着，正是"卡键"。退出前
+   无条件补发抬起（与用户是否物理按住无关：这些键本来就只该由我们按下）。
 
-   写者是 act.c **工作线程**调用的 SendEvent；读者是退出 / 重启时主线程的
-   SendClearStuckModifiers。这两处之间本来靠 ActStop() 的线程 join 建立
-   happens-before —— 那条路本身也是对的（join 确实建立顺序），但它的正确性
-   要求每个读代码的人在脑子里推理"调用方有没有记得先 ActStop"。
-   换成 atomic 之后，这个数组**自身**就是线程安全的，不再把正确性寄托在
-   调用顺序上（顺序仍要保持，只是不再同时兼任"同步手段"）。 */
-static std::atomic<bool> g_injectedDown[MOD_COUNT];
+   为什么记**全部键**而不是只记修饰键：按词跳转的 Ctrl+方向、逐格补齐的
+   方向键同样是注入的 down/up 对，任何一对被截断，残留的就是方向键 ——
+   只记修饰键的年代它们既无账可查，也游离在清理范围之外（修"重启清不掉
+   卡键"时一并改掉，见 SendClearStuckModifiers）。
 
-static int ModIndex(int vk) {
-    for (int i = 0; i < MOD_COUNT; i++) if (kMods[i] == vk) return i;
-    return -1;
+   跨线程：写者是 act.c **工作线程**调用的 SendEvent；读者是退出 / 重启时
+   主线程的 SendClearStuckModifiers。与被替换掉的 std::atomic<bool>[8] 同一
+   级别的保证：Interlocked 原生操作让位图**自身**线程安全，不把正确性寄托
+   在调用顺序上（ActStop 先 join 的顺序仍要保持，只是不再兼任"同步手段"）。 */
+static volatile LONG g_injMask[8];   /* bit = vk & 31，字 = vk >> 5，覆盖 VK 0..255 */
+
+static void InjNote(int vk, BOOL up) {
+    if (vk <= 0 || vk > 255) return;
+    volatile LONG* w = &g_injMask[vk >> 5];
+    LONG bit = (LONG)1 << (vk & 31);
+    if (up) InterlockedAnd(w, ~bit);
+    else    InterlockedOr(w, bit);
 }
 
 /* 单条键盘事件（按下 / 抬起） */
 static void SendEvent(int vk, BOOL up) {
-    int mi = ModIndex(vk);
-    if (mi >= 0) g_injectedDown[mi] = !up;
+    InjNote(vk, up);
     INPUT i;
     memset(&i, 0, sizeof(i));
     i.type = INPUT_KEYBOARD;
@@ -312,12 +311,12 @@ void SendNativeWordJump(int dir, BOOL shift) {
     SendHyperResume(hyperHeld);
 }
 
-/* 释放一个修饰键。Alt / Win 的"抬起"被系统单独看到时会被解释为
+/* 补发一个卡住键的"抬起"。Alt / Win 的"抬起"被系统单独看到时会被解释为
    "按下并释放了 Alt/Win" —— 从而激活菜单栏或开始菜单（AHK 为此专门
    引入 #MenuMaskKey：用一个中性键插在中间，让系统认为中间按过别的键）。
    这里用未定义虚拟键 0xFF 作掩码键，行为与 AHK 的 vkFF 一致。 */
 #define MASK_VK 0xFF
-static void ReleaseMod(int vk) {
+static void ReleaseStuck(int vk) {
     if (vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN) {
         SendEvent(MASK_VK, FALSE);
         SendEvent(MASK_VK, TRUE);
@@ -325,24 +324,71 @@ static void ReleaseMod(int vk) {
     SendEvent(vk, TRUE);
 }
 
-/* 重启 / 退出时清键盘状态（AHK 同理：区分"逻辑状态"与"物理状态"）。
-   GetAsyncKeyState 反映的是 OS 的逻辑状态——被注入的键同样置位，
-   所以卡键恰恰表现为"OS 认为它按着"。判据是：
-       逻辑按下（OS 认为按着） && 物理未按（用户没真的按） == 卡键
-   物理状态只能由低级钩子自己记录（见 hook.c 的 PhysKeyDown）。
-   注：此前写成"逻辑未按才补发抬起"，等于把所有真正卡住的键全跳过了，
-   这就是"重启程序清不掉卡键"的原因。 */
-void SendClearStuckModifiers(void) {
-    for (int i = 0; i < MOD_COUNT; i++) {
-        int vk = kMods[i];
-        BOOL logicalDown = (GetAsyncKeyState(vk) & 0x8000) != 0;
-        if (logicalDown && !PhysKeyDown(vk)) ReleaseMod(vk);
+/* 重启 / 退出时清键盘卡键（AHK 同理：区分"逻辑状态"与"物理状态"）。
+   卡键 = OS 认为某键一直按着，而用户并没有按。两类来源，两种清法：
+
+   ① 本进程注入过 down 还没配 up 的键（g_injMask 有账）——**无条件**补抬。
+      这些键本来只该由我们按下，不用看物理表。
+
+   ② 其余"逻辑按下但物理未按"的键 —— **全 VK 扫描**（0x08..0xFE）补抬。
+      物理表 g_phys 由键盘钩子维护（hook.c），注入的键不进表，所以注入残留
+      即使漏了记账也会在这里被兜住；普通键（字母/方向键）的卡键从此有了
+      防线（此前只扫 8 个修饰键，方向键卡键重启永远清不掉）。
+      ★ **不看卡键是谁造成的**：别的程序注入后崩掉留下的、驱动/输入法异常
+      留下的，只要"OS 认为按着、钩子没见到用户物理按下"就一并清掉 —— 这正
+      是重启的"重置键盘"语义（与 KeyCleaner 类工具同效）。
+      扫描跳过：
+        · 通用别名 VK_SHIFT / VK_CONTROL / VK_MENU —— 左右键各自扫描处理；
+          别名的物理表恒为"未按"（钩子只记具体键），扫它会把用户真按着的
+          Shift/Ctrl/Alt 误清；
+        · 开关键 VK_CAPITAL / VK_NUMLOCK / VK_SCROLL —— 逻辑状态表示
+          "灯位"而不是"卡键"，补抬只会把状态搞乱，刻意不处理（CapsLock
+          的一贯决定）。
+      未定义的 VK（0x07、0x0A..0x0F 等保留段）GetAsyncKeyState 恒为 0，
+      扫过去是无害空转，不必逐一排除。
+
+   protectSeededHolds：怎么对待"启动播种的按住"（g_phys 三态里的 2 ——
+   钩子装上之前就按着的键，"用户正按着"与"早已卡住"状态同态，见 hook.c）。
+     · TRUE（**启动**用）：播种按住视作用户按住、受保护 —— 启动瞬间用户
+       真按着修饰键（如登录后按着 Shift）不该被抖掉。代价是"上上次崩溃
+       留下的修饰键卡键"在启动这一遍漏清 —— 再重启一次即可（见 FALSE）。
+     · FALSE（**重启 / 退出**用）：只保护钩子亲眼见过的按住（g_phys==1）。
+       重启是用户显式的"重置键盘"动作，此刻物理按着的键几乎必然已松开，
+       播种态的卡键（无论谁造成）一律清掉。
+
+   调用时机与顺序的约束（main.c 各调用点的注释与此互为对照）：
+     · 重启路径必须在 ActStop()（执行线程已 join、不再有新注入）之后、
+       ModHoldReset()（其中的 PhysSeedFromLogical 会重播种，改变 g_phys
+       语义）**之前** —— 排反了就会漏清；
+     · 启动路径在 PhysSeedFromLogical() 之后、HookInstall() 之前：注入的
+       抬起不会被自己的钩子当成输入处理。
+   注：SendInput 返回成功即事件已进入系统输入流，此后进程退出不影响派发
+   —— 发完不需要"等一等"。 */
+void SendClearStuckModifiers(BOOL protectSeededHolds) {
+    BOOL swept[256];
+    memset(swept, 0, sizeof(swept));
+    /* ① 注入记账的键：无条件补抬起 */
+    for (int word = 0; word < 8; word++) {
+        LONG bits = InterlockedExchange(&g_injMask[word], 0);
+        for (int bit = 0; bit < 32 && bits; bit++) {
+            if (bits & ((LONG)1 << bit)) {
+                int vk = (word << 5) | bit;
+                swept[vk] = TRUE;    /* ② 跳过：异步状态尚未回落，别发两遍 */
+                ReleaseStuck(vk);
+            }
+        }
     }
-    /* 我们注入过的修饰键：无条件补抬起（这些键本不该残留 down 状态） */
-    for (int i = 0; i < MOD_COUNT; i++)
-        if (g_injectedDown[i]) ReleaseMod(kMods[i]);
-    /* CapsLock 是开关键，逻辑状态表示"灯亮"，不是卡键；只在明确没物理按住
-       且灯亮时才切一次，避免把用户的大小写状态改乱 —— 保守起见不处理。 */
+    /* ② 全 VK 扫描：逻辑按下 && 物理未按 = 卡键（无论卡键是谁造成的） */
+    for (int vk = 0x08; vk <= 0xFE; vk++) {
+        if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU ||
+            vk == VK_CAPITAL || vk == VK_NUMLOCK || vk == VK_SCROLL)
+            continue;
+        if (swept[vk]) continue;
+        BOOL logicalDown = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        BOOL userHeld = protectSeededHolds ? PhysKeyDown(vk)
+                                           : PhysKeyObservedDown(vk);
+        if (logicalDown && !userHeld) ReleaseStuck(vk);
+    }
 }
 
 /* ================= Hyper 透传（HyperPassthrough，默认关） =================
@@ -362,7 +408,7 @@ void SendClearStuckModifiers(void) {
      1) **已映射键的注入必须摘掉四键**（文件前部所有发键/滚轮突发的
         SendHyperSuspend/Resume）：我们的 ← 带着 RWin 出去就是 Win+←，
         直接把目标窗口贴边；RShift 按着时滚轮会被目标当横向/缩放手势。
-     2) 四键都在 kMods 里：SendEvent 自动记账 g_injectedDown，退出/重启的
+     2) 四键的注入都走 SendEvent：自动进 g_injMask 记账，退出/重启的
         卡键清理（SendClearStuckModifiers）不用新增路径。 */
 static std::atomic<bool> g_hyperActive{ false };
 static std::atomic<bool> g_hyperReady{ false };

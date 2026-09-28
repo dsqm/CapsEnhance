@@ -705,12 +705,19 @@ static void ResetEngine(void) {
    钩子 / 和弦引擎 / 修饰门闩随进程重启全部回到干净初态。 */
 static void DoRestart(void) {
     ResetEngine();
-    ModHoldReset();
     g_btnCount = 0;
     /* 必须先停执行线程并等它收尾：否则它可能正在注入，而 SendClearStuckModifiers
-       要读 send.c 里由它维护的 g_injectedDown（清卡键会读错）。 */
+       要读 send.c 的注入记账（清卡键会读错）。 */
     ActStop();
-    SendClearStuckModifiers();
+    /* 清卡键必须排在 ModHoldReset **之前**：ModHoldReset 里的 PhysSeedFromLogical
+       会重播种 g_phys，排在后面判据就被播种改写了。此刻钩子还装着，g_phys
+       是钩子亲眼维护的物理状态 —— 正是判据最准的时刻。
+       protectSeededHolds=FALSE（激进）：重启是用户显式的"重置键盘"动作，
+       只保护"钩子亲眼见到的按住"，**播种态的卡键无论谁造成的都一并清掉**
+       —— 包括别的程序崩溃留下的（用户用 KeyCleaner 类工具修的那种）。
+       顺序约束的完整说明见 send.c。 */
+    SendClearStuckModifiers(FALSE);
+    ModHoldReset();
 
     WCHAR exe[MAX_PATH] = L"";
     GetModuleFileNameW(NULL, exe, MAX_PATH);
@@ -1272,13 +1279,17 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
        那一小段真实按键。 */
     PhysSeedFromLogical();   /* 启动前就按着的键按物理按住处理（防误清） */
 
-    /* 启动时清一次"上次留下的卡键"：程序被强杀（或上电异常）时，
-       它注入过的修饰键可能还停在"按下"状态，而状态表随进程一起消失了 ——
-       受害的是**别的**程序，表现为"Alt/Ctrl 一直按着"。
-       判据是"系统认为按着 且 用户物理上没按"（见 send.c），所以刚播种完
-       的物理表正好用来保护用户此刻真按着的键，不会误清。
+    /* 启动时清一次"上次留下的卡键"：程序被强杀（或上电异常）时，它注入过的
+       键可能还停在"按下"状态，而注入记账随进程一起消失了 —— 受害的是**别的**
+       程序，表现为"Alt/Ctrl 一直按着"或"方向键自己跑"。
+       两类残留的清法不同（见 send.c）：注入过的键靠记账补抬（记账没了），
+       所以这里靠**全 VK 扫描**兜底 —— 判据"系统认为按着 且 用户物理上没按"，
+       与卡键是谁造成的无关（别的程序崩溃留下的同样清）。
+       protectSeededHolds=TRUE（保守）：刚播种的键（启动前就按着的）分不清
+       "用户正按着"还是"早已卡住"，一律当按住保护 —— 代价是上次崩溃残留的
+       修饰键在启动这一遍漏清，**再重启一次即可**（重启路径走激进清理）。
        放在装钩子之前：此时我们注入的抬起不会被自己的钩子当成输入处理。 */
-    SendClearStuckModifiers();
+    SendClearStuckModifiers(TRUE);
 
     if (!HookInstall()) {
         TrayHint(L"钩子安装失败（可能被安全软件拦截）");
@@ -1360,7 +1371,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     ActStop();                   /* 停执行线程并等它收尾，再清卡键 */
     WpsBridgeShutdown();         /* 让 WPS 降权桥立刻退出（否则要等它的空闲超时） */
     HookUninstall();
-    SendClearStuckModifiers();   /* 退出前清掉可能卡住的注入修饰键 */
+    SendClearStuckModifiers(FALSE);   /* 退出前清卡键：注入记账补抬 + 全 VK 扫描（激进，见 send.c） */
     TrayRemove();
     if (g_menu) { DestroyMenu(g_menu); g_menu = NULL; }
     return rc;

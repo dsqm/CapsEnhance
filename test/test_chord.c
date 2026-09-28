@@ -765,12 +765,15 @@ int main(void) {
     CHECK(CountVk(VK_LEFT) == nKStopped, "K: 松开 Caps 后重复立刻停止");
 
     /* ---- 场景L：清卡键（SendClearStuckModifiers 的判定）----
-       卡键 = OS 逻辑按下 && 物理未按。注入的键同样会置位逻辑状态，
-       但不会更新物理表 —— 所以注入 down 之后调用清理，应补发 up。 */
+       卡键 = OS 逻辑按下 && 物理未按（钩子维护的物理表，注入的键不进表）。
+       清理分两段：① 注入记账的键无条件补抬；② 全 VK 扫描兜底 —— 与卡键是
+       谁造成的无关（别的程序崩溃留下的也清）。protectSeededHolds 控制怎么
+       对待"启动播种的按住"（g_phys 三态里的 2）：TRUE 保护（启动语义），
+       FALSE 只保护钩子亲眼见过的按住（重启/退出语义）。 */
     Reset();
     SendEvent(VK_LCONTROL, FALSE); Pump(30);     /* 注入 Ctrl down（逻辑按下） */
     CHECK(g_phys[VK_LCONTROL] == 0, "L: 注入的键不进物理表");
-    SendClearStuckModifiers(); Pump(30); Drain();
+    SendClearStuckModifiers(FALSE); Pump(30); Drain();
     CHECK(SeqIdx(VK_LCONTROL, 1) >= 0, "L: 卡住的 Ctrl 被补发抬起");
     SendEvent(VK_LCONTROL, TRUE); Pump(10);      /* 收尾：确保系统状态干净 */
     Pump(30);
@@ -779,13 +782,59 @@ int main(void) {
        模拟：注入 down 后手工把"注入过"标记清零、物理表置位，
        相当于"用户物理按住且与我们无关"的状态。 */
     SendEvent(VK_LCONTROL, FALSE); Pump(30);
-    /* 直接清 send.c 的注入标记：g_injectedDown 在同一编译单元 */
-    for (int i = 0; i < 8; i++)
-        if (kMods[i] == VK_LCONTROL) g_injectedDown[i] = FALSE;
-    g_phys[VK_LCONTROL] = 1;                     /* 物理按住 */
+    /* 直接清 send.c 的注入记账：g_injMask 在同一编译单元 */
+    InjNote(VK_LCONTROL, TRUE);
+    g_phys[VK_LCONTROL] = 1;                     /* 钩子亲眼见过的物理按住 */
     ResetRec();
-    SendClearStuckModifiers(); Pump(30); Drain();
+    SendClearStuckModifiers(FALSE); Pump(30); Drain();
     CHECK(SeqIdx(VK_LCONTROL, 1) < 0, "L: 物理按住的 Ctrl 不被清理");
+    g_phys[VK_LCONTROL] = 0;
+    SendEvent(VK_LCONTROL, TRUE); Pump(10);      /* 收尾 */
+    Pump(30);
+
+    /* 非修饰键同样要有账可查（方向键残留曾是清理的盲区：按词跳转/逐格补齐
+       注入的 ←↓→↑ 被进程死亡截断就是这种状态）。 */
+    ResetRec();
+    SendEvent(VK_LEFT, FALSE); Pump(30);
+    SendClearStuckModifiers(FALSE); Pump(30); Drain();
+    CHECK(SeqIdx(VK_LEFT, 1) >= 0, "L: 卡住的方向键（注入残留）被补发抬起");
+    SendEvent(VK_LEFT, TRUE); Pump(10);
+    Pump(30);
+
+    /* 外来卡键：**不是本程序注入**的（无注入账）、钩子也没见过物理按下 ——
+       别的程序注入后崩溃留下的正是这种状态。② 全 VK 扫描必须兜住它：
+       重启的"重置键盘"要能清掉不是本程序造成的卡键（KeyCleaner 同效）。 */
+    ResetRec();
+    SendEvent(VK_LEFT, FALSE); Pump(30);
+    InjNote(VK_LEFT, TRUE);                      /* 抹账：装作与我们无关 */
+    SendClearStuckModifiers(FALSE); Pump(30); Drain();
+    CHECK(SeqIdx(VK_LEFT, 1) >= 0, "L: 外来卡键（无注入账、无物理按下）被全VK扫描清掉");
+    SendEvent(VK_LEFT, TRUE); Pump(10);
+    Pump(30);
+
+    /* 物理按住的普通键同样受保护（扫全 VK 也不能动用户正按着的键）。 */
+    ResetRec();
+    SendEvent(VK_LEFT, FALSE); Pump(30);
+    InjNote(VK_LEFT, TRUE);
+    g_phys[VK_LEFT] = 1;                         /* 钩子亲眼见过的物理按住 */
+    SendClearStuckModifiers(FALSE); Pump(30); Drain();
+    CHECK(SeqIdx(VK_LEFT, 1) < 0, "L: 物理按住的方向键不被清理");
+    g_phys[VK_LEFT] = 0;
+    SendEvent(VK_LEFT, TRUE); Pump(10);
+    Pump(30);
+
+    /* 播种按住（g_phys==2：启动时就按着、钩子没见过按下）的两种语义：
+       启动路径（TRUE）把它当"用户按着"保护 —— 登录时按着 Shift 不该被抖掉；
+       重启路径（FALSE）把它清掉 —— 用户显式的"重置键盘"要能清掉上上次
+       崩溃留下的修饰键卡键（它与"用户正按着"状态同态，只有这里能区分）。 */
+    ResetRec();
+    SendEvent(VK_LCONTROL, FALSE); Pump(30);
+    InjNote(VK_LCONTROL, TRUE);
+    g_phys[VK_LCONTROL] = 2;                     /* 播种按下 */
+    SendClearStuckModifiers(TRUE); Pump(30); Drain();
+    CHECK(SeqIdx(VK_LCONTROL, 1) < 0, "L: 启动语义下播种按住受保护（不误清用户按着的键）");
+    SendClearStuckModifiers(FALSE); Pump(30); Drain();
+    CHECK(SeqIdx(VK_LCONTROL, 1) >= 0, "L: 重启语义下播种按住被清掉（清掉别的程序留的卡键）");
     g_phys[VK_LCONTROL] = 0;
     SendEvent(VK_LCONTROL, TRUE); Pump(10);      /* 收尾 */
     Pump(30);

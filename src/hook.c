@@ -27,23 +27,37 @@ static volatile DWORD s_shiftMask = 0;   /* bit0=左 Shift, bit1=右 Shift */
 /* 物理按键状态表：只记录真实（非注入）按键的按下/抬起。
    GetAsyncKeyState 反映的是 OS 的"逻辑"状态——被注入的键同样会置位，
    因此它区分不了"用户真的按着"和"键卡住了"。必须由钩子自己维护物理状态，
-   这正是 AHK 安装键盘钩子后能分辨 GetKeyState(,"P") 物理状态的原因。 */
+   这正是 AHK 安装键盘钩子后能分辨 GetKeyState(,"P") 物理状态的原因。
+
+   三态取值：
+     0 = 确认抬起（钩子见过抬起，或从未见过按下）
+     1 = 按下，且**钩子亲眼见过**这个按下 —— 最可信的"用户正按着"
+     2 = 按下，但来自**启动播种**（PhysSeedFromLogical：钩子装上之前就已
+         按下，钩子没见过按下事件）—— "用户正按着"与"早已卡住"在字节层面
+         同态，种子分不清。消费方按需取舍：钩子逻辑（吞放判定等）两种按下
+         一视同仁（PhysKeyDown）；清卡键在**重启/退出**时只认 1（见 send.c，
+         这正是"重启能清掉别的程序留下的卡键"的实现点）。
+   钩子见到的真实 down 会把 2 升级成 1（用户又按了一次，转正）。 */
 static volatile BYTE g_phys[256];
 BOOL PhysKeyDown(int vk) {
     if (vk < 0 || vk > 255) return FALSE;
     return g_phys[vk] != 0;
 }
+BOOL PhysKeyObservedDown(int vk) {
+    if (vk < 0 || vk > 255) return FALSE;
+    return g_phys[vk] == 1;
+}
 
-/* 装好钩子后调用：把"此刻逻辑按下"的键视为物理按住。
-   否则用户在程序启动之前就按住的键（钩子没见过它的按下）会在清理时
-   被误判成卡键而清掉。 */
+/* 装好钩子后调用：把"此刻逻辑按下"的键标记为**播种按下**（三态里的 2）。
+   钩子还没见过这些键的按下事件，不能冒充"亲眼所见"；它们是否真的是
+   用户在按，由消费方决定怎么用（见 g_phys 的三态说明）。 */
 void PhysSeedFromLogical(void) {
     static const int vks[] = {
         VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL,
         VK_LMENU,  VK_RMENU,  VK_LWIN,     VK_RWIN, VK_CAPITAL
     };
     for (int i = 0; i < (int)(sizeof(vks) / sizeof(vks[0])); i++)
-        if (GetAsyncKeyState(vks[i]) & 0x8000) g_phys[vks[i]] = 1;
+        if (GetAsyncKeyState(vks[i]) & 0x8000) g_phys[vks[i]] = 2;
     /* Shift 位图同步种子化：否则"启动前就按着 Shift"时 Caps+滚轮不会横向滚动 */
     s_shiftMask = 0;
     if (g_phys[VK_LSHIFT]) s_shiftMask |= 1u;
