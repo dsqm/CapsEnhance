@@ -77,6 +77,14 @@ static const ActionDef kActions[] = {
     /* 剪贴板：单发命令，不发键。窗口本体在独立 exe（clip/clip.c）里，
        由 main.c 在和弦上直接开合。 */
     { ACT_CLIPLIST,  'V',        0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_CLIPLIST, "剪贴板(V)", "剪贴|板" },
+    /* 系统音量：走普通"发键"通道（outVk = 多媒体键，系统自己处理，与前台程序无关）。
+       静音是**开关**：重复一次就多切一次（来回横跳），必须单发 —— 与 Caps(Tab) 同理。
+       音量加减是**步进**：长按重复（与真实音量键的手感一致，重复节奏即引擎的
+       REPEAT_*），增强模式点按补齐到 3 步也顺理成章（增强 = ×3 的既有语义）。
+       两条都带 ACTF_NO_SHIFT：选区模式的 Shift 对系统音量毫无意义。 */
+    { ACT_MUTE,      VK_F6,      VK_VOLUME_MUTE, -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT, "静音(F6)", "静音" },
+    { ACT_VOLDOWN,   VK_F7,      VK_VOLUME_DOWN, -1, ACTF_NO_SHIFT, "音量-(F7)", "音量-" },
+    { ACT_VOLUP,     VK_F8,      VK_VOLUME_UP,   -1, ACTF_NO_SHIFT, "音量+(F8)", "音量+" },
     /* 诊断：没有触发键（由 PROBE_KEY 的特殊路径投递，见 hook.c） */
     { ACT_PROBE,     0,          0,          -1, ACTF_PROBE, "探测", "记录日志" },
 };

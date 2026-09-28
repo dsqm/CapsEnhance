@@ -90,6 +90,9 @@
 #define ACT_OPENFOLDER 15            /* 打开焦点程序所在文件夹并选中该 exe（F3）  */
 #define ACT_HELP     16              /* 按键帮助（F1）：拉起/唤起独立 exe CapsEnhanceHelp */
 #define ACT_CLIPLIST 17              /* 剪贴板（V）：拉起/唤起独立 exe CapsEnhanceClip，读 Ditto 历史 */
+#define ACT_MUTE     18              /* 系统静音开关（F6）：发 VK_VOLUME_MUTE，翻转型 -> 单发 */
+#define ACT_VOLDOWN  19              /* 系统音量减（F7）：发 VK_VOLUME_DOWN，步进型 -> 可长按重复 */
+#define ACT_VOLUP    20              /* 系统音量加（F8）：发 VK_VOLUME_UP，步进型 -> 可长按重复 */
 
 #define DIR_LEFT 0
 #define DIR_RIGHT 1

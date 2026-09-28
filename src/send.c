@@ -29,6 +29,11 @@ static BOOL IsExtendedVk(int vk) {
     case VK_SNAPSHOT:
     case VK_LWIN: case VK_RWIN: case VK_APPS:
     case VK_DIVIDE:                 /* 小键盘 / */
+    case VK_VOLUME_MUTE: case VK_VOLUME_DOWN: case VK_VOLUME_UP:
+        /* 多媒体键在真实键盘上同样是 E0 前缀扫描码（Mute=E0 20 / Down=E0 2E /
+           Up=E0 30）。缺了扩展标志，注入事件的合成扫描码就是裸 0x20 —— 那是
+           字母 D 的主键码，按扫描码认键的消费者（日志工具 / 其他钩子）会看成
+           "按了 D"。 */
         return TRUE;
     default:
         return FALSE;

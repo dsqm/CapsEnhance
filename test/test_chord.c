@@ -2236,6 +2236,32 @@ int main(void) {
         Drain();
     }
 
+    /* ---- 场景AI3：系统音量（C+F6 静音 / F7 减 / F8 加）----
+       三条都走普通"发键"通道（outVk = 多媒体键，由系统处理，与前台程序无关），
+       真正的注入序列与 J/K 那些共用同一条路（场景A~F 已覆盖），而且真发会把
+       跑测试这台机器的系统音量改掉 —— 所以这里只离线钉住两件容易改坏的语义：
+         ① 接线：F6/F7/F8 各自接到哪个动作；
+         ② 单发与否是**按动作**定的：静音是开关（重复 = 来回切），必须单发；
+            音量加减是步进（长按重复 = 连续调，与真实音量键手感一致），必须
+            **不**单发 —— 弄反了要么"按住 F6 静音乱跳"，要么"按住 F8 只加一格"。 */
+    {
+        CHECK(ActOfVk(VK_F6) == ACT_MUTE && ActOfVk(VK_F7) == ACT_VOLDOWN &&
+              ActOfVk(VK_F8) == ACT_VOLUP,
+              "AI3: 触发键 F6/F7/F8 -> 静音 / 音量减 / 音量加");
+        CHECK(ActHasFlag(ACT_MUTE, ACTF_SINGLE_SHOT) &&
+              ActHasFlag(ACT_MUTE, ACTF_NO_SHIFT) &&
+              ActOutVk(ACT_MUTE) == VK_VOLUME_MUTE,
+              "AI3: 静音 = 单发开关（绝不重复）+ 不吃选区 + 发 VK_VOLUME_MUTE");
+        CHECK(!ActHasFlag(ACT_VOLDOWN, ACTF_SINGLE_SHOT) &&
+              ActHasFlag(ACT_VOLDOWN, ACTF_NO_SHIFT) &&
+              ActOutVk(ACT_VOLDOWN) == VK_VOLUME_DOWN,
+              "AI3: 音量减 = 可重复（长按连续降）+ 不吃选区 + 发 VK_VOLUME_DOWN");
+        CHECK(!ActHasFlag(ACT_VOLUP, ACTF_SINGLE_SHOT) &&
+              ActHasFlag(ACT_VOLUP, ACTF_NO_SHIFT) &&
+              ActOutVk(ACT_VOLUP) == VK_VOLUME_UP,
+              "AI3: 音量加 = 可重复（长按连续升）+ 不吃选区 + 发 VK_VOLUME_UP");
+    }
+
     /* ---- 场景AJ：记录日志结束的通知**可点击**（点了打开并选中那份日志）----
        这条链路的末端（真的弹出文件管理器）与打开文件夹那条一样测不了，能离线钉住的
        是几件容易在以后改坏的事：
