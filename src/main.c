@@ -311,6 +311,7 @@ static HICON LoadAppIcon(BOOL wantSmall) {
 #define IDM_SETTINGS 2
 #define IDM_EXIT     3
 #define IDM_RESTART  4
+#define IDM_FOLDER   5   /* 程序文件夹：打开本 exe 所在目录（见 TrayShowMenu 的分支） */
 /* 设置程序：**独立 exe**，与本 exe 同目录。
    为什么不把设置界面做进本体：本体是托盘常驻程序，它的主线程是键盘钩子的
    宿主 —— 任何模态窗口/重活都会把钩子拖住（见 act.c 文件头）。设置界面要跑
@@ -550,6 +551,14 @@ static void TrayShowMenu(void) {
         LaunchSettings();
     } else if (cmd == IDM_RESTART) {
         DoRestart();
+    } else if (cmd == IDM_FOLDER) {
+        /* 「程序文件夹」：复用日志定位与 C+F3 的同一条 shell 链路
+           （FolderRevealPath：一次性线程 + SHOpenFolderAndSelectItems，失败
+           自动绕回主线程弹气泡）。传**exe 文件**而不是目录 —— 它的语义是
+           "打开父文件夹并选中这一项"，正合"打开文件所在的位置"；传目录反而
+           会去开它的上级（见 folder.c 里 FolderRevealPidl 的说明）。 */
+        WCHAR exe[MAX_PATH];
+        if (GetModuleFileNameW(NULL, exe, MAX_PATH)) FolderRevealPath(exe);
     } else if (cmd == IDM_EXIT) {
         g_quit = TRUE;
         PostMessageW(g_mainWnd, WM_CLOSE, 0, 0);
@@ -1320,6 +1329,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     if (!g_quit) {
         g_menu = CreatePopupMenu();
         if (g_menu) {
+            AppendMenuW(g_menu, MF_STRING, IDM_FOLDER, L"程序文件夹");
+            AppendMenuW(g_menu, MF_SEPARATOR, 0, NULL);
             AppendMenuW(g_menu, MF_STRING, IDM_PAUSE, L"暂停映射");
             AppendMenuW(g_menu, MF_STRING, IDM_SETTINGS, L"设置...");
             AppendMenuW(g_menu, MF_STRING, IDM_RESTART, L"重启程序");

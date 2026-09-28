@@ -10,7 +10,7 @@ Windows **CapsLock** 快捷键增强程序。按住 `CapsLock` 当作修饰键�
 ## 快速开始
 
 1. 把四个 exe（`CapsEnhance.exe`、`CapsEnhanceSettings.exe`、`CapsEnhanceHelp.exe`、`CapsEnhanceClip.exe`）放在同一个目录，双击 `CapsEnhance.exe` 运行。
-2. 托盘会出现程序图标（首次可能收进托盘"隐藏图标"溢出区，从任务栏设置里拖出来即可常驻）；从托盘菜单可**暂停映射 / 打开设置 / 重启程序 / 退出**。
+2. 托盘会出现程序图标（首次可能收进托盘"隐藏图标"溢出区，从任务栏设置里拖出来即可常驻）；从托盘菜单可**暂停映射 / 打开设置 / 重启程序 / 打开程序文件夹 / 退出**。
 3. 需要管理员权限时，在配置里打开 `RunAsAdmin = 1`（**默认关闭**，见[配置](#配置-capsenhanceini)）。
 
 > **CapsLock 会被本程序拦截**：按住才是光亮键的"映射模式"，单击或长按不做任何事、也不触发真的 CapsLock。需要大小写切换时，用 `CapsLock + Tab` 发送一次真实的 CapsLock。
