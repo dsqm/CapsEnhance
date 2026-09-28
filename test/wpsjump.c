@@ -33,6 +33,7 @@ void CapLog(const char* fmt, ...) {
     g_lines++;
 }
 BOOL PhysKeyDown(int vk) { (void)vk; return FALSE; }
+BOOL PhysKeyObservedDown(int vk) { (void)vk; return FALSE; }
 
 static int g_fail = 0;
 
