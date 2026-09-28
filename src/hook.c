@@ -378,20 +378,11 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 }
                 return 1;
             }
-            /* ---- 预览开着时空格 = 钉住 toggle ----
-               拦它必须真知道预览开着（ClipViewIsOpen 是主线程镜像，钩子与消息
-               处理同线程，读它就是一次内存读）—— 否则"浮层开着、预览没开"时
-               打字空格就丢了。toggle 的执行在浮层侧（WM_CLIP_KEY 里的 VK_SPACE）。 */
-            if (!g_cMod && ClipViewIsOpen() && vk == VK_SPACE) {
-                if (down) { SwallowNote(vk); PostMessageW(g_mainWnd, WM_CLIP_KEY, (WPARAM)VK_SPACE, 0); }
-                else      SwallowTake(vk);
-                return 1;
-            }
             /* ---- 预览开着时按了无关键 = 用户已经回去干别的了 ----
                预览退场。**只通知，不吞** —— 这颗键该怎么走还怎么走，预览从不
                拥有键盘（Ditto 同款语义：预览开着时开始打字，预览自己消失）。
                修饰键除外：Shift+回车 纯文本粘贴这类组合里修饰键先到，不能把
-               "正要粘贴"误判成"开始打字"。钉住中 ClipViewHide 会自己忽略。 */
+               "正要粘贴"误判成"开始打字"。 */
             if (down && ClipViewIsOpen()) {
                 static const int kViewMods[] = { VK_LSHIFT, VK_RSHIFT, VK_LCONTROL,
                     VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN };

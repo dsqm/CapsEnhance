@@ -21,7 +21,6 @@
 static BOOL  ViewSurface(void);
 static void  ViewBtnRect(int i, Gdiplus::RectF* out);
 static int   ViewHitBtn(float x, float y);
-static void  ViewCopy(void);
 static void  ViewHarvest(void);
 static void  ViewPaintSoon(void);
 static BOOL  ScrollPaintStrip(int dx, int dy);
@@ -44,8 +43,7 @@ static HCURSOR MakeZoomCursor(BOOL plus);
      · 滚轮 = 上下滚动；Ctrl+滚轮 = 缩放（锚=窗口中心）；横向滚轮 = 左右滚动
      · 横竖两条**自绘**滚动条按需出现（图装不下才预留边条画拇指，见
        ViewFitOnce）；没有拖图平移 —— Ditto 没有
-     · 双击图片 = 1:1 ↔ 适应窗口；标题栏可拖动挪窗、✕ 关闭、"复制"写回剪贴板
-     · 空格钉住（钩子代收转发）：钉住后"无关键退场"停用，Esc/F3 照常
+     · 双击图片 = 1:1 ↔ 适应窗口；标题栏可拖动挪窗、✕ 关闭
    窗口尺寸（Ditto 勾选项"根据内容调整窗口大小"+"缩放图像以适应窗口"）：
      · 解码完成后窗口才显示，尺寸贴着图像内容（上限 = ClipViewMaxW/H 配置，
        仍不超过工作区）—— 没有先弹
@@ -81,7 +79,6 @@ static void*     g_viewBits = NULL;
 static int       g_viewSurfW = 0, g_viewSurfH = 0;   /* 内容 DIB 的现尺寸 */
 static float     g_viewScale = 0.0f;   /* 0 = 100% 原大（默认）；>0 = 显式比例；<0 = 适应窗口（双击切换） */
 static BOOL      g_viewFitted = FALSE; /* 本条目按内容定过窗口尺寸（换条目重置） */
-static BOOL      g_viewPinned = FALSE; /* 空格钉住：停用"无关键退场" */
 static BOOL      g_viewWinDrag = FALSE;     /* 正在拖标题栏挪窗 */
 static BOOL      g_viewClickArm = FALSE;    /* 按下发生在图片区：抬起时切换适应窗口 */
 static POINT     g_viewDragCur;             /* 按下那一刻的光标位置 */
@@ -106,7 +103,7 @@ static BOOL g_animX = FALSE, g_animY = FALSE;     /* 各轴动画进行中（横
 #define VIEW_ANCHOR_KEEP    0                 /* ViewSyncScroll：现位 clamp 进新范围 */
 #define VIEW_ANCHOR_CENTER  1                 /*   滚到内容中心（缩放锚 = 窗口中心） */
 #define VIEW_ANCHOR_TOP     2                 /*   回到顶/左（新内容从头看） */
-#define VIEW_BTN_COUNT 2                    /* 0 = ✕，1 = 复制 */
+#define VIEW_BTN_COUNT 1                    /* 只剩 ✕（复制按钮已删） */
 
 /* 当前生效缩放。Ditto 勾上"根据内容调整窗口大小 + 缩放图像以适应窗口"后
    的显示态是 **100% 原大、顶对齐、超窗走滚动条**（实测澄清："缩放图像以
@@ -316,13 +313,9 @@ static void ViewBtnRect(int i, Gdiplus::RectF* out) {
     float s = 26.0f * g_k;
     out->Y = (g_headerH - s) * 0.5f;
     out->Height = s;
-    if (i == 0) {                            /* ✕ 贴最右 */
-        out->Width = s;
-        out->X = cw - s - 6.0f * g_k;
-    } else {                                 /* 复制 在 ✕ 左边 */
-        out->Width = 56.0f * g_k;
-        out->X = cw - s - 6.0f * g_k - 8.0f * g_k - out->Width;
-    }
+    (void)i;                                 /* 只剩 ✕ 一颗：贴最右 */
+    out->Width = s;
+    out->X = cw - s - 6.0f * g_k;
 }
 
 static int ViewHitBtn(float x, float y) {
@@ -332,15 +325,6 @@ static int ViewHitBtn(float x, float y) {
         if (x >= r.X && x <= r.X + r.Width && y >= r.Y && y <= r.Y + r.Height) return i;
     }
     return -1;
-}
-
-/* 复制原图回剪贴板：走现成的格式回写路径（DbLoadFormats + PutOnClipboard）——
-   Data 表里的原始字节原样进剪贴板（不经过 GDI+ 重编码），Ditto 的 ignore
-   标记也自动带上，这次复制不会又被记进历史。 */
-static void ViewCopy(void) {
-    if (g_viewRow < 0 || g_viewRow >= g_count) return;
-    if (ClipLoadFormats(g_items[g_viewRow].id) > 0) PutOnClipboard(FALSE);
-    FreeFmts();
 }
 
 /* 主线程收割：把解码线程放进槽的图接进 g_viewImg，旧图就地释放。
@@ -684,16 +668,12 @@ static void ViewPaint(void) {
     } else {
         wcscpy_s(title, 96, L"解码中…");
     }
-    if (g_viewPinned) wcscat_s(title, 96, L" 已钉住");
     GdiText(g_viewDC, title, g_fontRow, CR(C_TITLE),
             12.0f * g_k, 0.0f, cw - 160.0f * g_k, g_headerH,
             DT_LEFT, TRUE);
     Gdiplus::RectF r;
     ViewBtnRect(0, &r);
     GdiText(g_viewDC, L"✕", g_fontRow, CR(0xFF6E6E6E),
-            r.X, r.Y, r.Width, r.Height, DT_CENTER, FALSE);
-    ViewBtnRect(1, &r);
-    GdiText(g_viewDC, L"复制", g_fontSmall, CR(0xFF6E6E6E),
             r.X, r.Y, r.Width, r.Height, DT_CENTER, FALSE);
 
     g_viewLastSX = sx;  g_viewLastSY = sy;
@@ -710,20 +690,18 @@ BOOL ViewIsOpen(void) { return g_viewOpen; }
 HWND ViewWnd(void)   { return g_view; }
 BOOL ViewIsViewMsg(UINT msg) { return g_msgView && msg == g_msgView; }
 
-/* 状态报信：主程序在主线程上记两份镜像（s_viewOpen / s_viewPinned），钩子
-   据此决定"空格拦不拦、无关键要不要叫预览退场"。幂等：重复发只是再确认。 */
+/* 状态报信：主程序在主线程上记一份镜像（s_viewOpen），钩子据此决定
+   "无关键要不要叫预览退场"。幂等：重复发只是再确认。 */
 static void ViewNotifyState(void) {
     if (!g_msgViewState) return;
     HWND mw = FindWindowW(CLIP_MAIN_CLASS, NULL);
-    if (mw) PostMessageW(mw, g_msgViewState, g_viewOpen ? 1 : 0,
-                         g_viewPinned ? 1 : 0);
+    if (mw) PostMessageW(mw, g_msgViewState, g_viewOpen ? 1 : 0, 0);
 }
 
 void ViewHide(void) {
     if (!g_viewOpen && g_viewRow < 0) return;
     g_viewRow = -1;
     g_viewId = 0;
-    g_viewPinned = FALSE;
     g_viewWinDrag = FALSE;
     if (g_viewPaintPending) {
         g_viewPaintPending = FALSE;
@@ -763,13 +741,6 @@ void ViewFollowSel(void) {
     }
     ThumbRequestViewDecode(g_viewId);
     ViewPaint();                 /* 立即切到"解码中"，图好了 WM_VIEW_READY 再画 */
-}
-
-void ViewPinToggle(void) {
-    g_viewPinned = !g_viewPinned;
-    ViewNotifyState();           /* 开着没变，但 pinned 位变了 */
-    g_viewFullPaint = TRUE;      /* 标题文字变了 */
-    ViewPaint();                 /* 标题里带"已钉住" */
 }
 
 /* 条目集重载（DbLoadItems）后校验预览：g_viewRow 是 g_items 的下标，重载后
@@ -889,7 +860,6 @@ static LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         float x = (float)(short)LOWORD(lp), y = (float)(short)HIWORD(lp);
         int hb = ViewHitBtn(x, y);
         if (hb == 0) { ViewHide(); return 0; }    /* ✕ */
-        if (hb == 1) { ViewCopy(); return 0; }    /* 复制原图 */
         /* ---- 自绘滚动条：拇指 = 拖拽；轨道 = 翻页 ---- */
         RECT v, h;
         ViewBarRects(&v, &h);
@@ -1061,10 +1031,9 @@ void ViewToggle(void) {
     g_viewId = g_items[g_sel].id;
     g_viewScale = 0.0f;
     g_viewFitted = FALSE;
-    g_viewPinned = FALSE;
     /* 窗口不在这里显示："根据内容调整窗口大小"（Ditto 勾选项同款）意味着
        尺寸依赖解码结果 —— WM_VIEW_READY 里按内容摆好再 SHOW。逻辑上预览
-       此刻已"开着"（g_viewOpen），空格钉住 / 无关键退场从这一刻就生效。 */
+       此刻已"开着"（g_viewOpen），无关键退场从这一刻就生效。 */
     g_viewOpen = TRUE;
     ViewNotifyState();
     g_viewFullPaint = TRUE;      /* 新会话第一帧必须整画 */
@@ -1185,5 +1154,4 @@ void ViewDestroy(void) {
     g_viewOpen = FALSE;
     g_viewRow = -1;
     g_viewId = 0;
-    g_viewPinned = FALSE;
 }

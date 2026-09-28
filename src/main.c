@@ -820,7 +820,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == s_taskbarCreated && s_taskbarCreated) { TrayRebuild(); return 0; }
     if (ClipIsBornMsg(msg))   { ClipBorn((DWORD)wp, (DWORD)lp); return 0; }  /* 浮层窗口已出生，握手完成 */
     if (ClipIsClosedMsg(msg)) { ClipClosed(); return 0; }   /* 浮层自行关闭（如粘贴后收起） */
-    if (ClipViewIsStateMsg(msg)) { ClipViewState((int)wp, (int)(lp & 1)); return 0; } /* 预览窗开/关/钉住报信 */
+    if (ClipViewIsStateMsg(msg)) { ClipViewState((int)wp); return 0; } /* 预览窗开/关报信 */
     if (msg == WM_CLIP_GONE) { ClipGone(); return 0; }      /* 浮层进程没了（内核告知，见 src/child.c） */
 
     switch (msg) {

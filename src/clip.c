@@ -75,12 +75,11 @@ static BOOL  s_spawned = FALSE;   /* 本轮是否已经 CreateProcess 过 */
 static ULONGLONG s_spawnMs = 0;   /* 本轮拉起的时间点（0 = 这一轮没有拉起，复用驻留那份） */
 static ChildWatch s_watch;        /* 浮层进程的死亡通知（见 ClipGone） */
 static int   s_ticks   = 0;
-/* 图片预览窗的两份镜像（浮层随 CLIP_MSG_VIEWSTATE 报上来）。钩子在主线程上
-   读它们决定"空格拦不拦、无关键要不要叫预览退场"；与消息处理同线程串行
-   （cap_core.h 的分界说明），不需要同步原语。浮层关闭/进程死亡时一并清掉
-   —— 预览依附于列表，列表没了它必然也没了。 */
+/* 图片预览窗的镜像（浮层随 CLIP_MSG_VIEWSTATE 报上来）。钩子在主线程上
+   读它决定"无关键要不要叫预览退场"；与消息处理同线程串行（cap_core.h 的
+   分界说明），不需要同步原语。浮层关闭/进程死亡时一并清掉 —— 预览依附于
+   列表，列表没了它必然也没了。 */
 static BOOL  s_viewOpen = FALSE;
-static BOOL  s_viewPinned = FALSE;
 
 static void EnsureMsgs(void) {
     if (!s_msgShow) s_msgShow = RegisterWindowMessageW(CLIP_MSG_SHOW);
@@ -107,10 +106,10 @@ void ClipViewToggle(void) {
     if (w && s_msgView) PostMessageW(w, s_msgView, 1, 0);
 }
 
-/* 用户按了别的键（钩子判定"别的"，修饰键除外）：预览退场。钉住中忽略 ——
-   钉住的全部意义就是"别自动关我"。不吞键：这颗键该怎么走还怎么走。 */
+/* 用户按了别的键（钩子判定"别的"，修饰键除外）：预览退场。
+   不吞键：这颗键该怎么走还怎么走。 */
 void ClipViewHide(void) {
-    if (!s_viewOpen || s_viewPinned) return;
+    if (!s_viewOpen) return;
     EnsureMsgs();
     HWND w = FindWindowW(CLIP_CLASS, NULL);
     if (w && s_msgView) PostMessageW(w, s_msgView, 0, 0);
@@ -126,9 +125,8 @@ BOOL ClipViewIsStateMsg(UINT msg) {
     return s_msgViewState && msg == s_msgViewState;
 }
 
-void ClipViewState(int open, int pinned) {
-    s_viewOpen   = (open != 0);
-    s_viewPinned = (pinned != 0);
+void ClipViewState(int open) {
+    s_viewOpen = (open != 0);
 }
 
 static void StopTick(void) {

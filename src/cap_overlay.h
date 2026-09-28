@@ -91,13 +91,12 @@ void HelpTick(void);   /* HELP_TIMER 到点：把期望状态再送一次（见�
 #define CLIP_MSG_ESC  L"CapsEnhanceClipEsc"   /* 注册消息：主程序代收的 Esc */
 #define CLIP_MSG_KEY  L"CapsEnhanceClipKey"   /* 注册消息：主程序代收的导航键（wParam=vk，lParam=CLIPKF_*） */
 #define CLIP_MSG_CLOSED L"CapsEnhanceClipClosed" /* 注册消息：浮层自行关闭（粘贴/Esc/超时收起）-> 主程序清 s_want */
-/* 浮层 -> 主程序：图片预览窗状态变了（注册消息）。wParam = 1 开 / 0 关，
-   lParam bit0 = 钉住中（空格开关）。主程序据此记两份镜像（s_viewOpen /
-   s_viewPinned），钩子在**主线程上**直接读 —— 两个低级钩子与消息处理同在
-   主线程串行（见 cap_core.h 的分界说明），这两份镜像不需要任何同步原语。
-   为什么必须让主程序知道：预览窗是 NOACTIVATE 的，键盘全部由钩子代收；
-   "预览开着时空格=钉住、按了别的键=预览退场"这两条规则只有钩子能执行，
-   它就得知道预览开没开、钉没钉。 */
+/* 浮层 -> 主程序：图片预览窗状态变了（注册消息）。wParam = 1 开 / 0 关。
+   主程序据此记一份镜像（s_viewOpen），钩子在**主线程上**直接读 —— 两个
+   低级钩子与消息处理同在主线程串行（见 cap_core.h 的分界说明），这份镜像
+   不需要任何同步原语。为什么必须让主程序知道：预览窗是 NOACTIVATE 的，
+   键盘全部由钩子代收，"预览开着时按了别的键=预览退场"这条规则只有钩子能
+   执行，它就得知道预览开没开。 */
 #define CLIP_MSG_VIEWSTATE L"CapsEnhanceClipViewState"
 /* 主程序 -> 浮层：wParam=1 切换图片预览（裸 F3，浮层自己判当前条目是不是
    图片）；wParam=0 让预览退场（用户按了无关键）。 */
@@ -122,7 +121,7 @@ void ClipViewToggle(void);  /* WM_CLIP_VIEW(1)：钩子代收的裸 F3 -> 转给
 void ClipViewHide(void);    /* WM_CLIP_VIEW(0)：用户按了无关键 -> 让预览退场（钉住时忽略） */
 BOOL ClipViewIsOpen(void);  /* 预览窗当前开着吗（钩子据此拦空格/发退场通知；镜像值） */
 BOOL ClipViewIsStateMsg(UINT msg); /* 主窗口收到这条注册消息 = 预览窗状态变了 */
-void ClipViewState(int open, int pinned); /* 收到 CLIP_MSG_VIEWSTATE：更新镜像 */
+void ClipViewState(int open);            /* 收到 CLIP_MSG_VIEWSTATE：更新镜像 */
 BOOL ClipIsOpen(void);  /* 浮层当前是否"该开着"（钩子据此决定要不要拦 Esc） */
 BOOL ClipIsClosedMsg(UINT msg); /* 主窗口收到这条注册消息 = 浮层自行关闭了 */
 void ClipClosed(void);  /* 收到 CLIP_MSG_CLOSED：清 s_want，恢复按键放行 */

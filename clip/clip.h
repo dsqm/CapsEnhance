@@ -85,7 +85,6 @@ void  ViewInitMessages(void);            /* 注册预览的注册消息（wWinMa
 BOOL  ViewIsOpen(void);                  /* 预览会话进行中？（列表键盘/鼠标分支用） */
 HWND  ViewWnd(void);                     /* 预览窗口（点外关闭判定的第二矩形） */
 BOOL  ViewIsViewMsg(UINT msg);           /* 这条消息是不是 F3 预览的 toggle/退场 */
-void  ViewPinToggle(void);               /* 空格：钉住开关（列表键盘分支调用） */
 
 /* ---- clip_thumb.c：缩略图缓存 + 解码线程 ---- */
 void  ThumbsInit(void);                  /* 临界区 + 唤醒事件（首次 DbLoadItems 之前） */

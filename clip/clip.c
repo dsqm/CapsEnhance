@@ -1699,9 +1699,6 @@ static LRESULT CALLBACK ClipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (vk == VK_DOWN)        { MoveSel(1); return 0; }
         if (vk == VK_PRIOR)       { MoveSel(-ROWS_VISIBLE); return 0; }
         if (vk == VK_NEXT)        { MoveSel(ROWS_VISIBLE); return 0; }
-        /* 空格 = 预览钉住 toggle。钩子只在预览开着时才转发（g_viewOpen 再判
-           一次：镜像报信到钩子生效之间有窗口期，防御残留转发）。 */
-        if (vk == VK_SPACE && ViewIsOpen()) { ViewPinToggle(); return 0; }
         if (vk >= '0' && vk <= '9') {
             int i = (vk == '0') ? 9 : (vk - '1');
             if (i < g_count) { g_sel = i; EnsureVisible(i); Render(); DoPaste(shift); }

@@ -108,21 +108,17 @@ void ClipPrewarm(void) { }   /* 预热只是提前拉进程，和弦测试不关
 
 
 /* F3 图片预览（src/clip.c 的 ClipView*）：与浮层同类"另一个 exe 的窗口"，
-   同样桩掉。ClipViewIsOpen 与上面的 ClipIsOpen 同一个理由要反映真实开合 ——
-   钩子据它决定"空格拦不拦、无关键要不要叫预览退场"；Hide 被 pinned 挡住、
-   VIEWSTATE 双向同步这两条也照真实现复刻，后面的钉住用例才测得出语义。 */
-static BOOL g_viewOpen = FALSE, g_viewPinned = FALSE;
+   同样桩掉。ClipViewIsOpen 要反映真实开合 —— 钩子据它决定"无关键要不要
+   叫预览退场"；VIEWSTATE 双向同步也照真实现复刻。 */
+static BOOL g_viewOpen = FALSE;
 void ClipViewToggle(void) { g_viewOpen = !g_viewOpen; }
-void ClipViewHide(void)   { if (!g_viewOpen || g_viewPinned) return; g_viewOpen = FALSE; }
+void ClipViewHide(void)   { if (!g_viewOpen) return; g_viewOpen = FALSE; }
 BOOL ClipViewIsOpen(void) { return g_viewOpen; }
 BOOL ClipViewIsStateMsg(UINT msg) { (void)msg; return FALSE; }
-void ClipViewState(int open, int pinned) {
-    g_viewOpen   = (open != 0);
-    g_viewPinned = (pinned != 0);
-}
+void ClipViewState(int open) { g_viewOpen = (open != 0); }
 static void ResetClipRec(void) {
     g_clipShow = 0; g_clipHide = 0; g_clipEsc = 0; g_clipKey = 0; g_clipOpen = FALSE;
-    g_viewOpen = FALSE; g_viewPinned = FALSE;
+    g_viewOpen = FALSE;
 }
 
 /* ---- 捕获钩子：记录注入的完整事件序列（按下/抬起），并可统计次数 ---- */
