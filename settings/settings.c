@@ -6,8 +6,15 @@
    取到的东西**先填进左侧输入框**（不直接入名单），确认后点"添加"才加进去 ——
    这样能先看清取到了什么、也能顺手改一改。
    取什么由名单决定：进程名单取进程名，窗口类名单取**类名**（原样，无前缀）。
-   保存 = 写回 ini + 让本体重启
-   （`CapsEnhance.exe --restart`，本体重读配置才算生效）。
+   保存 = 写回 ini（「保存」）+ 让本体重启（「保存并重启」，走
+   `CapsEnhance.exe --restart`，本体重读配置才算生效）。
+   ★ 只有这两颗按钮会写 ini。「退出」（以及标题栏的 ✕）**丢弃**改动：有未保存
+   改动时弹一次"退出将丢弃？"的确认，没改动就直接关。
+
+   "有没有未保存改动"的判据是**与基线比对**，不是"动过就脏"（EDIT 收到
+   WM_SETTEXT 是**无条件**发 EN_CHANGE 的，把同样的值写回去也会"动一下"）：
+   加载后与保存后各拍一次基线快照（字段快照 + 五份名单拍平的文本），任何控件
+   通知来了就重比一遍 —— 真的不同才脏，改回原样 `*` 自己就消失。
 
    为什么不是"直接编辑文本"：配置项的值域（LogMaxKB 0..65536、
    AutoScrollInterval 100..60000 …）与布尔语义（只认 0/1）在**配置文件里
@@ -42,9 +49,17 @@
    页签**外观自绘**（PaintTab：comctl 默认的浮凸小块太旧，改成"文本 +
    强调色下划线"的现代样式，行为不动）；常规页的配置项按 group 列**分段**
    渲染半粗段头（见 kFields 的 group 列 / InitGroups）。
+
+   尺寸选取窗：三组"窗口大小"（快速粘贴 / F3 预览的最大与最小）只给两个数字
+   看不出实际多大，每行右侧的「调整…」弹出一个**照真实浮层画法画的示例窗口**，
+   拖着它定尺寸，点中央「完成」把值填回那一对输入框（ini 仍由底部保存按钮写）。
+   三颗按钮两套样式 —— F3 的最大与最小是同一个窗口。弹窗本身**不在这个文件
+   里**：它有自己的窗口类 / 状态 / 两套画法，住在 settings/sizepick.c（两个
+   编译单元之间共享的东西列在 settings/settings_int.h）。
    ============================================================ */
 #define WIN32_LEAN_AND_MEAN
 #include "cap.h"
+#include "settings_int.h"   /* 本 exe 的内部头：与 sizepick.c 共享的那几样 */
 
 #include <stdio.h>
 #include <string.h>
@@ -67,51 +82,7 @@
 #define INI_NAME    L"CapsEnhance.ini"
 #define MAIN_EXE    L"CapsEnhance.exe"
 
-/* ---- 控件 ID ---- */
-#define IDC_SAVEONLY 101   /* 只保存不重启 */
-#define IDC_STATUS  105
-#define IDC_SAVE    102    /* 保存并重启 */
-#define IDC_RELOAD  103
-#define IDC_EXIT    104
-#define IDC_TAB     120   /* 页签条（换页在 WndProc 的 WM_NOTIFY / TCN_SELCHANGE） */
-#define IDC_HEADER  121   /* 顶部"窗框"托盘 */
-#define IDC_FOOTER  122   /* 底部"窗框"托盘（hMenu 传 NULL 的窗口控件 ID 是 0，
-                             会撞上"段头 id 为 0"这类查询 —— 必须给正式 ID） */
-#define IDC_GROUP0  400   /* 常规页段头（每段一个 STATIC，见 kFields 的 group 列） */
-#define GROUP_MAX   8     /* 段数上限；超出的段不带头（数据里目前 5 段，纯保底） */
-
-#define IDC_RUN_ADMIN  200
-#define IDC_LOG_KB     201
-#define IDC_STEPS      202
-#define IDC_OVER_CTRL  203
-#define IDC_WMUL       204
-#define IDC_INTERVAL   205
-#define IDC_FASTMS     206
-#define IDC_HMUL       207
-#define IDC_SCI        208
-#define IDC_IME_CAPS   209
-#define IDC_IME_LSHF   210
-#define IDC_IME_RSHF   211
-#define IDC_DITTO_DB   212
-#define IDC_CLIP_PICK  213   /* 按钮：显示当前字体 + 字号，点它弹系统字体对话框 */
-#define IDC_CLIP_CLICK 214   /* 勾选框：单击条目直接上屏 */
-#define IDC_DITTO_BROWSE 215 /* 按钮：选 Ditto 文件夹 */
-
-#define IDC_DITTO_CONV   216 /* 按钮：DittoDir 相对/绝对路径互转（跨盘禁用） */
-#define IDC_CLIP_W       217 /* 快速粘贴窗口宽（96 DPI 像素） */
-#define IDC_CLIP_H       218 /* 快速粘贴窗口高（同上） */
-#define IDC_CLIP_VMW     219 /* F3 预览窗格最大宽（96 DPI 像素） */
-#define IDC_CLIP_VMH     220 /* F3 预览窗格最大高（同上） */
-#define IDC_CLIP_VNW     221 /* F3 预览窗格最小宽（96 DPI 像素） */
-#define IDC_CLIP_VNH     222 /* F3 预览窗格最小高（同上） */
-
-/* 五份名单各一组：列表框 / 输入框 / 添加 / 删除 / 标题 / 选取窗口 */
-#define IDC_LIST0  300
-#define IDC_NAME0  301
-#define IDC_ADD0   302
-#define IDC_DEL0   303
-#define IDC_LAB0   304
-#define LIST_STRIDE 10
+/* 控件 ID 全在 settings_int.h（两个编译单元共用，见那里的说明）。 */
 
 /* ---- 页签 ----
    两页：常规 = 全部配置项（kFields），名单 = 全部名单（kLists）。分页是
@@ -128,27 +99,9 @@ static const WCHAR* const kTabNames[TAB_N] = { L"常规", L"名单" };
    标签只写中文说明 —— ini 里的键名属于配置文件的内部拼法，界面不重复；
    数值单位（KB / 毫秒 …）单独一列，显示在输入框右侧。
    group 一列是**归属段**（Ditto 路径 / 快速粘贴显然是「剪贴板」这类）：
-   每段第一行渲染一个半粗段头，同一段的行必须连排（段头按"换段"渲染）。 */
-typedef struct {
-    int          id;
-    int          cfg;       /* 对应的 CFG_* 编号；-1 = 纯界面控件（按钮）。
-                               有了它，Load / Save 就是"按 cfg 直取"，
-                               不用再为每个控件写一条 switch 分支。 */
-    const WCHAR* label;
-    const WCHAR* unit;      /* 数值单位，显示在输入框右侧；勾选框与文本框为 NULL */
-    int          isBool;    /* 1 = 勾选框，0 = 输入框 */
-    int          isText;    /* 1 = **文本**输入框（路径这类值）；与 isBool 互斥。
-                               之所以要单独一位：文本行没有 min/max，也不该走
-                               "只能填数字"那条校验 —— 用 isBool 的三态去编码
-                               就会在校验分支里冒出 `if (isBool == 2)` 这种暗号。 */
-    int          isBtn;     /* 1 = 按钮（label 就是按钮上的字）。
-                               按钮不承载配置值，点击行为在 WM_COMMAND 里按 id 分支。 */
-    int          min, max;  /* 值域**不在这里写第二份**：InitFieldRanges 从
-                               config.c 的表取（CfgLo / CfgHi）—— 与解析共用
-                               同一份判据，历史上"界面允许 999、加载回来变成 16"
-                               就是两份分叉出来的 */
-    const WCHAR* group;     /* 归属段名（见上方说明；段头文字就是它） */
-} Field;
+   每段第一行渲染一个半粗段头，同一段的行必须连排（段头按"换段"渲染）。
+   ★ 这个 struct 本身住在 settings_int.h：尺寸选取窗（sizepick.c）也要按它
+     取字段的值域与键名，两个编译单元共一份定义。 */
 
 /* 成对字段（宽+高并排一行）：kFields 里其余字段不受影响。
    第一列 = 行首（宽）字段 id，第二列 = 行次（高）字段 id。 */
@@ -158,8 +111,9 @@ static const int kPairs[][2] = {
     { IDC_CLIP_VNW,   IDC_CLIP_VNH   },
 };
 
-/* id 是某对的行首（宽）？返回行次（高）的 id，否则 0。 */
-static int PairSecondId(int id) {
+/* id 是某对的行首（宽）？返回行次（高）的 id，否则 0。
+   （尺寸选取窗也要用：给定宽字段 id 找高字段 id。） */
+int PairSecondId(int id) {
     for (int i = 0; i < (int)(sizeof(kPairs) / sizeof(kPairs[0])); i++)
         if (kPairs[i][0] == id) return kPairs[i][1];
     return 0;
@@ -171,6 +125,9 @@ static BOOL IsPairSecond(int id) {
         if (kPairs[i][1] == id) return TRUE;
     return FALSE;
 }
+
+/* 尺寸对 <-> 「调整…」按钮的那张表住在 sizepick.c（弹窗自己的世界），
+   主文件只问一句"这一对配没配按钮"：见 settings_int.h 的 SizePickerBtnFor。 */
 
 static Field kFields[] = {
     { IDC_RUN_ADMIN,  CFG_RUN_AS_ADMIN,        L"以管理员身份运行（会弹 UAC）",                   NULL,      1, 0, 0, 0, 0,      L"通用" },
@@ -236,6 +193,14 @@ static void InitGroups(void) {
     }
 }
 
+/* 按控件 id 找字段行（没有返回 NULL）。尺寸选取窗按它取那一对的值域与键名
+   —— 表本身不外露，外头只能拿到一行的指针。 */
+const Field* FieldById(int id) {
+    for (int i = 0; i < FIELD_N; i++)
+        if (kFields[i].id == id) return &kFields[i];
+    return NULL;
+}
+
 /* 选窗时该取什么：进程名单取进程名（`xxx.exe`）；**窗口类名单要取类名**
    —— 把进程名填进"窗口类"名单里永远匹配不上。取到的类名**原样**填进输入框
    （不带任何前缀：本项目的窗口名单只按类名判定，没有"标题"这一维）。 */
@@ -261,7 +226,10 @@ static const ListGroup kLists[] = {
 };
 #define LIST_N ((int)(sizeof(kLists) / sizeof(kLists[0])))
 
-static HWND   g_hwnd    = NULL;
+/* ★ 下面几个**不带 static**：尺寸选取窗（sizepick.c）要用它们（声明在
+   settings_int.h）。能不共享的都留在下面继续 static —— 拆分的收益就在这条
+   界线上，别顺手把整个文件都改成全局的。 */
+HWND   g_hwnd    = NULL;
 static HWND   g_header  = NULL;         /* 顶部"窗框"：页签条的实底托盘（挡住滚上来的内容） */
 static HWND   g_footer  = NULL;         /* 底部"窗框"：状态栏 + 按钮的实底托盘 */
 static HWND   g_status  = NULL;
@@ -269,9 +237,9 @@ static WCHAR  g_dir[MAX_PATH]  = L"";    /* exe 所在目录（结尾带 '\'） 
 static WCHAR  g_path[MAX_PATH] = L"";    /* CapsEnhance.ini 完整路径 */
 static BOOL   g_dirty   = FALSE;
 static BOOL   g_loading = FALSE;         /* 装载期屏蔽 EN_CHANGE，否则一打开就"未保存" */
-static int    g_dpi     = 96;            /* 当前窗口 DPI（96 = 100%） */
-static HFONT  g_font    = NULL;
-static HFONT  g_fontBold = NULL;         /* 半粗体：段头 / 选中页签（建不出就与 g_font 同柄） */
+int    g_dpi     = 96;                  /* 当前窗口 DPI（96 = 100%） */
+HFONT  g_font    = NULL;
+HFONT  g_fontBold = NULL;               /* 半粗体：段头 / 选中页签（建不出就与 g_font 同柄） */
 static int    g_viewH    = 0;            /* 内容可视区高度（底部按钮/状态栏不算） */
 static int    g_contentH = 0;            /* 内容总高；比可视区高就出滚动条 */
 static int    g_laidScroll = -1;         /* 子控件当前是按哪个滚动位置排的 */
@@ -285,7 +253,7 @@ static int S(int v) { return MulDiv(v, g_dpi, 96); }
 
 /* ---------------- 小工具 ---------------- */
 
-static void SetStatus(const WCHAR* fmt, ...) {
+void SetStatus(const WCHAR* fmt, ...) {
     WCHAR buf[512];
     va_list ap; va_start(ap, fmt);
     _vsnwprintf_s(buf, 512, _TRUNCATE, fmt, ap);
@@ -299,14 +267,11 @@ static void UpdateTitle(void) {
     SetWindowTextW(g_hwnd, t);
 }
 
-static void MarkDirty(void) {
-    if (g_loading) return;
-    if (!g_dirty) { g_dirty = TRUE; UpdateTitle(); }
-}
+/* （"有没有未保存改动"的判定在下面那一节：UpdateDirty，按基线比对） */
 
 /* 输入校验：**只认十进制数字**（与配置解析器同一套严格度）。
    不合法的直接拦下并说清范围 —— 静默写个 0 进去才是对用户最坏的结果。 */
-static BOOL ReadIntField(HWND edit, const Field* f, int* out) {
+BOOL ReadIntField(HWND edit, const Field* f, int* out) {
     WCHAR buf[64] = L"";
     GetWindowTextW(edit, buf, 64);
     const WCHAR* p = buf;
@@ -322,7 +287,7 @@ static BOOL ReadIntField(HWND edit, const Field* f, int* out) {
     return TRUE;
 }
 
-static void SetIntField(HWND edit, int v) {
+void SetIntField(HWND edit, int v) {
     WCHAR buf[32];
     _snwprintf_s(buf, 32, _TRUNCATE, L"%d", v);
     SetWindowTextW(edit, buf);
@@ -333,6 +298,73 @@ static void SetCheck(HWND btn, BOOL on) {
 }
 static BOOL GetCheck(HWND btn) {
     return SendMessageW(btn, BM_GETCHECK, 0, 0) == BST_CHECKED;
+}
+
+/* ---------------- "有没有未保存的改动"：与**基线**比，不是"动过就脏" ----------------
+
+   判据为什么必须是比对而不是记账：EDIT 控件收到 WM_SETTEXT **无条件**发
+   EN_CHANGE —— 哪怕写进去的文本和原来一个字都不差。于是"尺寸选取窗把同样
+   的值填回来"、"重新加载后又写一遍"这些**没有改动**的动作也会把窗口标成
+   已修改，标题栏凭空多一个 `*`，用户以为自己改了什么、退出时还得犹豫一下。
+   所以这里存一份"已保存基线快照"（加载后 / 保存后各拍一次），任何控件通知
+   来了就**重新比对一遍**：真的不同才脏，改回原样就自动不脏。
+
+   快照形态：字段存文本（勾选框存 "0"/"1"，字体按钮存"字体名|字号"，因为它
+   的值在配置层而不在控件里）；名单存 '\n' 连接的整段 —— 都是纯字符串比较，
+   没有第二套判据。 */
+
+#define LIST_SNAP_MAX (CFG_MAX_ENTRIES * (CFG_NAME_MAX + 1))   /* 一份名单拍平的字数上限 */
+static WCHAR g_baseField[FIELD_N][DITTO_DIR_MAX];
+static WCHAR g_baseList[LIST_N][LIST_SNAP_MAX];
+static WCHAR g_snapTmp[LIST_SNAP_MAX];        /* 比对时的临时缓冲（一次用一份） */
+
+/* 第 i 个字段的当前值 -> 文本 */
+static void FieldSnapshot(int i, WCHAR* out, size_t cap) {
+    const Field* f = &kFields[i];
+    if (f->id == IDC_CLIP_PICK) {   /* 按钮自己不承载值：真值在配置层（字体 + 字号） */
+        _snwprintf_s(out, cap, _TRUNCATE, L"%s|%d",
+                     CfgStr(CFG_CLIP_FONT), CfgInt(CFG_CLIP_FONT_SIZE));
+        return;
+    }
+    HWND c = GetDlgItem(g_hwnd, f->id);
+    if (!c) { out[0] = 0; return; }
+    if (f->isBool) { out[0] = GetCheck(c) ? L'1' : L'0'; out[1] = 0; return; }
+    GetWindowTextW(c, out, (int)cap);
+}
+
+/* 第 i 份名单的当前内容 -> 文本（'\n' 连接，顺序即界面顺序） */
+static void ListSnapshot(int i, WCHAR* out, size_t cap) {
+    HWND lb = GetDlgItem(g_hwnd, IDC_LIST0 + i * LIST_STRIDE);
+    out[0] = 0;
+    if (!lb) return;
+    int n = (int)SendMessageW(lb, LB_GETCOUNT, 0, 0);
+    for (int j = 0; j < n && j < CFG_MAX_ENTRIES; j++) {
+        WCHAR name[CFG_NAME_MAX] = L"";
+        if (SendMessageW(lb, LB_GETTEXT, (WPARAM)j, (LPARAM)name) == LB_ERR) break;
+        wcscat_s(out, cap, name);
+        wcscat_s(out, cap, L"\n");
+    }
+}
+
+/* 拍一次基线（加载后 / 保存成功后调用 —— 那一刻"界面 == ini"） */
+static void TakeSnapshot(void) {
+    for (int i = 0; i < FIELD_N; i++) FieldSnapshot(i, g_baseField[i], DITTO_DIR_MAX);
+    for (int i = 0; i < LIST_N; i++)  ListSnapshot(i, g_baseList[i], LIST_SNAP_MAX);
+}
+
+/* 重新判定：当前界面 vs 基线。装载期不判（那会儿正在往控件里写值）。 */
+void UpdateDirty(void) {
+    if (g_loading) return;
+    BOOL d = FALSE;
+    for (int i = 0; i < FIELD_N && !d; i++) {
+        FieldSnapshot(i, g_snapTmp, LIST_SNAP_MAX);
+        if (wcscmp(g_snapTmp, g_baseField[i]) != 0) d = TRUE;
+    }
+    for (int i = 0; i < LIST_N && !d; i++) {
+        ListSnapshot(i, g_snapTmp, LIST_SNAP_MAX);
+        if (wcscmp(g_snapTmp, g_baseList[i]) != 0) d = TRUE;
+    }
+    if (d != g_dirty) { g_dirty = d; UpdateTitle(); }
 }
 
 /* 页签显隐：按 WS_VISIBLE **风格位**判断，状态没变就不发 ShowWindow。
@@ -460,6 +492,8 @@ static void LoadConfig(void) {
     }
     UpdateClipFontBtn();   /* 按钮文字就是当前值，加载后刷一次 */
     g_loading = FALSE;
+    /* 装载完之后拍基线：此刻"界面 == ini"，之后任何偏离才算"未保存的改动" */
+    TakeSnapshot();
     g_dirty = FALSE;
     UpdateTitle();
     SetStatus(L"");
@@ -526,8 +560,10 @@ static BOOL SaveConfig(void) {
                     APP_TITLE, MB_ICONERROR | MB_OK);
         return FALSE;
     }
-    g_dirty = FALSE;
-    UpdateTitle();
+    /* 写回成功 = 界面与 ini 重新对齐：重拍基线（比"直接置 g_dirty=FALSE"
+       稳 —— 万一某些值被配置层钳过，界面对不上，那也该照实显示为已改动）。 */
+    TakeSnapshot();
+    UpdateDirty();
     /* 文案对"只保存"和"保存并重启"都成立：真重启的话 RestartMain 会马上
        把状态栏覆写成"已保存并请求重启"。 */
     SetStatus(L"已保存 %s（重启 CapsEnhance 后生效）", g_path);
@@ -567,12 +603,17 @@ static void DoSave(void) {
     if (SaveConfig()) RestartMain();
 }
 
-static void AskSaveAndClose(void) {
-    if (!g_dirty) { DestroyWindow(g_hwnd); return; }
-    int r = MessageBoxW(g_hwnd, L"配置已修改，是否保存并重启 CapsEnhance？",
-                        APP_TITLE, MB_ICONQUESTION | MB_YESNOCANCEL | MB_DEFBUTTON1);
-    if (r == IDCANCEL) return;
-    if (r == IDYES) DoSave();
+/* 关窗 = **丢弃**（不写 ini）。
+   有未保存改动时先问一句 —— 手滑点错还能救回来；没改动就直接关，不多话。
+   默认按钮给"否"：这个对话框默认动作必须是"不丢东西"的那一边。
+   为什么问句不是"要保存吗"：界面上已经有「保存」/「保存并重启」两颗明确的
+   提交按钮，退出再问一遍等于把决定权从用户手里拿回来一次；而且问句里那个
+   "保存并重启"会把"我只是想关掉"变成"顺手重启了本体"。 */
+static void CloseNoSave(void) {
+    if (g_dirty &&
+        MessageBoxW(g_hwnd, L"有未保存的改动，退出将丢弃。\n确定退出？",
+                    APP_TITLE, MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) != IDYES)
+        return;
     DestroyWindow(g_hwnd);
 }
 
@@ -676,6 +717,9 @@ static void Layout(int w, int h) {
             ShowCtrl(GetDlgItem(g_hwnd, IDC_DITTO_CONV), fieldPage);
         }
     }
+    /* 三对尺寸行的「调整…」：不在 kFields 里（它们不承载配置值），单独显隐。
+       具体是哪三颗由弹窗自己说（表在它那边），这里只给"当前页要不要显示"。 */
+    SizePickerShowButtons(fieldPage);
     for (int i = 0; i < LIST_N; i++) {
         int base = IDC_LIST0 + i * LIST_STRIDE;
         for (int k = 0; k <= 5; k++)      /* 组内控件占 0..5 六个 id */
@@ -737,15 +781,20 @@ static void Layout(int w, int h) {
             int pw2 = PairSecondId(id);
             if (pw2) {
                 /* ---- 宽 + 高 一行两框（三组尺寸对）----
-                   行首字段（宽）的标签吃左边说明两个框，两个数字框并排，
-                   中间夹行次字段的单位控件（文字就是"×"），行首的单位
-                   （像素）收尾。行次字段的标签隐藏。 */
+                   行内的顺序是**输入框 → 「调整…」→ 描述**：两个数字框并排
+                   （中间夹行次字段的单位"×"），行首的单位（像素）收尾，紧跟着
+                   是这一对的「调整…」，说明标签吃剩下的宽度。
+                   ★ 按钮紧贴输入框、不钉行尾：它是"这两个框的"按钮，离得远了
+                   就看不出管的是哪一对；描述放最后是因为它是一整句，只有它
+                   能被压缩/截断（窗口变窄时先牺牲句子，不动控件）。
+                   行次字段的标签隐藏。 */
                 HWND lab  = GetDlgItem(g_hwnd, id + 500);
                 HWND unit = GetDlgItem(g_hwnd, id + 600);
                 HWND c2   = GetDlgItem(g_hwnd, pw2);
                 HWND cross = GetDlgItem(g_hwnd, pw2 + 600);
                 HWND lab2 = GetDlgItem(g_hwnd, pw2 + 500);
-                int boxW = S(56), xgap = S(4), crossW = S(16);
+                int boxW = S(56), xgap = S(4), crossW = S(16), unitW = S(52);
+                int colGap = S(8);   /* 列与列之间的呼吸感（外层那个 gap 是行间距，别混） */
                 MoveWindow(c, x, y - off, boxW, S(22), TRUE);
                 if (cross)
                     MoveWindow(cross, x + boxW + xgap, y + S(4) - off, crossW, S(18), TRUE);
@@ -753,12 +802,19 @@ static void Layout(int w, int h) {
                     MoveWindow(c2, x + boxW + xgap + crossW, y - off, boxW, S(22), TRUE);
                 if (unit)
                     MoveWindow(unit, x + boxW * 2 + xgap * 2 + crossW,
-                               y + S(4) - off, S(52), S(18), TRUE);
+                               y + S(4) - off, unitW, S(18), TRUE);
+                int tailX = x + boxW * 2 + xgap * 2 + crossW + unitW + colGap;
+                int btnId = SizePickerBtnFor(id);
+                int btnW  = btnId ? S(76) : 0;
+                if (btnId) {
+                    HWND sb = GetDlgItem(g_hwnd, btnId);
+                    MoveWindow(sb, tailX, y - off, btnW, S(22), TRUE);
+                    ShowWindow(sb, TRUE);       /* 显隐轮只按页开关，这里补一次 */
+                    tailX += btnW + colGap;
+                }
                 if (lab)
-                    MoveWindow(lab, x + boxW * 2 + xgap * 2 + crossW + S(52) + S(8),
-                               y + S(4) - off,
-                               w - (x + boxW * 2 + xgap * 2 + crossW + S(52) + S(8)) - x,
-                               S(18), TRUE);
+                    MoveWindow(lab, tailX, y + S(4) - off,
+                               (w - x - tailX) > 0 ? (w - x - tailX) : 0, S(18), TRUE);
                 if (lab2) ShowWindow(lab2, FALSE);
                 /* 次字段的输入框也要随页显隐（显隐轮只按 fieldPage 开关） */
                 ShowWindow(c2, TRUE);
@@ -1199,7 +1255,7 @@ static void AddName(int i) {
     HWND ed = GetDlgItem(g_hwnd, base + 1);
     WCHAR raw[CFG_NAME_MAX] = L"";
     GetWindowTextW(ed, raw, CFG_NAME_MAX);
-    if (AddListEntry(i, raw)) MarkDirty();
+    if (AddListEntry(i, raw)) UpdateDirty();
     SetWindowTextW(ed, L"");
     SetFocus(ed);
 }
@@ -1212,7 +1268,7 @@ static void DelName(int i) {
     SendMessageW(lb, LB_DELETESTRING, (WPARAM)sel, 0);
     int n = (int)SendMessageW(lb, LB_GETCOUNT, 0, 0);
     SendMessageW(lb, LB_SETCURSEL, (WPARAM)((sel < n) ? sel : n - 1), 0);
-    MarkDirty();
+    UpdateDirty();
 }
 
 /* ---------------- DittoDir：选取 / 相对绝对互转 ----------------
@@ -1340,7 +1396,7 @@ static void BrowseDittoDir(void) {
     if (hrCo == S_OK || hrCo == S_FALSE) CoUninitialize();
     if (!path[0]) return;
     SetWindowTextW(e, path);
-    MarkDirty();
+    UpdateDirty();
     UpdateConvBtn();
 }
 
@@ -1386,7 +1442,7 @@ static void ConvertDittoDir(void) {
         CompsJoin(a, na, out, DITTO_DIR_MAX);
     }
     SetWindowTextW(e, out);
-    MarkDirty();
+    UpdateDirty();
     UpdateConvBtn();
 }
 
@@ -1653,11 +1709,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 CfgSetStr(CFG_CLIP_FONT, name);
                 CfgSetInt(CFG_CLIP_FONT_SIZE, size);
                 UpdateClipFontBtn();
-                MarkDirty();
+                UpdateDirty();
             }
             return 0;
         }
-        if (id == IDC_EXIT)   { AskSaveAndClose(); return 0; }
+        if (id == IDC_EXIT)   { CloseNoSave(); return 0; }
         if (id == IDC_RELOAD) {
             if (g_dirty && MessageBoxW(h, L"放弃未保存的改动并重新加载？", APP_TITLE,
                                        MB_ICONQUESTION | MB_YESNO) != IDYES) return 0;
@@ -1675,8 +1731,12 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         if (id == IDC_DITTO_BROWSE) { BrowseDittoDir(); return 0; }
         if (id == IDC_DITTO_CONV)   { ConvertDittoDir(); return 0; }
+        if (id == IDC_CLIP_SIZE_BTN || id == IDC_VIEWMAX_BTN || id == IDC_VIEWMIN_BTN) {
+            OpenSizePicker(id);      /* 弹示例窗拖尺寸：见"尺寸选取窗"一节 */
+            return 0;
+        }
         /* 勾选框 / 输入框：任何改动都算"有未保存的改动" */
-        if (HIWORD(w) == BN_CLICKED || HIWORD(w) == EN_CHANGE) MarkDirty();
+        if (HIWORD(w) == BN_CLICKED || HIWORD(w) == EN_CHANGE) UpdateDirty();
         if (id == IDC_DITTO_DB && HIWORD(w) == EN_CHANGE) UpdateConvBtn();
         return 0;
     }
@@ -1786,7 +1846,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         Layout(LOWORD(l), HIWORD(l));
         return 0;
     case WM_CLOSE:
-        AskSaveAndClose();
+        CloseNoSave();
         return 0;
     case WM_DESTROY:
         PostQuitMessage(0);
@@ -1876,6 +1936,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     fc.lpfnWndProc = FooterProc;
     fc.lpszClassName = FOOTER_CLASS;
     if (!RegisterClassW(&fc)) return 1;
+
+    /* 尺寸选取窗的窗口类（无边框自绘的 WS_POPUP）：注册细节属于弹窗自己，
+       见 settings/sizepick.c 的 SizePickerRegister。建主窗之前注册完。 */
+    if (!SizePickerRegister(hInst)) return 1;
 
     /* DPI 要在**建窗之前**知道：窗口尺寸本身就得按它算（否则 200% 屏上
        窗口只有一半大）。QueryDpi 在没有 hwnd 时退回查屏幕 DC。 */
@@ -1999,6 +2063,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     MakeBtn(hInst, g_hwnd, L"相对⇄绝对", IDC_DITTO_CONV);
     EnableWindow(GetDlgItem(g_hwnd, IDC_DITTO_CONV), FALSE);
 
+    /* 三对尺寸行右侧的「调整…」：弹示例窗拖尺寸（落位在 Layout 的成对分支） */
+    MakeBtn(hInst, g_hwnd, L"调整…", IDC_CLIP_SIZE_BTN);
+    MakeBtn(hInst, g_hwnd, L"调整…", IDC_VIEWMAX_BTN);
+    MakeBtn(hInst, g_hwnd, L"调整…", IDC_VIEWMIN_BTN);
+
     /* 底部"窗框"最后建：z 序压在表单内容之上，滚动时挡住溢出的内容 */
     g_footer = CreateWindowExW(WS_EX_CONTROLPARENT, FOOTER_CLASS, L"",
                                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
@@ -2032,9 +2101,20 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
             SetStatus(L"选窗已取消");
             continue;
         }
+        /* 尺寸选取窗的 Esc 也在这一层拦：它是无边框弹窗，焦点万一没落在它身上
+           （主窗口此时是禁用的，焦点有可能回到主窗口），它就收不到按键 ——
+           而它没有关闭按钮，收不到 Esc 就是"关不掉了"。消息循环是唯一能稳稳
+           看到本线程所有按键的地方。 */
+        if (SizePickerIsOpen() && msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
+            SizePickerClose(FALSE);
+            SetStatus(L"已放弃这次窗口大小调整");
+            continue;
+        }
         /* Tab 在控件之间移动焦点：IsDialogMessage 让输入框也吃 Tab，
-           否则设置界面里没法用键盘走完一整张表单。 */
-        if (!IsDialogMessageW(g_hwnd, &msg)) {
+           否则设置界面里没法用键盘走完一整张表单。
+           尺寸选取窗开着时**不走它**：那是另一个顶层窗口（Esc / 回车归它），
+           IsDialogMessage 只认主窗口与它的子控件，让它先过一道只会白吞按键。 */
+        if (SizePickerIsOpen() || !IsDialogMessageW(g_hwnd, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

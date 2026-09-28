@@ -80,9 +80,13 @@ rem hosts the keyboard hook, so it must never own a modal editor window.
 rem It links src\config.c: the form reads/writes config values through the
 rem same ConfigGet*/ConfigSet* the main program uses, so ranges and key names
 rem are never duplicated in the UI.
+rem Two translation units: settings\settings.c is the form itself, settings\sizepick.c
+rem is the window-size picker (its own window class, state and two sets of drawing
+rem code -- kept out of the form on purpose). They share only what is listed in
+rem settings\settings_int.h.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /Foobj\ ^
-   settings\settings.c src\config.c ^
+   settings\settings.c settings\sizepick.c src\config.c ^
    /link /OUT:bin/CapsEnhanceSettings.exe ^
    user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib uuid.lib ^
    /SUBSYSTEM:WINDOWS
