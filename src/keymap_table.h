@@ -63,7 +63,7 @@ static const ActionDef kActions[] = {
        同时 ACTF_NO_SHIFT：它不是光标动作，不该被选区模式套上 Shift。 */
     { ACT_CAPSLOCK,  VK_TAB,     VK_CAPITAL,  -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT, "Caps(Tab)", "CapsLock" },
     /* 按词跳转：方向写在表里，免得运行时靠 ACT_WORD_L/R 的数值去反推左右 */
-    { ACT_WORD_L,    'N',        0,          DIR_LEFT,  ACTF_WORDJUMP, "词←(N)", "词←" },
+    { ACT_WORD_L,    'N',        0,          DIR_LEFT,  ACTF_WORDJUMP, "词←(N)", "←词" },
     { ACT_WORD_R,    'O',        0,          DIR_RIGHT, ACTF_WORDJUMP, "词→(O)", "词→" },
     /* 挪窗口：单发命令（不发键、与光标/选区无关）。位置由光标决定，所以
        "增强模式发 3 次"没有意义 —— SINGLE_SHOT 同时挡掉重复与松手补齐。 */
@@ -76,7 +76,7 @@ static const ActionDef kActions[] = {
     { ACT_HELP,      VK_F1,      0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_HELP, "帮助(F1)", "帮助" },
     /* 剪贴板：单发命令，不发键。窗口本体在独立 exe（clip/clip.c）里，
        由 main.c 在和弦上直接开合。 */
-    { ACT_CLIPLIST,  'V',        0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_CLIPLIST, "剪贴板(V)", "剪贴|板" },
+    { ACT_CLIPLIST,  'V',        0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_CLIPLIST, "剪贴板(V)", "贴板" },
     /* 系统音量：走普通"发键"通道（outVk = 多媒体键，系统自己处理，与前台程序无关）。
        静音是**开关**：重复一次就多切一次（来回横跳），必须单发 —— 与 Caps(Tab) 同理。
        音量加减是**步进**：长按重复（与真实音量键的手感一致，重复节奏即引擎的

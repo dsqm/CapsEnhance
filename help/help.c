@@ -55,10 +55,10 @@
      1. **不抢焦点**。窗口带 `WS_EX_NOACTIVATE`，显示用 `SW_SHOWNOACTIVATE` —— 
         全程不激活、不改变前台窗口，所以可以"一边按着 C+F1 看，一边继续在
         原来的程序里操作"。也因此**不能用 Esc 关闭**（没有焦点就收不到它）。
-     2. **半透明且好看**。用逐像素 alpha（32bpp DIB + `UpdateLayeredWindow`）：
-        背板半透明、键帽与文字完全实心且抗锯齿 —— 比"整窗一起调透明度"干净
-        （后者连文字一起发虚）。文字用 **GDI+ 的灰阶抗锯齿**，不上 ClearType：
-        见"文字"那一节的实测结论。
+     2. **半透明且好看**。整窗透明走 `WS_EX_LAYERED` + `LWA_ALPHA`（内容照常
+        GDI/WM_PAINT，见 wWinMain），背板画成**不透明白**；文字用 **GDI
+        `DrawTextW` 的 ClearType**，与剪贴板浮层（clip/clip.c）同一条路 ——
+        文字为什么不能用 GDI+ DrawString 画，见"文字"那一节的实测结论。
      3. **启动要快**。自包含：不读配置、不装钩子、不初始化 COM/TSF，只做
         "GDI+ 起一次 + 画一帧 + 送进分层窗口"。键位表直接从共享头编进来，
         没有任何跨进程取数据的往返。
@@ -103,6 +103,10 @@
 #define C_MOD_FUNC   0xFF7A5210
 #define C_FOOT_KEY   0xFF2B6CB0
 #define C_FOOT_TEXT  0xFF7A7A7A
+
+/* 文字改走 GDI（见"文字"那一节）：GDI 要 COLORREF，把上面 0xAARRGGBB 的
+   常量捻过来（alpha 字节丢弃 —— 背板本就不透明，文字色恒为全不透明）。 */
+#define RGB_OF(c) RGB((BYTE)(((c) >> 16) & 0xFF), (BYTE)(((c) >> 8) & 0xFF), (BYTE)((c) & 0xFF))
 
 #define APP_TITLE L"CapsEnhance 按键帮助"
 #define KEY_RADIUS_U 0.055f       /* 键帽圆角（单位：u） */
@@ -197,7 +201,7 @@ static int   g_pxW = 0, g_pxH = 0;  /* 整个浮层的像素尺寸 */
 /* 布局量：四个"带"的高度与四个字号。**全部由 FitUnit 按 DPI 算一次** —— 
    绘制侧不再自己写第二份常量（曾经"开窗用一份 u、绘制用另一份"就是这么来的）。 */
 static float g_pad = 26.0f, g_title = 40.0f, g_gap = 16.0f, g_foot = 84.0f;
-static float g_fsName = 12.0f, g_fsFunc = 16.0f, g_fsTitle = 17.0f, g_fsFoot = 13.0f;
+static int   g_fsName = 12, g_fsFunc = 16, g_fsTitle = 17, g_fsFoot = 13;
 static HDC     g_memDC = NULL;
 static HBITMAP g_bmp = NULL;
 static void*   g_bits = NULL;
@@ -348,32 +352,65 @@ static void AddRoundRect(Gdiplus::GraphicsPath* p, float x, float y,
     p->CloseFigure();
 }
 
-/* ---------- 文字：GDI+ 灰阶抗锯齿 ----------
-   ★★ 为什么不上 ClearType：本窗口是**逐像素 alpha 的半透明浮层**，而 ClearType 是
-   次像素渲染 —— 它对"文字下面是什么颜色"有假设，在带透明背景的位图上支持并不完美：
-   会留下**彩色镶边**（看着像锯齿），深底亮字还会 blooming（"莫名其妙地粗"）。
-   四种渲染并排实测过（GDI+ GridFit / GDI+ AntiAlias / GDI ClearType / GDI
-   ANTIALIASED，同一块 DIB、同一字号）：ClearType 最粗且有彩边，ANTIALIASED 偏细软，
-   **GDI+ 的 `AntiAliasGridFit` 在深底亮字上最锐利、且完全没有彩边**。
-   ★ 去掉 ClearType 之后就只剩**字号**这一个变量了：灰阶抗锯齿在小字号下发虚。
-   所以这里把能挤的空间全让给字号（键帽缝隙、标签留边都收到最小），并且
-   **逐键帽实测**取"装得下的最大字号"，而不是拍一个比例 —— 以后改文案、改键位表，
-   字号会自动跟着变，不需要回来调数字（`AllLabelsFit` + `PickFuncSize`）。 */
+/* ---------- 文字：GDI DrawTextW（与剪贴板浮层同一条路） ----------
+   ★★ 为什么不用 GDI+ DrawString（同一组键帽文案四种画法并排实测过，
+   探针在 test/textprobe.cpp）：
+     1) GDI+ 按**浮点**坐标排版：居中的标签 origin 几乎都落在亚像素相位上，
+        hinting 在不同相位下对笔画吸附不同 —— 同字号的不同键"有的粗有的细"，
+        这正是帮助图上笔画不均匀的直接来源；
+     2) GDI+ 自带的 ClearType 栅格化器比 GDI 的淡、发灰（同样的字色画出来
+        覆盖率就是上不去），整体观感虚。
+   GDI 的 DrawTextW 永远落在**整数像素**，且与整个系统 UI（包括剪贴板浮层
+   Caps+V）用的是同一个栅格化器 —— 所以文字整体换成 GDI：HFONT +
+   DEFAULT_QUALITY（跟随系统 ClearType 设置），测宽用 GetTextExtentPoint32W
+   （与 DrawTextW 自己的排版同源，"量着放得下画着一定放得下"）。
+   键帽/底板等形状仍由 GDI+ 画：绘制本就分两遍（先形状后文字），GDI+ 那遍
+   Flush 落盘之后 GDI 才动笔，互不踩同一 DC 的状态。 */
 static const WCHAR* g_fontFace = L"Microsoft YaHei UI";
 
-/* GDI+ 的 `MeasureString` 每侧会多算 1/6 em（这是它的既有行为，不是 bug）—— 直接拿
-   它当判据会让字号白白小一号。这里按 em/3 把这份 padding 补回去。 */
-static float TextWidth(Gdiplus::Graphics* g, const WCHAR* s, Gdiplus::Font* f, float em) {
+/* 与 clip.c 的 MakeFont 同款：GDI 字体 + DEFAULT_QUALITY。
+   lfHeight 负值 = 按字形（em）高度取。 */
+static HFONT MakeFontPx(int px) {
+    LOGFONTW lf;
+    memset(&lf, 0, sizeof(lf));
+    lf.lfHeight = -px;
+    lf.lfWeight = FW_NORMAL;
+    lf.lfQuality = DEFAULT_QUALITY;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfOutPrecision = OUT_DEFAULT_PRECIS;
+    lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
+    lf.lfPitchAndFamily = VARIABLE_PITCH | FF_DONTCARE;
+    wcsncpy_s(lf.lfFaceName, LF_FACESIZE, g_fontFace, _TRUNCATE);
+    return CreateFontIndirectW(&lf);
+}
+
+/* 字体脸可用性探测：脸名不存在时 GDI 会静默替换成别的字体，中文掉进回退
+   字形（笔画细、像点阵）。用 GGI_MARK_NONEXISTING_GLYPHS 认一个汉字字形，
+   没有（脸被替换成了不含 CJK 的字体）就退标准雅黑（字形差别很小）。 */
+static BOOL FontHasCjk(HDC dc, HFONT f) {
+    if (!f) return FALSE;
+    HGDIOBJ of = SelectObject(dc, f);
+    WORD idx = 0xFFFF;
+    DWORD r = GetGlyphIndicesW(dc, L"帮", 1, &idx, GGI_MARK_NONEXISTING_GLYPHS);
+    SelectObject(dc, of);
+    return (r == 1 && idx != 0xFFFF);
+}
+
+/* GDI 的文字宽度：GetTextExtentPoint32W 与 DrawTextW 自己的排版同源 ——
+   测出来放得下，画出来一定放得下。（GDI+ MeasureString 每侧多算 1/6 em、
+   需要补正的那笔账从此不存在。） */
+static float TextWidth(HDC dc, HFONT f, const WCHAR* s) {
     if (!s || !*s) return 0.0f;
-    Gdiplus::RectF box(0.0f, 0.0f, 0.0f, 0.0f);
-    g->MeasureString(s, -1, f, Gdiplus::PointF(0.0f, 0.0f), &box);
-    return box.Width - em / 3.0f;
+    HGDIOBJ of = SelectObject(dc, f);
+    SIZE sz;
+    BOOL ok = GetTextExtentPoint32W(dc, s, (int)wcslen(s), &sz);
+    SelectObject(dc, of);
+    return ok ? (float)sz.cx : 0.0f;
 }
 
 /* 这条文案按 `|` 切段后，每段都能装进这个键帽吗？（没写 `|` 的会走自动折行，
    用整条量是保守的。） */
-static BOOL LabelLinesFit(Gdiplus::Graphics* g, Gdiplus::Font* f, const KeyDef* k,
-                          float em, float u) {
+static BOOL LabelLinesFit(HDC dc, HFONT f, const KeyDef* k, float u) {
     const char* lab = LabelOfVk(k->vk);
     if (!lab) return TRUE;
     float maxW = k->w * u - u * CAP_GAP_K - u * LABEL_PAD_K;
@@ -392,7 +429,7 @@ static BOOL LabelLinesFit(Gdiplus::Graphics* g, Gdiplus::Font* f, const KeyDef* 
             wcscpy_s(one, 64, seg);
             seg = NULL;
         }
-        if (TextWidth(g, one, f, em) > maxW) return FALSE;
+        if (TextWidth(dc, f, one) > maxW) return FALSE;
     }
     return TRUE;
 }
@@ -401,68 +438,66 @@ static BOOL LabelLinesFit(Gdiplus::Graphics* g, Gdiplus::Font* f, const KeyDef* 
    ★ 以前是"全局一个字号、由最长的文案卡死"—— F3 那种"打开|程序目录"（4 字一行）
    会把所有键都拖小，最后只能靠改文案换字号，不值。改成**按键算**：
    短文案的键用目标字号，长文案的键自动降一档，互不拖累，文案也就不必为字号让路。
-   档位最多三四档，绘制时按字号取 Font（小缓存），不用每个键都建一个。 */
-static float g_funcSize[LAYOUT_N];
-static Gdiplus::Font* g_fontSlots[8] = { 0 };
-static float g_fontSlotSize[8] = { 0 };
+   档位最多三四档：字号是整数像素，按字号把 HFONT 懒建进表里，画完统一释放。 */
+static int g_funcSize[LAYOUT_N];
+static HFONT g_hfFunc[32] = { 0 };      /* 下标 = 字号（9..31） */
+static HFONT g_hfName = NULL, g_hfTitle = NULL, g_hfFoot = NULL;
 
-static Gdiplus::Font* FontFor(Gdiplus::FontFamily* fam, float size) {
-    for (int i = 0; i < 8; i++)
-        if (g_fontSlots[i] && g_fontSlotSize[i] == size) return g_fontSlots[i];
-    for (int i = 0; i < 8; i++) {
-        if (!g_fontSlots[i]) {
-            g_fontSlotSize[i] = size;
-            g_fontSlots[i] = new Gdiplus::Font(fam, size, Gdiplus::FontStyleRegular,
-                                               Gdiplus::UnitPixel);
-            return g_fontSlots[i];
-        }
-    }
-    return NULL;   /* 八档都占满了（现实中到不了）：这颗键就不画功能名 */
+static HFONT FuncFontFor(int px) {
+    if (px < 9 || px >= (int)(_countof(g_hfFunc))) return NULL;
+    if (!g_hfFunc[px]) g_hfFunc[px] = MakeFontPx(px);
+    return g_hfFunc[px];
 }
 
 static void FreeFontCache(void) {
-    for (int i = 0; i < 8; i++) {
-        delete g_fontSlots[i];
-        g_fontSlots[i] = NULL;
+    for (int i = 0; i < (int)(_countof(g_hfFunc)); i++) {
+        if (g_hfFunc[i]) { DeleteObject(g_hfFunc[i]); g_hfFunc[i] = NULL; }
     }
+    if (g_hfName)  { DeleteObject(g_hfName);  g_hfName  = NULL; }
+    if (g_hfTitle) { DeleteObject(g_hfTitle); g_hfTitle = NULL; }
+    if (g_hfFoot)  { DeleteObject(g_hfFoot);  g_hfFoot  = NULL; }
 }
 
-static void PickFuncSizes(Gdiplus::Graphics* g, Gdiplus::FontFamily* fam, float u) {
+static void PickFuncSizes(HDC dc, float u) {
     for (int i = 0; i < LAYOUT_N; i++) {
         const KeyDef* k = &kLayout[i];
-        if (!LabelOfVk(k->vk)) { g_funcSize[i] = 0.0f; continue; }
-        float got = 9.0f;
-        for (float h = g_fsFunc; h >= 9.0f; h -= 1.0f) {
-            Gdiplus::Font f(fam, h, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-            if (f.GetLastStatus() != Gdiplus::Ok) break;
-            if (LabelLinesFit(g, &f, k, h, u)) { got = h; break; }
+        if (!LabelOfVk(k->vk)) { g_funcSize[i] = 0; continue; }
+        int got = 9;
+        for (int h = g_fsFunc; h >= 9; h--) {
+            HFONT f = FuncFontFor(h);
+            if (!f) break;
+            if (LabelLinesFit(dc, f, k, u)) { got = h; break; }
         }
         g_funcSize[i] = got;
     }
 }
 
-/* 画一行文本（垂直居中，按 al 水平对齐）。
-   居中时把矩形**左右各放宽 10%**：GDI+ 的 `NoWrap` 在文字宽于矩形时是**直接裁掉**
-   （"程序目录"→"程序目"）；放宽是对称的、不改变居中位置，只是不再被误判成溢出。 */
-static void DrawLine(Gdiplus::Graphics* g, const WCHAR* s, Gdiplus::Font* f,
-                     Gdiplus::Color c, float x, float y, float w, float h,
-                     Gdiplus::StringAlignment al) {
-    if (!s || !*s) return;
-    Gdiplus::SolidBrush br(c);
-    Gdiplus::StringFormat fmt;
-    fmt.SetAlignment(al);
-    fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-    fmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
-    Gdiplus::RectF rc = (al == Gdiplus::StringAlignmentNear)
-                        ? Gdiplus::RectF(x, y, w, h)
-                        : Gdiplus::RectF(x - w * 0.10f, y, w * 1.20f, h);
-    g->DrawString(s, -1, f, rc, &fmt, &br);
+/* 画一行文本（垂直居中，DT_CENTER 水平居中 / DT_LEFT 靠左）。
+   ★ 矩形**取整到像素**：GDI 只认整数坐标 —— 这正是"每个键的笔画吸附一致"
+   的来源（GDI+ 时代居中 origin 落在亚像素相位上，粗细才会随键宽漂移）。
+   DT_NOCLIP：文案要么被逐键字号实测过放得下、要么（硬折的兜底）允许像
+   GDI+ 版放宽矩形那样溢出，都不依赖裁剪。 */
+#define HELP_IR(v) ((int)((v) + 0.5f))
+static void DrawLineGdi(HDC dc, const WCHAR* s, HFONT f, COLORREF c,
+                        float x, float y, float w, float h, UINT align) {
+    if (!s || !*s || !f) return;
+    RECT rc;
+    rc.left   = HELP_IR(x);
+    rc.top    = HELP_IR(y);
+    rc.right  = HELP_IR(x + w);
+    rc.bottom = HELP_IR(y + h);
+    HGDIOBJ of = SelectObject(dc, f);
+    SetTextColor(dc, c);
+    SetBkMode(dc, TRANSPARENT);
+    DrawTextW(dc, s, -1, &rc,
+              DT_SINGLELINE | DT_NOPREFIX | DT_VCENTER | DT_NOCLIP | align);
+    SelectObject(dc, of);
 }
 
 /* 长文案折行：**最多两行**，中文逐字断、拉丁词不拆。
-   断点优先级：文案里写死的 `|`（语义断点，见 keymap_table.h）> 按宽度自动找。 */
-static int WrapLabel(Gdiplus::Graphics* g, const WCHAR* s, Gdiplus::Font* f, float em,
-                     float maxW, WCHAR out[2][64]) {
+   断点优先级：文案里写死的 `|`（语义断点，见 keymap_table.h）> 按宽度自动找。
+   （与 GDI+ 版逻辑一致，只把量宽的尺子换成 GDI 的。） */
+static int WrapLabel(HDC dc, const WCHAR* s, HFONT f, float maxW, WCHAR out[2][64]) {
     out[0][0] = out[1][0] = 0;
     if (!s || !*s) return 0;
     const WCHAR* bar = wcschr(s, L'|');
@@ -474,7 +509,7 @@ static int WrapLabel(Gdiplus::Graphics* g, const WCHAR* s, Gdiplus::Font* f, flo
         return out[1][0] ? 2 : 1;
     }
     int n = (int)wcslen(s);
-    if (TextWidth(g, s, f, em) <= maxW || n < 3) {
+    if (TextWidth(dc, f, s) <= maxW || n < 3) {
         wcscpy_s(out[0], 64, s);
         return 1;
     }
@@ -494,28 +529,21 @@ static int WrapLabel(Gdiplus::Graphics* g, const WCHAR* s, Gdiplus::Font* f, flo
             WCHAR l[64], r[64];
             wcsncpy_s(l, 64, s, (size_t)i);
             wcscpy_s(r, 64, s + i);
-            if (TextWidth(g, l, f, em) <= maxW && TextWidth(g, r, f, em) <= maxW) best = i;
+            if (TextWidth(dc, f, l) <= maxW && TextWidth(dc, f, r) <= maxW) best = i;
         }
     }
-    if (best < 0) {                       /* 找不到合适断点：硬折在中间 */
-        best = mid;
-        wcsncpy_s(out[0], 64, s, (size_t)best);
-        wcscpy_s(out[1], 64, s + best);
-        return 2;
-    }
+    if (best < 0) best = mid;             /* 找不到合适断点：硬折在中间 */
     wcsncpy_s(out[0], 64, s, (size_t)best);
     wcscpy_s(out[1], 64, s + best);
     return 2;
 }
 
-/* ---------- 所有文字（第二遍绘制） ----------
-   顺序上必须晚于键帽那一遍：文字不会再被后画的相邻键帽盖住。 */
-static void DrawAllText(Gdiplus::Graphics* g, Gdiplus::FontFamily* fam,
-                        Gdiplus::Font* fN, Gdiplus::Font* fT, Gdiplus::Font* fFt,
-                        float kbdX, float kbdY, float u, float capH) {
-    DrawLine(g, APP_TITLE, fT, Gdiplus::Color(C_TITLE),
-             g_pad, g_pad * 0.4f, (float)g_pxW - 2 * g_pad, g_title,
-             Gdiplus::StringAlignmentNear);
+/* ---------- 所有文字（第二遍绘制，GDI） ----------
+   顺序上必须晚于键帽那一遍，且在 GDI+ Flush 之后才动笔（见 Render）：文字
+   不会再被后画的相邻键帽盖住，也不与 GDI+ 争用同一 DC 的状态。 */
+static void DrawAllText(HDC dc, float kbdX, float kbdY, float u, float capH) {
+    DrawLineGdi(dc, APP_TITLE, g_hfTitle, RGB_OF(C_TITLE),
+                g_pad, g_pad * 0.4f, (float)g_pxW - 2 * g_pad, g_title, DT_LEFT);
 
     for (int i = 0; i < LAYOUT_N; i++) {
         const KeyDef* k = &kLayout[i];
@@ -533,29 +561,29 @@ static void DrawAllText(Gdiplus::Graphics* g, Gdiplus::FontFamily* fam,
         KeyNameOf(k->vk, name, 32);
         /* 未映射的键也只画键名，且**位置与已映射键的键名一致**（都在键帽上部）——
            以前它居中，同一行里两种键名的基线高低不一，扫过去是跳的。 */
-        DrawLine(g, name, fN,
-                 Gdiplus::Color(mod ? C_MOD_NAME : (mapped ? C_ACT_NAME : C_DIM_TEXT)),
-                 x, y + capH * 0.04f, w, capH * 0.34f, Gdiplus::StringAlignmentCenter);
+        DrawLineGdi(dc, name, g_hfName,
+                    RGB_OF(mod ? C_MOD_NAME : (mapped ? C_ACT_NAME : C_DIM_TEXT)),
+                    x, y + capH * 0.04f, w, capH * 0.34f, DT_CENTER);
         if (!mapped) continue;
 
         /* 已映射：**原键名留在键帽上**（上部），功能名在下面。
            键名在上、功能在下是刻意的：先认出"这是哪个键"，再看它做什么。
            功能名的字号是**这颗键自己的**（`PickFuncSizes` 按文案实测的），长文案
            的键自动用小一号，不拖累别的键。 */
-        Gdiplus::Font* fF = FontFor(fam, g_funcSize[i]);
+        HFONT fF = FuncFontFor(g_funcSize[i]);
         if (!fF) continue;
         WCHAR labW[64], lines[2][64];
         Utf8ToW(lab, labW, 64);
-        int nl = WrapLabel(g, labW, fF, g_funcSize[i], w - u * LABEL_PAD_K, lines);
-        Gdiplus::Color cFunc(mod ? C_MOD_FUNC : C_ACT_FUNC);
+        int nl = WrapLabel(dc, labW, fF, w - u * LABEL_PAD_K, lines);
+        COLORREF cFunc = RGB_OF(mod ? C_MOD_FUNC : C_ACT_FUNC);
         if (nl <= 1) {
-            DrawLine(g, lines[0], fF, cFunc, x, y + capH * 0.36f, w, capH * 0.60f,
-                     Gdiplus::StringAlignmentCenter);
+            DrawLineGdi(dc, lines[0], fF, cFunc, x, y + capH * 0.36f, w, capH * 0.60f,
+                        DT_CENTER);
         } else {
-            DrawLine(g, lines[0], fF, cFunc, x, y + capH * 0.30f, w, capH * 0.34f,
-                     Gdiplus::StringAlignmentCenter);
-            DrawLine(g, lines[1], fF, cFunc, x, y + capH * 0.62f, w, capH * 0.34f,
-                     Gdiplus::StringAlignmentCenter);
+            DrawLineGdi(dc, lines[0], fF, cFunc, x, y + capH * 0.30f, w, capH * 0.34f,
+                        DT_CENTER);
+            DrawLineGdi(dc, lines[1], fF, cFunc, x, y + capH * 0.62f, w, capH * 0.34f,
+                        DT_CENTER);
         }
     }
 
@@ -575,7 +603,7 @@ static void DrawAllText(Gdiplus::Graphics* g, Gdiplus::FontFamily* fam,
                 if (i / FOOTER_ROWS != c) continue;
                 WCHAR t[128];
                 Utf8ToW(kFootKey[i], t, 128);
-                float w = TextWidth(g, t, fFt, g_fsFoot);
+                float w = TextWidth(dc, g_hfFoot, t);
                 if (w > wmax) wmax = w;
             }
             keyW[c] = wmax + u * 0.30f;
@@ -588,10 +616,10 @@ static void DrawAllText(Gdiplus::Graphics* g, Gdiplus::FontFamily* fam,
             WCHAR kpart[128], text[128];
             Utf8ToW(kFootKey[i], kpart, 128);
             Utf8ToW(kFootDesc[i], text, 128);
-            DrawLine(g, kpart, fFt, Gdiplus::Color(C_FOOT_KEY), fx, fy, keyW[col], rowH,
-                     Gdiplus::StringAlignmentNear);
-            DrawLine(g, text, fFt, Gdiplus::Color(C_FOOT_TEXT), fx + keyW[col], fy,
-                     colW - keyW[col], rowH, Gdiplus::StringAlignmentNear);
+            DrawLineGdi(dc, kpart, g_hfFoot, RGB_OF(C_FOOT_KEY),
+                        fx, fy, keyW[col], rowH, DT_LEFT);
+            DrawLineGdi(dc, text, g_hfFoot, RGB_OF(C_FOOT_TEXT),
+                        fx + keyW[col], fy, colW - keyW[col], rowH, DT_LEFT);
         }
     }
 }
@@ -669,10 +697,10 @@ static void FitUnit(int* outW, int* outH) {
        有的胖有的瘦，整体看着就是"字体怪怪的"。
        ★ 功能名的最终字号不由这里定：这个值只是个"上限目标"，每个键的真实字号由
        `PickFuncSizes` 按**各自的文案**实测往下找（长文案的键自动降一档，互不拖累）。 */
-    g_fsName  = (float)(int)(u * 0.17f);
-    g_fsFunc  = (float)(int)(u * 0.28f);
-    g_fsTitle = (float)(int)(u * 0.23f);
-    g_fsFoot  = (float)(int)(u * 0.22f);
+    g_fsName  = (int)(u * 0.17f);
+    g_fsFunc  = (int)(u * 0.28f);
+    g_fsTitle = (int)(u * 0.23f);
+    g_fsFoot  = (int)(u * 0.22f);
 
     *outW = (int)(KBD_UNITS_W * u) + 2 * (int)g_pad;
     *outH = 2 * (int)g_pad + (int)g_title + (int)(KBD_UNITS_H * u)
@@ -680,7 +708,8 @@ static void FitUnit(int* outW, int* outH) {
 }
 
 /* ---------- 渲染一帧 ----------
-   分两遍：先铺所有键帽的底，再画所有文字 —— 文字不会被后画的相邻键帽盖住。 */
+   分两遍：GDI+ 先铺背板与所有键帽的底，Flush 落进 DIB **之后**再用 GDI 画
+   所有文字 —— 文字不会被后画的相邻键帽盖住，两套引擎也互不踩对方的状态。 */
 static BOOL Render(void) {
     if (!g_memDC || !g_bmp) return FALSE;
 
@@ -689,56 +718,57 @@ static BOOL Render(void) {
     const float kbdX = g_pad;
     const float kbdY = g_pad + g_title;
 
-    Gdiplus::Bitmap bmp(g_pxW, g_pxH, g_pxW * 4, PixelFormat32bppPARGB, (BYTE*)g_bits);
-    if (bmp.GetLastStatus() != Gdiplus::Ok) return FALSE;
-    Gdiplus::Graphics g(&bmp);
-    /* 底铺成**不透明**的背板色：ClearType 只能画在不透明的底上（见 C_PANEL）。
-       旧版这里 Clear 成全透明 + 逐像素 alpha，代价就是字只能用灰阶抗锯齿。 */
-    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
-    g.Clear(Gdiplus::Color(C_PANEL));
-
     /* 字体**不跟随系统默认**：系统 UI 字体（`SPI_GETNONCLIENTMETRICS` 的 `lfMessageFont`）
        通常是 Segoe UI，中文会掉到回退字形（笔画细、像点阵），而这图上大半是中文。
-       雅黑 UI 是 Win8+ 自带的 UI 版；取不到再退标准雅黑（字形差别很小）。 */
+       探测用 GDI 做（认一个汉字字形，见 FontHasCjk）：雅黑 UI 是 Win8+ 自带的
+       UI 版，若脸被静默替换成非 CJK 字体就退标准雅黑（字形差别很小）。 */
     {
-        Gdiplus::FontFamily probe(g_fontFace);
-        if (probe.GetLastStatus() != Gdiplus::Ok) g_fontFace = L"Microsoft YaHei";
+        HFONT probe = MakeFontPx(g_fsFunc);
+        if (!FontHasCjk(g_memDC, probe)) g_fontFace = L"Microsoft YaHei";
+        if (probe) DeleteObject(probe);
     }
-    Gdiplus::FontFamily fam(g_fontFace);
-    /* ★ 功能名的字号**必须在这里定**：要逐个键帽量过才知道各自能放多大 */
-    PickFuncSizes(&g, &fam, u);
-    Gdiplus::Font fName(&fam, g_fsName, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-    Gdiplus::Font fTitle(&fam, g_fsTitle, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-    Gdiplus::Font fFoot(&fam, g_fsFoot, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    g_hfName  = MakeFontPx(g_fsName);
+    g_hfTitle = MakeFontPx(g_fsTitle);
+    g_hfFoot  = MakeFontPx(g_fsFoot);
 
-    /* ---- 第一遍：背板 + 所有键帽的底 ---- */
     {
-        /* 背板：半透明 + 一圈细边 */
-        Gdiplus::GraphicsPath p;
-        AddRoundRect(&p, 0.5f, 0.5f, (float)g_pxW - 1.0f, (float)g_pxH - 1.0f, PANEL_RADIUS);
-        Gdiplus::SolidBrush bg(Gdiplus::Color(C_PANEL));
-        Gdiplus::Pen pen(Gdiplus::Color(C_BORDER), 1.0f);
-        g.FillPath(&bg, &p);
-        g.DrawPath(&pen, &p);
+        Gdiplus::Bitmap bmp(g_pxW, g_pxH, g_pxW * 4, PixelFormat32bppPARGB, (BYTE*)g_bits);
+        if (bmp.GetLastStatus() != Gdiplus::Ok) { FreeFontCache(); return FALSE; }
+        Gdiplus::Graphics g(&bmp);
+        /* 底铺成**不透明**的背板色：GDI 的 ClearType 同样只能画在不透明的底上
+           （见 C_PANEL）。 */
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.Clear(Gdiplus::Color(C_PANEL));
 
-        for (int i = 0; i < LAYOUT_N; i++) {
-            const KeyDef* k = &kLayout[i];
-            BOOL mapped = (LabelOfVk(k->vk) != NULL);
-            BOOL mod = (k->vk == VK_CAPITAL || k->vk == 'D' || k->vk == VK_LMENU);
-            Gdiplus::GraphicsPath path;
-            AddRoundRect(&path, kbdX + k->x * u, kbdY + kRowY[k->row] * u,
-                         k->w * u - u * CAP_GAP_K, capH, u * KEY_RADIUS_U);
-            Gdiplus::SolidBrush fill(Gdiplus::Color(mod ? C_MOD_FILL : (mapped ? C_ACT_FILL : C_DIM_FILL)));
-            Gdiplus::Pen stroke(Gdiplus::Color(mod ? C_MOD_LINE : (mapped ? C_ACT_LINE : C_DIM_LINE)), 1.0f);
-            g.FillPath(&fill, &path);
-            g.DrawPath(&stroke, &path);
+        /* ---- 第一遍：背板 + 所有键帽的底（GDI+） ---- */
+        {
+            Gdiplus::GraphicsPath p;
+            AddRoundRect(&p, 0.5f, 0.5f, (float)g_pxW - 1.0f, (float)g_pxH - 1.0f, PANEL_RADIUS);
+            Gdiplus::SolidBrush bg(Gdiplus::Color(C_PANEL));
+            Gdiplus::Pen pen(Gdiplus::Color(C_BORDER), 1.0f);
+            g.FillPath(&bg, &p);
+            g.DrawPath(&pen, &p);
+
+            for (int i = 0; i < LAYOUT_N; i++) {
+                const KeyDef* k = &kLayout[i];
+                BOOL mapped = (LabelOfVk(k->vk) != NULL);
+                BOOL mod = (k->vk == VK_CAPITAL || k->vk == 'D' || k->vk == VK_LMENU);
+                Gdiplus::GraphicsPath path;
+                AddRoundRect(&path, kbdX + k->x * u, kbdY + kRowY[k->row] * u,
+                             k->w * u - u * CAP_GAP_K, capH, u * KEY_RADIUS_U);
+                Gdiplus::SolidBrush fill(Gdiplus::Color(mod ? C_MOD_FILL : (mapped ? C_ACT_FILL : C_DIM_FILL)));
+                Gdiplus::Pen stroke(Gdiplus::Color(mod ? C_MOD_LINE : (mapped ? C_ACT_LINE : C_DIM_LINE)), 1.0f);
+                g.FillPath(&fill, &path);
+                g.DrawPath(&stroke, &path);
+            }
         }
-    }
+        g.Flush(Gdiplus::FlushIntentionSync);
+    }   /* GDI+ 到此收笔：下面的文字由 GDI 独占 memDC */
 
-    /* ---- 第二遍：所有文字 ---- */
-    DrawAllText(&g, &fam, &fName, &fTitle, &fFoot, kbdX, kbdY, u, capH);
-    g.Flush(Gdiplus::FlushIntentionSync);
+    /* ---- 第二遍：所有文字（GDI，与剪贴板浮层同一条路） ----
+       ★ 功能名的字号**必须在这里定**：要逐个键帽量过才知道各自能放多大 */
+    PickFuncSizes(g_memDC, u);
+    DrawAllText(g_memDC, kbdX, kbdY, u, capH);
     FreeFontCache();
 
     /* 位置 = 光标所在显示器工作区居中（物理像素 —— 本进程声明了 Per-Monitor V2） */
@@ -750,8 +780,7 @@ static BOOL Render(void) {
     if (py < work.top) py = work.top;
     if (g_hwnd) MoveWindow(g_hwnd, px, py, g_pxW, g_pxH, FALSE);
 
-    /* 内容已画进双缓冲位图，交给 WM_PAINT 贴上去（不再走 UpdateLayeredWindow：
-       那条路必须逐像素 alpha，而逐像素 alpha 画不出 ClearType）。 */
+    /* 内容已画进双缓冲位图，交给 WM_PAINT 贴上去 */
     InvalidateRect(g_hwnd, NULL, FALSE);
     return TRUE;
 }
