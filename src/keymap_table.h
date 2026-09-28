@@ -56,6 +56,10 @@ static const ActionDef kActions[] = {
     { ACT_UP,        'I',        VK_UP,       -1, 0,                  "↑(I)", "↑" },
     { ACT_HOME,      'P',        VK_HOME,     -1, 0,                  "Home(P)", "Home" },
     { ACT_END,       VK_OEM_1,   VK_END,      -1, 0,                  "End(;)", "End" },
+    /* 翻页（C+- / C+=）：与 Home/End 同类 —— 普通发键、可长按重复、选区模式
+       生效时带 Shift（编辑器里 Shift+PgUp/PgDn = 整页选择）。 */
+    { ACT_PGUP,      VK_OEM_MINUS, VK_PRIOR,  -1, 0,                  "PgUp(-)", "PgUp" },
+    { ACT_PGDOWN,    VK_OEM_PLUS,  VK_NEXT,   -1, 0,                  "PgDn(=)", "PgDn" },
     { ACT_BACKSPACE, 'R',        VK_BACK,     -1, 0,                  "Bs(R)", "退格" },
     { ACT_DELETE,    'W',        VK_DELETE,   -1, 0,                  "Del(W)", "DEL" },
     { ACT_ENTER,     VK_SPACE,   VK_RETURN,   -1, 0,                  "Enter", "回车" },

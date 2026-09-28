@@ -2262,6 +2262,22 @@ int main(void) {
               "AI3: 音量加 = 可重复（长按连续升）+ 不吃选区 + 发 VK_VOLUME_UP");
     }
 
+    /* ---- 场景AI4：翻页（C+- = PgUp / C+= = PgDn）----
+       与 Home/End 同类：普通"发键"通道、可长按重复、选区模式生效时带 Shift
+       （编辑器里 Shift+PgUp/PgDn = 整页选择）。注入序列与 J/K 共用一条路，
+       这里只钉接线与属性语义。 */
+    {
+        CHECK(ActOfVk(VK_OEM_MINUS) == ACT_PGUP && ActOfVk(VK_OEM_PLUS) == ACT_PGDOWN,
+              "AI4: 触发键 - / = -> 上翻页 / 下翻页");
+        CHECK(ActOutVk(ACT_PGUP) == VK_PRIOR && ActOutVk(ACT_PGDOWN) == VK_NEXT,
+              "AI4: 目标键 = VK_PRIOR / VK_NEXT");
+        CHECK(!ActHasFlag(ACT_PGUP, ACTF_SINGLE_SHOT) &&
+              !ActHasFlag(ACT_PGUP, ACTF_NO_SHIFT) &&
+              !ActHasFlag(ACT_PGDOWN, ACTF_SINGLE_SHOT) &&
+              !ActHasFlag(ACT_PGDOWN, ACTF_NO_SHIFT),
+              "AI4: 两条都可长按重复、都吃选区修饰（与 Home/End 一致）");
+    }
+
     /* ---- 场景AJ：记录日志结束的通知**可点击**（点了打开并选中那份日志）----
        这条链路的末端（真的弹出文件管理器）与打开文件夹那条一样测不了，能离线钉住的
        是几件容易在以后改坏的事：

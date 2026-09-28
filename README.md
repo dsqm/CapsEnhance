@@ -20,6 +20,7 @@ Windows **CapsLock** 快捷键增强程序：按住 `CapsLock`（下称 **C**）
 | --- | --- |
 | `I` `J` `K` `L` | ↑ ← ↓ → |
 | `P` / `;` | Home / End |
+| `-` / `=` | PgUp / PgDn |
 | `R` / `W` | Backspace / Delete |
 | `Space` | Enter |
 | `N` / `O` | 按词向左 / 右跳 |

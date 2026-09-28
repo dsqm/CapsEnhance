@@ -93,6 +93,8 @@
 #define ACT_MUTE     18              /* 系统静音开关（F6）：发 VK_VOLUME_MUTE，翻转型 -> 单发 */
 #define ACT_VOLDOWN  19              /* 系统音量减（F7）：发 VK_VOLUME_DOWN，步进型 -> 可长按重复 */
 #define ACT_VOLUP    20              /* 系统音量加（F8）：发 VK_VOLUME_UP，步进型 -> 可长按重复 */
+#define ACT_PGUP     21              /* 上翻页（-）：发 VK_PRIOR，光标/滚动类 -> 可重复、可带选区 */
+#define ACT_PGDOWN   22              /* 下翻页（=）：发 VK_NEXT，光标/滚动类 -> 可重复、可带选区 */
 
 #define DIR_LEFT 0
 #define DIR_RIGHT 1
