@@ -18,11 +18,13 @@ if exist "%RC%" goto have_rc
 set "RC=%SDK%\bin\%SDKVER%\x86\rc.exe"
 if exist "%RC%" goto have_rc
 echo [ERROR] rc.exe not found under "%SDK%\bin\%SDKVER%"
+call :maybe_pause
 exit /b 1
 :have_rc
 "%RC%" /nologo /fo obj\app.res res\app.rc
 if errorlevel 1 (
     echo [ERROR] resource compile failed
+    call :maybe_pause
     exit /b 1
 )
 rem .res must be converted to a COFF obj for the linker. Keep the name flat
@@ -31,6 +33,7 @@ rem file as C++ source when listed before /link.
 cvtres /nologo /MACHINE:X64 /OUT:obj\app_res.obj obj\app.res
 if errorlevel 1 (
     echo [ERROR] resource convert failed
+    call :maybe_pause
     exit /b 1
 )
 
@@ -70,10 +73,7 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib winmm.lib ^
    /SUBSYSTEM:WINDOWS
 
-if errorlevel 1 (
-    echo [ERROR] build failed
-    exit /b 1
-)
+if errorlevel 1 goto fail_main
 
 rem Settings editor: a separate exe on purpose -- the main program's thread
 rem hosts the keyboard hook, so it must never own a modal editor window.
@@ -92,6 +92,7 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /SUBSYSTEM:WINDOWS
 if errorlevel 1 (
     echo [ERROR] settings build failed
+    call :maybe_pause
     exit /b 1
 )
 
@@ -108,6 +109,7 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /SUBSYSTEM:WINDOWS
 if errorlevel 1 (
     echo [ERROR] help overlay build failed
+    call :maybe_pause
     exit /b 1
 )
 
@@ -129,6 +131,7 @@ cl /nologo /O2 /W0 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /bigobj /c ^
    thirdparty\sqlite3mc_amalgamation.c
 if errorlevel 1 (
     echo [ERROR] sqlite3 build failed
+    call :maybe_pause
     exit /b 1
 )
 
@@ -138,6 +141,7 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc /c ^
    /Foobj\colorcode.obj src\colorcode.c
 if errorlevel 1 (
     echo [ERROR] colorcode build failed
+    call :maybe_pause
     exit /b 1
 )
 
@@ -150,6 +154,7 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc /Ithirdpart
    /SUBSYSTEM:WINDOWS
 if errorlevel 1 (
     echo [ERROR] clipboard overlay build failed
+    call :maybe_pause
     exit /b 1
 )
 
@@ -159,3 +164,47 @@ for %%F in (bin\CapsEnhance.exe) do echo [OK] bin/CapsEnhance.exe built. size=%%
 for %%F in (bin\CapsEnhanceSettings.exe) do echo [OK] bin/CapsEnhanceSettings.exe built. size=%%~zF bytes
 for %%F in (bin\CapsEnhanceClip.exe) do echo [OK] bin/CapsEnhanceClip.exe built. size=%%~zF bytes
 where certutil >nul 2>&1 && certutil -hashfile bin\CapsEnhance.exe SHA256 | findstr /R /V "SHA256 CertUtil hash" 
+call :maybe_pause
+exit /b 0
+
+rem ---- failure reporting ----
+rem Why this block exists: the single most common failure here is LNK1104 on
+rem bin\CapsEnhance.exe, because the program is a tray app that is normally
+rem RUNNING, and Windows cannot overwrite an exe while a process has it mapped.
+rem The linker only prints "LNK1104: cannot open file", which reads like a
+rem permission problem -- and a double-clicked window closes before it can be
+rem read. So: say what it actually means, and pause.
+:fail_main
+rem Two very different causes land here, and they need different advice:/r/nrem   (a) a real compile/link error  -> the messages above already say where;
+rem   (b) LNK1104 on bin\CapsEnhance.exe -> the program is still running, and
+rem       Windows cannot overwrite an exe while a process has it mapped.
+rem (b) is by far the most common one here (this is a tray app you leave
+rem running), and the linker reports it as "cannot open file", which reads
+rem like a permission problem. tasklist tells the two apart for free.
+rem findstr, not find: Git Bash puts its own /usr/bin/find ahead of System32,
+rem so a plain "find" silently runs the Unix one (seen when building from a
+rem bash shell) and the probe always fails.
+tasklist /fi "imagename eq CapsEnhance.exe" 2>nul | findstr /i /c:"CapsEnhance.exe" >nul
+if not errorlevel 1 goto fail_locked
+echo.
+echo [ERROR] build failed -- see the compiler/linker messages above.
+call :maybe_pause
+exit /b 1
+
+:fail_locked
+echo.
+echo [ERROR] build failed: bin\CapsEnhance.exe is locked by a running copy.
+echo.
+echo   Windows cannot overwrite an exe while a process has it mapped, so the
+echo   linker can only say "LNK1104: cannot open file". Exit CapsEnhance
+echo   first (tray icon, right click, exit), then run build.bat again.
+echo   Same for CapsEnhanceSettings / Help / Clip if you have those open.
+call :maybe_pause
+exit /b 1
+
+rem Do not hang CI: GitHub Actions sets CI=true. Interactive runs (double
+rem click) pause so the message can actually be read.
+:maybe_pause
+if /i "%CI%"=="true" exit /b 0
+pause
+exit /b 0

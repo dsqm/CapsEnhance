@@ -176,6 +176,11 @@ static DWORD WINAPI ActThread(LPVOID p) {
    g_cMod 卡在 TRUE：表现就是"松开 C 之后滚轮还在动"，而且之后按 Tab 会被
    当成 Caps+Tab 而**冒出大写锁定**。搬到本线程之后，Sleep 的只有这里。 */
 #define ACT_WHEEL_QMAX 64   /* 待补队列长度；满则丢最旧（宁可掉加速，也不要堆延迟） */
+/* 这条请求已经等了多久才算"注入追不上滚轮" -> 跳过格间间隔（send.c 的 hurry）。
+   定在 20ms：正常跟手时一条只要 ~9ms（3 格 × 1.2ms + 2 个 2ms 间隔），
+   等到 20ms 说明前面至少压着两条，再讲究"逐格不合并"就是拿掉加速去换精度。
+   松手判据 ACT_WHEEL_STALE_MS 在 cap_window.h（main.c 的 ResetEngine 也要用）。 */
+#define ACT_WHEEL_HURRY_MS  20
 
 static Lane    s_wLane;            /* 车道四件套（见 lane.h）            */
 static int     s_wDelta[ACT_WHEEL_QMAX];  /* 方向（符号有意义，幅度由注入端归一） */
@@ -183,6 +188,7 @@ static int     s_wMul[ACT_WHEEL_QMAX];    /* 纵向：放大倍数；横向：�
 static BOOL    s_wHorz[ACT_WHEEL_QMAX];   /* 本条是横向吗（Caps+Shift+滚轮） */
 static BOOL    s_wFull[ACT_WHEEL_QMAX];   /* 纵向全量注入（Hyper 下物理格也被吞，
                                               mul 格全部由我们补发，见 WheelPost） */
+static ULONGLONG s_wTick[ACT_WHEEL_QMAX]; /* 入队时刻（GetTickCount64）：诊断用 */
 static int     s_wHead = 0, s_wTail = 0, s_wN = 0;
 
 static DWORD WINAPI WheelThread(LPVOID p) {
@@ -199,13 +205,34 @@ static DWORD WINAPI WheelThread(LPVOID p) {
             mul   = s_wMul[s_wHead];
             horz  = s_wHorz[s_wHead];
             BOOL full = s_wFull[s_wHead];
+            ULONGLONG tIn = s_wTick[s_wHead];   /* 入队时刻：算"排队等了多久" */
             s_wHead = (s_wHead + 1) % ACT_WHEEL_QMAX;
             s_wN--;
+            int depth = s_wN;                   /* 出队后还剩几条：>0 = 这条通道在积压 */
             LeaveCriticalSection(&s_wLane.cs);
-            /* 里面的 Sleep 只阻塞本线程 */
-            if (horz) SendWheelHNotches(delta, mul);   /* 横向：注入 mul 格 */
-            else if (full) SendWheelNotches(delta, mul); /* 纵向全量：物理格已被吞 */
-            else      SendWheelAccel(delta, mul);      /* 纵向：物理格已送达，补 mul-1 */
+            /* 里面的等待只阻塞本线程 */
+            int notches = horz ? mul : (full ? mul : SendWheelExtraCount(mul));
+            ULONGLONG t0 = GetTickCount64();
+            ULONGLONG waited = t0 - tIn;
+            /* 积压判据用"这条已经等了多久"，而不是"队列深度"：深度 1 只是正常
+               跟手，等到 ACT_WHEEL_HURRY_MS 才说明注入真的追不上滚轮。 */
+            BOOL hurry = (waited >= ACT_WHEEL_HURRY_MS);
+            if (horz)      SendWheelHNotchesEx(delta, mul, hurry);   /* 横向：注入 mul 格 */
+            else if (full) SendWheelNotchesEx(delta, mul, hurry);    /* 纵向全量：物理格已被吞 */
+            else           SendWheelNotchesEx(delta, SendWheelExtraCount(mul), hurry);
+                                                        /* 纵向：物理格已送达，补 mul-1 */
+            /* 记录模式：这一行是"终点侧"的证据 —— 钩子那行（hook.c 的"滚轮 纵 …"）
+               只说"系统送来了什么"，本行说"我们真的补了几格、排队等了多久"。
+               排查"有时候不加速"时两种异常一眼可辨：
+                 · 「排队」突然变成几十上百毫秒 = 注入被目标拖住、队列在积压，
+                   后面的请求就会被 WheelPost 的"满则丢最旧"或松手清队丢掉；
+                 · 「补=0 格」= 倍数被配成 <=1（该组合已关闭），不是丢包。 */
+            if (g_recording.load())
+                CapLog("  滚轮注入 %s delta=%d 补=%d 格 排队=%llu ms 注入=%llu ms 队列剩=%d%s",
+                       horz ? "横" : "纵", delta, notches,
+                       (unsigned long long)waited,
+                       (unsigned long long)(GetTickCount64() - t0), depth,
+                       hurry ? "  [积压:已跳过格间隔]" : "");
         }
     }
     return 0;
@@ -221,7 +248,13 @@ static DWORD WINAPI WheelThread(LPVOID p) {
 static void WheelPost(int delta, int n, BOOL horz, BOOL full) {
     if (delta == 0) return;
     if (n <= 0) return;
-    if (!horz && !full && SendWheelExtraCount(n) <= 0) return;   /* 倍数 <2：不放大 */
+    if (!horz && !full && SendWheelExtraCount(n) <= 0) {   /* 倍数 <2：不放大 */
+        /* 记一行：否则日志里只有钩子那句"滚轮 纵 …"，看不出"为什么后面什么都没有"
+           —— 排查"有时候不加速"时，"是配置关了"和"是被丢了"必须能分开。 */
+        if (g_recording.load())
+            CapLog("  滚轮补发：跳过（倍数<=1，该组合已关闭）n=%d", n);
+        return;
+    }
     if (!LaneLive(&s_wLane)) {
         /* 分两种，不能一概"同步兜底"：
              · 线程**从未**起来（CreateThread 失败）-> 同步注入，宁可损失
@@ -230,38 +263,94 @@ static void WheelPost(int delta, int n, BOOL horz, BOOL full) {
                ActStop() -> ... -> HookUninstall()，钩子在 ActStop 之后仍然
                装着，这段窗口期内再来滚轮事件就会在**主线程**同步跑
                SendWheelAxis 的 Sleep —— 正是本文件头要消灭的根因。 */
-        if (STOPPED(&s_dead)) return;
+        if (STOPPED(&s_dead)) {
+            if (g_recording.load())
+                CapLog("  滚轮补发：丢弃（通道已停止）delta=%d n=%d", delta, n);
+            return;
+        }
+        if (g_recording.load())
+            CapLog("  滚轮补发：通道未起，退回主线程同步注入 delta=%d n=%d", delta, n);
         if (horz) SendWheelHNotches(delta, n);
         else if (full) SendWheelNotches(delta, n);
         else      SendWheelAccel(delta, n);
         return;
     }
     EnterCriticalSection(&s_wLane.cs);
-    if (LaneStopped(&s_wLane)) { LeaveCriticalSection(&s_wLane.cs); return; }
+    if (LaneStopped(&s_wLane)) {
+        LeaveCriticalSection(&s_wLane.cs);
+        if (g_recording.load())
+            CapLog("  滚轮补发：丢弃（车道已停）delta=%d n=%d", delta, n);
+        return;
+    }
+    BOOL dropped = FALSE;
     if (s_wN == ACT_WHEEL_QMAX) {          /* 满：丢最旧的一条 */
         s_wHead = (s_wHead + 1) % ACT_WHEEL_QMAX;
         s_wN--;
+        dropped = TRUE;
     }
     s_wDelta[s_wTail] = delta;
     s_wMul[s_wTail]   = n;
     s_wHorz[s_wTail]  = horz;
     s_wFull[s_wTail]  = full;
+    s_wTick[s_wTail]  = GetTickCount64();
     s_wTail = (s_wTail + 1) % ACT_WHEEL_QMAX;
     s_wN++;
+    int depth = s_wN;
     LeaveCriticalSection(&s_wLane.cs);
+    /* 日志写在锁**外**：CapLog 是文件 I/O，占着队列锁会把注入线程一起堵住 ——
+       那正好是"主线程/钩子被阻塞"的同一种味道（见文件头）。 */
+    if (g_recording.load())
+        CapLog("  滚轮补发：入队 %s delta=%d n=%d 队列=%d/%d%s",
+               horz ? "横" : "纵", delta, n, depth, ACT_WHEEL_QMAX,
+               dropped ? "（队列满，丢了最旧一条）" : "");
     LanePoke(&s_wLane);
 }
 
 void ActWheelPost(int delta, int mul)  { WheelPost(delta, mul, FALSE, SendHyperLive()); }
 void ActWheelPostH(int delta, int n)   { WheelPost(delta, n,   TRUE,  FALSE);          }
 
-/* 丢弃还没补发的滚轮请求（松开 C / 引擎复位时）。
-   预期是"松开 C 就是普通滚轮"，所以松手后不该再有加速尾流。 */
+/* 丢弃**全部**还没补发的滚轮请求（通道停止 / 退出 / 暂停用）。
+   ★ 松开 C 不走这里了 —— 见下面的 ActWheelDropOlder：整队清空会把用户刚滚的
+   那几格一起吞掉，那正是"有时候不加速、松开重按才行"的成因。 */
 void ActWheelClear(void) {
     if (!LaneLive(&s_wLane)) return;
     EnterCriticalSection(&s_wLane.cs);
+    int dropped = s_wN;
     s_wHead = s_wTail = s_wN = 0;
     LeaveCriticalSection(&s_wLane.cs);
+    /* 丢了多少必须写下来：否则"钩子看到 68 格、只注入 42 次"这种缺口在日志里
+       一点痕迹都没有（这次排查就卡在这上面）。 */
+    if (g_recording.load() && dropped > 0)
+        CapLog("  滚轮补发：清空队列，丢弃 %d 条未补发请求", dropped);
+}
+
+/* 队头是否"陈旧"。抽成纯函数是为了能被单测直接断言 —— 时间戳是内部状态，
+   不伪造时钟就测不到这条边界，而它正是"松手会不会吞掉用户刚滚的那几格"
+   的唯一判据。ms<=0 表示整队清空。 */
+static BOOL WheelStale(ULONGLONG enqTick, ULONGLONG now, int ms) {
+    if (ms <= 0) return TRUE;
+    return (now - enqTick) > (ULONGLONG)ms;
+}
+
+/* 只丢"陈旧"的请求（松开 C / 引擎复位时用）。队列是 FIFO，所以从队头开始，
+   超过 ms 的才丢，新的留着继续补发。ms<=0 等同于整队清空（单测用）。
+   为什么不再整队清空：那些请求就是用户刚刚滚出来的加速，清掉等于让这次甩轮
+   的尾部"不加速"；而重按一次 C 队列变空、下一轮又正常。 */
+void ActWheelDropOlder(int ms) {
+    if (!LaneLive(&s_wLane)) return;
+    int dropped = 0;
+    EnterCriticalSection(&s_wLane.cs);
+    ULONGLONG now = GetTickCount64();
+    while (s_wN > 0 && WheelStale(s_wTick[s_wHead], now, ms)) {
+        s_wHead = (s_wHead + 1) % ACT_WHEEL_QMAX;
+        s_wN--;
+        dropped++;
+    }
+    int left = s_wN;
+    LeaveCriticalSection(&s_wLane.cs);
+    if (g_recording.load() && dropped > 0)
+        CapLog("  滚轮补发：松手清掉 %d 条陈旧请求（>%d ms），保留 %d 条继续补发",
+               dropped, ms, left);
 }
 /* 起/停滚轮通道。起不来不算致命：车道没起来（LaneLive 为假），两个投递入口都退回同步注入
    （损失一点响应性，但功能不失效）。 */
@@ -269,6 +358,7 @@ static void WheelLaneStart(void) {
     s_wHead = s_wTail = s_wN = 0;
     memset(s_wHorz, 0, sizeof(s_wHorz));
     memset(s_wFull, 0, sizeof(s_wFull));
+    memset(s_wTick, 0, sizeof(s_wTick));
     LaneStart(&s_wLane, WheelThread);
 }
 static void WheelLaneStop(void) {

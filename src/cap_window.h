@@ -100,4 +100,12 @@ void DragComputeTopLeft(POINT wndTL, POINT from, POINT to, POINT* out);
    之后按 Tab 冒出大写锁定），同一根因也是 mul>=3 卡顿的来源。 */
 void ActWheelPost(int delta, int mul);   /* 投递一次纵向放大（Caps+滚轮），非阻塞 */
 void ActWheelPostH(int delta, int n);    /* 投递一次横向滚动（Caps+Shift），注入 n 格 */
-void ActWheelClear(void);                /* 丢弃未补发的滚轮请求（松开 C）  */
+/* 松手时"陈旧"的判据：比这还旧的请求视觉上已经过期（用户早就滚过去了），
+   留着补发只会变成松手之后的尾流；而刚滚的那几格必须补完 —— 它们就是用户
+   期待的那次加速（实测每次甩轮尾部会被整队清掉 2~4 条）。 */
+#define ACT_WHEEL_STALE_MS 120
+/* 丢弃**陈旧**的未补发请求（松开 C / 引擎复位）：只丢队头超过 ms 的，刚滚的
+   那几格照常补发 —— 整队清空会让每次甩轮的尾部少几格（"有时候不加速"的成因）。
+   ms<=0 = 整队清空。 */
+void ActWheelDropOlder(int ms);
+void ActWheelClear(void);                /* 整队清空（通道停止/退出/暂停用） */

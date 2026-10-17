@@ -146,6 +146,11 @@ void SendWheelAccel(int delta, int mul);     /* 纵向放大：补发 (mul-1) �
 int  SendWheelExtraCount(int mul);           /* 倍数 -> 补发格数（单测用） */
 void SendWheelNotches(int delta, int n);     /* 补发 n 个同值刻度（持续滚动用） */
 void SendWheelHNotches(int delta, int n);    /* 横向：n 个 ±120 刻度（Caps+Shift+滚轮） */
+/* 同上两条，但 hurry=TRUE 时**跳过格间 2ms 间隔**。只给"队列已经积压"的情形用
+   （判据在 act.c 的 WheelThread）：宁可让目标把几格合并成一条大 delta，也不能
+   让队列越堆越深、最后整段被清掉。正常跟手滚动不会传 TRUE。 */
+void SendWheelNotchesEx(int delta, int n, BOOL hurry);
+void SendWheelHNotchesEx(int delta, int n, BOOL hurry);
 #define WHEEL_STD_DELTA 120                  /* 标准滚轮刻度（WHEEL_DELTA） */
 void SendClearStuckModifiers(BOOL protectSeededHolds);
 /* 清卡键：① 注入记账无条件补抬 + ② 全VK扫描"逻辑按下且物理未按"（无论卡键

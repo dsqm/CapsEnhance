@@ -1011,6 +1011,40 @@ int main(void) {
     Pump(100); Drain();
     CHECK(g_whInj == 0, "Q: 倍数 0 或 delta=0 -> 一格都不注入");
 
+    /* ---- 场景Q2：滚轮注入的两个"慢"与"丢"（真机实测） ----
+       ① 格间间隔的精度：进程没提高定时器精度时，Sleep 的最小粒度是**一个系统
+          tick** —— Sleep(2) 实测单次 15.6ms，于是"补 3 格"要 30.5ms 而不是
+          设计的 4ms，注入线程比滚轮送格还慢，队列一路积压（实测排队 203ms）。
+          已改用高精度可等待定时器（send.c 的 WaitMs），实测降到 ~9ms。
+          断言用**5 次取最小**：最小值对机器负载最不敏感，而一旦退回 Sleep，
+          它会整片抬到 31ms，必然越界。
+       ② 松手只丢陈旧项：原来 ResetEngine 整队清空，把每次甩轮尾部还没补发的
+          2~4 条一起吞掉（实测 68 格入队、只注入 42 次）—— 那正是"有时候不
+          加速、松开重按才行"的成因。判据 WheelStale 是纯函数，这里直接断言
+          它的边界；队列遍历本身只有两行，不值得为它伪造时钟。 */
+    {
+        /* 直接量"格间等待"本身，**不经过 SendInput**：在钩子所属线程上同步注入
+           会撞上"注入事件要由本线程的钩子处理、而本线程正卡在 SendInput 里"，
+           耗时变成 ~300ms 的钩子超时（实测这么飘过 311ms），测的就不是间隔了。
+           生产路径不会这样（注入在 act.c 的专用线程上），所以只量 WaitMs。 */
+        LARGE_INTEGER f, a, b;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&a);
+        for (int k = 0; k < 10; k++) WaitMs(WHEEL_GAP_MS);
+        QueryPerformanceCounter(&b);
+        double per = (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart / 10.0;
+        CHECK(per < 8.0,
+              "Q2: 格间等待 ≈2ms（不是一个 15.6ms 的系统 tick；退回 Sleep 会是 15.6）");
+        printf("        (WHEEL_GAP_MS=%d 实测单次 %.1f ms)\n", WHEEL_GAP_MS, per);
+
+        ULONGLONG now = GetTickCount64();
+        CHECK(WheelStale(now - 200, now, ACT_WHEEL_STALE_MS),
+              "Q2: 200ms 前入队的请求算陈旧（松手会丢）");
+        CHECK(!WheelStale(now, now, ACT_WHEEL_STALE_MS),
+              "Q2: 刚入队的请求不算陈旧（松手必须留下并补发）");
+        CHECK(WheelStale(now, now, 0), "Q2: 阈值 ms<=0 = 整队清空");
+    }
+
     /* ---- 场景O：超限"改道"的落点校验契约 ----
        背景（QQ 实测）：MaxArrowSteps 超限后 SendArrows 改发原生 Ctrl+方向，
        但改道的落点由**目标程序自己的词切分**决定 —— QQ/Chromium 按 ICU
@@ -2479,6 +2513,115 @@ int main(void) {
         }
 
         DeleteFileW(logF);
+    }
+
+    /* ---- 场景AK：补发的格子**真的落到目标窗口**了吗（端到端落点） ----
+       场景Q只证明了"我们调了 SendInput、注入计数钩子看到 N 格"。它证明不了
+       终点：那几格有没有真的派发到目标窗口、有没有被系统合并、有没有在目标
+       侧丢掉。而"按住 Caps 滚轮有时候不加速"恰恰是**终点侧**的现象 ——
+       CapsEnhance 的记录日志只能看到前半段（钩子收到了什么、投递了什么）。
+
+       做法：起 obj\test\wheelprobe.exe 当目标窗口（它自己置顶并把光标挪到窗口
+       中心，于是"悬停滚动"也落在它身上），直驱钩子伪造"Caps 按下 + 一格
+       物理滚轮"。伪造的那一格不会真的产生，所以目标只会收到我们补发的
+       mul-1 格 —— 断言**净滚动量** = (mul-1)*120。
+       断言 delta 合计而不是条数：3 格被系统合并成 1 条 delta=360 是合法
+       行为（见 send.c 顶部"不要改成一个事件塞 delta=N"那段实测），合计不变。
+       实测到的条数打出来给人看 —— 合并与否是有价值的观测，不是断言。
+       探针 exe 不在（没编过）就跳过：假红比不测更贵。 */
+    {
+        WCHAR cwd[MAX_PATH] = L"", probeExe[MAX_PATH] = L"", outFile[MAX_PATH] = L"";
+        GetCurrentDirectoryW(MAX_PATH, cwd);
+        /* 诊断工具一律落 obj\test\（bin\ 只放四个发布 exe，见 docs\DEVELOPMENT.md） */
+        _snwprintf_s(probeExe, MAX_PATH, _TRUNCATE, L"%s\\obj\\test\\wheelprobe.exe", cwd);
+        _snwprintf_s(outFile,  MAX_PATH, _TRUNCATE, L"%s\\obj\\test\\wheelprobe.out", cwd);
+
+        if (GetFileAttributesW(probeExe) == INVALID_FILE_ATTRIBUTES) {
+            printf("  [SKIP] AK: 目标侧探针不在（先跑 test\\build_wheelprobe.bat）\n");
+        } else {
+            DeleteFileW(outFile);
+
+            WCHAR cmd[MAX_PATH * 2];
+            _snwprintf_s(cmd, MAX_PATH * 2, _TRUNCATE,
+                         L"\"%s\" --out \"%s\" --auto-close 8000", probeExe, outFile);
+            STARTUPINFOW si; PROCESS_INFORMATION pi;
+            memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
+            memset(&pi, 0, sizeof(pi));
+            BOOL started = CreateProcessW(NULL, cmd, NULL, NULL, FALSE,
+                                          CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+
+            /* 等它建窗：边等边泵（Sleep 期间本进程不在等消息状态，钩子会被跳过） */
+            HWND probeWnd = NULL;
+            for (int i = 0; i < 60 && started; i++) {
+                probeWnd = FindWindowW(L"CapsEnhanceWheelProbe", NULL);
+                if (probeWnd) break;
+                Pump(50);
+            }
+            CHECK(started && probeWnd != NULL, "AK: 前置条件 —— 目标侧探针窗口起来了");
+
+            if (started && probeWnd) {
+                POINT oldPt;
+                GetCursorPos(&oldPt);
+                RECT r;
+                GetWindowRect(probeWnd, &r);
+                SetCursorPos((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+                SetForegroundWindow(probeWnd);
+                Pump(200);                 /* 让"光标已压在探针窗口上"稳定下来 */
+
+                Reset();
+                ResetWheelRec();
+                int wmul = CfgInt(CFG_WHEEL_SCROLL_MUL);
+                CHECK(wmul >= 2, "AK: 前置条件 —— WheelScrollMul >= 2（否则根本没有补发）");
+
+                Key(CLI_CAPS, TRUE); Pump(30);   /* 伪造 Caps 按下 -> g_cMod = TRUE */
+                Wheel(120, 0);                   /* 伪造一格物理滚轮（这一格不会真的产生） */
+                Pump(400); Drain();
+
+                int want = SendWheelExtraCount(wmul);
+                CHECK(g_wheelInj == want,
+                      "AK: 本进程确实补发了 mul-1 格（注入计数钩子）");
+
+                /* 收尾：抬起 Caps、让探针关窗写文件 */
+                Key(CLI_CAPS, FALSE); Pump(50); Drain();
+                PostMessageW(probeWnd, WM_CLOSE, 0, 0);
+                WaitForSingleObject(pi.hProcess, 5000);
+                TerminateProcess(pi.hProcess, 0);   /* 兜底：绝不留后台进程 */
+                SetCursorPos(oldPt.x, oldPt.y);
+
+                int msgCount = -1, msgSum = 0, hkInj = -1, hkPhys = -1, hookOn = -1;
+                FILE* fp = NULL;
+                if (_wfopen_s(&fp, outFile, L"rb") == 0 && fp) {
+                    char line[512];
+                    while (fgets(line, sizeof(line), fp)) {
+                        int c = 0, s = 0;
+                        if (sscanf_s(line, "本窗口 纵条数=%d 纵delta合计=%d", &c, &s) == 2) {
+                            msgCount = c; msgSum = s;
+                        }
+                        if (sscanf_s(line, "物理滚轮(钩子) 纵条数=%d", &c) == 1) hkPhys = c;
+                        if (sscanf_s(line, "注入滚轮(钩子) 纵条数=%d 纵delta合计=%d", &c, &s) == 2) {
+                            hkInj = c;
+                        }
+                        if (strstr(line, "钩子=已安装")) hookOn = 1;
+                        else if (strstr(line, "钩子=未安装")) hookOn = 0;
+                    }
+                    fclose(fp);
+                }
+                CHECK(msgCount >= 0, "AK: 探针写出了汇总（窗口侧计数可读）");
+                CHECK(msgSum == want * 120,
+                      "AK: 补发的格子真的落到了目标窗口（delta 合计 = (mul-1)*120）");
+                printf("        (探针实测：目标窗口收到 %d 条、delta 合计 %d；"
+                       "探针钩子 %s，见物理 %d 格 / 注入 %d 格；期望注入 %d 格)\n",
+                       msgCount, msgSum,
+                       hookOn == 1 ? "已装" : (hookOn == 0 ? "未装" : "未知"),
+                       hkPhys, hkInj, want);
+            }
+
+            if (started) {
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+            }
+            DeleteFileW(outFile);
+        }
     }
 
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);

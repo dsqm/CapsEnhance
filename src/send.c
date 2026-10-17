@@ -239,7 +239,41 @@ int SendArrows(int dir, int n, BOOL shift) {
 #define WHEEL_EXTRA_MAX 15
 #define WHEEL_GAP_MS    2
 
-static void SendWheelAxis(int delta, int n, BOOL horizontal) {
+/* ---------- 精确短等待（只给滚轮逐格间隔用） ----------
+   为什么不能用 Sleep：进程没提高定时器精度时，Sleep 的最小粒度是**一个系统
+   tick**（默认 15.6ms）。实测本机 Sleep(2) 单次就是 15.6ms —— 于是"补 3 格"
+   要 30.5ms 而不是设计的 4ms，注入线程比滚轮送格还慢，队列一路积压（实测
+   排队涨到 203ms），尾部再被"松手清队"整段丢掉，表现就是"有时候不加速"。
+
+   为什么不用 timeBeginPeriod(1)：它改的是**全系统**的定时器精度（耗电、
+   唤醒频率），一个常驻工具不该做这件事。高精度可等待定时器只影响本进程；
+   老系统上建不出来就退回 Sleep（行为与旧版一致）。 */
+static HANDLE    s_hiTimer = NULL;
+static INIT_ONCE s_hiOnce  = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK HiTimerInit(PINIT_ONCE once, PVOID param, PVOID* ctx) {
+    (void)once; (void)param; (void)ctx;
+    s_hiTimer = CreateWaitableTimerExW(NULL, NULL,
+                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    return TRUE;
+}
+static void WaitMs(int ms) {
+    if (ms <= 0) return;
+    InitOnceExecuteOnce(&s_hiOnce, HiTimerInit, NULL, NULL);
+    if (s_hiTimer) {
+        LARGE_INTEGER due;
+        due.QuadPart = -(LONGLONG)ms * 10000;   /* 相对时间，单位 100ns */
+        if (SetWaitableTimer(s_hiTimer, &due, 0, NULL, NULL, FALSE) &&
+            WaitForSingleObject(s_hiTimer, (DWORD)ms + 50) == WAIT_OBJECT_0)
+            return;
+    }
+    Sleep((DWORD)ms);                            /* 兜底：与旧版行为一致 */
+}
+
+/* hurry：跳过格间间隔。只有**队列已经积压**时才用（判据在 act.c 的
+   WheelThread）——那时宁可让目标把几格合并成一条大 delta，也不能让队列
+   越堆越深、最后整段被清掉。正常跟手滚动不会走到这里，所以"逐格不合并"
+   这个刻意设计（见上）不受影响。 */
+static void SendWheelAxis(int delta, int n, BOOL horizontal, BOOL hurry) {
     if (delta == 0 || n <= 0) return;
     if (n > WHEEL_EXTRA_MAX) n = WHEEL_EXTRA_MAX;
     /* Hyper 透传时同样摘四键：RShift 按着时目标的 WM_MOUSEWHEEL 会被当成
@@ -260,12 +294,15 @@ static void SendWheelAxis(int delta, int n, BOOL horizontal) {
                        (unsigned long)GetLastError());
             break;
         }
-        if (i + 1 < n) Sleep(WHEEL_GAP_MS);
+        if (i + 1 < n && !hurry) WaitMs(WHEEL_GAP_MS);
     }
     SendHyperResume(hyperHeld);
 }
 
-void SendWheelNotches(int delta, int n)  { SendWheelAxis(delta, n, FALSE); }
+void SendWheelNotches(int delta, int n)  { SendWheelAxis(delta, n, FALSE, FALSE); }
+void SendWheelNotchesEx(int delta, int n, BOOL hurry) {
+    SendWheelAxis(delta, n, FALSE, hurry);
+}
 
 /* 纵向放大：倍数 -> 要补发的格数。单独拎出来是为了能被单测直接断言换算
    （真注入的条数没法在本进程里稳定观测，见 test_chord 场景Q 的说明）。
@@ -289,9 +326,10 @@ void SendWheelAccel(int delta, int mul) {
    这不是我们随便定的，而是"Shift + 滚轮"在浏览器 / 资源管理器 / 表格里的
    通用约定（Firefox 官方快捷键表就写着 Shift+上滚 = 向左滚动）。照抄系统
    约定用户才不用重新适应肌肉记忆。 */
-void SendWheelHNotches(int delta, int n) {
+void SendWheelHNotches(int delta, int n) { SendWheelHNotchesEx(delta, n, FALSE); }
+void SendWheelHNotchesEx(int delta, int n, BOOL hurry) {
     if (delta == 0) return;
-    SendWheelAxis((delta > 0) ? -WHEEL_STD_DELTA : WHEEL_STD_DELTA, n, TRUE);
+    SendWheelAxis((delta > 0) ? -WHEEL_STD_DELTA : WHEEL_STD_DELTA, n, TRUE, hurry);
 }
 
 /* 兜底：文字读取失败时，用系统原生 Ctrl(+Shift)+方向键做按词跳转。
