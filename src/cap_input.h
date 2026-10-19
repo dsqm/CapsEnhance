@@ -49,9 +49,6 @@ void ActClear(void);              /* 丢弃未开始的请求（引擎复位） 
 void ActClearKeepFill(void);      /* 同上，但保留"松手补齐"类请求             */
 int  ActInFlight(void);           /* 队列中 + 正在执行的动作数                */
 void ActDrain(void);              /* 等队列清空且当前动作结束                 */
-void ActHyperSet(BOOL on);        /* Hyper 意图信箱（钩子线程投递；动作线程在两次
-                                     动作之间执行 SendHyperApply —— 与发键突发
-                                     天然串行，见 act.c） */
 
 /* ================= 持续滚动通道（act.c：独立状态 + 独立线程） =================
    **只有「Caps + 增强修饰键（默认 Alt/D） + 滚轮」走这里** —— 滚一下就一直滚，
@@ -159,10 +156,17 @@ void SendClearStuckModifiers(BOOL protectSeededHolds);
    详见 send.c。 */
 
 /* ---------- Hyper 透传（HyperPassthrough，默认关；语义见 send.c） ----------
-   按住 C 期间由程序替用户按住右侧 RWin+RCtrl+RShift+RAlt，未映射键经 hook
-   放行、带着这组修饰键漏给系统（AutoHotkey 等绑定 Hyper 热键用）。
-   已映射键的注入必须先摘掉这组修饰键 —— 否则注入的 ← 就是 Win+←（贴边）。 */
-void SendHyperApply(BOOL on);    /* 按下/抬起四键并维护就绪标志（仅动作线程调用） */
-BOOL SendHyperLive(void);        /* 四键此刻已按下且配置开启（钩子放行未映射键的判据） */
-BOOL SendHyperSuspend(void);     /* 发键突发前摘四键；返回是否真摘了（Resume 用） */
-void SendHyperResume(BOOL was);  /* 突发结束；was 且和弦仍在则按回 */
+   **懒按下**：按住 C 期间三键（RWin+RCtrl+RShift）不按，只有按下未映射键时
+   才按、最后一个这类键抬起就抬。因为"键到达那一刻"的修饰键状态才决定它是不是
+   Hyper+X，所以物理键必须被吞掉、由这里按顺序重放（hook.c 的 Hyper 分支）。
+   已映射键的注入必须先摘掉这组修饰键 —— 否则注入的 ← 就是 Win+←（贴边）。
+   状态由 send.c 的 HyperSyncLocked 统一决定（held == 有 Hyper 键按着 && 无突发
+   在发键），Suspend/Resume 只是**计数**，调用方不需要配对记账。 */
+BOOL SendHyperKeyDown(int vk);   /* 重放未映射键的按下（钩子线程）。FALSE = 现在 arm 不了，
+                                    调用方把这一对 down/up 都吞掉 */
+void SendHyperKeyUp(int vk);     /* 重放抬起；最后一个键抬起时三键跟着抬 */
+void SendHyperKeyRepeat(int vk); /* 系统自动重复：转发一条 down（三键已按着） */
+BOOL SendHyperLive(void);        /* 三键此刻真按着且配置开启（滚轮整格注入的判据） */
+void SendHyperSuspend(void);     /* 发键突发前摘三键（可跨线程嵌套） */
+void SendHyperResume(void);      /* 突发结束；全部突发都结束后才按回 */
+void SendHyperReset(void);       /* 收尾：计数归零并抬起三键（暂停/重启、ActStop） */

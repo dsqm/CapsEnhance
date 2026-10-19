@@ -47,22 +47,6 @@ static volatile LONG s_busy = 0;         /* 1 = 正在执行某个动作        
 static ActJob  s_q[ACT_QUEUE_MAX];
 static int     s_head = 0, s_tail = 0, s_n = 0;
 
-/* ---------- Hyper 意图信箱（HyperPassthrough，语义见 send.c） ----------
-   钩子线程只写一个 int（1=按下 / -1=抬起 / 0=无），动作线程每轮循环开头
-   消费一次。为什么不排队列：Hyper 的按下/抬起必须与"正在发键的突发"串行
-   —— 列在 FIFO 里会排到长按词跳转后面（几百毫秒才生效），直接插队又可能
-   落进某个突发的中间。信箱语义恰好折中：**只在两次动作之间**执行，突发
-   进行中最多等一个突发（几十毫秒），突发结束后立即生效。
-   collapse 是安全的：信箱只表达"最终想要的状态"，重复 apply 幂等。
-   程序退出（ActStop）时未消费的意图被丢弃 —— 按下的四键由
-   SendClearStuckModifiers 兜底抬起（都在注入记账 g_injMask 里）。 */
-static std::atomic<int> s_hyperWish{ 0 };
-
-void ActHyperSet(BOOL on) {
-    s_hyperWish.store(on ? 1 : -1);
-    LanePoke(&s_lane);          /* 线程可能在空闲等待，戳一下 */
-}
-
 /* 执行一条请求。顺序必须与"开火 -> 补齐"的原始语义一致。
    走哪条分支由动作标志决定（见 keymap.c），这里不再列举动作 id ——
    加一个按词跳转/诊断类动作不必再回来改这个函数。 */
@@ -132,9 +116,6 @@ static DWORD WINAPI ActThread(LPVOID p) {
         if (LaneStopped(&s_lane)) break;
         WaitForSingleObject(s_lane.ev, 1000);
         for (;;) {
-            /* Hyper 意图在每轮动作之间消化：突发进行中不插手（见信箱注释） */
-            int wish = s_hyperWish.exchange(0);
-            if (wish != 0) SendHyperApply(wish > 0);
             ActJob j;
             EnterCriticalSection(&s_lane.cs);
             if (LaneStopped(&s_lane)) { LeaveCriticalSection(&s_lane.cs); return 0; }
@@ -189,6 +170,17 @@ static DWORD WINAPI ActThread(LPVOID p) {
    松手判据 ACT_WHEEL_STALE_MS 在 cap_window.h（main.c 的 ResetEngine 也要用）。 */
 #define ACT_WHEEL_HURRY_MS  20
 
+/* 滚轮手势的 Hyper 边界（只在"正按着一个 Hyper 键又滚轮"时才起作用）：
+   队列空了以后再等这么久还没有新格，才算"手停了"，这时才把三键按回。
+   为什么需要它：懒按下之后滚轮期间三键本来是**不按**的（见 send.c），但若
+   此刻正按着一个未映射键（Hyper 键按着 = 三键按着），注入滚轮前就必须摘掉
+   —— RShift 会让目标把它当横向、RCtrl 当缩放。摘一次、按回一次，滚快了就是
+   十几次/秒的抬按（用户看到的是"键会松开再按下"）。把手势内所有格共用一次
+   摘键，抖动就从"每格一次"降到"每次滚动手势一次"。
+   150ms 的取法：一格与一格的间隔通常 20~60ms（甩轮更密），足够把一整段
+   滚动收成一次；再长就会让"滚完立刻抬 Hyper 键"落进被吞的窗口。 */
+#define ACT_WHEEL_HYPER_HOLD_MS 150
+
 static Lane    s_wLane;            /* 车道四件套（见 lane.h）            */
 static int     s_wDelta[ACT_WHEEL_QMAX];  /* 方向（符号有意义，幅度由注入端归一） */
 static int     s_wMul[ACT_WHEEL_QMAX];    /* 纵向：放大倍数；横向：注入格数 */
@@ -200,13 +192,23 @@ static int     s_wHead = 0, s_wTail = 0, s_wN = 0;
 
 static DWORD WINAPI WheelThread(LPVOID p) {
     (void)p;
+    /* 本次滚轮手势是否已经摘掉 Hyper 三键。手势内所有格共用一次摘除 ——
+       否则滚得快时就是 10 次/秒的抬按（见 ACT_WHEEL_HYPER_HOLD_MS）。 */
+    BOOL hyperHeld = FALSE;
     for (;;) {
         if (LaneStopped(&s_wLane)) break;
-        WaitForSingleObject(s_wLane.ev, 1000);   /* 1s 超时兜底，防事件被吞 */
+        /* 空闲时睡 1s（超时兜底，防事件被吞）；手势进行中不在这里等，
+           直接进内层取下一格。 */
+        if (!hyperHeld)
+            WaitForSingleObject(s_wLane.ev, 1000);
         for (;;) {
             int delta, mul; BOOL horz;
             EnterCriticalSection(&s_wLane.cs);
-            if (LaneStopped(&s_wLane)) { LeaveCriticalSection(&s_wLane.cs); return 0; }
+            if (LaneStopped(&s_wLane)) {
+                LeaveCriticalSection(&s_wLane.cs);
+                if (hyperHeld) SendHyperResume();   /* 停车道也要把键按回 */
+                return 0;
+            }
             if (s_wN == 0) { LeaveCriticalSection(&s_wLane.cs); break; }
             delta = s_wDelta[s_wHead];
             mul   = s_wMul[s_wHead];
@@ -217,6 +219,9 @@ static DWORD WINAPI WheelThread(LPVOID p) {
             s_wN--;
             int depth = s_wN;                   /* 出队后还剩几条：>0 = 这条通道在积压 */
             LeaveCriticalSection(&s_wLane.cs);
+            /* 手势边界：第一条请求才摘键（内层 SendWheelAxis 里的那次摘除
+               在计数下退化为空操作）。 */
+            if (!hyperHeld) { SendHyperSuspend(); hyperHeld = TRUE; }
             /* 里面的等待只阻塞本线程 */
             int notches = horz ? mul : (full ? mul : SendWheelExtraCount(mul));
             ULONGLONG t0 = GetTickCount64();
@@ -241,7 +246,16 @@ static DWORD WINAPI WheelThread(LPVOID p) {
                        (unsigned long long)(GetTickCount64() - t0), depth,
                        hurry ? "  [积压:已跳过格间隔]" : "");
         }
+        /* 队列空了：再等一小会儿看还有没有下一格。有就**不回外层**，直接接着
+           滚（三键保持抬起，整段手势只摘一次）；没有说明手停了 -> 按回。 */
+        if (hyperHeld) {
+            if (WaitForSingleObject(s_wLane.ev, ACT_WHEEL_HYPER_HOLD_MS) == WAIT_OBJECT_0)
+                continue;                    /* 又来一格：同一手势，接着滚 */
+            SendHyperResume();
+            hyperHeld = FALSE;
+        }
     }
+    if (hyperHeld) SendHyperResume();
     return 0;
 }
 
@@ -249,9 +263,11 @@ static DWORD WINAPI WheelThread(LPVOID p) {
    horz=FALSE：纵向放大，n = 倍数（只补 n-1 格，物理那格系统照常送达）；
    horz=TRUE ：横向滚动，n = 注入格数（物理那格是纵向、已被钩子吞掉，
                所以全部由我们注入）。
-   full：纵向**全量**注入（n 格全由我们发）—— Hyper 透传下物理那格也必须
-   吞掉（它带着按住的 RShift 到达目标会被当成横向/缩放手势），改由我们摘掉
-   Hyper 后整量注入。 */
+   full：纵向**全量**注入（n 格全由我们发）—— 正按着一个 Hyper 键时（三键按着）
+   物理那格也必须吞掉（它带着按住的 RShift 到达目标会被当成横向/缩放手势），
+   改由我们摘掉三键后整量注入。**这个结论由钩子随消息带下来**，不在这里重新判：
+   三键的按下状态会在一次滚动手势里变化，再判一次会让"吞了物理格却只补
+   mul-1 格"（总量少一格）成为可能。 */
 static void WheelPost(int delta, int n, BOOL horz, BOOL full) {
     if (delta == 0) return;
     if (n <= 0) return;
@@ -313,7 +329,7 @@ static void WheelPost(int delta, int n, BOOL horz, BOOL full) {
     LanePoke(&s_wLane);
 }
 
-void ActWheelPost(int delta, int mul)  { WheelPost(delta, mul, FALSE, SendHyperLive()); }
+void ActWheelPost(int delta, int mul, BOOL full) { WheelPost(delta, mul, FALSE, full); }
 void ActWheelPostH(int delta, int n)   { WheelPost(delta, n,   TRUE,  FALSE);          }
 
 /* 丢弃**全部**还没补发的滚轮请求（通道停止 / 退出 / 暂停用）。
@@ -659,6 +675,11 @@ void ActAutoScrollWheel(int delta) {
 static DWORD WINAPI AutoScrollThread(LPVOID p) {
     (void)p;
     BOOL running = FALSE;
+    /* 一段持续滚动是否已经摘掉 Hyper 三键。持续滚动是 25 次/秒的连续注入，
+       若此刻正按着 Hyper 键（三键按着），每拍都摘一次的话整段能抬按几百次
+       —— 所以整段只摘一次，停下时按回（见 send.c 的 HyperSyncLocked：
+       摘除是计数，嵌套调用不会打架）。 */
+    BOOL hyperHeld = FALSE;
     for (;;) {
         if (LaneStopped(&s_asLane)) break;
 
@@ -670,9 +691,14 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
             if (LaneStopped(&s_asLane)) break;
             if (!ACTIVE(&s_asActive)) continue;
             running = TRUE;          /* 落到下面立刻发第一格：启动要即时响应 */
+            if (!hyperHeld) { SendHyperSuspend(); hyperHeld = TRUE; }
         }
 
-        if (!ACTIVE(&s_asActive)) { running = FALSE; continue; }
+        if (!ACTIVE(&s_asActive)) {
+            running = FALSE;
+            if (hyperHeld) { SendHyperResume(); hyperHeld = FALSE; }
+            continue;
+        }
 
         /* 超时兜底：从最后一次调速起算 AUTOSCROLL_MAX_MS。到点自己停 ——
            这一条不依赖任何输入，是"用户走开 / 钩子被系统摘掉"时的最后一道闸。 */
@@ -681,7 +707,9 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
             if (g_recording.load())
                 CapLog("持续滚动：终止（超时 %d ms 未调速，已注入 %d 拍）",
                        (int)ATOMIC(&s_asMaxMs), (int)ATOMIC(&s_asTicks));
-            ActAutoScrollStop(); running = FALSE; continue;
+            ActAutoScrollStop(); running = FALSE;
+            if (hyperHeld) { SendHyperResume(); hyperHeld = FALSE; }
+            continue;
         }
         int dir = (int)ATOMIC(&s_asDir);
         if (dir == 0) {
@@ -689,7 +717,9 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
                真出现说明状态被打乱 —— **必须停下**，不能只把 running 清掉了事：
                active 还是 1，下一轮会跳过"空闲等待"直接回来，于是这里变成没有
                任何等待的死循环（CPU 空转、界面照旧，极难查）。 */
-            ActAutoScrollStop(); running = FALSE; continue;
+            ActAutoScrollStop(); running = FALSE;
+            if (hyperHeld) { SendHyperResume(); hyperHeld = FALSE; }
+            continue;
         }
 
         DWORD tick; int delta;
@@ -716,8 +746,11 @@ static DWORD WINAPI AutoScrollThread(LPVOID p) {
         if (ended) {
             if (LaneStopped(&s_asLane)) break;
             running = FALSE;
+            if (hyperHeld) { SendHyperResume(); hyperHeld = FALSE; }
         }
     }
+    /* 线程退出（车道停止）时也要把三键按回：这条路径不经过上面的收尾。 */
+    if (hyperHeld) SendHyperResume();
     return 0;
 }
 
@@ -793,6 +826,11 @@ void ActStop(void) {
             CapLog("  !! 动作线程 5s 未退出，跳过共享对象销毁（防拆正在使用的锁/事件）");
         return;
     }
+    /* 所有注入车道都已 join，此刻没人再改 Hyper 状态 —— 把计数与"按着"的
+       记账强行归零。正常路径每条车道都会自己 Resume，这里是给 join 超时
+       留下的兜底：否则下一次启动会带着一个永远 >0 的计数，三键再也按不回去。
+       真按在系统里的键由随后的 SendClearStuckModifiers 按注入记账补抬。 */
+    SendHyperReset();
     if (s_evIdle) { CloseHandle(s_evIdle); s_evIdle = NULL; }
 }
 

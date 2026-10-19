@@ -974,20 +974,33 @@ int main(void) {
           "Q: 倍数超上限 -> 补格数被钳住");
 
     ResetWheelRec();
-    ActWheelPost(120, 2);                /* 纵向倍数 2 -> 补 1 格 */
+    ActWheelPost(120, 2, FALSE);         /* 纵向倍数 2 -> 补 1 格 */
     Pump(100); Drain();
     CHECK(g_wheelInj == 1 && g_wheelSum != 0, "Q: 纵向倍数 2 -> 补 1 格");
     CHECK(g_whInj == 0, "Q: 纵向不会误发到横轴");
 
     ResetWheelRec();
-    ActWheelPost(-120, 3);               /* 方向原样带过去 */
+    ActWheelPost(-120, 3, FALSE);        /* 方向原样带过去 */
     Pump(100); Drain();
     CHECK(g_wheelInj == 2 && g_wheelSum < 0, "Q: 倍数 3 -> 补 2 格、方向为负");
 
     ResetWheelRec();
-    ActWheelPost(120, 1);                /* 倍数 1 = 不放大 -> 一格都不补 */
+    ActWheelPost(120, 1, FALSE);         /* 倍数 1 = 不放大 -> 一格都不补 */
     Pump(100); Drain();
     CHECK(g_wheelInj == 0, "Q: 倍数 1 -> 一格都不补（物理格交给系统）");
+
+    /* full=TRUE：物理格已被钩子吞掉（正按着 Hyper 键时），所以**整量**注入。
+       这条与上面那条只差一个标志，但差了整整一格 —— 混起来就是"有时候
+       少滚一格"。 */
+    ResetWheelRec();
+    ActWheelPost(120, 2, TRUE);
+    Pump(100); Drain();
+    CHECK(g_wheelInj == 2 && g_wheelSum > 0, "Q: full -> 倍数 2 整量注入 2 格（物理格已被吞）");
+
+    ResetWheelRec();
+    ActWheelPost(120, 1, TRUE);
+    Pump(100); Drain();
+    CHECK(g_wheelInj == 1, "Q: full 且倍数 1 -> 仍要注入 1 格（物理格已被吞）");
 
     ResetWheelRec();
     ActWheelPostH(120, 1);               /* 横向倍数 1 -> 注入 1 格 */
@@ -2362,49 +2375,99 @@ int main(void) {
     }
 
     /* ---- 场景AI5：Hyper 透传（HyperPassthrough，默认关）----
-       按住 C 期间程序替用户按下右侧四修饰键（RWin+RCtrl+RShift+RAlt），
-       未映射键带四键放行，供 AutoHotkey 等外部工具绑定 Hyper 热键。
-       测试直驱钩子过程；CAP_TEST 下 Apply 的真注入是空实现（绝不往测试机
-       注入修饰键），就绪标志用测试缝直设。真机的注入序列（四键 down/up +
+       **懒按下**：按住 C 期间三键（RWin+RCtrl+RShift，不含 Alt）不按，只有
+       按下未映射键的那一刻才按、最后一个这类键抬起就抬；物理键一律被吞掉，
+       由我们按顺序重放 [三键↓ 键↓] / [键↑ 三键↑]（见 send.c 的
+       SendHyperKeyDown）。这样滚轮/鼠标/持续滚动期间三键根本不按，也就没有
+       "抬起来再按回去"的抖动。
+       测试直驱钩子过程；CAP_TEST 下真注入是空实现（既不往测试机注入修饰键，
+       也不注入重放的主键），但状态机照走。真机的注入序列（三键 down/up +
        掩码键防开始菜单）属于 OS 行为，test/hyperprobe*.cpp 已单独验证过。
-       这里离线钉住 hook 侧的判定语义：
-         ① 就绪前未映射键照旧吞（不比关闭时差）；
-         ② 就绪后未映射键放行、抬起同放行、修饰键仍吞；
-         ③ 松开 Caps -> 就绪清零，恢复原行为；
-         ④ 透传算"和弦做过事"：之后松手不得触发单击 Caps 切输入法。 */
+       这里离线钉住 hook 侧与状态机的语义：
+         ① 和弦期间**不按三键**（这是"滚滚轮不再抖"的根据）；
+         ② 按下未映射键 -> 吞掉物理键 + 三键按下；最后一个键抬起 -> 三键跟着抬；
+         ③ 多个键同时按着时按引用计数、自动重复不重复 arm；
+         ④ 修饰键始终吞（不透传）；
+         ⑤ **跨线程嵌套**：三条注入车道（动作 / 滚轮 / 持续滚动）的
+            Suspend/Resume 会交叉，顺序必须无关 —— 旧实现用"was 旗标 + 全局
+            depth"配对，交叉时会丢按回（三键永久悬空、透传失效，要松手重按
+            C），这条就是它的回归；
+         ⑥ 松开 Caps 时仍按着的 Hyper 键要补抬起（否则目标永远认为它按着）；
+         ⑦ 透传算"和弦做过事"：之后松手不得触发单击 Caps 切输入法。 */
     {
         CfgSetInt(CFG_HYPER_PASSTHROUGH, 1);
         Sim(CLI_CAPS, TRUE);  Pump(20);
-        /* 等 ON 意图被动作线程消费（CAP_TEST 下只置标志，不注入） */
-        for (int i = 0; i < 200 && !SendHyperLive(); i++) { Pump(5); Sleep(2); }
-        CHECK(SendHyperLive(), "AI5: 按下 Caps -> Hyper 意图被动作线程消费（就绪）");
+        CHECK(!SendHyperLive() && !SendHyperTestHeld(),
+              "AI5: 和弦期间不按三键（懒按下：滚轮/鼠标不再带修饰键）");
 
-        SendHyperTestSetReady(FALSE);        /* 人为回到"注入未完成" */
-        LRESULT r0 = Sim('G', TRUE);
-        CHECK(r0 == 1, "AI5: 未就绪 -> 未映射键照旧吞掉（不比关闭时差）");
-        Sim('G', FALSE); Pump(2);
-
-        SendHyperTestSetReady(TRUE);         /* 模拟注入完成 */
+        /* ② 未映射键：物理事件必须吞掉（放行就会抢在三键之前到达目标） */
         LRESULT r1 = Sim('G', TRUE);
-        CHECK(r1 == 0, "AI5: 就绪后未映射键放行（带四修饰键漏给系统）");
-        LRESULT r2 = Sim('G', FALSE);
-        CHECK(r2 == 0, "AI5: 放行键的抬起同样放行（吞放配对不被破坏）");
+        CHECK(r1 == 1, "AI5: 未映射键的物理事件被吞（由我们按序重放）");
+        CHECK(SendHyperTestHeld() && SendHyperLive(), "AI5: 按下未映射键 -> 三键按下");
+
+        /* ③ 自动重复：同一个键的重复 down 不再 arm，但也不能漏出去 */
+        LRESULT r2 = Sim('G', TRUE);
+        CHECK(r2 == 1 && SendHyperTestHeld(), "AI5: 自动重复被吞、三键保持按下");
+
+        /* 两个键同时按着：先松一个，三键不能跟着抬 */
+        Sim('H', TRUE);
+        Sim('G', FALSE);
+        CHECK(SendHyperTestHeld(), "AI5: 还有一个 Hyper 键按着 -> 三键不抬");
+        Sim('H', FALSE);
+        CHECK(!SendHyperTestHeld() && !SendHyperLive(),
+              "AI5: 最后一个 Hyper 键抬起 -> 三键跟着抬");
+
+        /* ④ 修饰键始终吞（不透传） */
         LRESULT r3 = Sim(VK_RCONTROL, TRUE);
         CHECK(r3 == 1, "AI5: 修饰键始终吞（不透传）");
         Sim(VK_RCONTROL, FALSE); Pump(2);
 
+        /* 没有 Hyper 键按着时挂起是**空操作**：滚轮手势/持续滚动会在整段期间
+           挂起（act.c），三键本来就没按，不能因此把 arm 锁死 —— 否则"一边滚
+           一边按 Hyper 键"会被白白吞掉。 */
+        SendHyperSuspend();
+        LRESULT r5 = Sim('G', TRUE);
+        CHECK(r5 == 1 && SendHyperTestHeld(),
+              "AI5: 没有 Hyper 键按着时挂起不阻塞 arm（滚轮期间照样能按 Hyper 键）");
+        SendHyperResume();                   /* 空挂起的配对 Resume 不得改动状态 */
+        CHECK(SendHyperTestHeld(), "AI5: 空挂起的 Resume 不影响已 arm 的状态");
+        Sim('G', FALSE);
+        CHECK(!SendHyperTestHeld(), "AI5: 抬起后三键跟着抬");
+
+        /* ⑤ 交叉的 Suspend/Resume。顺序刻意排成旧实现会丢掉"按回"的那一种：
+           第二条 Suspend 看到键已抬起（旧实现里它的 was=0），两条 Resume
+           谁先谁后都不该让三键悬空。 */
+        Sim('G', TRUE);
+        CHECK(SendHyperTestHeld(), "AI5: 重新按下未映射键 -> 三键再次按下");
+        SendHyperSuspend();                  /* 车道A：摘三键 */
+        CHECK(!SendHyperTestHeld() && !SendHyperLive(),
+              "AI5: 突发期间三键被摘（注入的 ← 才不会变成 Win+←）");
+        SendHyperSuspend();                  /* 车道B：看到键已抬起，不再摘 */
+        SendHyperResume();                   /* 车道B 先收尾：还有一条在发键，不能按回 */
+        CHECK(!SendHyperTestHeld(), "AI5: 还有突发在发键时不得按回");
+        SendHyperResume();                   /* 车道A 收尾：全部结束 -> 按回 */
+        CHECK(SendHyperTestHeld() && SendHyperLive(),
+              "AI5: 交叉 Suspend/Resume 后三键必须按回（旧实现会永久悬空）");
+        /* 多调一次 Resume 不能把计数打成负数（否则之后再也按不回去） */
+        SendHyperResume();
+        CHECK(SendHyperTestHeld(), "AI5: 多余的 Resume 不破坏状态");
+
+        /* ⑥ 按住 Hyper 键的同时松开 Caps：合成的 G↓ 必须补抬起 */
         int imeCaps = g_imeReq[IME_KEY_CAPS];   /* 单击切输入法的请求计数（场景AG 的桩） */
         Sim(CLI_CAPS, FALSE); Pump(20);
-        for (int i = 0; i < 200 && SendHyperLive(); i++) { Pump(5); Sleep(2); }
-        CHECK(!SendHyperLive(), "AI5: 松开 Caps -> OFF 意图清就绪，恢复原行为");
+        CHECK(!SendHyperTestHeld(), "AI5: 松开 Caps -> 仍按着的 Hyper 键被补抬起");
         CHECK(g_imeReq[IME_KEY_CAPS] == imeCaps,
               "AI5: 透传算动作 -> 松手不触发单击 Caps 切输入法");
-        /* 关闭后再开一次和弦：ON 意图不再投递，未映射键回到"吞"的既有承诺。
+        Sim('G', FALSE); Pump(2);            /* 迟到的物理抬起：和弦外，不能再动三键 */
+        CHECK(!SendHyperTestHeld(), "AI5: 迟到的物理抬起不影响状态");
+
+        /* 关闭后：未映射键回到"吞"的既有承诺（也不按三键）。
            （和弦外普通键本来就该放行 —— 那是正常打字，不是透传。） */
         CfgSetInt(CFG_HYPER_PASSTHROUGH, 0);
         Sim(CLI_CAPS, TRUE);  Pump(20);
         LRESULT r4 = Sim('G', TRUE);
         CHECK(r4 == 1, "AI5: 功能关闭后新和弦未映射键照常吞");
+        CHECK(!SendHyperTestHeld(), "AI5: 功能关闭时不按三键");
         Sim('G', FALSE); Pump(2);
         Sim(CLI_CAPS, FALSE); Pump(20);
         Drain();

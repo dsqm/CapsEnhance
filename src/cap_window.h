@@ -120,7 +120,8 @@ void DragComputeTopLeft(POINT wndTL, POINT from, POINT to, POINT* out);
    逐格补发，主线程不在"等消息"状态期间系统会**跳过**低级钩子，
    于是松开 Caps 的 keyup 可能被漏掉（g_cMod 卡住 → 滚轮停不下来 +
    之后按 Tab 冒出大写锁定），同一根因也是 mul>=3 卡顿的来源。 */
-void ActWheelPost(int delta, int mul);   /* 投递一次纵向放大（Caps+滚轮），非阻塞 */
+void ActWheelPost(int delta, int mul, BOOL full);   /* 投递一次纵向放大（Caps+滚轮），非阻塞。
+                                                       full=物理格已被钩子吞掉，mul 格全由我们注入 */
 void ActWheelPostH(int delta, int n);    /* 投递一次横向滚动（Caps+Shift），注入 n 格 */
 /* 松手时"陈旧"的判据：比这还旧的请求视觉上已经过期（用户早就滚过去了），
    留着补发只会变成松手之后的尾流；而刚滚的那几格必须补完 —— 它们就是用户

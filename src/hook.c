@@ -91,6 +91,25 @@ static BOOL      s_shiftArmed = FALSE;  /* 某个 Shift 已按下、期间没别
 static int       s_shiftVk = 0;         /* 上面那个"某个 Shift"是哪个 */
 static ULONGLONG s_shiftTick = 0;       /* 它按下的时刻（判"按得够短"） */
 
+/* ---------- Hyper 透传：哪些键已经由我们重放过 ----------
+   懒按下（见 send.c）之后，未映射键的物理 down 被吞、由我们发一条合成的
+   [三键↓ 键↓]。这张表就是"这个键的 down 是我们发的"，用途有两个：
+     · 自动重复（同一个键的重复 down）要转发一条 down，而不是重新 arm；
+     · 抬起时才知道该发 [键↑ 三键↑]（没发过的 up 什么都不用做）。
+   值域就是 VK（0..255）。只在钩子线程访问，无需加锁。 */
+static BOOL s_hyperSent[256];
+
+/* 和弦结束 / 暂停 / 重启时收尾：把仍按着的 Hyper 键逐个补抬起（否则目标
+   永远认为它们按着），再让 send.c 抬三键。 */
+static void HyperReleaseAll(void) {
+    for (int vk = 0; vk < 256; vk++) {
+        if (!s_hyperSent[vk]) continue;
+        s_hyperSent[vk] = FALSE;
+        SendHyperKeyUp(vk);
+    }
+    SendHyperReset();
+}
+
 /* 本次 Caps 是否"决定不介入"（反着按：见 ChordKeyHeldBeforeCaps）。
    down 时决定一次，up 沿用 —— 与 g_cMod 一样是"一次会话一份决定"。 */
 static volatile BOOL g_capsSkip = FALSE;
@@ -247,10 +266,10 @@ void ModHoldReset(void) {
        还在跟手、而左键的抬起被吞掉。DragEnd 不依赖拖拽是否在进行。 */
     DragEnd();
     g_dragSwallowUp = FALSE;
-    /* Hyper 透传也在这里收手：暂停/重启会跳过钩子的"松开 C"路径（同上面
-       DragEnd 的理由），按下的四修饰键不能留到恢复之后。幂等：本来就没
-       按下时这是一次空操作。 */
-    ActHyperSet(FALSE);
+    /* Hyper 透传也在这里收手：暂停/重启会跳过钩子回调，"松开 C 再松开 G"
+       那条路径根本收不到（同上面 DragEnd 的理由），合成的 G↓ 与三键不能
+       留到恢复之后。幂等：本来就没按着时这是一次空操作。 */
+    HyperReleaseAll();
     /* ★ g_phys 必须**重新播种**，不是"留着不动"：暂停期间钩子在记录它之前就
        早退了（见本文件 paused 分支），所以"暂停时按住、恢复以后才松"的
        Alt/Ctrl/Shift 从没进过这张表。恢复后按下 Caps 时 ChordKeyHeldBeforeCaps
@@ -513,10 +532,9 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 g_downMask = 0;
                 s_capsUsed = FALSE;      /* 新一轮和弦：还没有任何动作发生 */
                 g_probeArmed = FALSE;   /* 新一轮和弦：探测键从"未按过"开始 */
-                /* Hyper 透传（HyperPassthrough，默认关）：和弦开始 -> 动作线程
-                   按下右侧四修饰键（见 send.c）。就绪前的未映射键照旧吞掉，
-                   行为不比关闭时差；已映射键的注入会临时摘掉四键。 */
-                if (CfgBool(CFG_HYPER_PASSTHROUGH)) ActHyperSet(TRUE);
+                /* Hyper 透传（HyperPassthrough，默认关）**不在这里按三键** ——
+                   它是懒按下：只有真的按下一个未映射键时才按（见下面的分支
+                   与 send.c）。所以整个和弦期间滚轮/鼠标都不带修饰键。 */
                 PostMessageW(g_mainWnd, WM_CAPS_DOWN, 0, 0);   /* 通知主线程复位 */
                 return 1;
             }
@@ -538,7 +556,11 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                    会在上面 `if (!g_cMod) 放行` 分支出去，没人再清闩锁 ——
                    下一次 C+` 的首次按下就哑了。 */
                 g_probeArmed = FALSE;
-                ActHyperSet(FALSE);             /* Hyper 透传：抬起四修饰键（幂等） */
+                /* Hyper 透传：松开 C 时把仍按着的 Hyper 键补抬起并抬三键。
+                   懒按下之后三键是"跟着未映射键走"的，正常情况下这里本来就
+                   没东西可按；但"按住 Hyper+G 的同时松开 C"会让 G 的 up 落到
+                   和弦外（那条路只放行），合成的 G↓ 就永远没人配对了。 */
+                HyperReleaseAll();
                 DragEnd();                      /* C 松开：拖拽立即收手（若在拖） */
                 SendArrowsRequestInterrupt();   /* C 松开：立即打断逐格输出 */
                 PostMessageW(g_mainWnd, WM_CAPS_UP, 0, 0);
@@ -628,23 +650,37 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         }
 
         /* C 按住期间其它普通键。
-           Hyper 透传（HyperPassthrough，默认关）就绪时：未映射键**原样放行**
-           —— 它们带着按住的 RWin+RCtrl+RShift+RAlt 漏给系统，供 AutoHotkey
-           等外部工具绑定 Hyper 热键（macOS Capslock 的同款语义）。
-           修饰键例外：始终吞（配对记账），不透传 —— 它们只会徒增"Alt 菜单/
-           开始菜单/组合键失控"一类副作用，外部工具要的只是普通键 + 四键态。
-           PASS_OR_SWALLOW 保证"down 曾被吞过的键 up 必吞"：透传就绪前那几毫秒
-           竞态窗口里吞掉的 down，其 up 仍走吞，两侧永远配对。 */
+           Hyper 透传（HyperPassthrough，默认关）是**懒按下**：三键平时不按，
+           按下未映射键的这一刻才按（顺序：三键↓ -> 键↓，见 send.c 的
+           SendHyperKeyDown），最后一个这类键抬起就抬。所以：
+             · 物理键一律**吞掉** —— 不能放行。放行的物理键会抢在三键之前
+               到达目标（它就卡在这个回调里），目标/AHK 看到的是一个不带修饰键
+               的普通键（Hyper+G 变成 g）。必须由我们按序重放。
+             · 自动重复（down 已记过）转发一条 down 即可，三键已经按着。
+           arm 不起来（有发键突发在跑、三键摘着）时**不发裸键**：把这一对
+           down/up 都吞掉，宁可丢一次按键，也不往目标里塞杂字符。
+           修饰键例外：始终吞（配对记账）—— 它们只会徒增"Alt 菜单/开始菜单/
+           组合键失控"一类副作用，外部工具要的只是普通键 + 三键态。 */
         if (IsModifierVk(vk)) {
             if (down) SwallowNote(vk);
             else      SwallowTake(vk);
             return 1;
         }
-        if (SendHyperLive()) {
-            if (down) s_capsUsed = TRUE;   /* 透传也算"和弦做过事"：之后松手不切输入法 */
-            return PASS_OR_SWALLOW(vk, down);
+        if (CfgBool(CFG_HYPER_PASSTHROUGH)) {
+            if (down) {
+                if (s_hyperSent[vk]) {
+                    SendHyperKeyRepeat(vk);
+                } else if (SendHyperKeyDown(vk)) {
+                    s_hyperSent[vk] = TRUE;
+                    s_capsUsed = TRUE;   /* 透传也算"和弦做过事"：之后松手不切输入法 */
+                }
+            } else if (s_hyperSent[vk]) {
+                s_hyperSent[vk] = FALSE;
+                SendHyperKeyUp(vk);
+            }
+            return 1;
         }
-        /* 关闭（或未就绪）：维持既有承诺 —— 全部屏蔽（修饰键已在上面记账
+        /* 关闭：维持既有承诺 —— 全部屏蔽（修饰键已在上面记账
            返回；普通字母键量大且遗孤的 up 无害，不占表）。 */
         if (!down) SwallowTake(vk);
         return 1;
@@ -791,15 +827,19 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
 
         /* 普通（只按住 C）：快速滚动 N 倍 —— 见 main.c 的 WM_WHEEL_ACCEL。
            物理格不吞（它是"加强"，不是"替换"）。
-           ★ Hyper 透传就绪时例外：物理格**也吞** —— 它带着按住的 RShift
-           到达目标，会被当成横向/缩放手势（浏览器 Shift+滚轮 = 横向）。
-           吞掉之后 mul 格全部由滚轮通道摘着 Hyper 注入（act.c 的 full 变体），
-           总滚动量不变。 */
+           ★ 例外：**正按着一个 Hyper 键**（懒按下，见 send.c）时三键是按着的，
+           物理格必须也吞 —— 它带着 RShift 到达目标会被当成横向/缩放手势
+           （浏览器 Shift+滚轮 = 横向）。吞掉之后 mul 格全部由滚轮通道摘着
+           三键注入（act.c 的 full 变体），总滚动量不变。
+           注意这个状态在一次滚动手势里会变（按住 Hyper 键 -> 抬起），所以
+           "这一格吞没吞"必须随消息带走，不能交给下游再判一次。 */
         if (vert && chord && delta != 0) {
             int mul = CfgInt(CFG_WHEEL_SCROLL_MUL);
             if (mul > 1) {
-                PostMessageW(g_mainWnd, WM_WHEEL_ACCEL, (WPARAM)delta, (LPARAM)mul);
-                if (SendHyperLive()) return 1;
+                BOOL swallow = SendHyperLive();
+                PostMessageW(g_mainWnd, WM_WHEEL_ACCEL, (WPARAM)delta,
+                             (LPARAM)(mul | (swallow ? WM_WHEEL_ACCEL_FULL : 0)));
+                if (swallow) return 1;
             }
         }
 

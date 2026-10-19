@@ -10,7 +10,12 @@
 #define WM_TOGGLE_TRAY (WM_APP + 5) /* 托盘自定义回调消息 */
 #define WM_ALREADY_RUNNING (WM_APP + 7) /* 已有实例在跑：新实例通知它提示后退出 */
 #define WM_PROBE       (WM_APP + 6) /* 探测焦点控件（钩子线程投递） */
-#define WM_WHEEL_ACCEL (WM_APP + 8) /* Caps+滚轮 快速滚动：wParam=delta，lParam=倍数 */
+#define WM_WHEEL_ACCEL (WM_APP + 8) /* Caps+滚轮 快速滚动：wParam=delta，
+                                       lParam=低16位倍数 | WM_WHEEL_ACCEL_FULL */
+/* lParam 的高位标记：**这一格的物理滚轮已被钩子吞掉**，所以 N 格要全部由
+   我们注入（否则物理格 + 补 (N-1) 格才是 N 格）。由钩子在"吞不吞"的同一
+   次判定里写下 —— 就绪状态在滚动手势中会变，下游不能重新判。 */
+#define WM_WHEEL_ACCEL_FULL 0x10000
 #define WM_WHEEL_ENH   (WM_APP + 9) /* Caps+Alt/D+滚轮 持续滚动：wParam=delta */
 #define WM_MODE_UP     (WM_APP + 10)/* 某修饰模式的激活键全部抬起：wParam=mode */
 #define WM_WHEEL_HACCEL (WM_APP + 11)/* 横向滚动（Caps+Shift+滚轮）：wParam=delta，lParam=倍数。

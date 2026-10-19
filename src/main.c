@@ -1094,8 +1094,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
            原来在这里直接 SendWheelAccel（内含 Sleep 逐格补发），主线程一进
            Sleep 就不在"等消息"状态，系统会把这段时间到达的低级钩子事件**直接
            跳过**：松开 Caps 的 keyup 被漏掉 -> g_cMod 卡在 TRUE -> 松开 C 后
-           滚轮还在滚、随后按 Tab 又冒出大写锁定。同一根因也造成倍数高时卡顿。 */
-        ActWheelPost((int)wp, (int)lp);
+           滚轮还在滚、随后按 Tab 又冒出大写锁定。同一根因也造成倍数高时卡顿。
+           lParam 高位是"物理格已被钩子吞掉"（见 cap_core.h）：必须照它办，
+           不能在这里重新判就绪 —— 滚动手势期间三键是抬起的，重判会少补一格。 */
+        ActWheelPost((int)wp, (int)(lp & 0xFFFF), (lp & WM_WHEEL_ACCEL_FULL) != 0);
         return 0;
     case WM_WHEEL_ENH:
         /* Caps+Alt/D+滚轮：驱动持续滚动（act.c 的持续滚动通道）。

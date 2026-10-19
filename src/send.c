@@ -100,20 +100,21 @@ static void SendEvent(int vk, BOOL up) {
 #define COMBO_GAP      40     /* ms：修饰键 <-> 主键之间 */
 
 /* Hyper 透传的突发摘除（定义在文件末尾）：本程序自己发键/滚轮之前先摘掉
-   按住的 RWin+RCtrl+RShift+RAlt —— 否则注入的 ← 带着 RWin 出去就是 Win+←，
-   直接把目标窗口贴边。返回本次是否真摘了（Resume 据此决定要不要按回去）。 */
-BOOL SendHyperSuspend(void);
-void SendHyperResume(BOOL was);
+   按住的三键（RWin+RCtrl+RShift）—— 否则注入的 ← 带着 RWin 出去就是 Win+←，
+   直接把目标窗口贴边。**调用方不必记账**：能不能按回由状态机自己判定
+   （见文件末尾的 HyperSyncLocked），所以这里没有返回值。 */
+void SendHyperSuspend(void);
+void SendHyperResume(void);
 
 /* 单击一个键；shift 全程按住（Shift↓ 键↓ 键↑ Shift↑） */
 void SendKeyOnce(int vk, BOOL shift) {
-    BOOL hyperHeld = SendHyperSuspend();
+    SendHyperSuspend();
     if (shift) { SendEvent(VK_LSHIFT, FALSE); Sleep(COMBO_GAP); }
     SendEvent(vk, FALSE);
     Sleep(KEY_GAP);
     SendEvent(vk, TRUE);
     if (shift) { Sleep(COMBO_GAP); SendEvent(VK_LSHIFT, TRUE); }
-    SendHyperResume(hyperHeld);
+    SendHyperResume();
 }
 
 /* 逐格输出的打断机制：
@@ -163,7 +164,7 @@ BOOL SendArrowsConflicts(int act) {
 /* 真正的逐格发送：不做任何超限判定，n 步就是 n 步。 */
 static void ArrowsEmit(int dir, int n, BOOL shift) {
     int vk = (dir == DIR_LEFT) ? VK_LEFT : VK_RIGHT;
-    BOOL hyperHeld = SendHyperSuspend();   /* Hyper 透传时先摘四键，逐格完再按回 */
+    SendHyperSuspend();                    /* Hyper 透传时先摘三键，逐格完再按回 */
     g_arrDir = dir; g_arrBusy = TRUE; g_arrBreak = FALSE; g_arrBroke = FALSE;
     if (shift) { SendEvent(VK_LSHIFT, FALSE); Sleep(COMBO_GAP); }
     for (int i = 0; i < n && i < MAX_ARROW_STEPS; i++) {
@@ -177,7 +178,7 @@ static void ArrowsEmit(int dir, int n, BOOL shift) {
     }
     g_arrBusy = FALSE;
     if (shift) SendEvent(VK_LSHIFT, TRUE);   /* 打断时也要抬 Shift，选区停在此处 */
-    SendHyperResume(hyperHeld);
+    SendHyperResume();
 }
 
 /* 补正专用：即使步数达到 MaxArrowSteps 也逐格走完，**不**改道。
@@ -276,9 +277,11 @@ static void WaitMs(int ms) {
 static void SendWheelAxis(int delta, int n, BOOL horizontal, BOOL hurry) {
     if (delta == 0 || n <= 0) return;
     if (n > WHEEL_EXTRA_MAX) n = WHEEL_EXTRA_MAX;
-    /* Hyper 透传时同样摘四键：RShift 按着时目标的 WM_MOUSEWHEEL 会被当成
-       横向/缩放手势（浏览器 Shift+滚轮 = 横向），纵轴放大就走样了。 */
-    BOOL hyperHeld = SendHyperSuspend();
+    /* Hyper 透传时同样摘三键：RShift 按着时目标的 WM_MOUSEWHEEL 会被当成
+       横向/缩放手势（浏览器 Shift+滚轮 = 横向），纵轴放大就走样了。
+       长通道（滚轮手势、持续滚动）会在外层先摘一次，这里的嵌套计数让它
+       退化成空操作 —— 一整段手势只抬一次键（见 act.c 的 WheelThread）。 */
+    SendHyperSuspend();
     for (int i = 0; i < n; i++) {
         INPUT in;
         memset(&in, 0, sizeof(in));
@@ -296,7 +299,7 @@ static void SendWheelAxis(int delta, int n, BOOL horizontal, BOOL hurry) {
         }
         if (i + 1 < n && !hurry) WaitMs(WHEEL_GAP_MS);
     }
-    SendHyperResume(hyperHeld);
+    SendHyperResume();
 }
 
 void SendWheelNotches(int delta, int n)  { SendWheelAxis(delta, n, FALSE, FALSE); }
@@ -336,7 +339,7 @@ void SendWheelHNotchesEx(int delta, int n, BOOL hurry) {
    Ctrl 必须在方向键之前按下、之后抬起，否则目标收到的只是单格方向键。 */
 void SendNativeWordJump(int dir, BOOL shift) {
     int vk = (dir == DIR_LEFT) ? VK_LEFT : VK_RIGHT;
-    BOOL hyperHeld = SendHyperSuspend();
+    SendHyperSuspend();
     if (shift) { SendEvent(VK_LSHIFT, FALSE); Sleep(COMBO_GAP); }
     SendEvent(VK_LCONTROL, FALSE);
     Sleep(COMBO_GAP);
@@ -346,7 +349,7 @@ void SendNativeWordJump(int dir, BOOL shift) {
     Sleep(COMBO_GAP);
     SendEvent(VK_LCONTROL, TRUE);
     if (shift) { Sleep(COMBO_GAP); SendEvent(VK_LSHIFT, TRUE); }
-    SendHyperResume(hyperHeld);
+    SendHyperResume();
 }
 
 /* 补发一个卡住键的"抬起"。Alt / Win 的"抬起"被系统单独看到时会被解释为
@@ -430,32 +433,68 @@ void SendClearStuckModifiers(BOOL protectSeededHolds) {
 }
 
 /* ================= Hyper 透传（HyperPassthrough，默认关） =================
-   按住 C 的整个和弦期间，替用户按住右侧四修饰键（RWin+RCtrl+RShift+RAlt）：
-   未映射键由 hook 放行、带着这组修饰键漏给系统，供 AutoHotkey 等绑定
-   >#^!+X 类 Hyper 热键 —— macOS Capslock 的同款方案。开关与语义见 config.c
-   的 HyperPassthrough 注释；误触安全性（Win+E/Win+数字等系统热键要求修饰键
-   精确匹配，四键齐按时全部失配）已在 test/hyperprobe*.cpp 实测。
+   **懒按下**：按住 C 期间三键（RWin+RCtrl+RShift）一律不按，只有真的按下
+   一个未映射键时才按，最后一个这类键抬起就抬。目标与外部工具看到的是
+   "按下 Hyper+X 的那一瞬 Hyper 才成立"，而不是"按住 C 就一直 Hyper"。
+   开关与语义见 config.c 的 HyperPassthrough 注释；误触安全性（Win+E/
+   Win+数字等系统热键要求修饰键精确匹配，三键齐按时全部失配）已在
+   test/hyperprobe*.cpp 实测。
 
-   状态与线程（act.c 的意图信箱 -> 本文件的 Apply，跑在**动作线程**上）：
-     · g_hyperActive —— 本次和弦启用了 Hyper。动作线程写、钩子线程读。
-     · g_hyperReady  —— 四键确实已按下（注入完成后才置位）。就绪之前未映射键
-       照旧吞掉 —— 行为不比"关闭"差，只是慢一拍生效（注入是毫秒级）。
-     · g_hyperDown / g_hyperDepth —— 只被动作线程触碰（Apply 与
-       Suspend/Resume 都在动作线程上串行），普通变量即可。
+   **为什么必须重放键**：目标（和 AHK 的钩子）判断"这是不是 Hyper+X"，看的
+   是**键到达那一刻**的修饰键状态。物理 X 的事件此刻正卡在我们的钩子回调里，
+   这时再去注入三键，它们只会排在 X 后面 —— 外部工具看到的就是一个不带修饰
+   键的 x。所以调用方要吞掉物理键，由本文件按顺序发 [三键↓ X↓] / [X↑ 三键↑]
+   （见 hook.c 的 Hyper 分支）。代价是未映射键变成合成键：过滤注入输入的程序
+   （部分游戏/安全软件）拿不到它；键的自动重复也要由我们逐条转发。
+
+   好处：滚轮 / 鼠标 / 持续滚动期间三键根本不按，不存在"抬起来再按回去"的
+   抖动；按住 C 点鼠标也不再带 Shift/Ctrl/Win。
+
+   状态机（三条注入线程共用）：
+     · g_hyperKeys  —— 当前按着几个"已重放"的未映射键。>0 才是 Hyper 态。
+     · g_hyperSusp  —— 正在发键的突发数（动作 / 滚轮 / 持续滚动车道各在注入
+       前后调一次 Suspend/Resume）。**只在真有 Hyper 键按着时才计入**：它只
+       为"按住 Hyper 键的同时又触发映射动作"这个边角存在 —— 那时必须先摘掉
+       三键，否则注入的 ← 就是 Win+←。
+     · g_hyperHeld  —— 三键此刻是否真的按着，== (keys>0 && susp==0)。
+     · g_hyperReady —— 同 held，滚轮"整格注入"的判据（见 hook.c）。
+   任何入口改完上面两个变量就调 HyperSyncLocked() —— 没有"谁摘的谁按回"
+   这种跨线程配对。那套写法在两条车道交叉时会丢按回（三键永久悬空、
+   透传失效），test_chord 场景AI5 钉的就是它。
+
    两条铁律：
-     1) **已映射键的注入必须摘掉四键**（文件前部所有发键/滚轮突发的
-        SendHyperSuspend/Resume）：我们的 ← 带着 RWin 出去就是 Win+←，
-        直接把目标窗口贴边；RShift 按着时滚轮会被目标当横向/缩放手势。
-     2) 四键的注入都走 SendEvent：自动进 g_injMask 记账，退出/重启的
+     1) **已映射键的注入必须摘掉三键**（文件前部所有发键/滚轮突发的
+        SendHyperSuspend/Resume）：RShift 按着时滚轮会被目标当横向/缩放手势。
+     2) 三键的注入都走 SendEvent：自动进 g_injMask 记账，退出/重启的
         卡键清理（SendClearStuckModifiers）不用新增路径。 */
-static std::atomic<bool> g_hyperActive{ false };
 static std::atomic<bool> g_hyperReady{ false };
-static BOOL g_hyperDown = FALSE;   /* 仅动作线程读写 */
-static int  g_hyperDepth = 0;      /* Suspend 嵌套深度（同上） */
+/* 以下三项由 g_hyperCs 保护。临界区里只有计数和 4~6 次 SendInput、**没有
+   Sleep**，所以它是微秒级的 —— 争用它不会拖住任何一条注入线程（滚轮注入
+   的格间等待都在临界区之外）。 */
+static CRITICAL_SECTION g_hyperCs;
+static INIT_ONCE        g_hyperOnce = INIT_ONCE_STATIC_INIT;
+static BOOL             g_hyperHeld = FALSE;
+static int              g_hyperKeys = 0;
+static int              g_hyperSusp = 0;
 
-/* 按下 / 抬起四键。无 Sleep：修饰键之间不需要间隔（期间不发别的键，事件流
+static BOOL CALLBACK HyperCsInit(PINIT_ONCE once, PVOID param, PVOID* ctx) {
+    (void)once; (void)param; (void)ctx;
+    InitializeCriticalSection(&g_hyperCs);
+    return TRUE;
+}
+/* send.c 没有 init 入口（也不该为这个加一个），所以用 InitOnce：初始化本身
+   线程安全，之后每次只是一个原子的"已完成"读。 */
+static void HyperLock(void) {
+    InitOnceExecuteOnce(&g_hyperOnce, HyperCsInit, NULL, NULL);
+    EnterCriticalSection(&g_hyperCs);
+}
+static void HyperUnlock(void) { LeaveCriticalSection(&g_hyperCs); }
+
+/* 按下 / 抬起三键。无 Sleep：修饰键之间不需要间隔（期间不发别的键，事件流
    顺序即语义）；抬起前插一对掩码键 —— RWin 单独抬起会被系统解释成"按了一下
    Win"弹开始菜单（AHK #MenuMaskKey 同款，与上面 ReleaseMod 同一套）。
+   按下顺序 Win->Ctrl->Shift、抬起反序：Shift 最后按下、最先抬起，中途若
+   有事件插进来也不会出现"半个组合键"。
    ★ CAP_TEST 下绝不真注入：测试直驱钩子过程 + 直设标志，见 test_chord 场景AI5。 */
 static void HyperPress(void) {
 #ifdef CAP_TEST
@@ -464,7 +503,6 @@ static void HyperPress(void) {
     SendEvent(VK_RWIN, FALSE);
     SendEvent(VK_RCONTROL, FALSE);
     SendEvent(VK_RSHIFT, FALSE);
-    SendEvent(VK_RMENU, FALSE);
 #endif
 }
 static void HyperRelease(void) {
@@ -473,55 +511,114 @@ static void HyperRelease(void) {
 #else
     SendEvent(MASK_VK, FALSE);
     SendEvent(MASK_VK, TRUE);
-    SendEvent(VK_RMENU, TRUE);
     SendEvent(VK_RSHIFT, TRUE);
     SendEvent(VK_RCONTROL, TRUE);
     SendEvent(VK_RWIN, TRUE);
 #endif
 }
 
-/* 动作线程调用（act.c 的 Hyper 意图信箱）：on=按下四键并置就绪；
-   off=清就绪并抬起。重复调用幂等；collapse 后的最终 wish 决定终态。 */
-void SendHyperApply(BOOL on) {
-    if (on && CfgBool(CFG_HYPER_PASSTHROUGH)) {
-        g_hyperActive = true;
-        if (!g_hyperDown) { HyperPress(); g_hyperDown = TRUE; }
-        g_hyperReady = true;
-    } else {
-        g_hyperReady = false;
-        g_hyperActive = false;
-        if (g_hyperDown) { HyperRelease(); g_hyperDown = FALSE; }
+/* **唯一**决定"按/抬三键"的地方（调用者必须已持锁）。 */
+static void HyperSyncLocked(void) {
+    BOOL want = g_hyperKeys > 0 && g_hyperSusp == 0;
+    if (want != g_hyperHeld) {
+        if (want) HyperPress();
+        else      HyperRelease();
+        g_hyperHeld = want;
     }
+    g_hyperReady = g_hyperHeld;
 }
 
-/* 发键突发前摘四键 / 结束后按回。嵌套安全（depth 计数）；摘除只看
-   active+down，恢复时若和弦已结束（active 被清）就不再按回 —— 松手后
-   不该有任何残留的修饰键态。 */
-BOOL SendHyperSuspend(void) {
-    g_hyperDepth++;
-    BOOL was = FALSE;
-    if (g_hyperActive.load() && g_hyperDown) {
-        HyperRelease();
-        g_hyperDown = FALSE;
-        was = TRUE;
-    }
-    return was;
+/* 钩子线程调用：重放一个未映射键的按下。
+   返回 TRUE = 已发出去（调用方必须吞掉物理键，抬起时回调 SendHyperKeyUp）；
+   FALSE = 此刻有发键突发在跑、三键摘着没法 arm，调用方把这一对 down/up
+   都吞掉（**不**发裸键：那会往目标里塞一个不带修饰键的杂字符）。 */
+BOOL SendHyperKeyDown(int vk) {
+    HyperLock();
+    if (g_hyperSusp > 0) { HyperUnlock(); return FALSE; }
+    if (g_hyperKeys == 0) HyperPress();   /* 三键在前、主键在后：顺序即语义 */
+    g_hyperKeys++;
+    g_hyperHeld = TRUE;
+    g_hyperReady = true;
+    HyperUnlock();
+#ifdef CAP_TEST
+    (void)vk;                             /* 测试只验状态机，不往测试机注入真键 */
+#else
+    SendEvent(vk, FALSE);                 /* 注入放在锁外 */
+#endif
+    return TRUE;
 }
-void SendHyperResume(BOOL was) {
-    if (--g_hyperDepth == 0 && was && g_hyperActive.load() && !g_hyperDown) {
-        HyperPress();
-        g_hyperDown = TRUE;
-    }
+/* 钩子线程调用：重放一个未映射键的抬起。主键先抬，最后一个键抬起时三键跟着抬。 */
+void SendHyperKeyUp(int vk) {
+#ifdef CAP_TEST
+    (void)vk;
+#else
+    SendEvent(vk, TRUE);
+#endif
+    HyperLock();
+    if (g_hyperKeys > 0) g_hyperKeys--;
+    HyperSyncLocked();
+    HyperUnlock();
+}
+/* 系统自动重复：三键已按着，把重复的 down 原样转发一条即可。 */
+void SendHyperKeyRepeat(int vk) {
+#ifdef CAP_TEST
+    (void)vk;
+#else
+    SendEvent(vk, FALSE);
+#endif
 }
 
-/* 钩子线程读：未映射键此刻是否该带 Hyper 放行（四键已按下 + 配置开着）。
-   放在 send.c 是因为判据的一半（ready）在这里 —— hook.c 不碰状态。 */
+/* 发键突发前摘三键 / 结束后按回。**只在真有 Hyper 键按着时才计入**：
+   懒按下之后三键平时是不按的，如果照样计数，"按住 C 滚轮"的整段手势就会把
+   g_hyperSusp 顶成 >0 —— 期间按下的未映射键全都 arm 不起来、被白白吞掉。
+   没有东西可摘的时候这次挂起就是空操作。
+   配对用**线程本地**层数：每个 Suspend/Resume 对都发生在同一条线程上（车道
+   的整段括号与 send.c 内部的单次突发是同一条线程、可嵌套），跨线程不会串。
+   这样"外层没计入、内层计入了"的嵌套也收得干净 —— 不会出现 A 线程的 Resume
+   把 B 线程的挂起抵消掉。 */
+static thread_local int s_mySusp = 0;
+
+void SendHyperSuspend(void) {
+    HyperLock();
+    if (g_hyperKeys > 0) { g_hyperSusp++; s_mySusp++; }
+    HyperSyncLocked();
+    HyperUnlock();
+}
+void SendHyperResume(void) {
+    HyperLock();
+    if (s_mySusp > 0) {
+        s_mySusp--;
+        if (g_hyperSusp > 0) g_hyperSusp--;
+    }
+    HyperSyncLocked();
+    HyperUnlock();
+}
+
+/* 钩子线程读：三键此刻真按着且配置开着（滚轮"整格注入"的判据）。 */
 BOOL SendHyperLive(void) {
     return g_hyperReady.load() && CfgBool(CFG_HYPER_PASSTHROUGH);
 }
 
+/* 收尾：把计数与三键强行归零，并把仍按着的三键抬起来。
+   两个调用点：① 暂停/重启（ModHoldReset）—— 暂停期间钩子不处理事件，
+   "松开 C 再松开 G"那条路径根本收不到，三键会留到恢复之后；② ActStop
+   且各注入车道都已 join 之后（兜底 join 超时留下的计数）。 */
+void SendHyperReset(void) {
+    HyperLock();
+    g_hyperKeys = 0;
+    g_hyperSusp = 0;
+    s_mySusp = 0;                 /* 只清调用线程自己那份（别的线程的会被夹到 0） */
+    if (g_hyperHeld) { HyperRelease(); g_hyperHeld = FALSE; }
+    g_hyperReady = false;
+    HyperUnlock();
+}
+
 #ifdef CAP_TEST
-/* 测试直设 ready：不经真注入（CAP_TEST 下 Apply 也不会注入），用于把
-   "注入完成"与"未就绪"两个状态确定性地摆出来。 */
-void SendHyperTestSetReady(BOOL ready) { g_hyperReady = ready; }
+/* 三键此刻是否按着（CAP_TEST 下 press/release 是空实现，但状态机照走）。 */
+BOOL SendHyperTestHeld(void) {
+    HyperLock();
+    BOOL held = g_hyperHeld;
+    HyperUnlock();
+    return held;
+}
 #endif
