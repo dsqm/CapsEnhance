@@ -1,5 +1,6 @@
 /* ================= cap_window：窗口几何 =================
-   winmove（挪到光标）/ drag（Caps+左键拖动）/ folder（打开所在文件夹），
+   winmove（挪到光标）/ drag（Caps+左键拖动）/ folder（打开所在文件夹）/
+   pin（窗口置顶），
    外加"坐标空间必须=物理像素"这条进程级前提的初始化与自检。
    本文件**只被 cap.h 包含**。 */
 /* ---------- 窗口挪到光标处（src/winmove.c） ----------
@@ -62,6 +63,27 @@ BOOL FolderResolveTarget(const WCHAR* path, WCHAR* out, size_t cap
                            这个降级、只去掉多余的尾部分隔符（`C:\dir\` 解析不出 PIDL）。
                            **只给 `CAP_TEST` 编出来的断言用**的那个形参在下面说明。 */
 
+/* ---------- 窗口置顶（src/pin.cpp，`Caps + T`） ----------
+   行为与视觉对齐 PowerToys 的 AlwaysOnTop：把前台窗口钉在最上层（再按一次放开），
+   被钉的窗口外面套一圈强调色圆角边框，钉住 / 放开各响一声系统音。
+   全部实现（建窗、绘制、WinEvent 跟随、定时器、虚拟桌面判定、音效）都跑在
+   pin.cpp 自己的线程上，这里只有三个投递入口与一个只读镜像 ——
+   钩子宿主线程与动作线程都只发消息，不碰任何共享可变状态。
+
+   ★ 目标窗口由**调用方**给定（动作线程用开火那一刻的前台窗口快照，见 main.c 的
+     PostAct），不是本模块现读：投递是异步的，等它跑到时前台可能已经换了。 */
+void PinInit(void);            /* WinMain：起置顶线程并等它就绪（失败则功能静默不可用） */
+void PinShutdown(void);        /* 退出 / 重启：解除全部置顶后停线程 */
+void PinToggle(HWND target);   /* 动作线程：toggle 一个窗口的置顶（非阻塞） */
+void PinUnpinAll(void);        /* 托盘「取消全部置顶」：一次性全放（非阻塞） */
+int  PinCount(void);           /* 当前钉住几个（主线程读镜像：托盘菜单据此置灰） */
+BOOL PinFrameRect(const RECT* target, int thickness, RECT* out);
+                        /* 纯函数：目标窗口外框 -> 边框窗矩形（四边各外扩 thickness）。
+                           单测用它覆盖几何，不碰真实窗口。 */
+int  PinCornerRadiusFor(int pref);
+                        /* 纯函数：DWM 角偏好 -> 圆角半径（0 = 直角）。与 PowerToys 的
+                           WindowCornerUtils 同表，单测覆盖。 */
+
 /* ---------- 坐标空间（进程级，必须在建任何窗口之前调用一次） ----------
    ★ 根因记录：低级鼠标钩子给的 `MSLLHOOKSTRUCT.pt` **永远是物理像素**
    （官方定义就是 "per-monitor-aware screen coordinates"），而**不声明 DPI 感知**的

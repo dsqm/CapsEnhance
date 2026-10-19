@@ -22,6 +22,11 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
 if errorlevel 1 exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\drag_chord.obj src\drag.c
+rem pin.cpp: window pinning (PowerToys AlwaysOnTop port) (C+T). main.c calls PinInit/PinShutdown/PinCount,
+rem and test_chord.c asserts the pure geometry helpers (PinFrameRect / PinCornerRadiusFor).
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /std:c++17 ^
+   /Isrc /c /Foobj\pin_chord.obj src\pin.cpp
+if errorlevel 1 exit /b 1
 rem /DCAP_TEST: folder.c 的 FolderResolveTarget 会把"退成目录"这个判定结果
 rem 通过可选形参带出来给断言看（真返回值在两种情况下可能长得一样，
 rem 光比字符串分不出走的是哪一支）。
@@ -33,7 +38,7 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /DCAP_TEST /TP ^
 if errorlevel 1 exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\test_chord.obj obj\config_chord.obj obj\keymap_chord.obj obj\winmove_chord.obj obj\drag_chord.obj ^
-   obj\folder_chord.obj obj\lane_chord.obj ^
+   obj\folder_chord.obj obj\lane_chord.obj obj\pin_chord.obj ^
    /link /OUT:obj\test\test_chord.exe ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib winmm.lib ^
    /SUBSYSTEM:CONSOLE

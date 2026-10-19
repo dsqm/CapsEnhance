@@ -52,7 +52,8 @@ popd
 if not defined SDKVER goto no_sdk
 
 set "PATH=%MSVC%\bin\Hostx64\x64;%PATH%"
-set "INCLUDE=%MSVC%\include;%SDK%\Include\%SDKVER%\ucrt;%SDK%\Include\%SDKVER%\um;%SDK%\Include\%SDKVER%\shared"
+set "INCLUDE=%MSVC%\include;%SDK%\Include\%SDKVER%\ucrt;%SDK%\Include\%SDKVER%\um;%SDK%\Include\%SDKVER%\shared;%SDK%\Include\%SDKVER%\winrt"
+rem winrt: WRL (wrl\client.h) and C++/WinRT headers live here, not in um.
 set "LIB=%MSVC%\lib\x64;%SDK%\Lib\%SDKVER%\ucrt\x64;%SDK%\Lib\%SDKVER%\um\x64"
 
 rem ---- Report the toolchain that was actually selected ----

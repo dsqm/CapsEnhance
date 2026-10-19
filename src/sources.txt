@@ -10,6 +10,7 @@ src\autodisp.c
 src\bridge.c
 src\wps.c
 src\winmove.c
+src\pin.cpp
 src\drag.c
 src\ime.c
 src\folder.c

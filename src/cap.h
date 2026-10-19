@@ -36,7 +36,7 @@
                     的分界）+ 全局状态 + 主窗口句柄 + 诊断日志
      cap_input.h    键位表查询 / 动作执行线程（含滚轮与持续滚动两条通道）/
                     底层钩子 / 发送与补齐
-     cap_window.h   窗口几何（winmove / drag / folder）+ 坐标空间自检
+     cap_window.h   窗口几何（winmove / drag / folder / pin）+ 坐标空间自检
      cap_overlay.h  子进程底座（child.c）+ 按键帮助 + 剪贴板浮层
      cap_config.h   配置（CFG_* 编号与通用读写 + 五份名单 + 进程路径查询）
      cap_nav.h      按词跳转 / 单键切输入法 / 自动化与 WPS 的接口去向（auto.h）

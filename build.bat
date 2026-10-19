@@ -65,12 +65,16 @@ rem NOTE: a cl response file has NO comment syntax (rem becomes an unknown
 rem option) and any '@' inside it nests another response file (D8035), so the
 rem list is bare filenames only.  Run from the repo root: the paths in it are
 rem relative, exactly like the ones on this command line.
-cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP ^
+rem /std:c++17: pin.cpp is a straight port of PowerToys' AlwaysOnTop, which uses
+rem structured bindings and inline static members. Other TUs are unaffected
+rem (C++17 is a superset of what they use).
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /std:c++17 ^
    /Foobj\ ^
    @src\sources.txt ^
    /link /OUT:bin/CapsEnhance.exe ^
    obj\app_res.obj ^
    user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib oleacc.lib advapi32.lib imm32.lib winmm.lib ^
+   d2d1.lib dwmapi.lib ^
    /SUBSYSTEM:WINDOWS
 
 if errorlevel 1 goto fail_main

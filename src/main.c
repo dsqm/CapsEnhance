@@ -257,11 +257,12 @@ static void PostAct(int act, int fillAct, int count, BOOL keep) {
     j.shf     = g_actShf;
     j.count   = count;
     j.keep    = keep;
-    /* 需要"目标窗口"的动作（目前只有"打开所在文件夹"）在这里一并快照 ——
+    /* 需要"目标窗口"的动作（打开所在文件夹 / 窗口置顶）在这里一并快照 ——
        与 enh/shf 同一个时机（按下触发键的这一发）、同一个理由：执行线程是
        异步的，等它跑到时前台窗口可能已经换了（见 cap.h 的 ActJob.hwnd）。
        postTick 不在这里填：投递时刻由 act.c 的 ActPost 写。 */
-    j.hwnd    = ActHasFlag(act, ACTF_OPENFOLDER) ? GetForegroundWindow() : NULL;
+    j.hwnd    = (ActHasFlag(act, ACTF_OPENFOLDER) || ActHasFlag(act, ACTF_PIN))
+                    ? GetForegroundWindow() : NULL;
     ActPost(&j);
 }
 
@@ -312,6 +313,7 @@ static HICON LoadAppIcon(BOOL wantSmall) {
 #define IDM_EXIT     3
 #define IDM_RESTART  4
 #define IDM_FOLDER   5   /* 程序文件夹：打开本 exe 所在目录（见 TrayShowMenu 的分支） */
+#define IDM_UNPINALL 6   /* 取消全部置顶：Caps+T 钉住的窗口一次性全放（见 pin.c） */
 /* 设置程序：**独立 exe**，与本 exe 同目录。
    为什么不把设置界面做进本体：本体是托盘常驻程序，它的主线程是键盘钩子的
    宿主 —— 任何模态窗口/重活都会把钩子拖住（见 act.c 文件头）。设置界面要跑
@@ -542,11 +544,17 @@ static void TrayShowMenu(void) {
     POINT pt;
     GetCursorPos(&pt);
     SetMenuPauseText();
+    /* 「取消全部置顶」只在真有窗口钉着时可点：菜单是常驻的一份，
+       enable 状态每次弹出前重设（PinCount 读的是置顶线程维护的镜像）。 */
+    EnableMenuItem(g_menu, IDM_UNPINALL,
+                   MF_BYCOMMAND | (PinCount() > 0 ? MF_ENABLED : MF_GRAYED));
     SetForegroundWindow(g_mainWnd);
     int cmd = TrackPopupMenu(g_menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
                              pt.x, pt.y, 0, g_mainWnd, NULL);
     if (cmd == IDM_PAUSE) {
         ApplyPauseState();
+    } else if (cmd == IDM_UNPINALL) {
+        PinUnpinAll();
     } else if (cmd == IDM_SETTINGS) {
         LaunchSettings();
     } else if (cmd == IDM_RESTART) {
@@ -1030,6 +1038,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_PIN_ELEVATED:            /* 置顶失败：目标窗口权限比本程序高（pin.c 发来） */
+        /* 与 WM_FOLDER_OPEN 同一条理由绕回主线程：气泡动的是托盘的 g_nid。
+           这件事必须让人看见 —— 否则就是"按了 Caps+T 什么都没发生"，
+           而真正的原因在另一个进程的完整性级别上，用户无从推断。 */
+        TrayBalloon(L"无法置顶：目标窗口以管理员身份运行。"
+                    L"需要置顶这类窗口，请在设置里打开「以管理员运行」（RunAsAdmin）。", NULL);
+        return 0;
     case WM_CLIP_ESC:                /* 钩子代收的 Esc（浮层自己收不到键盘，见 clip.c） */
         ClipEsc();
         return 0;
@@ -1267,6 +1282,13 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     ConfigLoad();   /* 读 CapsEnhance.ini（缺失则写注释模板） */
     KeyMapInit();   /* 装配修饰激活键（编译期常量 Alt+D / F，见 cap.h） */
 
+    /* 置顶线程（C+T 用，见 pin.c）：必须在执行线程之前起。
+       这里建好之后 s_tool 就不再变化，动作线程直接 PostMessage 过去即可 ——
+       顺序放在 ActStart 之前，是为了让"主线程建窗"与"工作线程读句柄"之间
+       有一条真实的 happens-before（CreateThread 本身就是那道栅栏）。
+       起不来不算致命：Caps+T 会静默无反应，其余功能照旧。 */
+    PinInit();
+
     /* 执行线程要在装钩子之前起来：装了钩子就随时可能有动作要发。 */
     if (!ActStart()) {
         /* 退回同步兜底（见 act.c 的 ActPost）：动作改在**承载钩子的线程**上执行，
@@ -1345,6 +1367,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
             AppendMenuW(g_menu, MF_STRING, IDM_FOLDER, L"程序文件夹");
             AppendMenuW(g_menu, MF_SEPARATOR, 0, NULL);
             AppendMenuW(g_menu, MF_STRING, IDM_PAUSE, L"暂停映射");
+            AppendMenuW(g_menu, MF_STRING, IDM_UNPINALL, L"取消全部置顶");
             AppendMenuW(g_menu, MF_STRING, IDM_SETTINGS, L"设置...");
             AppendMenuW(g_menu, MF_STRING, IDM_RESTART, L"重启程序");
             AppendMenuW(g_menu, MF_SEPARATOR, 0, NULL);
@@ -1371,6 +1394,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     /* ---- 统一收尾：所有启动失败路径都汇到这里 ---- */
     StopEngine();
     ActStop();                   /* 停执行线程并等它收尾，再清卡键 */
+    PinShutdown();               /* 解除全部置顶（窗口回到原来的层级）后停置顶线程 */
     WpsBridgeShutdown();         /* 让 WPS 降权桥立刻退出（否则要等它的空闲超时） */
     HookUninstall();
     SendClearStuckModifiers(FALSE);   /* 退出前清卡键：注入记账补抬 + 全 VK 扫描（激进，见 send.c） */

@@ -25,6 +25,7 @@
                                         或"用户按了别的键"（wParam=0 让预览退场）。见 src/clip.c 的 ClipViewToggle */
 #define CLIPKF_SHIFT     0x1           /* 那一刻 Shift 按着（= 纯文本粘贴） */
 #define CLIPKF_ALT       0x2           /* 那一刻 Alt 按着（Alt+数字 才拦，见 hook.c） */
+#define WM_PIN_ELEVATED (WM_APP + 20) /* 置顶线程 -> 主线程：目标窗口权限更高，SetWindowPos 被 UIPI 拦下 */
 #define WM_FOLDER_OPEN (WM_APP + 14) /* 打开所在文件夹**失败**：wParam=FOLDER_ERR_*（一次性线程 -> 主线程弹气泡）。
                                         为什么必须绕回主线程：气泡走 Shell_NotifyIconW + 主线程的 g_nid，
                                         工作线程直接调就是对它的跨线程访问。成功不发消息（不打扰）。 */
@@ -95,6 +96,7 @@
 #define ACT_VOLUP    20              /* 系统音量加（F8）：发 VK_VOLUME_UP，步进型 -> 可长按重复 */
 #define ACT_PGUP     21              /* 上翻页（-）：发 VK_PRIOR，光标/滚动类 -> 可重复、可带选区 */
 #define ACT_PGDOWN   22              /* 下翻页（=）：发 VK_NEXT，光标/滚动类 -> 可重复、可带选区 */
+#define ACT_PIN      23              /* 窗口置顶开关（T）：翻转类 -> 单发，见 pin.cpp */
 
 #define DIR_LEFT 0
 #define DIR_RIGHT 1
@@ -111,6 +113,7 @@
 #define ACTF_OPENFOLDER  0x20   /* 打开所在文件夹：交给 folder.c 的 shell 动作，不走按键发送 */
 #define ACTF_HELP        0x40   /* 按键帮助：由 main.c 直接在和弦上开合（见 help.c），不走按键发送 */
 #define ACTF_CLIPLIST    0x80   /* 剪贴板：由 main.c 直接在和弦上开合（见 clip.c），不走按键发送 */
+#define ACTF_PIN         0x100  /* 窗口置顶：交给 pin.c 的置顶线程（投递窗口句柄），不走按键发送 */
 
 /* ---------- 修饰（和弦）模式 ----------
    按住 C 期间生效的"组合修饰"。**激活键是编译期常量，不读配置**（见下面

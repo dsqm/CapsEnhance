@@ -2624,6 +2624,41 @@ int main(void) {
         }
     }
 
+    /* ---- 场景AL：窗口置顶（C+T，逻辑与边框对齐 PowerToys 的 AlwaysOnTop）----
+       边框画在另一条线程上、还要真的动系统窗口，像素与 topmost 位测不了。
+       能离线钉住的三件事：
+         ① 接线与语义：T 接到置顶动作，属性 = 单发（翻转）+ 不吃选区 + 不发键；
+         ② 几何：边框窗矩形 = 目标矩形四边各外扩 thickness（纯函数，多显示器
+            与 DPI 都只是喂不同的数进来）；
+         ③ 圆角：DWM 角偏好 -> 半径的映射与 PowerToys 的 WindowCornerUtils 同表
+            —— 尤其"拿不到偏好（Win10）就是直角"这条，最容易被以后顺手改成 8。 */
+    {
+        CHECK(ActOfVk('T') == ACT_PIN, "AL: 触发键 T -> 窗口置顶动作");
+        CHECK(ActHasFlag(ACT_PIN, ACTF_PIN) &&
+              ActHasFlag(ACT_PIN, ACTF_SINGLE_SHOT) &&
+              ActHasFlag(ACT_PIN, ACTF_NO_SHIFT),
+              "AL: 属性 = 由 pin 执行 + 单发 + 不吃选区修饰");
+        CHECK(ActOutVk(ACT_PIN) == 0, "AL: 该动作不发任何键（只改窗口层级）");
+
+        RECT target = { 100, 200, 500, 400 };
+        RECT frame;
+        memset(&frame, 0, sizeof(frame));
+        CHECK(PinFrameRect(&target, 4, &frame) != FALSE, "AL: 算得出边框窗矩形");
+        CHECK(frame.left == 96 && frame.top == 196 &&
+              frame.right == 504 && frame.bottom == 404,
+              "AL: 四边各外扩 thickness（左/上减，右/下加）");
+        CHECK(PinFrameRect(&target, 0, &frame) != FALSE && EqualRect(&frame, &target),
+              "AL: thickness = 0 时与目标矩形完全重合");
+        CHECK(PinFrameRect(NULL, 4, &frame) == FALSE,
+              "AL: 空指针返回失败（不写坏调用方的结构）");
+
+        CHECK(PinCornerRadiusFor(2) == 8, "AL: DWMWCP_ROUND -> 8");
+        CHECK(PinCornerRadiusFor(3) == 4, "AL: DWMWCP_ROUNDSMALL -> 4");
+        CHECK(PinCornerRadiusFor(0) == 8, "AL: DWMWCP_DEFAULT -> 8");
+        CHECK(PinCornerRadiusFor(1) == 0, "AL: DONOTROUND -> 直角");
+        CHECK(PinCornerRadiusFor(-1) == 0, "AL: 拿不到角偏好（Win10）-> 直角");
+    }
+
     printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
     return fails;
 }

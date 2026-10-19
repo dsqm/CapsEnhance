@@ -30,7 +30,7 @@ if errorlevel 1 exit /b 1
 
 if not exist "obj\an" mkdir "obj\an"
 
-cl /nologo /W4 /analyze /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
+cl /nologo /W4 /analyze /MT /utf-8 /DUNICODE /D_UNICODE /TP /std:c++17 ^
    /Fo"obj\an\\" /c /I"%~dp0..\src" /I"%~dp0..\thirdparty" ^
    @src\sources.txt ^
    src\colorcode.c ^

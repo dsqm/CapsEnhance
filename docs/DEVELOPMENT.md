@@ -108,7 +108,7 @@
 | --- | --- |
 | `keymap.c` | **键位映射的查询与装配**。动作表本身**不在这个文件里**，而在 `keymap_table.h` —— 它是"某个键是什么意思"的唯一一份定义，键位图（`help/help.c`）也要用同一份，两边各自 include，谁都不抄第二份。本文件提供查询接口（`ActOfVk` / `ActOutVk` / `ActWordDir` / `ActHasFlag` / `ActName`）与模式表（修饰模式 ↔ 激活键集合，激活键取自 `cap.h` 的 `MODE_*_KEYS_DEFAULT`，编译期常量、不读配置）。hook.c / main.c 只做查询。**引擎从不判断按的是哪个键，只问"这个模式生效了吗"**，所以"把 `D` 删掉只留 `Alt`"只改一处常量。启动时由 `KeyMapInit()` 装配 |
 | `hook.c` | **底层输入钩子**。识别 C / 触发键 / 模式激活键，维护 `volatile` 状态与"事件时刻的修饰快照"，并**无条件跟踪真实 Shift**（横向滚动要用，且须放在"未按 C 就放行"之前）；屏蔽映射期间的无效按键；修饰键抬起使某模式失效时投 `WM_MODE_UP`。鼠标钩子只做一件事——按住 C 时把滚轮请求投递出去；**横向与持续滚动两路吞掉物理格**，只有放大档放行；回调在最热路径上，只允许几次比较 + `PostMessage` |
-| `main.c` | **消息窗口 + 消息循环**。和弦引擎（按下即开火 → 重复节奏 → 松手补齐）；路由：按词跳转动作用 `NavJump`，其余用 `SendActOnce`；滚轮 / 持续滚动 / 模式失效消息只做投递；托盘菜单（暂停 / 设置 / 重启 / 程序文件夹 / 退出，「程序文件夹」与日志气泡点击、C+F3 走同一条 `FolderRevealPath` shell 链路）；`--restart` 等命令行开关；日志 `CapLog`；启动时调用 `NavBaseInfo()` 采集环境基线、`KeyMapInit()` 装配激活键 |
+| `main.c` | **消息窗口 + 消息循环**。和弦引擎（按下即开火 → 重复节奏 → 松手补齐）；路由：按词跳转动作用 `NavJump`，其余用 `SendActOnce`；滚轮 / 持续滚动 / 模式失效消息只做投递；托盘菜单（暂停 / 取消全部置顶 / 设置 / 重启 / 程序文件夹 / 退出，「程序文件夹」与日志气泡点击、C+F3 走同一条 `FolderRevealPath` shell 链路）；`--restart` 等命令行开关；日志 `CapLog`；启动时调用 `NavBaseInfo()` 采集环境基线、`KeyMapInit()` 装配激活键 |
 | `settings/settings.c` | **独立的设置程序**（`CapsEnhanceSettings.exe`，单独 exe，但链接 `src/config.c`）。**表单式**界面：布尔项 = 勾选框、数值项 = 数字框、五份名单各是一个可增删的列表（行内还有"选取窗口"：取到的值先填进输入框，点"添加"才入名单）；保存 = `ConfigSet*` + `ConfigSaveFile`（增量写回，保留注释/未知段/BOM/行尾） + `CapsEnhance.exe --restart`。为什么独立：本体主线程是钩子宿主，不能同时拥有设置窗口。为什么不做成文本编辑器：值域与布尔语义在 ini 里只是注释，摊开原文编辑等于允许写出"解析得出但不合理"的值。高 DPI：Per-Monitor V2 + `WM_DPICHANGED` 重排。页签：表单分「常规」（配置项，按通用/按词跳转/滚动/输入法/剪贴板分段渲染半粗段头）/「名单」（五份按程序/窗口生效的名单）两页（页签自绘为下划线式），页签只控显隐 —— 控件不分页，Load/Save 照旧按 id 找 |
 | `settings/sizepick.c` | **尺寸选取窗**：三对"窗口大小"（快速粘贴 / F3 预览的最大与最小）各配一颗「调整…」，点它弹出一个**照真实浮层画法画的示例窗口**（列表窗画示例条目、预览窗画占位图），拖着定尺寸，点中央「完成」把值填回那一对输入框 —— **不写 ini**，ini 仍由主窗口底部的保存按钮写。从 `settings.c` 里拆出来是因为它自带窗口类、状态与两套画法（六百行），塞在表单主文件里只会把两份主题互相稀释；★ 那两套画法与 `clip/clip.c` / `clip_view.c` 是**平行的两份**，改浮层样式时两边要一起看。两个编译单元之间只经 `settings/settings_int.h` 共享（控件 ID、`Field` 行、`g_hwnd` / `g_dpi` / 字体、读写输入框的小工具；反向只有"配没配按钮 / 开窗 / 关窗 / 显隐按钮 / 注册类"五个入口） |
 | `nav.c` | **按词跳转核心**。多通道读取文本与光标（Edit / Scintilla / UIA / IA2 / WPS）、直接置光标、诊断 `NavProbe` / `NavBaseInfo`；词边界算法已挪到 `nav_word.c`。只把 WPS 当成"又一条通道"（一行分派），WPS 细节不在这个文件里 |
@@ -124,6 +124,7 @@
 | `ime.c` | **单键强制切换输入法**。判定在键盘钩子（"单击"），执行在专用线程（跨进程 IME 消息 + 键盘布局切换）；单槽 latest-wins，见[单键切换输入法](#单键切换输入法imec) |
 | `folder.c` | **打开焦点程序所在文件夹**（`C+F3`），以及**打开日志文件所在位置**（日志结束气泡被点击时，走 `FolderRevealPath`）。走标准 shell 接口（`SHParseDisplayName` → `SHOpenFolderAndSelectItems`，**不拼 `explorer.exe` 命令行**）；目标窗口由 `ActJob.hwnd` 在开火那一刻快照；执行在自己的**一次性线程**上（MTA + `CoInitializeEx`），不占 `act.c` 的动作队列；UWP 走"宿主 `ApplicationFrameHost` → 子窗口 `Windows.UI.Core.CoreWindow` → 真实进程"；失败原因经 `WM_FOLDER_OPEN` 回主线程弹气泡。两个入口共用同一个 `FolderJob` 与线程过程 |
 | `child.c` | **子进程生命周期**（帮助窗口与剪贴板浮层的共同底座）。两件事：**父死子退** —— `CreateProcess(CREATE_SUSPENDED)` → 挂进一个只自己持有的 Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）→ 放行；主程序一没（正常退出 / 崩溃 / 被强杀），内核收掉这两个子进程，零协作、卡死也照杀。**子死父知** —— `RegisterWaitForSingleObject` 盯子进程句柄，它一死就给主窗口 `PostMessage`（内核通知，零轮询）。取代了原来那套 200ms 心跳 + 800ms 超时自杀。见[子进程的收场](#子进程的收场帮助--剪贴板浮层共同底座) |
+| `pin.cpp` | **窗口置顶**（`C+T`）—— **PowerToys AlwaysOnTop 模块的移植**。钉 / 放开（`WS_EX_TOPMOST` + 私有属性）、layered + color-key + blur-behind 的边框浮层、D2D 绘制的强调色圆角环、`Speech On/Sleep` 两声、7 个 WinEvent 钩子 + 每边框 100ms 定时器、虚拟桌面判定、提权失败上报。整套住在**自己的线程**里（主线程是钩子宿主、动作线程是串行队列），动作线程只投递一个 `HWND` 过来。见[窗口置顶](#窗口置顶pincppct) |
 | `help.c` | **按键帮助的开合（主程序侧）**（`C+F1`）：拉起同目录的 `CapsEnhanceHelp.exe`，并把"当前该显示还是该隐藏"告诉它（注册消息 + 40ms 对账重试）。窗口**不常驻**，所以每次显示都是一次冷启动 —— 而"按一下就松手"会让 SHOW/HIDE 都发在窗口出生之前，重试就是为这个竞态准备的。寿命由和弦决定：按下开、抬起关、松开 Caps（`ResetEngine`）也关 |
 | `help/help.c` | **按键帮助窗口本体**（独立 exe `CapsEnhanceHelp.exe`）。自包含：不装钩子、不初始化 COM/TSF，只做"GDI+ 起一次 + 铺底一帧 + GDI 画一遍字 + 送进分层窗口"（只读 `CapsEnhance.ini` 里那三个 `Ime*Mode`，用来决定底部三条"单击切输入法"的文案）。逐像素 alpha（32bpp DIB + `UpdateLayeredWindow`）实现半透明；文字用 **GDI + ClearType**；`WS_EX_NOACTIVATE` 保证不抢焦点；键位表从 `keymap_table.h` 编进来（不跨进程取数据）。见[按键帮助](#按键帮助helphelpc) |
 | `clip.c` | **剪贴板浮层的开合（主程序侧）**（`C+V`）：拉起 `CapsEnhanceClip.exe`（把 ini 里的 `DittoDir` 按**自己的** exe 目录展开成绝对路径后经 `--dir` 传过去）、Show/Hide 对账重试、盯住浮层进程的生死（见 `child.c`）、以及把钩子代收的 `Esc` / 导航键转过去。**寿命 ≠ 和弦**（松开 Caps 不关），`ClipShow` 是 toggle；`ClipIsOpen()` 被钩子用来决定"要不要吞 Esc"，所以送达超时必须把它清假。见[剪贴板浮层](#剪贴板浮层clipclipc--srcclipc) |
@@ -435,6 +436,67 @@ WPS 置位的回读校验返回**三态**：
 - **取路径只有一份实现**：`ConfigGetProcessPathByPid` ← `ConfigGetProcessPath(HWND)` ← `ConfigGetProcessName(HWND)`（最后一层抽 basename，供名单匹配）。名单匹配与"打开所在文件夹"要的都只是路径，不该各写一遍 `OpenProcess` + `QueryFullProcessImageNameW`。
 - **单测边界**：shell 那一步**测不了**（会真的弹窗口、还要等 explorer 响应），所以它只出现在 `FolderThreadProc` 里；`FolderProcessPathOf` 是同步的、纯本地的，测试直接拿一个真窗口验"解出来的就是本进程 exe 的全路径"（`test_chord` 场景 AH）。
 - **已知限制**：目标文件夹已在别处打开时，这个接口仍可能新开一个窗口（不复用已开的那个）。这是接口的既有行为，不是这里的实现选择。
+
+---
+
+## 窗口置顶（`pin.cpp`，`C+T`）
+
+**这是 Microsoft PowerToys 的 AlwaysOnTop 模块的移植，不是另写一个"差不多"的。** 对照表：
+
+| PowerToys 原文件 | 本文件里的位置 | 说明 |
+| --- | --- | --- |
+| `AlwaysOnTop.cpp` | `class AlwaysOnTop` | 模块主体：钉住表、事件订阅、边框分配、命令处理 |
+| `WindowBorder.cpp` | `class WindowBorder` + `GetFrameRect` | 每个被钉窗口一个浮层窗 |
+| `FrameDrawer.cpp` | `class FrameDrawer` | D2D 画"外矩形减内矩形"的环 |
+| `ScalingUtils.cpp` | `namespace ScalingUtils` | DPI 缩放 |
+| `WindowCornersUtil.cpp` | `namespace WindowCornerUtils` | DWM 圆角偏好 -> 半径 |
+| `VirtualDesktopUtils.cpp` | `class VirtualDesktopUtils` | 当前虚拟桌面判定 |
+| `Sound.h` | `namespace Sound` | Speech On / Speech Sleep |
+
+保留的是**全部逻辑与窗口模型**：7 个 `SetWinEventHook`、每边框 100ms `SetTimer`、
+`SetProp` 标记、`IsTopmost` 判据、最小化丢边框 / 恢复重钉、前台变化时刷新、
+`EVENT_OBJECT_FOCUS` 补回被程序弄丢的 topmost、layered + color-key + DWM blur-behind
+的透明做法、D2D `HwndRenderTarget` 绘制、`D2DERR_RECREATE_TARGET` 重建。
+
+**去掉的是 PowerToys 的外壳**（与本项目形态不符）：`Settings` / `SettingsObserver` /
+`FileWatcher`（本程序零配置，参数是文件顶部常量）、系统菜单集成、不透明度热键
+（Win+Ctrl+/-）、游戏模式判定、`NotificationUtil`（提权失败改走本程序的托盘气泡）、
+`winrt`（`com_ptr` 换 WRL `ComPtr`，强调色改读注册表 —— 同一个值的来源）。
+
+### 为什么换成移植版（上一版是 GDI+ 自绘）
+
+上一版是"GDI+ 逐像素 alpha + `UpdateLayeredWindow`"，结构上是另一个东西：渲染每帧
+0.6~2.5ms（实测并不慢），但**窗口模型与 PowerToys 不同**，拖动时的手感对不上。
+换成移植版之后，窗口、事件、定时器、绘制路径与 PowerToys 逐行同源，"同款"这件事
+不再需要靠参数去凑。
+
+### 几个必须记住的点
+
+- **本文件不 include `cap.h`**：`cap.h` 为了让 C 风格的 COM 代码编过定义了
+  `CINTERFACE` + `COBJMACROS`，那会让 SDK 交出 C 形态的 vtable —— WRL 的 `ComPtr`
+  与 D2D 的 C++ 接口都活不了。所以这里直接 include `windows.h`，并把用到的四个外部
+  符号（`g_recording` / `g_mainWnd` / `CapLog` / `WinIsShellClass`）自己声明。
+  独立诊断工具（`uiprobe` / `wspset`）用的是同一条规矩。
+- **编译标准**：本文件用 `/std:c++17`（结构化绑定、类内 inline 静态成员）。`build.bat`
+  的主 exe 编译行与 `test\build_test.bat` 里编 `pin.cpp` 的那一行都带着它；其余 TU
+  不受影响。
+- **必须有自己的线程**：主线程是低级钩子的宿主（见 `act.c` 顶部），而 `SetWindowPos`
+  要等对方窗口过程处理完；`SetWinEventHook` 的回调也只在**安装了它的那条线程**泵消息
+  时才送达。动作线程更不行 —— 它是串行 FIFO。所以动作线程只 `PostMessage` 一个
+  `HWND` 过来，其余全在 `pin.cpp` 的线程上。
+- **`Sound` 用绝对路径**：PowerToys 写的是相对路径 `Media\\Speech On.wav`，依赖系统
+  搜索路径；这里拼 `%SystemRoot%\\Media\\...`，找不到退回蜂鸣（与 `main.c` 的
+  `RecBeep` 同一条兜底）。
+- **提权窗口**：`SetWindowPos` 被 UIPI 拦下（`ERROR_ACCESS_DENIED`）→ 摘掉标记 →
+  `WM_PIN_ELEVATED` 绕回主线程弹气泡（气泡动的是托盘的 `g_nid`，不能在工作线程碰）。
+- **上限 32**：只挡"钉"，不挡"取消"；满了记日志，不挤掉旧的。
+- **零配置**：参数在 `pin.cpp` 顶部（`FRAME_THICKNESS` 等），值取 PowerToys 默认，
+  边框粗细取 2。注意 PowerToys 的几何是"环从窗外 1px 起、向内压 1px"，
+  所以**可见宽度 = 粗细 - 1**：2px 实际是一条 1px 的线 + 抗锯齿。
+- **单测边界**：边框画在另一条线程、还要真的动系统窗口，像素与 topmost 位测不了。
+  `PinFrameRect`（外扩几何）与 `PinCornerRadiusFor`（角偏好映射）是纯函数，由
+  `test_chord` 场景 AL 覆盖；接线与属性（单发 / 不吃选区 / 不发键）也在那里钉住。
+  真正的跟手与观感用一次性探针量（几何是否一致、边缘像素是不是强调色、每帧延迟）。
 
 ---
 

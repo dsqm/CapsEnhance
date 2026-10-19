@@ -84,6 +84,13 @@ static void RunJob(const ActJob* j) {
                所以也在这一层执行，不走主线程。 */
             if (!WinMoveFocusedToCursor() && g_recording.load())
                 CapLog("  [窗口] 没有可挪的前台窗口（桌面/任务栏，或就是本程序自己）");
+        } else if (ActHasFlag(act, ACTF_PIN)) {
+            /* 窗口置顶（C+T）：真正的 SetWindowPos / 建边框 / 画图都在 pin.c
+               自己的线程上（那里才有消息循环，WinEvent 与定时器都挂得住）。
+               这里只是投递一个窗口句柄 —— 目标取 ActJob 里的**开火快照**，
+               理由与"打开所在文件夹"完全相同：投递是异步的，等执行到这里时
+               前台窗口可能已经换了。本分支不阻塞，队列照常往下走。 */
+            PinToggle(j->hwnd);
         } else if (ActHasFlag(act, ACTF_OPENFOLDER)) {
             /* 打开所在文件夹（C+\）：目标窗口取的是 ActJob 里的**开火快照**
                （见 cap.h 的 ActJob.hwnd），不是现在现读前台窗口。

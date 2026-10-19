@@ -72,6 +72,10 @@ static const ActionDef kActions[] = {
     /* 挪窗口：单发命令（不发键、与光标/选区无关）。位置由光标决定，所以
        "增强模式发 3 次"没有意义 —— SINGLE_SHOT 同时挡掉重复与松手补齐。 */
     { ACT_MOVEWIN,   'Q',        0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_MOVEWIN, "窗口→光标(Q)", "窗口" },
+    /* 窗口置顶（T）：翻转类，按一次切一次 —— 与 Caps(Tab) 同理必须是单发。
+       逻辑与视觉对齐 PowerToys 的 AlwaysOnTop（见 src/pin.cpp 的文件头）：
+       钉住时外面套一圈强调色边框、响一声 Speech On，放开时响 Speech Sleep。 */
+    { ACT_PIN,       'T',        0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_PIN, "置顶(T)", "置顶" },
     /* 打开所在文件夹：单发命令（不发键）。目标是**按下那一刻**的前台窗口 ——
        窗口由 main.c 的 PostAct 快照进 ActJob.hwnd，这里只声明它是这类动作。 */
     { ACT_OPENFOLDER, VK_F3,     0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_OPENFOLDER, "文件夹(F3)", "打开|程序目录" },
