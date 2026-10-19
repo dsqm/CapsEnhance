@@ -205,6 +205,9 @@ static BOOL  Render(void);
 static void  RenderSoon(void);      /* 帧合并版 Render：高频来源只标脏（TID_RENDER） */
 
 static void  DoHideClose(void);
+/* DittoAction 是**本文件内部**的（只有列表的 Ditto 按钮调用），所以是 static；
+   它的声明**不要**再放回 clip.h —— 头里那条 extern 与这里的 static 撞在一起，
+   MSVC 会按"非标准扩展"把 extern 重定义成 static（C4211）。 */
 static void  DittoAction(void);
 static void  DoPaste(BOOL plain);
 

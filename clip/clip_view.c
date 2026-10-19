@@ -618,9 +618,11 @@ static void ViewPaint(void) {
         float eff = ViewEffScale();
         float dw = (float)iw * eff, dh = (float)ih * eff;
         /* 顶/左锚定（Ditto：100% 显示在顶部）：超窗方向被滚动条推着走，
-           不超窗时滚动条恒 0 —— 一条公式覆盖两种情况，没有居中分支。 */
-        float dx = -(float)ViewScrollPos(SB_HORZ);
-        float dy = g_headerH - (float)ViewScrollPos(SB_VERT);
+           不超窗时滚动条恒 0 —— 一条公式覆盖两种情况，没有居中分支。
+           ★ 这里刻意不叫 dx/dy/sx/sy：函数开头那四个 int 是**滚动位移**，
+             同名会被 C4456 判为遮蔽，读的人也会以为是同一个量。 */
+        float imgX = -(float)ViewScrollPos(SB_HORZ);
+        float imgY = g_headerH - (float)ViewScrollPos(SB_VERT);
         /* 只采样**可见**部分：反算内容区与图面交集对应的源矩形，每帧的
            采样量只跟窗口大小走，与图像尺寸和缩放比无关（4 倍放大时是
            全图采样的 1/16）。交集反算天然保证源矩形在图内。
@@ -628,16 +630,16 @@ static void ViewPaint(void) {
              边条的话，条带路径不搬不补那两块，溢进去的像素会冻在旧滚动
              位 —— 看起来就是"边条里的图不跟着滚"（实测）。 */
         float cwv = cw - (float)g_barW, rcv = (float)rc.bottom - (float)g_barH;
-        float vx0 = (dx > 0.0f) ? dx : 0.0f;
-        float vy0 = (dy > g_headerH) ? dy : g_headerH;
-        float vx1 = (dx + dw < cwv) ? (dx + dw) : cwv;
-        float vy1 = (dy + dh < rcv) ? (dy + dh) : rcv;
+        float vx0 = (imgX > 0.0f) ? imgX : 0.0f;
+        float vy0 = (imgY > g_headerH) ? imgY : g_headerH;
+        float vx1 = (imgX + dw < cwv) ? (imgX + dw) : cwv;
+        float vy1 = (imgY + dh < rcv) ? (imgY + dh) : rcv;
         if (vx0 < vx1 && vy0 < vy1) {
-            float sx = (vx0 - dx) / eff, sy = (vy0 - dy) / eff;
+            float srcX = (vx0 - imgX) / eff, srcY = (vy0 - imgY) / eff;
             float sw = (vx1 - vx0) / eff, sh = (vy1 - vy0) / eff;
             Gdiplus::RectF dst(vx0, vy0, vx1 - vx0, vy1 - vy0);
             g.SetInterpolationMode(Gdiplus::InterpolationModeBilinear);
-            g.DrawImage(g_viewImg, dst, sx, sy, sw, sh, Gdiplus::UnitPixel);
+            g.DrawImage(g_viewImg, dst, srcX, srcY, sw, sh, Gdiplus::UnitPixel);
         }
     }
 

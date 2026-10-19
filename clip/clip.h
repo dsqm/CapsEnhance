@@ -70,7 +70,6 @@ float RowTop(int idx);
 int   ClipLoadFormats(long long id);     /* 取一条的全部格式进 g_fmts，返回条数 */
 BOOL  PutOnClipboard(BOOL plain);        /* g_fmts 写回系统剪贴板（挂 Ditto 屏蔽标记） */
 void  FreeFmts(void);
-void  DittoAction(void);                 /* 转 Ditto 本体（预览/列表的 Ditto 按钮） */
 void  MonitorWork(HMONITOR mon, RECT* out);  /* 工作区矩形（预览拖动/摆窗用） */
 void  ThumbUpdateVisRange(void);         /* 可见行区间重算（渲染/条带里调用，clip.c 实现） */
 
