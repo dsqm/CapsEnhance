@@ -1040,6 +1040,8 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 依赖 **MSVC x64**（Windows 10/11），工具链由 `build_env.bat` 统一定位：用 vswhere 探测 VS/MSVC/SDK 并显式设置 `PATH/INCLUDE/LIB`（不走 vvcvars64，避开它的注册表探测；批处理里含 `(x86)` 的路径不能内联展开，也无法出现在 `( )` 块 / FOR 集合里）。
 
+**`.bat` 里的注释必须是 ASCII**（`build.bat` 头部那句 `ASCII only` 不是风格偏好，是硬约束）：cmd 按**系统 ANSI 代码页**（简中 = GBK/936）读批处理，UTF-8 中文注释会被按 GBK 解码成别的字符，DBCS 配对会吃掉后面的字节 —— 表现是某一行的 `rem` 前缀消失、整行被当成命令执行（`'…exe' 不是内部或外部命令`），而且**构建仍然成功**，只是那一段命令被跳过了，最容易当成"无害的乱码"忽略掉。所以：`build.bat` / `build_env.bat` / `test\*.bat` 只写英文；中文解释留在 `.md` 与源码注释里（那些文件按 UTF-8 读，不受影响）。
+
 ### 源码按 C++ 编译（`/TP`）
 
 所有 TU（含 `test\` 下的测试与诊断工具）都按 **C++** 编译，但**代码风格仍以 C 为主**，这是刻意的过渡态：

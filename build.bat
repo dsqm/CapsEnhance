@@ -135,8 +135,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem colorcode.c: 色值识别（纯函数，只有剪贴板浮层用）—— 单独编一个 obj，
-rem 和 sqlite 一样只链进 CapsEnhanceClip.exe，其余三个 exe 不涨一个字节。
+rem colorcode.c: colour-code detection (pure functions, clipboard overlay only).
+rem Built as its own obj and linked into CapsEnhanceClip.exe only, like sqlite,
+rem so the other three exes do not grow by a byte.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc /c ^
    /Foobj\colorcode.obj src\colorcode.c
 if errorlevel 1 (

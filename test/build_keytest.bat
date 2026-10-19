@@ -37,9 +37,9 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Foobj\ ^
    test\logsmoke.c /link /OUT:obj\test\logsmoke.exe user32.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 
-rem 权限/COM 附着类排障（只编译；运行要看机器上有没有 WPS / explorer）：
-rem   ilcheck  打印各进程的完整性级别（"管理员运行附不上普通权限的 WPS"就是它证的）
-rem   lowrun   借 shell 令牌以普通权限启动任意程序（复现"普通权限能、管理员不能"）
+rem Privilege / COM-attach diagnostics (compile only; running them needs WPS or explorer):
+rem   ilcheck  prints each process integrity level (proves "elevated cannot attach to WPS")
+rem   lowrun   starts any program at normal integrity via the shell token
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Foobj\ ^
    test\ilcheck.c /link /OUT:obj\test\ilcheck.exe advapi32.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
@@ -48,10 +48,10 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Foobj\ ^
    test\lowrun.c /link /OUT:obj\test\lowrun.exe userenv.lib advapi32.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
 
-rem 以普通权限跑：obj\test\lowrun.exe obj\test\wspset.exe obj\test\wspset.out
-rem 用途：核对 WPS 的"直接置位"三招哪些可用（Selection.SetRange / Range().Select /
-rem       Selection.Start 属性写入）以及回读是否一致。WPS 升级后若按词跳转落点变了，
-rem       先跑它重新测一遍 —— 这是选型的证据来源，不是猜的。
+rem Run at normal integrity: obj\test\lowrun.exe obj\test\wspset.exe obj\test\wspset.out
+rem Purpose: check which of the three WPS "set caret directly" tricks work
+rem       (Selection.SetRange / Range().Select / Selection.Start) and whether read-back matches.
+rem       Re-run it after a WPS upgrade if word-jump lands elsewhere -- evidence, not guesswork.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP /Foobj\ ^
    test\wspset.c /link /OUT:obj\test\wspset.exe user32.lib ole32.lib oleaut32.lib advapi32.lib /SUBSYSTEM:CONSOLE
 if errorlevel 1 goto fail
