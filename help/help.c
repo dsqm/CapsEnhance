@@ -57,7 +57,7 @@
         原来的程序里操作"。也因此**不能用 Esc 关闭**（没有焦点就收不到它）。
      2. **半透明且好看**。整窗透明走 `WS_EX_LAYERED` + `LWA_ALPHA`（内容照常
         GDI/WM_PAINT，见 wWinMain），背板画成**不透明白**；文字用 **GDI
-        `DrawTextW` 的 ClearType**，与剪贴板浮层（clip/clip.c）同一条路 ——
+        `DrawTextW` 的 ClearType** ——
         文字为什么不能用 GDI+ DrawString 画，见"文字"那一节的实测结论。
      3. **启动要快**。自包含：不读配置、不装钩子、不初始化 COM/TSF，只做
         "GDI+ 起一次 + 画一帧 + 送进分层窗口"。键位表直接从共享头编进来，
@@ -77,7 +77,7 @@
    3 分钟 —— 没有人在喂心跳，只能自己兜一个上限。 */
 
 /* ---------- 主题色（#AARRGGBB） ----------
-   ★ 浅色，与剪贴板浮层（clip/clip.c）同一套视觉语言：白底、深灰字、
+   ★ 浅色主题：白底、深灰字、
    已映射键浅蓝、修饰键浅琥珀。对比度同样按 WCAG AA（4.5:1）挑：
    浅蓝底 #DCE9F7（L≈0.82）上深字 #1A1A1A 约 14:1，功能名 #1F4E79 约 9:1 ——
    深底浅字时代那种"底色一亮任何浅色都到不了 4.5:1"的约束在浅色下不存在，
@@ -93,7 +93,7 @@
 #define C_DIM_FILL   0xFFF5F5F5   /* 未映射的键：留着位置、淡化，不抢注意力 */
 #define C_DIM_LINE   0xFFE0E0E0
 #define C_DIM_TEXT   0xFF9A9A9A
-#define C_ACT_FILL   0xFFDCE9F7   /* 已映射的"动作"键：与剪贴板选中行同款浅蓝 */
+#define C_ACT_FILL   0xFFDCE9F7   /* 已映射的"动作"键：浅蓝 */
 #define C_ACT_LINE   0xFF9DC0E8
 #define C_ACT_NAME   0xFF1A1A1A
 #define C_ACT_FUNC   0xFF1F4E79
@@ -115,7 +115,7 @@
                                      小字号下发虚，而字号的上限就是键帽内宽 ÷ 每行字数。 */
 #define LABEL_PAD_K  0.03f        /* 标签再往里收一点，别贴到键帽边 */
 #define PANEL_RADIUS 16.0f
-#define HELP_LIFE_ALPHA 242   /* 整窗不透明度（/255）：95%，与剪贴板浮层一致 */
+#define HELP_LIFE_ALPHA 242   /* 整窗不透明度（/255）：95% */
 
 /* ---------- 键盘布局（单位 u；x/w 按 ANSI 104 实测定义） ----------
    行的竖向位置：功能行占 0..1u，与数字行之间是 **0.25u**（不是普通行距 ——
@@ -352,7 +352,7 @@ static void AddRoundRect(Gdiplus::GraphicsPath* p, float x, float y,
     p->CloseFigure();
 }
 
-/* ---------- 文字：GDI DrawTextW（与剪贴板浮层同一条路） ----------
+/* ---------- 文字：GDI DrawTextW ----------
    ★★ 为什么不用 GDI+ DrawString（同一组键帽文案四种画法并排实测过，
    探针在 test/textprobe.cpp）：
      1) GDI+ 按**浮点**坐标排版：居中的标签 origin 几乎都落在亚像素相位上，
@@ -360,15 +360,15 @@ static void AddRoundRect(Gdiplus::GraphicsPath* p, float x, float y,
         这正是帮助图上笔画不均匀的直接来源；
      2) GDI+ 自带的 ClearType 栅格化器比 GDI 的淡、发灰（同样的字色画出来
         覆盖率就是上不去），整体观感虚。
-   GDI 的 DrawTextW 永远落在**整数像素**，且与整个系统 UI（包括剪贴板浮层
-   Caps+V）用的是同一个栅格化器 —— 所以文字整体换成 GDI：HFONT +
+   GDI 的 DrawTextW 永远落在**整数像素**，且与整个系统 UI 用的是同一个
+   栅格化器 —— 所以文字整体换成 GDI：HFONT +
    DEFAULT_QUALITY（跟随系统 ClearType 设置），测宽用 GetTextExtentPoint32W
    （与 DrawTextW 自己的排版同源，"量着放得下画着一定放得下"）。
    键帽/底板等形状仍由 GDI+ 画：绘制本就分两遍（先形状后文字），GDI+ 那遍
    Flush 落盘之后 GDI 才动笔，互不踩同一 DC 的状态。 */
 static const WCHAR* g_fontFace = L"Microsoft YaHei UI";
 
-/* 与 clip.c 的 MakeFont 同款：GDI 字体 + DEFAULT_QUALITY。
+/* GDI 字体 + DEFAULT_QUALITY。
    lfHeight 负值 = 按字形（em）高度取。 */
 static HFONT MakeFontPx(int px) {
     LOGFONTW lf;
@@ -765,7 +765,7 @@ static BOOL Render(void) {
         g.Flush(Gdiplus::FlushIntentionSync);
     }   /* GDI+ 到此收笔：下面的文字由 GDI 独占 memDC */
 
-    /* ---- 第二遍：所有文字（GDI，与剪贴板浮层同一条路） ----
+    /* ---- 第二遍：所有文字（GDI） ----
        ★ 功能名的字号**必须在这里定**：要逐个键帽量过才知道各自能放多大 */
     PickFuncSizes(g_memDC, u);
     DrawAllText(g_memDC, kbdX, kbdY, u, capH);

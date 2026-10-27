@@ -83,44 +83,6 @@ void HelpHide(void) { g_helpHide++; }
 void HelpTick(void) { }
 static void ResetHelpRec(void) { g_helpShow = 0; g_helpHide = 0; }
 
-/* 剪贴板浮层（C+V）：与帮助同一类"只是拉起另一个 exe 的窗口"，同样桩掉 ——
-   真去 CreateProcess 会让这条单元测试依赖 bin 里有没有那个 exe。
-   这里**故意**把 ClipIsOpen 做成跟着 ClipShow/ClipHide 走：钩子据它决定
-   "要不要替浮层吞 Esc"，所以它必须反映真实的开合，而不是恒真/恒假。 */
-static int  g_clipShow = 0, g_clipHide = 0, g_clipEsc = 0, g_clipKey = 0;
-static BOOL g_clipOpen = FALSE;
-void ClipShow(void) { g_clipShow++; g_clipOpen = TRUE; }
-void ClipHide(void) { g_clipHide++; g_clipOpen = FALSE; }
-void ClipTick(void) { }
-void ClipEsc(void) { g_clipEsc++; ClipHide(); }
-void ClipKey(int vk, unsigned flags) { (void)vk; (void)flags; g_clipKey++; }
-void ClipCallDitto(void) { g_clipHide++; g_clipOpen = FALSE; }   /* 转本体先关浮层 */
-BOOL ClipIsOpen(void) { return g_clipOpen; }
-/* main.c 的 WndProc 还要下面三条（浮层自行关闭 / 浮层进程没了）。本测试不验它们，
-   但**必须给出定义**，否则整个 test_chord 链接不过 —— ccabe56 加前两条时就漏了，
-   build_test 从那时起一直是链接失败。 */
-BOOL ClipIsClosedMsg(UINT msg) { (void)msg; return FALSE; }
-void ClipClosed(void) { g_clipOpen = FALSE; }
-void ClipGone(void)   { g_clipOpen = FALSE; }
-BOOL ClipIsBornMsg(UINT msg) { (void)msg; return FALSE; }
-void ClipBorn(DWORD selfMs, DWORD dbMs) { (void)selfMs; (void)dbMs; }
-void ClipPrewarm(void) { }   /* 预热只是提前拉进程，和弦测试不关心它 */
-
-
-/* F3 图片预览（src/clip.c 的 ClipView*）：与浮层同类"另一个 exe 的窗口"，
-   同样桩掉。ClipViewIsOpen 要反映真实开合 —— 钩子据它决定"无关键要不要
-   叫预览退场"；VIEWSTATE 双向同步也照真实现复刻。 */
-static BOOL g_viewOpen = FALSE;
-void ClipViewToggle(void) { g_viewOpen = !g_viewOpen; }
-void ClipViewHide(void)   { if (!g_viewOpen) return; g_viewOpen = FALSE; }
-BOOL ClipViewIsOpen(void) { return g_viewOpen; }
-BOOL ClipViewIsStateMsg(UINT msg) { (void)msg; return FALSE; }
-void ClipViewState(int open) { g_viewOpen = (open != 0); }
-static void ResetClipRec(void) {
-    g_clipShow = 0; g_clipHide = 0; g_clipEsc = 0; g_clipKey = 0; g_clipOpen = FALSE;
-    g_viewOpen = FALSE;
-}
-
 /* ---- 捕获钩子：记录注入的完整事件序列（按下/抬起），并可统计次数 ---- */
 typedef struct { int vk; int n; } Rec;
 static Rec g_rec[256]; static int g_recN = 0;
@@ -378,7 +340,7 @@ static void WriteChordIni(const char* body) {
 
 /* ---- AF 段的前置条件：探测点必须真的落在我们自己的窗口上 ----
    drag 场景用 WindowFromPoint 找被拖对象，所以桌面上任何盖住探测点的**置顶**窗口
-   （帮助浮层、剪贴板浮层、别的工具）都会让它找到别人 —— 表现就是"拖拽相关断言
+   （帮助浮层、别的工具）都会让它找到别人 —— 表现就是"拖拽相关断言
    整片红"，而代码完全正常（本地笔记里记过这条假红）。
    按本文件既有的做法（见 AE 段的"多显示器找不到就跳过"）：先把自己的窗口重新提到
    置顶带最上面复测；实在被盖住就打印 [SKIP] 并跳过依赖该点的断言，而不是拿环境
@@ -2300,35 +2262,6 @@ int main(void) {
         CHECK(g_helpHide > hideBefore,
               "AI: 松开 Caps（F1 仍按着）-> 同样请求隐藏（寿命=和弦）");
         Sim(VK_F1, FALSE);    Pump(20);
-        Drain();
-    }
-
-    /* ---- 场景AI2：剪贴板浮层（C+V）----
-       窗口本体在另一个 exe 里，测不了；能离线钉住的是三件"改坏了很难发现"的事：
-         ① C+V 真的接到 ClipShow（不需要任何修饰键 —— 与帮助 F1 同类）。
-         ② 寿命**不等于**和弦：松开 Caps 之后浮层仍然开着（否则来不及挑条目），
-            且这期间 Esc 被吞掉并转发（它自己收不到键盘）；关掉之后 Esc 必须
-            恢复放行 —— 永久吃掉用户的 Esc 是最糟的一类 bug。 */
-    {
-        ResetClipRec();
-        Sim(CLI_CAPS, TRUE);  Pump(20);
-        Sim('V', TRUE);       Pump(20);
-        Sim('V', FALSE);      Pump(20);
-        CHECK(g_clipShow >= 1, "AI2: C+V -> 请求显示剪贴板");
-        Sim(CLI_CAPS, FALSE); Pump(20);
-        Drain();
-
-        CHECK(g_clipOpen, "AI2: 松开 Caps 之后剪贴板仍然开着（寿命 ≠ 和弦）");
-        LRESULT r1 = Sim(VK_ESCAPE, TRUE);
-        CHECK(r1 == 1, "AI2: 浮层开着时 Esc 被吞掉（代收转发，不外泄给系统）");
-        Sim(VK_ESCAPE, FALSE); Pump(20);
-        CHECK(g_clipEsc >= 1, "AI2: Esc 被转给了剪贴板浮层");
-        CHECK(!g_clipOpen, "AI2: Esc 之后浮层已关");
-        Drain();
-
-        LRESULT r2 = Sim(VK_ESCAPE, TRUE);
-        CHECK(r2 == 0, "AI2: 浮层关掉后 Esc 恢复放行（不会永久吃键）");
-        Sim(VK_ESCAPE, FALSE); Pump(20);
         Drain();
     }
 

@@ -16,12 +16,12 @@ rem The main-exe source list is shared with build.bat (src\sources.txt, via the
 rem cl response-file syntax @): a new source file is added in ONE place. This
 rem script needs the repo root as the working directory (relative paths inside
 rem the response file) -- same requirement as build.bat itself.
-rem The standalone exes (help / clip / settings) plus src\colorcode.c are listed
-rem in full here because build.bat compiles them on their own cl lines.
+rem The standalone exes (help / settings) are listed in full here because
+rem build.bat compiles them on their own cl lines.
 rem The unit-test sources are NOT analyzed here -- they have their own build_*.bat.
-rem NOTE: src\help.c / src\clip.c and help\help.c / clip\clip.c have the same
+rem NOTE: src\help.c and help\help.c have the same
 rem base name, and one /Fo covers the whole command -- so their .obj and
-rem .nativecodeanalysis.xml overwrite each other (17 files for 19 TUs).
+rem .nativecodeanalysis.xml overwrite each other.
 rem Every TU is still compiled and analyzed; only the artifacts collide.
 setlocal
 
@@ -31,10 +31,9 @@ if errorlevel 1 exit /b 1
 if not exist "obj\an" mkdir "obj\an"
 
 cl /nologo /W4 /analyze /MT /utf-8 /DUNICODE /D_UNICODE /TP /std:c++17 ^
-   /Fo"obj\an\\" /c /I"%~dp0..\src" /I"%~dp0..\thirdparty" ^
+   /Fo"obj\an\\" /c /I"%~dp0..\src" ^
    @src\sources.txt ^
-   src\colorcode.c ^
-   help\help.c clip\clip.c settings\settings.c
+   help\help.c settings\settings.c
 if errorlevel 1 exit /b 1
 
 echo [OK] static analysis pass finished.

@@ -41,7 +41,7 @@
    滚轮若停在**某个列表框上**，滚的是那个列表框而不是整个表单
    （见 WndProc 的 WM_MOUSEWHEEL / ScrollListBy）。
 
-   页签：表单分两页 —— 「常规」（数值 / 开关 / 路径这些配置项）与
+   页签：表单分两页 —— 「常规」（数值 / 开关这些配置项）与
    「名单」（五份按程序 / 窗口生效的名单：按词跳转 / 自动屏蔽 / 整格滚动 /
    拖动的两份黑名单）。分页是结构性的：配置项全在常规页、名单全在名单页，
    页签只决定"显示哪些控件" —— 控件仍全是主窗口的子窗口，Load / Save 与
@@ -49,31 +49,21 @@
    页签**外观自绘**（PaintTab：comctl 默认的浮凸小块太旧，改成"文本 +
    强调色下划线"的现代样式，行为不动）；常规页的配置项按 group 列**分段**
    渲染半粗段头（见 kFields 的 group 列 / InitGroups）。
-
-   尺寸选取窗：三组"窗口大小"（快速粘贴 / F3 预览的最大与最小）只给两个数字
-   看不出实际多大，每行右侧的「调整…」弹出一个**照真实浮层画法画的示例窗口**，
-   拖着它定尺寸，点中央「完成」把值填回那一对输入框（ini 仍由底部保存按钮写）。
-   三颗按钮两套样式 —— F3 的最大与最小是同一个窗口。弹窗本身**不在这个文件
-   里**：它有自己的窗口类 / 状态 / 两套画法，住在 settings/sizepick.c（两个
-   编译单元之间共享的东西列在 settings/settings_int.h）。
    ============================================================ */
 #define WIN32_LEAN_AND_MEAN
 #include "cap.h"
-#include "settings_int.h"   /* 本 exe 的内部头：与 sizepick.c 共享的那几样 */
+#include "settings_int.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
 #include <shellapi.h>      /* ShellExecuteW（CreateProcess 失败时的兜底） */
-#include <commdlg.h>       /* ChooseFontW：系统标准字体对话框 */
-#include <shlobj.h>        /* SHBrowseForFolderW：选 Ditto 文件夹 */
 #include <commctrl.h>      /* 页签控件（WC_TABCONTROL / TCM_* / TCN_SELCHANGE） */
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
-#pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "comctl32.lib")
 
 #define APP_TITLE   L"CapsEnhance 设置"
@@ -98,36 +88,9 @@ static const WCHAR* const kTabNames[TAB_N] = { L"常规", L"名单" };
    值域也从那边取（InitFieldRanges），这里不写第二份。
    标签只写中文说明 —— ini 里的键名属于配置文件的内部拼法，界面不重复；
    数值单位（KB / 毫秒 …）单独一列，显示在输入框右侧。
-   group 一列是**归属段**（Ditto 路径 / 快速粘贴显然是「剪贴板」这类）：
+   group 一列是**归属段**（例如「通用」「滚动」「输入法」）：
    每段第一行渲染一个半粗段头，同一段的行必须连排（段头按"换段"渲染）。
-   ★ 这个 struct 本身住在 settings_int.h：尺寸选取窗（sizepick.c）也要按它
-     取字段的值域与键名，两个编译单元共一份定义。 */
-
-/* 成对字段（宽+高并排一行）：kFields 里其余字段不受影响。
-   第一列 = 行首（宽）字段 id，第二列 = 行次（高）字段 id。 */
-static const int kPairs[][2] = {
-    { IDC_CLIP_W,     IDC_CLIP_H     },
-    { IDC_CLIP_VMW,   IDC_CLIP_VMH   },
-    { IDC_CLIP_VNW,   IDC_CLIP_VNH   },
-};
-
-/* id 是某对的行首（宽）？返回行次（高）的 id，否则 0。
-   （尺寸选取窗也要用：给定宽字段 id 找高字段 id。） */
-int PairSecondId(int id) {
-    for (int i = 0; i < (int)(sizeof(kPairs) / sizeof(kPairs[0])); i++)
-        if (kPairs[i][0] == id) return kPairs[i][1];
-    return 0;
-}
-
-/* id 是某对的行次（高）？ */
-static BOOL IsPairSecond(int id) {
-    for (int i = 0; i < (int)(sizeof(kPairs) / sizeof(kPairs[0])); i++)
-        if (kPairs[i][1] == id) return TRUE;
-    return FALSE;
-}
-
-/* 尺寸对 <-> 「调整…」按钮的那张表住在 sizepick.c（弹窗自己的世界），
-   主文件只问一句"这一对配没配按钮"：见 settings_int.h 的 SizePickerBtnFor。 */
+   ★ 这个 struct 本身住在 settings_int.h。 */
 
 static Field kFields[] = {
     { IDC_RUN_ADMIN,  CFG_RUN_AS_ADMIN,        L"以管理员身份运行（会弹 UAC）",                   NULL,      1, 0, 0, 0, 0,      L"通用" },
@@ -144,21 +107,6 @@ static Field kFields[] = {
     { IDC_IME_CAPS,   CFG_IME_CAPS_MODE,       L"单击 Caps 时切输入法（0=不处理 1=中文 2=英文）",  NULL,    0, 0, 0, 0, 0,      L"输入法" },
     { IDC_IME_LSHF,   CFG_IME_LSHIFT_MODE,     L"单击左 Shift 时切输入法（同上；英文键盘下都不处理）", NULL, 0, 0, 0, 0, 0,   L"输入法" },
     { IDC_IME_RSHF,   CFG_IME_RSHIFT_MODE,     L"单击右 Shift 时切输入法（同上；英文键盘下都不处理）", NULL, 0, 0, 0, 0, 0,   L"输入法" },
-    /* Ditto 剪贴板数据库路径（`C+V` 读它）：**留空 = 不启用**。相对路径的
-       基准是本程序 exe 所在目录 —— 这一句写在标签里而不是让用户去猜。 */
-    { IDC_DITTO_DB,   CFG_DITTO_DIR,           L"Ditto 文件夹路径（含 Ditto.db 与 Ditto.exe；留空 = 不启用 Caps+V；相对路径相对本程序目录）",
-                     NULL, 0, 1, 0, 0, 0, L"剪贴板" },
-    /* 快速粘贴的字体只有一个入口：按钮上**显示当前字体 + 字号**，点它弹系统
-       字体对话框（对话框里本来就能同时选字体和字号，再给个独立字号框是重复）。
-       它不承载配置值，所以 cfg = -1，Load / Save 都跳过。 */
-    { IDC_CLIP_PICK, -1,                       L"快速粘贴字体",                                   NULL, 0, 0, 1, 0, 0, L"剪贴板" },
-    { IDC_CLIP_CLICK, CFG_CLIP_CLICK_PASTE,    L"单击条目直接上屏（取消勾选则单击只选中、双击才粘）", NULL, 1, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_W,     CFG_CLIP_W,              L"快速粘贴窗口大小（96 DPI 像素）",  L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_H,     CFG_CLIP_H,              L"快速粘贴窗口高度",                 L"×",   0, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_VMW,   CFG_CLIP_VIEW_MAX_W,     L"F3 预览窗格最大大小（96 DPI 像素）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_VMH,   CFG_CLIP_VIEW_MAX_H,     L"F3 预览窗格最大高度",                L"×",   0, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_VNW,   CFG_CLIP_VIEW_MIN_W,     L"F3 预览窗格最小大小（96 DPI 像素）", L"像素", 0, 0, 0, 0, 0, L"剪贴板" },
-    { IDC_CLIP_VNH,   CFG_CLIP_VIEW_MIN_H,     L"F3 预览窗格最小高度",                L"×",   0, 0, 0, 0, 0, L"剪贴板" },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
 
@@ -194,14 +142,6 @@ static void InitGroups(void) {
     }
 }
 
-/* 按控件 id 找字段行（没有返回 NULL）。尺寸选取窗按它取那一对的值域与键名
-   —— 表本身不外露，外头只能拿到一行的指针。 */
-const Field* FieldById(int id) {
-    for (int i = 0; i < FIELD_N; i++)
-        if (kFields[i].id == id) return &kFields[i];
-    return NULL;
-}
-
 /* 选窗时该取什么：进程名单取进程名（`xxx.exe`）；**窗口类名单要取类名**
    —— 把进程名填进"窗口类"名单里永远匹配不上。取到的类名**原样**填进输入框
    （不带任何前缀：本项目的窗口名单只按类名判定，没有"标题"这一维）。 */
@@ -227,9 +167,8 @@ static const ListGroup kLists[] = {
 };
 #define LIST_N ((int)(sizeof(kLists) / sizeof(kLists[0])))
 
-/* ★ 下面几个**不带 static**：尺寸选取窗（sizepick.c）要用它们（声明在
-   settings_int.h）。能不共享的都留在下面继续 static —— 拆分的收益就在这条
-   界线上，别顺手把整个文件都改成全局的。 */
+/* 下面几个与 settings_int.h 的声明对应。能不共享的都继续 static —-
+   这张清单越短越好。 */
 HWND   g_hwnd    = NULL;
 static HWND   g_header  = NULL;         /* 顶部"窗框"：页签条的实底托盘（挡住滚上来的内容） */
 static HWND   g_footer  = NULL;         /* 底部"窗框"：状态栏 + 按钮的实底托盘 */
@@ -315,18 +254,14 @@ static BOOL GetCheck(HWND btn) {
    没有第二套判据。 */
 
 #define LIST_SNAP_MAX (CFG_MAX_ENTRIES * (CFG_NAME_MAX + 1))   /* 一份名单拍平的字数上限 */
-static WCHAR g_baseField[FIELD_N][DITTO_DIR_MAX];
+#define FIELD_TEXT_MAX 320                                      /* 文本项快照缓冲（当前没有文本项，留作通用能力） */
+static WCHAR g_baseField[FIELD_N][FIELD_TEXT_MAX];
 static WCHAR g_baseList[LIST_N][LIST_SNAP_MAX];
 static WCHAR g_snapTmp[LIST_SNAP_MAX];        /* 比对时的临时缓冲（一次用一份） */
 
 /* 第 i 个字段的当前值 -> 文本 */
 static void FieldSnapshot(int i, WCHAR* out, size_t cap) {
     const Field* f = &kFields[i];
-    if (f->id == IDC_CLIP_PICK) {   /* 按钮自己不承载值：真值在配置层（字体 + 字号） */
-        _snwprintf_s(out, cap, _TRUNCATE, L"%s|%d",
-                     CfgStr(CFG_CLIP_FONT), CfgInt(CFG_CLIP_FONT_SIZE));
-        return;
-    }
     HWND c = GetDlgItem(g_hwnd, f->id);
     if (!c) { out[0] = 0; return; }
     if (f->isBool) { out[0] = GetCheck(c) ? L'1' : L'0'; out[1] = 0; return; }
@@ -349,7 +284,7 @@ static void ListSnapshot(int i, WCHAR* out, size_t cap) {
 
 /* 拍一次基线（加载后 / 保存成功后调用 —— 那一刻"界面 == ini"） */
 static void TakeSnapshot(void) {
-    for (int i = 0; i < FIELD_N; i++) FieldSnapshot(i, g_baseField[i], DITTO_DIR_MAX);
+    for (int i = 0; i < FIELD_N; i++) FieldSnapshot(i, g_baseField[i], FIELD_TEXT_MAX);
     for (int i = 0; i < LIST_N; i++)  ListSnapshot(i, g_baseList[i], LIST_SNAP_MAX);
 }
 
@@ -468,8 +403,6 @@ static void FillList(HWND lb, int list) {
         SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)ConfigListAt(list, i));
 }
 
-static void UpdateClipFontBtn(void);   /* 定义在字体对话框那一节（用到 g_dpi） */
-
 static void LoadConfig(void) {
     /* 文件不存在时让 config.c 写一份带注释的模板（与本体首次启动一致），
        再来读 —— 否则界面是空的，用户不知道该填什么。 */
@@ -480,7 +413,7 @@ static void LoadConfig(void) {
     g_loading = TRUE;
     for (int i = 0; i < FIELD_N; i++) {
         const Field* f = &kFields[i];
-        if (f->cfg < 0) continue;                  /* 按钮自己刷（见 UpdateClipFontBtn） */
+        if (f->cfg < 0) continue;                  /* 纯界面控件不承载配置值 */
         HWND c = GetDlgItem(g_hwnd, f->id);
         if (!c) continue;
         if (f->isBool)      SetCheck(c, CfgBool(f->cfg));
@@ -491,7 +424,6 @@ static void LoadConfig(void) {
         FillList(GetDlgItem(g_hwnd, IDC_LIST0 + i * LIST_STRIDE), kLists[i].list);
         SetWindowTextW(GetDlgItem(g_hwnd, IDC_NAME0 + i * LIST_STRIDE), L"");
     }
-    UpdateClipFontBtn();   /* 按钮文字就是当前值，加载后刷一次 */
     g_loading = FALSE;
     /* 装载完之后拍基线：此刻"界面 == ini"，之后任何偏离才算"未保存的改动" */
     TakeSnapshot();
@@ -529,8 +461,8 @@ static BOOL SaveConfig(void) {
         if (f->isBool) {
             CfgSetBool(f->cfg, GetCheck(c));
         } else if (f->isText) {
-            WCHAR t[DITTO_DIR_MAX];                /* 最长的文本项就是 DittoDir */
-            GetWindowTextW(c, t, DITTO_DIR_MAX);
+            WCHAR t[FIELD_TEXT_MAX];
+            GetWindowTextW(c, t, FIELD_TEXT_MAX);
             CfgSetStr(f->cfg, t);
         } else {
             int v = 0;
@@ -713,14 +645,7 @@ static void Layout(int w, int h) {
            有正式 ID，这里再加 id 判断双保险。 */
         if (g_grpHead[i])
             ShowCtrl(GetDlgItem(g_hwnd, g_grpHead[i]), fieldPage);
-        if (id == IDC_DITTO_DB) {         /* Ditto 行右侧两颗小按钮随行显隐 */
-            ShowCtrl(GetDlgItem(g_hwnd, IDC_DITTO_BROWSE), fieldPage);
-            ShowCtrl(GetDlgItem(g_hwnd, IDC_DITTO_CONV), fieldPage);
-        }
     }
-    /* 三对尺寸行的「调整…」：不在 kFields 里（它们不承载配置值），单独显隐。
-       具体是哪三颗由弹窗自己说（表在它那边），这里只给"当前页要不要显示"。 */
-    SizePickerShowButtons(fieldPage);
     for (int i = 0; i < LIST_N; i++) {
         int base = IDC_LIST0 + i * LIST_STRIDE;
         for (int k = 0; k <= 5; k++)      /* 组内控件占 0..5 六个 id */
@@ -740,15 +665,7 @@ static void Layout(int w, int h) {
         HWND c = GetDlgItem(g_hwnd, id);
         if (!c) continue;
         if (kFields[i].isBtn) {
-            if (id == IDC_CLIP_PICK) {
-                /* 字体行：左侧"显示字体："说明 + 定宽按钮
-                   （按钮文字就是当前字体 + 字号，UpdateClipFontBtn 刷） */
-                HWND lab = GetDlgItem(g_hwnd, id + 500);
-                if (lab) MoveWindow(lab, x, y + S(3) - off, S(84), S(18), TRUE);
-                MoveWindow(c, x + S(88), y - off, S(320), S(24), TRUE);
-            } else {
-                MoveWindow(c, x, y - off, w - x * 2, S(24), TRUE);
-            }
+            MoveWindow(c, x, y - off, w - x * 2, S(24), TRUE);
             y += rowBool;
         } else if (kFields[i].isBool) {
             MoveWindow(c, x, y - off, w - x * 2, rowBool - S(2), TRUE);
@@ -760,81 +677,22 @@ static void Layout(int w, int h) {
             HWND lab = GetDlgItem(g_hwnd, id + 500);
             if (lab) MoveWindow(lab, x, y - off, w - x * 2, S(18), TRUE);
             y += S(20);
-            if (id == IDC_DITTO_DB) {
-                /* Ditto 行右侧并排两颗小按钮：选取文件夹 / 相对绝对互转 */
-                int bb = S(60), bc = S(92), bg2 = S(6);
-                int aw = w - x * 2 - bb - bc - bg2 * 2;
-                MoveWindow(c, x, y - off, aw, S(22), TRUE);
-                MoveWindow(GetDlgItem(g_hwnd, IDC_DITTO_BROWSE),
-                        x + aw + bg2, y - off, bb, S(22), TRUE);
-                MoveWindow(GetDlgItem(g_hwnd, IDC_DITTO_CONV),
-                        x + aw + bg2 + bb + bg2, y - off, bc, S(22), TRUE);
-            } else {
-                MoveWindow(c, x, y - off, w - x * 2, S(22), TRUE);
-            }
+            MoveWindow(c, x, y - off, w - x * 2, S(22), TRUE);
             y += S(24);
-        } else if (IsPairSecond(id)) {
-            /* 成对行次（高）：两个框、单位与"×"分隔符都由行首那一行摆好；
-               这里只把次字段自己的标签藏掉，不占行。 */
-            HWND lab2 = GetDlgItem(g_hwnd, id + 500);
-            if (lab2) ShowWindow(lab2, FALSE);
         } else {
-            int pw2 = PairSecondId(id);
-            if (pw2) {
-                /* ---- 宽 + 高 一行两框（三组尺寸对）----
-                   行内的顺序是**输入框 → 「调整…」→ 描述**：两个数字框并排
-                   （中间夹行次字段的单位"×"），行首的单位（像素）收尾，紧跟着
-                   是这一对的「调整…」，说明标签吃剩下的宽度。
-                   ★ 按钮紧贴输入框、不钉行尾：它是"这两个框的"按钮，离得远了
-                   就看不出管的是哪一对；描述放最后是因为它是一整句，只有它
-                   能被压缩/截断（窗口变窄时先牺牲句子，不动控件）。
-                   行次字段的标签隐藏。 */
-                HWND lab  = GetDlgItem(g_hwnd, id + 500);
-                HWND unit = GetDlgItem(g_hwnd, id + 600);
-                HWND c2   = GetDlgItem(g_hwnd, pw2);
-                HWND cross = GetDlgItem(g_hwnd, pw2 + 600);
-                HWND lab2 = GetDlgItem(g_hwnd, pw2 + 500);
-                int boxW = S(56), xgap = S(4), crossW = S(16), unitW = S(52);
-                int colGap = S(8);   /* 列与列之间的呼吸感（外层那个 gap 是行间距，别混） */
-                MoveWindow(c, x, y - off, boxW, S(22), TRUE);
-                if (cross)
-                    MoveWindow(cross, x + boxW + xgap, y + S(4) - off, crossW, S(18), TRUE);
-                if (c2)
-                    MoveWindow(c2, x + boxW + xgap + crossW, y - off, boxW, S(22), TRUE);
-                if (unit)
-                    MoveWindow(unit, x + boxW * 2 + xgap * 2 + crossW,
-                               y + S(4) - off, unitW, S(18), TRUE);
-                int tailX = x + boxW * 2 + xgap * 2 + crossW + unitW + colGap;
-                int btnId = SizePickerBtnFor(id);
-                int btnW  = btnId ? S(76) : 0;
-                if (btnId) {
-                    HWND sb = GetDlgItem(g_hwnd, btnId);
-                    MoveWindow(sb, tailX, y - off, btnW, S(22), TRUE);
-                    ShowWindow(sb, TRUE);       /* 显隐轮只按页开关，这里补一次 */
-                    tailX += btnW + colGap;
-                }
-                if (lab)
-                    MoveWindow(lab, tailX, y + S(4) - off,
-                               (w - x - tailX) > 0 ? (w - x - tailX) : 0, S(18), TRUE);
-                if (lab2) ShowWindow(lab2, FALSE);
-                /* 次字段的输入框也要随页显隐（显隐轮只按 fieldPage 开关） */
-                ShowWindow(c2, TRUE);
-                y += rowInt;
-            } else {
-                /* 数字框放**左边**、单位紧跟在框右侧、标签吃剩下的空间：
-                   标签是长句，把输入框放在标签之后的话，窗口一窄它就被挤出
-                   客户区 —— 用户看到"有说明、没地方填"。输入框与单位宽固定。 */
-                HWND lab  = GetDlgItem(g_hwnd, id + 500);
-                HWND unit = GetDlgItem(g_hwnd, id + 600);
-                int ux = x + editW + S(4), unitW = S(52);
-                MoveWindow(c, x, y - off, editW, S(22), TRUE);
-                if (unit)
-                    MoveWindow(unit, ux, y + S(4) - off, unitW, S(18), TRUE);
-                if (lab)
-                    MoveWindow(lab, ux + unitW + S(8), y + S(4) - off,
-                               w - (ux + unitW + S(8)) - x, S(18), TRUE);
-                y += rowInt;
-            }
+            /* 数字框放**左边**、单位紧跟在框右侧、标签吃剩下的空间：
+               标签是长句，把输入框放在标签之后的话，窗口一窄它就被挤出
+               客户区 —— 用户看到"有说明、没地方填"。输入框与单位宽固定。 */
+            HWND lab  = GetDlgItem(g_hwnd, id + 500);
+            HWND unit = GetDlgItem(g_hwnd, id + 600);
+            int ux = x + editW + S(4), unitW = S(52);
+            MoveWindow(c, x, y - off, editW, S(22), TRUE);
+            if (unit)
+                MoveWindow(unit, ux, y + S(4) - off, unitW, S(18), TRUE);
+            if (lab)
+                MoveWindow(lab, ux + unitW + S(8), y + S(4) - off,
+                           w - (ux + unitW + S(8)) - x, S(18), TRUE);
+            y += rowInt;
         }
         y += gap;
     }
@@ -1272,181 +1130,6 @@ static void DelName(int i) {
     UpdateDirty();
 }
 
-/* ---------------- DittoDir：选取 / 相对绝对互转 ----------------
-   互转按钮只在"转得动"时可点：相对路径 -> 绝对永远可以（不涉及盘符）；
-   绝对 -> 相对只有与 exe **同盘**才有意义，跨盘时禁用（置灰）。 */
-
-/* 拆路径成分量："C:\a\b" -> ["C:", "a", "b"]（不分大小写比较用 _wcsicmp） */
-static int SplitComps(const WCHAR* path, WCHAR comps[][96], int max) {
-    int n = 0;
-    const WCHAR* p = path;
-    while (*p && n < max) {
-        while (*p == L'\\') p++;
-        if (!*p) break;
-        const WCHAR* s = p;
-        while (*p && *p != L'\\') p++;
-        int len = (int)(p - s);
-        if (len > 95) len = 95;
-        memcpy(comps[n], s, len * sizeof(WCHAR));
-        comps[n][len] = 0;
-        n++;
-    }
-    return n;
-}
-
-/* 就地消化分量里的 "." 与 ".."：top 之下（floorIdx，含）是根（盘符），
-   ".." 只往回退到根为止。返回消化后的分量数。 */
-static int CompsResolve(WCHAR comps[][96], int n, int floorIdx) {
-    int top = floorIdx;
-    for (int i = floorIdx + 1; i < n; i++) {
-        if (!wcscmp(comps[i], L".")) continue;
-        if (!wcscmp(comps[i], L"..")) {
-            if (top > floorIdx) top--;
-            continue;
-        }
-        if (top + 1 != i) wcscpy_s(comps[top + 1], 96, comps[i]);
-        top++;
-    }
-    return top + 1;
-}
-
-/* 分量数组 -> 路径字符串：a[0] 是盘符（"D:"），后面逐段加反斜杠。
-   不产生尾反斜杠（除非路径就是盘根）。 */
-static void CompsJoin(WCHAR comps[][96], int n, WCHAR* out, size_t cap) {
-    out[0] = 0;
-    if (n <= 0) return;
-    wcscpy_s(out, cap, comps[0]);
-    for (int i = 1; i < n; i++) {
-        wcscat_s(out, cap, L"\\");
-        wcscat_s(out, cap, comps[i]);
-    }
-}
-
-/* 互转按钮的可点状态：空串不可；相对路径可；绝对路径与 exe 同盘才可 */
-static BOOL ConvCanConvert(const WCHAR* t) {
-    if (!t || !t[0]) return FALSE;
-    if (t[0] == L'\\') return FALSE;               /* 根相对 / UNC：没有"exe 同盘"基准 */
-    if (!(t[1] == L':' )) return TRUE;              /* 相对路径：转绝对不涉及盘符 */
-    WCHAR dir[MAX_PATH];
-    wcscpy_s(dir, MAX_PATH, g_path);
-    WCHAR* s = wcsrchr(dir, L'\\');
-    if (!s) return FALSE;
-    *s = 0;
-    return towupper(t[0]) == towupper(dir[0]);
-}
-
-static void UpdateConvBtn(void) {
-    HWND e = GetDlgItem(g_hwnd, IDC_DITTO_DB);
-    HWND b = GetDlgItem(g_hwnd, IDC_DITTO_CONV);
-    if (!e || !b) return;
-    WCHAR t[DITTO_DIR_MAX] = L"";
-    GetWindowTextW(e, t, DITTO_DIR_MAX);
-    BOOL can = ConvCanConvert(t);
-    if (IsWindowEnabled(b) != can) {
-        EnableWindow(b, can);
-        InvalidateRect(b, NULL, TRUE);   /* 自绘按钮的禁用态要重画才变灰 */
-    }
-}
-
-static void BrowseDittoDir(void) {
-    HWND e = GetDlgItem(g_hwnd, IDC_DITTO_DB);
-    if (!e) return;
-    WCHAR cur[DITTO_DIR_MAX] = L"";
-    GetWindowTextW(e, cur, DITTO_DIR_MAX);
-    /* 新版对话框要求 COM；设置进程平时不用 COM，浏览前临时起一次 */
-    HRESULT hrCo = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED |
-                                         COINIT_DISABLE_OLE1DDE);
-    WCHAR path[DITTO_DIR_MAX] = L"";   /* 与 DittoDir 同宽（浏览框取来的就是那个值） */
-    /* ★ 全项目 CINTERFACE（cap.h 的迁移桥）：COM 只能走 C 形态 lpVtbl。
-       IID/CLSID 常量由 uuid.lib 提供（链接行已加）。 */
-    IFileOpenDialog* dlg = NULL;
-    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
-                                   IID_IFileOpenDialog, (void**)&dlg))) {
-        DWORD opts = 0;
-        if (SUCCEEDED(dlg->lpVtbl->GetOptions(dlg, &opts)))
-            dlg->lpVtbl->SetOptions(dlg, opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-        dlg->lpVtbl->SetTitle(dlg, L"选择 Ditto 的文件夹（里面要有 Ditto.db 和 Ditto.exe）");
-        /* 起始目录 = 当前值（存在才设）。用 SetDefaultFolder 而不是 SetFolder：
-           微软文档明确前者更好 —— 它只在用户没有"最近位置"时生效，不会每次
-           都强行跳走；SetFolder 会覆盖"最近使用"，导航体验差。 */
-        if (cur[0]) {
-            IShellItem* si = NULL;
-            if (SUCCEEDED(SHCreateItemFromParsingName(cur, NULL, IID_IShellItem,
-                                                      (void**)&si))) {
-                dlg->lpVtbl->SetDefaultFolder(dlg, si);
-                si->lpVtbl->Release(si);
-            }
-        }
-        if (dlg->lpVtbl->Show(dlg, g_hwnd) == S_OK) {
-            IShellItem* res = NULL;
-            if (SUCCEEDED(dlg->lpVtbl->GetResult(dlg, &res))) {
-                PWSTR p = NULL;
-                if (SUCCEEDED(res->lpVtbl->GetDisplayName(res, SIGDN_FILESYSPATH, &p))) {
-                    /* 截断而非 wcscpy_s：文件路径可以长过 MAX_PATH，而
-                       SIGDN_FILESYSPATH 给的是 shell 的原样字符串 —— 装不下时
-                       wcscpy_s 是 fastfail（整个设置程序崩掉），不是截断。
-                       缓冲与 DittoDir 同宽，取到的值本来就要填进那个框。 */
-                    _snwprintf_s(path, DITTO_DIR_MAX, _TRUNCATE, L"%s", p);
-                    CoTaskMemFree(p);
-                }
-                res->lpVtbl->Release(res);
-            }
-        }
-        dlg->lpVtbl->Release(dlg);
-    }
-    if (hrCo == S_OK || hrCo == S_FALSE) CoUninitialize();
-    if (!path[0]) return;
-    SetWindowTextW(e, path);
-    UpdateDirty();
-    UpdateConvBtn();
-}
-
-static void ConvertDittoDir(void) {
-    HWND e = GetDlgItem(g_hwnd, IDC_DITTO_DB);
-    if (!e) return;
-    WCHAR t[DITTO_DIR_MAX] = L"";
-    GetWindowTextW(e, t, DITTO_DIR_MAX);
-    if (!t[0]) return;
-    WCHAR dir[MAX_PATH];
-    wcscpy_s(dir, MAX_PATH, g_path);
-    WCHAR* s = wcsrchr(dir, L'\\');
-    if (!s) return;
-    *s = 0;
-    /* 分量全部就地消化（"." 与 ".."），拼出来的路径天然无 .. 也无尾反斜杠：
-       "..\Ditto" -> "D:\\Portable\\Ditto"，而不是 "D:\\Portable\\CapsEnhance\\..\\Ditto"。 */
-    static WCHAR a[24][96], b[24][96];   /* static：两组 9KB，别压栈（/analyze C6262） */
-    int na = SplitComps(dir, a, 24);
-    int nb = SplitComps(t, b, 24);
-    WCHAR out[DITTO_DIR_MAX] = L"";
-    if (t[1] == L':') {
-        /* 绝对 -> 相对：目标先归一化，再吃掉与 exe 目录的公共前缀，
-           exe 目录剩几段补几个 ".."。走到这里必然同盘（按钮可点状态保证）。 */
-        nb = CompsResolve(b, nb, 0);
-        int common = 0;
-        while (common < na && common < nb && _wcsicmp(a[common], b[common]) == 0)
-            common++;
-        out[0] = 0;
-        for (int i = common; i < na; i++)
-            wcscat_s(out, DITTO_DIR_MAX, L"..\\");
-        for (int i = common; i < nb; i++) {
-            wcscat_s(out, DITTO_DIR_MAX, b[i]);
-            if (i < nb - 1) wcscat_s(out, DITTO_DIR_MAX, L"\\");
-        }
-        if (!out[0]) wcscpy_s(out, DITTO_DIR_MAX, L".");
-    } else {
-        /* 相对 -> 绝对：目标分量接到 exe 目录后面统一消化，
-           ".." 就地弹出对应目录层。 */
-        for (int i = 0; i < nb && na < 24; i++, na++) {
-            wcscpy_s(a[na], 96, b[i]);
-        }
-        na = CompsResolve(a, na, 0);
-        CompsJoin(a, na, out, DITTO_DIR_MAX);
-    }
-    SetWindowTextW(e, out);
-    UpdateDirty();
-    UpdateConvBtn();
-}
-
 /* ---------------- 选窗添加 ----------------
    Spy++ / AutoIt "Finder Tool" 的标准做法（微软 KB Q143045）：点"选窗添加"
    后 SetCapture 把鼠标输入全收归本窗口 —— 目标窗口收不到这次点击、也不会被
@@ -1595,99 +1278,6 @@ static LRESULT CALLBACK FooterProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
-/* ---- 快速粘贴字体：按钮上显示"字体名 字号" ----
-   学 CLaunch-search（settings_general.go 的 fontDesc）的做法：一个入口，
-   按钮文字就是当前值 —— 用户不需要在两个框里对"现在选的是啥"。
-   字体名留空 = 用浮层的内置默认，显示时把默认名带出来，不然按钮是空的。 */
-static void UpdateClipFontBtn(void) {
-    HWND b = GetDlgItem(g_hwnd, IDC_CLIP_PICK);
-    if (!b) return;
-    const WCHAR* name = CfgStr(CFG_CLIP_FONT);
-    WCHAR txt[CLIP_FONT_MAX + 16];
-    _snwprintf_s(txt, (size_t)(CLIP_FONT_MAX + 16), _TRUNCATE, L"%s　%d 磅",
-                 (name[0] ? name : L"Microsoft YaHei UI"), CfgInt(CFG_CLIP_FONT_SIZE));
-    SetWindowTextW(b, txt);
-}
-
-/* ---------- 系统字体对话框（ChooseFont） ----------
-   调用方式取自本机的 CLaunch-search 项目（settings_font.go，同作者），那里踩过
-   两个坑，这里一并躲开：
-     ① 字体名留空时直接弹，家族预选会是空白 —— 先兜底成实际渲染用的默认字体。
-     ② 对话框按「字面名 + 字重」**整体**匹配；确认后写回的 lfFaceName 可能是带
-        字重后缀的 GDI 字面名（如选 MiSans 半细体 → 写回 "MiSans Medium"，字重
-        380）。第二次打开时恒传 FW_NORMAL(400) 会因字重对不上而家族预选空白。
-        所以用 EnumFontFamiliesEx 取该名字的**真实字重**再喂回去。 */
-
-struct FontFaceItem {
-    WCHAR name[LF_FACESIZE];
-    int   weight;
-};
-static FontFaceItem g_fontFaces[64];
-static int          g_fontFaceN = 0;
-
-static int CALLBACK EnumFaceProc(const LOGFONTW* lf, const TEXTMETRICW* tm,
-                                 DWORD type, LPARAM lp) {
-    (void)tm; (void)type; (void)lp;
-    if (g_fontFaceN < (int)(sizeof(g_fontFaces) / sizeof(g_fontFaces[0]))) {
-        wcsncpy_s(g_fontFaces[g_fontFaceN].name, LF_FACESIZE, lf->lfFaceName, _TRUNCATE);
-        g_fontFaces[g_fontFaceN].weight = lf->lfWeight;
-        g_fontFaceN++;
-    }
-    return 1;   /* 继续枚举 */
-}
-
-/* 取字体名的真实字重；枚举为空 = 字体未安装，返回 0（调用方兜底 FW_NORMAL）。
-   家族名与粗体字面同名的场景下，取字重最接近 400 的那个（即常规体）。 */
-static int FontFaceWeight(const WCHAR* name) {
-    if (!name || !name[0]) return 0;
-    LOGFONTW flt;
-    memset(&flt, 0, sizeof(flt));
-    wcsncpy_s(flt.lfFaceName, LF_FACESIZE, name, _TRUNCATE);
-    flt.lfCharSet = DEFAULT_CHARSET;
-    HDC dc = CreateCompatibleDC(NULL);
-    if (!dc) return 0;
-    g_fontFaceN = 0;
-    EnumFontFamiliesExW(dc, &flt, EnumFaceProc, 0, 0);
-    DeleteDC(dc);
-    if (g_fontFaceN <= 0) return 0;
-    int best = 0, bestDist = 1 << 30;
-    for (int i = 0; i < g_fontFaceN; i++) {
-        if (_wcsicmp(g_fontFaces[i].name, name) != 0) continue;
-        int dd = g_fontFaces[i].weight - 400;
-        if (dd < 0) dd = -dd;
-        if (dd < bestDist) { best = g_fontFaces[i].weight; bestDist = dd; }
-    }
-    return best ? best : g_fontFaces[0].weight;
-}
-
-/* 弹字体对话框。name / sizePt 既当初始值也当出参；用户确认返回 TRUE。 */
-static BOOL PickFont(HWND owner, WCHAR* name, int cap, int* sizePt) {
-    if (!name[0]) wcscpy_s(name, (size_t)cap, L"Microsoft YaHei UI");
-    LOGFONTW lf;
-    memset(&lf, 0, sizeof(lf));
-    wcsncpy_s(lf.lfFaceName, LF_FACESIZE, name, _TRUNCATE);
-    lf.lfHeight = -MulDiv(*sizePt, (g_dpi > 0 ? g_dpi : 96), 72);
-    lf.lfWeight = FontFaceWeight(name);
-    if (!lf.lfWeight) lf.lfWeight = FW_NORMAL;
-    lf.lfCharSet = DEFAULT_CHARSET;
-
-    CHOOSEFONTW cf;
-    memset(&cf, 0, sizeof(cf));
-    cf.lStructSize = sizeof(cf);
-    cf.hwndOwner   = owner;
-    cf.lpLogFont   = &lf;
-    cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_FORCEFONTEXIST | CF_NOSCRIPTSEL;
-    cf.nSizeMin = 6;
-    cf.nSizeMax = CLIP_FONT_SIZE_MAX;
-    if (!ChooseFontW(&cf)) return FALSE;
-
-    wcsncpy_s(name, (size_t)cap, lf.lfFaceName, _TRUNCATE);
-    int pt = cf.iPointSize / 10;
-    if (pt <= 0) pt = *sizePt;
-    *sizePt = pt;
-    return TRUE;
-}
-
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_COMMAND: {
@@ -1699,21 +1289,6 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         if (id == IDC_SAVE)   { DoSave(); return 0; }
-        if (id == IDC_CLIP_PICK) {
-            WCHAR name[CLIP_FONT_MAX] = L"";
-            int size = CfgInt(CFG_CLIP_FONT_SIZE);
-            const WCHAR* cur = CfgStr(CFG_CLIP_FONT);
-            if (cur[0]) wcscpy_s(name, CLIP_FONT_MAX, cur);
-            if (PickFont(h, name, CLIP_FONT_MAX, &size)) {
-                /* 确认即写入配置层（内存态）：ConfigSaveFile 写回时用的就是它，
-                   所以不需要"隐藏字段"来替按钮保管值。 */
-                CfgSetStr(CFG_CLIP_FONT, name);
-                CfgSetInt(CFG_CLIP_FONT_SIZE, size);
-                UpdateClipFontBtn();
-                UpdateDirty();
-            }
-            return 0;
-        }
         if (id == IDC_EXIT)   { CloseNoSave(); return 0; }
         if (id == IDC_RELOAD) {
             if (g_dirty && MessageBoxW(h, L"放弃未保存的改动并重新加载？", APP_TITLE,
@@ -1730,15 +1305,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (sub == 0 && HIWORD(w) == LBN_DBLCLK) { DelName(i); return 0; }
             return 0;
         }
-        if (id == IDC_DITTO_BROWSE) { BrowseDittoDir(); return 0; }
-        if (id == IDC_DITTO_CONV)   { ConvertDittoDir(); return 0; }
-        if (id == IDC_CLIP_SIZE_BTN || id == IDC_VIEWMAX_BTN || id == IDC_VIEWMIN_BTN) {
-            OpenSizePicker(id);      /* 弹示例窗拖尺寸：见"尺寸选取窗"一节 */
-            return 0;
-        }
         /* 勾选框 / 输入框：任何改动都算"有未保存的改动" */
         if (HIWORD(w) == BN_CLICKED || HIWORD(w) == EN_CHANGE) UpdateDirty();
-        if (id == IDC_DITTO_DB && HIWORD(w) == EN_CHANGE) UpdateConvBtn();
         return 0;
     }
     case WM_NOTIFY: {
@@ -1938,10 +1506,6 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     fc.lpszClassName = FOOTER_CLASS;
     if (!RegisterClassW(&fc)) return 1;
 
-    /* 尺寸选取窗的窗口类（无边框自绘的 WS_POPUP）：注册细节属于弹窗自己，
-       见 settings/sizepick.c 的 SizePickerRegister。建主窗之前注册完。 */
-    if (!SizePickerRegister(hInst)) return 1;
-
     /* DPI 要在**建窗之前**知道：窗口尺寸本身就得按它算（否则 200% 屏上
        窗口只有一半大）。QueryDpi 在没有 hwnd 时退回查屏幕 DC。 */
     g_dpi = (int)QueryDpi();
@@ -2016,8 +1580,6 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
                                      0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)id, hInst, NULL);
             HookChild(b);
-            if (id == IDC_CLIP_PICK)
-                MakeLabel(hInst, g_hwnd, L"显示字体：", id + 500);   /* 按钮左侧的说明 */
         } else if (kFields[i].isBool) {
             HWND b = CreateWindowExW(0, L"BUTTON", kFields[i].label,
                                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX | WS_TABSTOP,
@@ -2033,7 +1595,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
             /* 数字框：限 8 位（最大值 60000 也远用不完），防止粘进一大段文本。
                文本框按配置项自己的上限来限，不是 8 —— 路径比数字长得多。 */
             SendMessageW(e, EM_LIMITTEXT,
-                         kFields[i].isText ? (DITTO_DIR_MAX - 1) : 8, 0);
+                         kFields[i].isText ? (FIELD_TEXT_MAX - 1) : 8, 0);
             HookChild(e);
         }
     }
@@ -2057,17 +1619,6 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         MakeBtn(hInst, g_hwnd, L"删除", base + 3);
         MakeBtn(hInst, g_hwnd, L"选取窗口", base + 5);   /* 只填输入框，还得点"添加" */
     }
-
-    /* Ditto 行右侧的两颗小按钮（落位在 Layout 的 isText 分支里）。
-       互转按钮初始禁用：加载后由 UpdateConvBtn 按当前值决定。 */
-    MakeBtn(hInst, g_hwnd, L"选取…", IDC_DITTO_BROWSE);
-    MakeBtn(hInst, g_hwnd, L"相对⇄绝对", IDC_DITTO_CONV);
-    EnableWindow(GetDlgItem(g_hwnd, IDC_DITTO_CONV), FALSE);
-
-    /* 三对尺寸行右侧的「调整…」：弹示例窗拖尺寸（落位在 Layout 的成对分支） */
-    MakeBtn(hInst, g_hwnd, L"调整…", IDC_CLIP_SIZE_BTN);
-    MakeBtn(hInst, g_hwnd, L"调整…", IDC_VIEWMAX_BTN);
-    MakeBtn(hInst, g_hwnd, L"调整…", IDC_VIEWMIN_BTN);
 
     /* 底部"窗框"最后建：z 序压在表单内容之上，滚动时挡住溢出的内容 */
     g_footer = CreateWindowExW(WS_EX_CONTROLPARENT, FOOTER_CLASS, L"",
@@ -2102,20 +1653,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
             SetStatus(L"选窗已取消");
             continue;
         }
-        /* 尺寸选取窗的 Esc 也在这一层拦：它是无边框弹窗，焦点万一没落在它身上
-           （主窗口此时是禁用的，焦点有可能回到主窗口），它就收不到按键 ——
-           而它没有关闭按钮，收不到 Esc 就是"关不掉了"。消息循环是唯一能稳稳
-           看到本线程所有按键的地方。 */
-        if (SizePickerIsOpen() && msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
-            SizePickerClose(FALSE);
-            SetStatus(L"已放弃这次窗口大小调整");
-            continue;
-        }
         /* Tab 在控件之间移动焦点：IsDialogMessage 让输入框也吃 Tab，
-           否则设置界面里没法用键盘走完一整张表单。
-           尺寸选取窗开着时**不走它**：那是另一个顶层窗口（Esc / 回车归它），
-           IsDialogMessage 只认主窗口与它的子控件，让它先过一道只会白吞按键。 */
-        if (SizePickerIsOpen() || !IsDialogMessageW(g_hwnd, &msg)) {
+           否则设置界面里没法用键盘走完一整张表单。 */
+        if (!IsDialogMessageW(g_hwnd, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

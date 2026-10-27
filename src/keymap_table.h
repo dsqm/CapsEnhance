@@ -82,9 +82,6 @@ static const ActionDef kActions[] = {
     /* 按键帮助：单发命令，同样不发键。它由 main.c 直接在和弦上开合
        （不走执行线程，也不占动作队列 —— 见 help.c）：按下开、抬起关。 */
     { ACT_HELP,      VK_F1,      0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_HELP, "帮助(F1)", "帮助" },
-    /* 剪贴板：单发命令，不发键。窗口本体在独立 exe（clip/clip.c）里，
-       由 main.c 在和弦上直接开合。 */
-    { ACT_CLIPLIST,  'V',        0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_CLIPLIST, "剪贴板(V)", "贴板" },
     /* 系统音量：走普通"发键"通道（outVk = 多媒体键，系统自己处理，与前台程序无关）。
        静音是**开关**：重复一次就多切一次（来回横跳），必须单发 —— 与 Caps(Tab) 同理。
        音量加减是**步进**：长按重复（与真实音量键的手感一致，重复节奏即引擎的

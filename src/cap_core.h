@@ -22,14 +22,6 @@
                                        方向同浏览器：滚轮向上 = 向左。钩子已吞掉物理格。 */
 #define WM_RESTART_REQUEST (WM_APP + 12) /* 外部请求重启（--restart / 设置程序保存后） */
 #define WM_AUTODISABLE   (WM_APP + 13) /* 钩子 -> 主线程：自动屏蔽状态变化（wParam=1 命中名单） */
-#define WM_CLIP_ESC      (WM_APP + 15) /* 钩子 -> 主线程：剪贴板浮层打开期间按了 Esc（代收，见 clip.c） */
-#define WM_CLIP_KEY      (WM_APP + 16) /* 钩子 -> 主线程：浮层打开期间的导航键（wParam=vk，lParam=CLIPKF_*） */
-#define WM_CLIP_DITTO    (WM_APP + 17) /* 钩子 -> 主线程：浮层开着时单击了 Caps -> 转 Ditto 本体（见 ClipCallDitto） */
-#define WM_CLIP_GONE     (WM_APP + 18) /* 子进程死亡通知（实现在 src/child.c）-> 主线程：清 s_want、恢复按键放行 */
-#define WM_CLIP_VIEW     (WM_APP + 19) /* 钩子 -> 主线程：浮层打开期间的裸 F3（wParam=1 toggle 图片预览）
-                                        或"用户按了别的键"（wParam=0 让预览退场）。见 src/clip.c 的 ClipViewToggle */
-#define CLIPKF_SHIFT     0x1           /* 那一刻 Shift 按着（= 纯文本粘贴） */
-#define CLIPKF_ALT       0x2           /* 那一刻 Alt 按着（Alt+数字 才拦，见 hook.c） */
 #define WM_PIN_ELEVATED (WM_APP + 20) /* 置顶线程 -> 主线程：目标窗口权限更高，SetWindowPos 被 UIPI 拦下 */
 #define WM_FOLDER_OPEN (WM_APP + 14) /* 打开所在文件夹**失败**：wParam=FOLDER_ERR_*（一次性线程 -> 主线程弹气泡）。
                                         为什么必须绕回主线程：气泡走 Shell_NotifyIconW + 主线程的 g_nid，
@@ -95,7 +87,6 @@
 #define ACT_MOVEWIN 14               /* 把焦点窗口挪到鼠标光标处（多显示器）  */
 #define ACT_OPENFOLDER 15            /* 打开焦点程序所在文件夹并选中该 exe（F3）  */
 #define ACT_HELP     16              /* 按键帮助（F1）：拉起/唤起独立 exe CapsEnhanceHelp */
-#define ACT_CLIPLIST 17              /* 剪贴板（V）：拉起/唤起独立 exe CapsEnhanceClip，读 Ditto 历史 */
 #define ACT_MUTE     18              /* 系统静音开关（F6）：发 VK_VOLUME_MUTE，翻转型 -> 单发 */
 #define ACT_VOLDOWN  19              /* 系统音量减（F7）：发 VK_VOLUME_DOWN，步进型 -> 可长按重复 */
 #define ACT_VOLUP    20              /* 系统音量加（F8）：发 VK_VOLUME_UP，步进型 -> 可长按重复 */
@@ -117,7 +108,6 @@
 #define ACTF_MOVEWIN     0x10   /* 挪窗口：交给 winmove.c 的移动动作，不走按键发送 */
 #define ACTF_OPENFOLDER  0x20   /* 打开所在文件夹：交给 folder.c 的 shell 动作，不走按键发送 */
 #define ACTF_HELP        0x40   /* 按键帮助：由 main.c 直接在和弦上开合（见 help.c），不走按键发送 */
-#define ACTF_CLIPLIST    0x80   /* 剪贴板：由 main.c 直接在和弦上开合（见 clip.c），不走按键发送 */
 #define ACTF_PIN         0x100  /* 窗口置顶：交给 pin.c 的置顶线程（投递窗口句柄），不走按键发送 */
 
 /* ---------- 修饰（和弦）模式 ----------

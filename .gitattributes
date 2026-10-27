@@ -1,4 +1,4 @@
 # 许可证文本逐字保留（不让 git 做行尾规范化、也别当二进制压缩 diff）
 LICENSE -text
-thirdparty/sqlite3mc_amalgamation.c -text
-thirdparty/sqlite3mc_amalgamation.h -text
+archive/clipboard/thirdparty/sqlite3mc_amalgamation.c -text
+archive/clipboard/thirdparty/sqlite3mc_amalgamation.h -text

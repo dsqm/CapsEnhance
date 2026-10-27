@@ -754,22 +754,6 @@ int main(void) {
         EXPECT(CountStr(whole, "ProbeApp") == 1,
                "SEC: 旧段名不复制名单（三个来回之后文件里仍只有一条）");
     }
-    /* 超长的字符串值必须**截断**。
-       这条不是防御性的：wcscpy_s 把"目标放不下"当无效参数处理 → fastfail
-       （0xC0000409），所以一个手写的长字体名会让本体与设置程序一起启动即崩，
-       而用户唯一的自救入口（设置界面）也打不开。能跑到下面这一行就说明没崩。 */
-    {
-        WCHAR longFont[CLIP_FONT_MAX + 64];
-        for (int i = 0; i < (int)(sizeof(longFont) / sizeof(longFont[0]) - 1); i++)
-            longFont[i] = L'字';
-        longFont[sizeof(longFont) / sizeof(longFont[0]) - 1] = 0;
-        CfgSetStr(CFG_CLIP_FONT, longFont);
-        EXPECT(wcslen(CfgStr(CFG_CLIP_FONT)) == CLIP_FONT_MAX - 1,
-               "CFG: 超长 ClipFont 被截断存下（不是 fastfail）");
-        CfgSetStr(CFG_CLIP_FONT, L"");
-        EXPECT(CfgStr(CFG_CLIP_FONT)[0] == 0, "CFG: ClipFont 可清空（= 内置默认）");
-    }
-
     /* '#' 开头不再算注释（只认 ';'）。可观测的差别：名单段里一行 "# Ghost.exe"
        过去会被整行跳过，现在会被当成一个（带 # 的）进程名收进名单。
        不会因此崩掉解析 —— 只是"# 不再是注释"这件事有了明确后果。 */
@@ -818,51 +802,6 @@ int main(void) {
     EXPECT(TemplateHas("ImeCapsMode = 1"),   "CFG: 模板含 ImeCapsMode 默认值（切中文）");
     EXPECT(TemplateHas("ImeLShiftMode = 2"), "CFG: 模板含 ImeLShiftMode 默认值（切英文）");
     EXPECT(TemplateHas("ImeRShiftMode = 1"), "CFG: 模板含 ImeRShiftMode 默认值（切中文）");
-    /* DittoDir 是字符串配置项（Ditto 文件夹，Ditto.db/Ditto.exe 都从它派生），
-       默认值是**空**（未配置 = 功能不开），
-       所以断言的是"键在、且写成了空值"，不是"键 = 某值"。同时钉住解析与写回：
-       它是字符串，走的是与整数不同的那条路。 */
-    EXPECT(TemplateHas("DittoDir = "), "CFG: 模板含 DittoDir（默认空 = 不启用剪贴板）");
-    {
-        CfgSetStr(CFG_DITTO_DIR, L"..\\Ditto");
-        const WCHAR* got = CfgStr(CFG_DITTO_DIR);
-        EXPECT(got && wcscmp(got, L"..\\Ditto") == 0,
-               "CFG: DittoDir 原样存取（相对路径不在配置层展开）");
-        CfgSetStr(CFG_DITTO_DIR, L"");
-        EXPECT(CfgStr(CFG_DITTO_DIR)[0] == 0, "CFG: DittoDir 可清空（= 关闭该功能）");
-    }
-    /* 快速粘贴的字体/字号：字号是**磅**（与系统字体对话框一致），有钳制。
-       默认值 10 在这里写字面量（STR 宏是 config.c 的内部实现，测试不引入）——
-       改默认值时这里会失败，正好逼着人来核对。 */
-    EXPECT(TemplateHas("ClipFont = "),    "CFG: 模板含 ClipFont（默认空 = 内置字体）");
-    EXPECT(TemplateHas("ClipFontSize = 10"), "CFG: 模板含 ClipFontSize 默认值");
-    {
-        CfgSetStr(CFG_CLIP_FONT, L"MiSans Medium");
-        EXPECT(wcscmp(CfgStr(CFG_CLIP_FONT), L"MiSans Medium") == 0,
-               "CFG: ClipFont 原样存取（带字重后缀的字面名不改写）");
-        CfgSetInt(CFG_CLIP_FONT_SIZE, 999);
-        EXPECT(CfgInt(CFG_CLIP_FONT_SIZE) == CLIP_FONT_SIZE_MAX, "CFG: 字号超上限被钳制");
-        CfgSetInt(CFG_CLIP_FONT_SIZE, 1);
-        EXPECT(CfgInt(CFG_CLIP_FONT_SIZE) == 6, "CFG: 字号低于下限被钳到 6");
-        CfgSetStr(CFG_CLIP_FONT, L"");
-        CfgSetInt(CFG_CLIP_FONT_SIZE, CLIP_FONT_SIZE_DEFAULT);
-    }
-    /* 快速粘贴窗口的尺寸：96 DPI 下的像素，写进 ini 的默认值必须等于浮层
-       原来写死的那两个（560 / 374），否则"什么都没配"也会变个尺寸。 */
-    EXPECT(TemplateHas("ClipW = " STR(CLIP_W_DEFAULT)), "CFG: 模板含 ClipW 默认值");
-    EXPECT(TemplateHas("ClipH = " STR(CLIP_H_DEFAULT)), "CFG: 模板含 ClipH 默认值");
-    {
-        CfgSetInt(CFG_CLIP_W, 9999);
-        EXPECT(CfgInt(CFG_CLIP_W) == CLIP_W_MAX, "CFG: 宽度超上限被钳制");
-        CfgSetInt(CFG_CLIP_W, 1);
-        EXPECT(CfgInt(CFG_CLIP_W) == CLIP_W_MIN, "CFG: 宽度低于下限被钳到最小值");
-        CfgSetInt(CFG_CLIP_H, 9999);
-        EXPECT(CfgInt(CFG_CLIP_H) == CLIP_H_MAX, "CFG: 高度超上限被钳制");
-        CfgSetInt(CFG_CLIP_H, 1);
-        EXPECT(CfgInt(CFG_CLIP_H) == CLIP_H_MIN, "CFG: 高度低于下限被钳到最小值");
-        CfgSetInt(CFG_CLIP_W, CLIP_W_DEFAULT);
-        CfgSetInt(CFG_CLIP_H, CLIP_H_DEFAULT);
-    }
     /* 激活键不再进配置：模板里**不该**再出现这两项（否则用户会以为能改） */
     EXPECT(!TemplateHas("EnhanceKeys"), "CFG: 模板不再含 EnhanceKeys（已改为编译期常量）");
     EXPECT(!TemplateHas("ShiftKeys"),   "CFG: 模板不再含 ShiftKeys（已改为编译期常量）");

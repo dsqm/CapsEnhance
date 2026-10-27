@@ -322,113 +322,14 @@ static BOOL IsInjected(const KBDLLHOOKSTRUCT *p) {
     return (p->flags & LLKHF_INJECTED) != 0;
 }
 
-/* 是不是**自家浮层**粘贴时注入的键（见 cap.h 的 CLIP_INJECT_MARKER）。
-   与 IsInjected 分开的理由：那一位只说"有程序注入了键"，别的工具注入的也算，
-   而我们要能在日志里把两者分开。 */
-
 /* 底层键盘钩子过程 */
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
         KBDLLHOOKSTRUCT *p = (KBDLLHOOKSTRUCT*)lParam;
-        /* ★ 自家粘贴注入放在 IsInjected **之前**：这条路径存在的意义就是
-           "永不吞"，写成显式分支后，将来即使有人把注入放行挪到和弦逻辑后面，
-           也不会把浮层的粘贴键吞掉（那表现为"点了条目没粘上"）。 */
-        if (p->dwExtraInfo == CLIP_INJECT_MARKER) {
-            if (g_recording.load())
-                CapLog("  浮层粘贴注入：vk=0x%02X %s（放行）", (int)p->vkCode,
-                       (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) ? "down" : "up");
-            return CallNextHookEx(g_hook, nCode, wParam, lParam);
-        }
         if (IsInjected(p)) return CallNextHookEx(g_hook, nCode, wParam, lParam);
 
         BOOL down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
         int  vk   = (int)p->vkCode;
-
-        /* ---- 剪贴板浮层打开期间：Esc 由主程序代收 ----
-           浮层是 WS_EX_NOACTIVATE（它存在的全部意义就是不抢焦点），代价是
-           **它自己收不到任何键盘消息** —— 连"用户按了 Esc"都看不见。所以只能
-           由本钩子替它收：吞掉 down、把 up 也吞（配对记账，见 g_swallowVk），
-           再把这件事交给主线程去通知浮层。
-           ★ 只在浮层真的开着时介入（ClipIsOpen 是一次内存读），其余时间
-           Esc 完全照常 —— 不抢用户的键是这个项目的一贯规矩。 */
-        if (ClipIsOpen() && vk == VK_ESCAPE) {
-            if (down) { SwallowNote(vk); PostMessageW(g_mainWnd, WM_CLIP_ESC, 0, 0); }
-            else      SwallowTake(vk);
-            return 1;
-        }
-        /* ---- 浮层打开期间：导航键同样代收 ----
-           回车 / ↑↓ / PgUp/PgDn / Alt+数字 都要送到浮层去，而它一个键盘消息
-           都收不到（同上）。拦的范围刻意很窄：
-             · 数字键**只在 Alt 按着时**才拦 —— 不带 Alt 的数字留给将来的搜索框，
-               也免得"浮层开着时打不出数字"这种冤枉事。
-             · 其余一切照常放行：浮层开着不等于它拥有键盘。 */
-        if (ClipIsOpen()) {
-            BOOL alt = ((GetAsyncKeyState(VK_LMENU) & 0x8000) != 0) ||
-                       ((GetAsyncKeyState(VK_RMENU) & 0x8000) != 0);
-            /* Caps 还按着时，I/K 让位给浮层：词跳的 i/k 变成 ↑↓。
-               ★ 判 g_cMod（Caps 和弦进行中）是必需的：不带 Caps 的 i/k 是普通
-               打字，浮层开着也不该抢（它不拥有键盘）。 */
-            if (g_cMod && (vk == 'I' || vk == 'K')) {
-                if (down) {
-                    SwallowNote(vk);
-                    s_capsUsed = TRUE;   /* 算动作：防止之后误触发"单击 Caps 切输入法" */
-                    PostMessageW(g_mainWnd, WM_CLIP_KEY,
-                                 (WPARAM)(vk == 'I' ? VK_UP : VK_DOWN), 0);
-                } else {
-                    SwallowTake(vk);
-                }
-                return 1;
-            }
-            BOOL nav = (vk == VK_RETURN || vk == VK_UP || vk == VK_DOWN ||
-                        vk == VK_PRIOR || vk == VK_NEXT);
-            if (nav || (alt && vk >= '0' && vk <= '9')) {
-                unsigned f = 0;
-                if (GetAsyncKeyState(VK_SHIFT) & 0x8000) f |= CLIPKF_SHIFT;
-                if (alt) f |= CLIPKF_ALT;
-                if (down) { SwallowNote(vk); PostMessageW(g_mainWnd, WM_CLIP_KEY, (WPARAM)vk, (LPARAM)f); }
-                else      SwallowTake(vk);
-                return 1;
-            }
-            /* ---- 裸 F3 = 图片预览 toggle（仅浮层可见时）----
-               ★ 只在 Caps 没按着时拦：caps+F3 是"打开所在文件夹"（和弦触发键），
-               它的判定在下面的触发键分支 —— 这里抢先吞掉的话那个功能就死了
-               （代收段在触发键分支之前，顺序是天生的，只能自己让开）。
-               ★ ClipIsOpen 门同样是硬约束：浮层关着时一个字节都不碰，浏览器
-               查找 / IDE"查找下一个"照常。没有这扇门的实测后果：浮层藏起后
-               F3 还在 toggle 一个看不见的预览，前台应用反而收不到 F3 ——
-               表现就是"有些时候按 F3 没反应"。
-               ★ 系统自动重复只吞不转发。LL 钩子没有 repeat 标志（KBDLLHOOKSTRUCT
-               的 flags 里没有那一位），自动重复表现为"up 之前又来 down"——
-               恰好就是记账表能回答的问题：表里没有才记上并 toggle，repeat
-               只吞（否则按住 F3，预览开关闪个不停）。 */
-            if (!g_cMod && ClipIsOpen() && vk == VK_F3) {
-                if (down) {
-                    BOOL noted = FALSE;
-                    for (int i = 0; i < g_swallowN; i++)
-                        if (g_swallowVk[i] == vk) { noted = TRUE; break; }
-                    if (!noted) {
-                        SwallowNote(vk);
-                        PostMessageW(g_mainWnd, WM_CLIP_VIEW, 1, 0);
-                    }
-                } else {
-                    SwallowTake(vk);
-                }
-                return 1;
-            }
-            /* ---- 预览开着时按了无关键 = 用户已经回去干别的了 ----
-               预览退场。**只通知，不吞** —— 这颗键该怎么走还怎么走，预览从不
-               拥有键盘（Ditto 同款语义：预览开着时开始打字，预览自己消失）。
-               修饰键除外：Shift+回车 纯文本粘贴这类组合里修饰键先到，不能把
-               "正要粘贴"误判成"开始打字"。 */
-            if (down && ClipViewIsOpen()) {
-                static const int kViewMods[] = { VK_LSHIFT, VK_RSHIFT, VK_LCONTROL,
-                    VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN };
-                BOOL mod = FALSE;
-                for (int i = 0; i < (int)(sizeof(kViewMods) / sizeof(kViewMods[0])); i++)
-                    if (vk == kViewMods[i]) { mod = TRUE; break; }
-                if (!mod) PostMessageW(g_mainWnd, WM_CLIP_VIEW, 0, 0);
-            }
-        }
 
         /* ---- "按任意键打断持续滚动"（2026-09-11 第二版） ----
            松手不再终止（滚起来就能松手读），所以终止条件改由"用户产生新输入"
@@ -545,11 +446,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                    放在最前面：DragEnd / 打断那些是收尾动作，不影响判定。
                    （"反着按"与"命中 [AutoDisable]"那两条路在 down 时就已放行，
                    g_cMod 为假，根本走不到这里 —— 与"整段不介入"天然一致。） */
-                if (!s_capsUsed && ClipIsOpen())
-                    PostMessageW(g_mainWnd, WM_CLIP_DITTO, 0, 0);
-                    /* 单击 Caps 且浮层开着 -> 转 Ditto 本体（见 ClipCallDitto）。
-                       浮层的关闭由 ClipCallDitto 自己做（先关再拉本体）。 */
-                else if (!s_capsUsed && ConfigGetImeMode(IME_KEY_CAPS) != IME_MODE_OFF)
+                if (!s_capsUsed && ConfigGetImeMode(IME_KEY_CAPS) != IME_MODE_OFF)
                     ImeRequest(IME_KEY_CAPS);
                 s_capsUsed = FALSE;
                 /* 必须先清探测闩锁：若用户"按着 ` 直接松开 C"，` 的 keyup

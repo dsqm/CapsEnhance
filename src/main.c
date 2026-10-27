@@ -835,10 +835,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
        ★ 这条广播要能被收到，前提是 WinMain 里把它放进了 UIPI 白名单 ——
        管理员运行时 explorer 的广播本来是会被 UIPI 拦掉的（见 TrayStartRetry）。 */
     if (msg == s_taskbarCreated && s_taskbarCreated) { TrayRebuild(); return 0; }
-    if (ClipIsBornMsg(msg))   { ClipBorn((DWORD)wp, (DWORD)lp); return 0; }  /* 浮层窗口已出生，握手完成 */
-    if (ClipIsClosedMsg(msg)) { ClipClosed(); return 0; }   /* 浮层自行关闭（如粘贴后收起） */
-    if (ClipViewIsStateMsg(msg)) { ClipViewState((int)wp); return 0; } /* 预览窗开/关报信 */
-    if (msg == WM_CLIP_GONE) { ClipGone(); return 0; }      /* 浮层进程没了（内核告知，见 src/child.c） */
 
     switch (msg) {
     /* ---- 和弦引擎事件 ---- */
@@ -965,9 +961,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                它只是"拉起/唤起另一个进程的窗口"，在主线程上做才是对的
                （要按和弦的寿命开合，见 help.c）。 */
             if (ActHasFlag(act, ACTF_HELP)) HelpShow();
-            /* 剪贴板（Caps+V）：同样不走执行线程 —— 它只是"拉起/唤起另一个
-               进程的窗口"。toggle 语义在 ClipShow 里（再按一次 = 关掉）。 */
-            if (ActHasFlag(act, ACTF_CLIPLIST)) ClipShow();
             if (!single) {
                 /* 开关键只切一次、也不接管重复节奏（原来那个动作继续重复） */
                 g_activeAct = act;
@@ -1045,28 +1038,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         TrayBalloon(L"无法置顶：目标窗口以管理员身份运行。"
                     L"需要置顶这类窗口，请在设置里打开「以管理员运行」（RunAsAdmin）。", NULL);
         return 0;
-    case WM_CLIP_ESC:                /* 钩子代收的 Esc（浮层自己收不到键盘，见 clip.c） */
-        ClipEsc();
-        return 0;
-    case WM_CLIP_KEY:                /* 钩子代收的导航键（回车 / ↑↓ / Alt+数字 …） */
-        ClipKey((int)wp, (unsigned)lp);
-        return 0;
-    case WM_CLIP_DITTO:              /* 浮层开着时单击 Caps：关浮层、拉起 Ditto 本体 */
-        ClipCallDitto();
-        return 0;
-    case WM_CLIP_VIEW:               /* 裸 F3（toggle 预览）/ 无关键（预览退场），见 src/clip.c */
-        if (wp) ClipViewToggle();
-        else    ClipViewHide();
-        return 0;
     case WM_TIMER: {
         if (wp == TRAY_RETRY_TIMER) { TrayRetryTick(); return 0; }
         if (wp == HELP_TIMER) { HelpTick(); return 0; }
-        if (wp == CLIP_TIMER) { ClipTick(); return 0; }
-        if (wp == CLIP_PREWARM_TIMER) {
-            KillTimer(g_mainWnd, CLIP_PREWARM_TIMER);   /* 一次性：预热完就拆 */
-            ClipPrewarm();
-            return 0;
-        }
         if (wp != 2) break;
         if (!g_cMod) { ResetEngine(); return 0; }
         ULONGLONG now = GetTickCount64();
@@ -1378,12 +1352,6 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         /* 钩子都装完了，按当前全部状态刷新一次提示（滚轮钩子装不上要让人看见，
            别静默降级；[AutoDisable] 与记录态也一并纳入）。 */
         TrayCurrentHint();
-
-        /* 浮层预热：启动 3 秒后把剪贴板浮层进程先拉起来（隐藏驻留，见
-           src/clip.c 的 ClipPrewarm）—— 第一次 Caps+V 从此不用付冷启动。
-           用定时器错开而不是现在就拉：启动这几秒里钩子、托盘、杀软都在忙，
-           别挤在同一瞬间。 */
-        SetTimer(g_mainWnd, CLIP_PREWARM_TIMER, 3000, NULL);
     }
 
     MSG msg;

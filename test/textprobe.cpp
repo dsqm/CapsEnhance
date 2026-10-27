@@ -3,7 +3,7 @@
    再 2x 最近邻放大存 PNG，肉眼对比笔画粗细与锐度。
      A  help.c 现状：GDI+ ClearType + 居中对齐（origin 落在亚像素相位）
      B  GDI+ ClearType + 整数 origin（只换定位，仍用 GDI+ 栅格化器）
-     C  clip.c 方案：GDI DrawTextW + HFONT(DEFAULT_QUALITY)，整数矩形
+     C  GDI 方案：GDI DrawTextW + HFONT(DEFAULT_QUALITY)，整数矩形
      D  GDI+ 灰阶 AntiAliasGridFit + 居中（旧版路线）
    每行画 4 个不同宽度的"键帽"（复现帮助图里各键标签相位不同的事实）。 */
 #include <windows.h>
@@ -72,7 +72,7 @@ int main() {
     const WCHAR* rowName[4] = {
         L"A  help现状: GDI+ ClearType 居中(亚像素相位)",
         L"B  GDI+ ClearType 整数origin",
-        L"C  clip方案: GDI DrawTextW 整数矩形",
+        L"C  GDI方案: GDI DrawTextW 整数矩形",
         L"D  GDI+ 灰阶AntiAlias 居中",
     };
 
@@ -123,7 +123,7 @@ int main() {
                 g.Flush(FlushIntentionSync);
 
                 if (row == 2) {
-                    /* C：GDI DrawTextW —— 整数矩形（clip.c DrawTipText 同款） */
+                    /* C：GDI DrawTextW —— 整数矩形 */
                     LOGFONTW lf; memset(&lf, 0, sizeof(lf));
                     lf.lfHeight = -fsFunc;
                     lf.lfWeight = FW_NORMAL;

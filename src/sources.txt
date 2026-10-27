@@ -15,6 +15,5 @@ src\drag.c
 src\ime.c
 src\folder.c
 src\help.c
-src\clip.c
 src\child.c
 src\lane.c

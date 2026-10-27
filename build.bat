@@ -83,16 +83,13 @@ rem Settings editor: a separate exe on purpose -- the main program's thread
 rem hosts the keyboard hook, so it must never own a modal editor window.
 rem It links src\config.c: the form reads/writes config values through the
 rem same ConfigGet*/ConfigSet* the main program uses, so ranges and key names
-rem are never duplicated in the UI.
-rem Two translation units: settings\settings.c is the form itself, settings\sizepick.c
-rem is the window-size picker (its own window class, state and two sets of drawing
-rem code -- kept out of the form on purpose). They share only what is listed in
-rem settings\settings_int.h.
+rem are never duplicated in the UI. settings\settings_int.h holds the field-row
+rem definition.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /Foobj\ ^
-   settings\settings.c settings\sizepick.c src\config.c ^
+   settings\settings.c src\config.c ^
    /link /OUT:bin/CapsEnhanceSettings.exe ^
-   user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib uuid.lib ^
+   user32.lib gdi32.lib shell32.lib advapi32.lib ^
    /SUBSYSTEM:WINDOWS
 if errorlevel 1 (
     echo [ERROR] settings build failed
@@ -117,57 +114,10 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem Clipboard overlay: a fourth exe, for the same reason as the help overlay --
-rem it opens Ditto's SQLite database, decodes clipboard formats and writes them
-rem back to the clipboard, none of which belongs on the hook-hosting thread.
-rem
-rem The SQLite amalgamation is compiled on its OWN cl line on purpose:
-rem   - /W0 /analyze-  -- third-party code is not held to this repo's /W4 + /analyze
-rem                       zero-warning baseline (it would never pass it).
-rem   - no /TP         -- it is C, not C++; forcing C++ breaks the amalgamation.
-rem   - /bigobj        -- an amalgamation is one huge TU; the default section
-rem                       limit is exceeded otherwise.
-rem It is linked into CapsEnhanceClip.exe ONLY, so the other three exes do not
-rem grow by a single byte.
-cl /nologo /O2 /W0 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /bigobj /c ^
-   /D_CRT_SECURE_NO_WARNINGS /Ithirdparty ^
-   /Foobj\sqlite3mc.obj ^
-   thirdparty\sqlite3mc_amalgamation.c
-if errorlevel 1 (
-    echo [ERROR] sqlite3 build failed
-    call :maybe_pause
-    exit /b 1
-)
-
-rem colorcode.c: colour-code detection (pure functions, clipboard overlay only).
-rem Built as its own obj and linked into CapsEnhanceClip.exe only, like sqlite,
-rem so the other three exes do not grow by a byte.
-cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc /c ^
-   /Foobj\colorcode.obj src\colorcode.c
-if errorlevel 1 (
-    echo [ERROR] colorcode build failed
-    call :maybe_pause
-    exit /b 1
-)
-
-cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc /Ithirdparty ^
-   /Foobj\ ^
-   clip\clip.c clip\clip_thumb.c clip\clip_view.c ^
-   /link /OUT:bin/CapsEnhanceClip.exe ^
-   obj\sqlite3mc.obj obj\colorcode.obj ^
-   user32.lib gdi32.lib shell32.lib ole32.lib gdiplus.lib bcrypt.lib advapi32.lib ^
-   /SUBSYSTEM:WINDOWS
-if errorlevel 1 (
-    echo [ERROR] clipboard overlay build failed
-    call :maybe_pause
-    exit /b 1
-)
-
 rem Report what actually got built, with which toolchain. Cheap here, and it
 rem turns "the two exes differ, why?" into a one-line diff of the logs.
 for %%F in (bin\CapsEnhance.exe) do echo [OK] bin/CapsEnhance.exe built. size=%%~zF bytes
 for %%F in (bin\CapsEnhanceSettings.exe) do echo [OK] bin/CapsEnhanceSettings.exe built. size=%%~zF bytes
-for %%F in (bin\CapsEnhanceClip.exe) do echo [OK] bin/CapsEnhanceClip.exe built. size=%%~zF bytes
 where certutil >nul 2>&1 && certutil -hashfile bin\CapsEnhance.exe SHA256 | findstr /R /V "SHA256 CertUtil hash" 
 call :maybe_pause
 exit /b 0
@@ -203,7 +153,7 @@ echo.
 echo   Windows cannot overwrite an exe while a process has it mapped, so the
 echo   linker can only say "LNK1104: cannot open file". Exit CapsEnhance
 echo   first (tray icon, right click, exit), then run build.bat again.
-echo   Same for CapsEnhanceSettings / Help / Clip if you have those open.
+echo   Same for CapsEnhanceSettings / Help if you have those open.
 call :maybe_pause
 exit /b 1
 

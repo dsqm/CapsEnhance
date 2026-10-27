@@ -196,10 +196,8 @@ typedef enum {
 static WCHAR g_names[CFGLIST_COUNT][CFG_MAX_ENTRIES][CFG_NAME_MAX];
 static int   g_count[CFGLIST_COUNT];
 /* ---------- 值存储 ----------
-   整数 / 布尔项的值**就在 kCfg 表里**（表即存储）；文本项指向下面这两个缓冲
-   —— 文本项要求"返回内部指针"（主程序读路径、设置程序写回都要），塞不进表里。 */
-static WCHAR g_dittoDir[DITTO_DIR_MAX] = L"";
-static WCHAR g_clipFont[CLIP_FONT_MAX] = L"";
+   整数 / 布尔项的值**就在 kCfg 表里**（表即存储）。文本项（当前没有）由调用方
+   提供缓冲：文本项要求"返回内部指针"，塞不进表里。 */
 
 /* ================= 配置项描述符表（**唯一一份语义定义**） =================
    加一个配置项 = 本表加一行（默认值 / 值域 / ini 注释 / 解析 / 读写 / 写回
@@ -303,58 +301,6 @@ static CfgDef kCfg[CFG_COUNT] = {
       "; 三个键都遵守 [AutoDisable] 名单。\n" },
     { "imelshiftmode", "ImeLShiftMode", 0, IME_LSHIFT_MODE_DEFAULT, 0, IME_MODE_MAX, 0, NULL, 0, NULL },
     { "imershiftmode", "ImeRShiftMode", 0, IME_RSHIFT_MODE_DEFAULT, 0, IME_MODE_MAX, 0, NULL, 0, NULL },
-
-    /* 文本项。收下时已 TrimW 过，**不做任何路径规范化**：相对路径的基准由
-       使用者决定（主程序按自己的 exe 目录展开），在这里展开就等于把基准写在两处。 */
-    { "dittodir", "DittoDir", CFG_F_TEXT, 0, 0, 0, DITTO_DIR_MAX, g_dittoDir, 0,
-      "; Ditto 的文件夹（Caps+V 弹出剪贴板用，两处派生）：\n"
-      ";   <DittoDir>\\Ditto.db   浮层只读地取最近 100 条\n"
-      ";   <DittoDir>\\Ditto.exe  浮层里\"转 Ditto 本体\"用 -open 拉起它的窗口\n"
-      "; 留空 = 不启用该功能（按 Caps+V 时浮层会提示未配置）。\n"
-      "; 相对路径的基准 = 本程序 exe 所在目录（也就是本文件所在目录）：\n"
-      ";   DittoDir = ..\\Ditto          -> exe 同级的上一级里的 Ditto 文件夹\n"
-      ";   DittoDir = C:\\Tools\\Ditto   -> 绝对路径，原样使用\n"
-      "; 数据库不在程序目录也能找到：会按 Ditto.Settings 里的 DBPath3 解析\n"
-      "; （绝对路径直用；相对路径先试程序目录、再试系统的「文档」文件夹）。\n"
-      "; ★ 窗口大小（ClipW/ClipH=0 时）也读 <DittoDir>\\Ditto.Settings。\n"
-      "; 不做任何自动探测：便携版 Ditto 的目录在哪，只有你知道。\n" },
-
-    { "clipfont", "ClipFont", CFG_F_TEXT, 0, 0, 0, CLIP_FONT_MAX, g_clipFont, 0,
-      "; 快速粘贴窗口（Caps+V）的字体与字号。\n"
-      "; ClipFontSize 单位是磅（与系统字体对话框一致），范围 6.."
-      STR(CLIP_FONT_SIZE_MAX) "\n"
-      "; ClipFont 留空 = 用内置的 Microsoft YaHei UI。\n" },
-
-    { "clipfontsize", "ClipFontSize", 0, CLIP_FONT_SIZE_DEFAULT, 6, CLIP_FONT_SIZE_MAX, 0, NULL, 0, NULL },
-
-    { "clipw", "ClipW", 0, CLIP_W_DEFAULT, CLIP_W_MIN, CLIP_W_MAX, 0, NULL, 0,
-      "; 快速粘贴窗口（Caps+V）的大小：单位是 96 DPI 下的像素，\n"
-      "; 实际大小 = 值 × 显示器 DPI/96（换显示器不用改配置）。\n"
-      "; 设置界面（剪贴板段）里也可以直接改。\n"
-      "; 宽 " STR(CLIP_W_MIN) ".." STR(CLIP_W_MAX)
-      "，高 " STR(CLIP_H_MIN) ".." STR(CLIP_H_MAX) "\n"
-      "; 高度只定外框：条目按行高往下排，排不下的用滚轮看。\n"
-      "; ★ 尺寸是浮层进程启动时读的，改完要重启 CapsEnhance 才生效。\n" },
-    { "cliph", "ClipH", 0, CLIP_H_DEFAULT, CLIP_H_MIN, CLIP_H_MAX, 0, NULL, 0, NULL },
-
-    { "clipclickpaste", "ClipClickPaste", CFG_F_BOOL, CLIP_CLICK_PASTE_DEFAULT, 0, 1, 0, NULL, 1,
-      "; 单击条目直接上屏（默认开）：挑中就粘，不必先选中再双击。\n"
-      "; 0 = 关闭（单击只选中，双击才粘）\n" },
-
-    { "clipviewmaxw", "ClipViewMaxW", 0, CLIP_VIEW_MAX_W_DEFAULT, CLIP_VIEW_MAX_W_MIN, CLIP_VIEW_MAX_W_MAX, 0, NULL, 0,
-      "; F3 图片预览窗格的最大宽度：单位 96 DPI 下的像素，\n"
-      "; 实际 = 值 × 显示器 DPI/96，且仍不超过所在屏幕的工作区。\n"
-      "; 设置界面（剪贴板段）里也可以直接改。超限的图用滚动条平移。\n"
-      "; ★ 浮层进程启动时读，改完要重启 CapsEnhance 才生效。\n" },
-    { "clipviewmaxh", "ClipViewMaxH", 0, CLIP_VIEW_MAX_H_DEFAULT, CLIP_VIEW_MAX_H_MIN, CLIP_VIEW_MAX_H_MAX, 0, NULL, 0,
-      "; F3 图片预览窗格的最大高度（同上）。\n" },
-
-    { "clipviewminw", "ClipViewMinW", 0, CLIP_VIEW_MIN_W_DEFAULT, CLIP_VIEW_MIN_W_MIN, CLIP_VIEW_MIN_W_MAX, 0, NULL, 0,
-      "; F3 图片预览窗格的最小宽度：小图的预览窗也撑到这个大小，\n"
-      "; 点一下图（切换适应窗口）才是实打实的放大。与最大值一样按 DPI 放大、\n"
-      "; 不超工作区；设置界面（剪贴板段）里可改。\n" },
-    { "clipviewminh", "ClipViewMinH", 0, CLIP_VIEW_MIN_H_DEFAULT, CLIP_VIEW_MIN_H_MIN, CLIP_VIEW_MIN_H_MAX, 0, NULL, 0,
-      "; F3 图片预览窗格的最小高度（同上）。\n" },
 
     { "hyperpassthrough", "HyperPassthrough", CFG_F_BOOL, 0, 0, 1, 0, NULL, 0,
       "; Hyper 透传（进阶功能，默认关）：**懒按下** —— 按住 C 期间三键不按，\n"
@@ -1147,8 +1093,8 @@ static const char* const kListSec[CFGLIST_COUNT] = {
 
 /* 写回用的"键 = 值"清单：直接遍历 kCfg。
    key = 比较用的形态（小写）；name = 写进文件的形态（见 CfgDef 的说明）。
-   val 的容量按**最宽的那个值**定：DittoDir 是字符串值之一，UTF-8 下一个
-   汉字/非拉丁字符最多 3 字节，320 个 WCHAR 就是 960 字节上限，取 1024 留余量。
+   val 的容量按**最宽的那个值**定：文本项若出现，UTF-8 下一个汉字/非拉丁字符
+   最多 3 字节，320 个 WCHAR 就是 960 字节上限，取 1024 留余量。
    写成固定数组而不是指针，是为了让"值"与"键"一样留在结构里 —— 调用方拿到
    的 KeyVal 数组在它的整个生命周期内都有效，不需要再管谁 owns 哪块内存。 */
 typedef struct { int id; const char* key; const char* name; char val[1024]; } KeyVal;
@@ -1230,7 +1176,7 @@ BOOL ConfigSaveFile(const WCHAR* path) {
     size_t bodyLen = raw.size();
     if (hasBom && bodyLen >= 3) { body += 3; bodyLen -= 3; }
 
-    /* static 不是随手加的：KeyVal 的 val 为了装得下字符串值（DittoDir 最长 320 个 WCHAR
+    /* static 不是随手加的：KeyVal 的 val 为了装得下可能的文本值（320 个 WCHAR
        的 UTF-8）是 1KB，16 条就是 ~17KB —— 放栈上会撞 /analyze 的 C6262
        （"函数使用堆叠的 17840 字节"）。这只函数只在保存配置时跑一次、且只有
        主线程会调（设置程序 / 主程序都不并发写 ini），静态化是安全的。 */

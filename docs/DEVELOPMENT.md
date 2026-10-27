@@ -89,7 +89,7 @@
 | `cap_core.h` | 共享常量（主线程消息 `WM_*` / 动作与模式常量 / `atomic` 与 `volatile` 的分界说明）+ 全局状态 + 主窗口句柄 + 诊断日志 |
 | `cap_input.h` | `keymap` 查询 / 动作执行线程 `ActJob`（含滚轮与持续滚动两条通道）/ 底层钩子 / 发送与补齐 |
 | `cap_window.h` | `winmove` / `drag` / `folder` + 坐标空间初始化与自检 |
-| `cap_overlay.h` | `child.c` 子进程底座 + 按键帮助 + 剪贴板浮层（三个独立 exe 的主程序侧接口） |
+| `cap_overlay.h` | `child.c` 子进程底座 + 按键帮助（独立 exe 的主程序侧接口） |
 | `cap_config.h` | `CFG_*` 编号与通用读写 + 五份名单 + 进程名/路径查询 |
 | `cap_nav.h` | 按词跳转 / 单键切输入法 / 自动化与 WPS 的接口去向（`auto.h`） |
 
@@ -97,7 +97,7 @@
 已经放好的 `windows.h` / `atomic` 与那三个 COM 宏，单独拿去用会缺类型。
 分区之间也**没有互相依赖**，只有 `cap.h` 按上表顺序包含它们。
 
-为什么值得拆：这个头原先 700 多行、被每一个 TU 包含 —— 想查"剪贴板浮层主程序侧
+为什么值得拆：这个头原先 700 多行、被每一个 TU 包含 —— 想查"帮助浮层主程序侧
 有哪些接口"也得整份读一遍。拆开之后按模块读一个分区头就够。
 
 ---
@@ -109,8 +109,7 @@
 | `keymap.c` | **键位映射的查询与装配**。动作表本身**不在这个文件里**，而在 `keymap_table.h` —— 它是"某个键是什么意思"的唯一一份定义，键位图（`help/help.c`）也要用同一份，两边各自 include，谁都不抄第二份。本文件提供查询接口（`ActOfVk` / `ActOutVk` / `ActWordDir` / `ActHasFlag` / `ActName`）与模式表（修饰模式 ↔ 激活键集合，激活键取自 `cap.h` 的 `MODE_*_KEYS_DEFAULT`，编译期常量、不读配置）。hook.c / main.c 只做查询。**引擎从不判断按的是哪个键，只问"这个模式生效了吗"**，所以"把 `D` 删掉只留 `Alt`"只改一处常量。启动时由 `KeyMapInit()` 装配 |
 | `hook.c` | **底层输入钩子**。识别 C / 触发键 / 模式激活键，维护 `volatile` 状态与"事件时刻的修饰快照"，并**无条件跟踪真实 Shift**（横向滚动要用，且须放在"未按 C 就放行"之前）；屏蔽映射期间的无效按键；修饰键抬起使某模式失效时投 `WM_MODE_UP`。鼠标钩子只做一件事——按住 C 时把滚轮请求投递出去；**横向与持续滚动两路吞掉物理格**，只有放大档放行；回调在最热路径上，只允许几次比较 + `PostMessage` |
 | `main.c` | **消息窗口 + 消息循环**。和弦引擎（按下即开火 → 重复节奏 → 松手补齐）；路由：按词跳转动作用 `NavJump`，其余用 `SendActOnce`；滚轮 / 持续滚动 / 模式失效消息只做投递；托盘菜单（暂停 / 取消全部置顶 / 设置 / 重启 / 程序文件夹 / 退出，「程序文件夹」与日志气泡点击、C+F3 走同一条 `FolderRevealPath` shell 链路）；`--restart` 等命令行开关；日志 `CapLog`；启动时调用 `NavBaseInfo()` 采集环境基线、`KeyMapInit()` 装配激活键 |
-| `settings/settings.c` | **独立的设置程序**（`CapsEnhanceSettings.exe`，单独 exe，但链接 `src/config.c`）。**表单式**界面：布尔项 = 勾选框、数值项 = 数字框、五份名单各是一个可增删的列表（行内还有"选取窗口"：取到的值先填进输入框，点"添加"才入名单）；保存 = `ConfigSet*` + `ConfigSaveFile`（增量写回，保留注释/未知段/BOM/行尾） + `CapsEnhance.exe --restart`。为什么独立：本体主线程是钩子宿主，不能同时拥有设置窗口。为什么不做成文本编辑器：值域与布尔语义在 ini 里只是注释，摊开原文编辑等于允许写出"解析得出但不合理"的值。高 DPI：Per-Monitor V2 + `WM_DPICHANGED` 重排。页签：表单分「常规」（配置项，按通用/按词跳转/滚动/输入法/剪贴板分段渲染半粗段头）/「名单」（五份按程序/窗口生效的名单）两页（页签自绘为下划线式），页签只控显隐 —— 控件不分页，Load/Save 照旧按 id 找 |
-| `settings/sizepick.c` | **尺寸选取窗**：三对"窗口大小"（快速粘贴 / F3 预览的最大与最小）各配一颗「调整…」，点它弹出一个**照真实浮层画法画的示例窗口**（列表窗画示例条目、预览窗画占位图），拖着定尺寸，点中央「完成」把值填回那一对输入框 —— **不写 ini**，ini 仍由主窗口底部的保存按钮写。从 `settings.c` 里拆出来是因为它自带窗口类、状态与两套画法（六百行），塞在表单主文件里只会把两份主题互相稀释；★ 那两套画法与 `clip/clip.c` / `clip_view.c` 是**平行的两份**，改浮层样式时两边要一起看。两个编译单元之间只经 `settings/settings_int.h` 共享（控件 ID、`Field` 行、`g_hwnd` / `g_dpi` / 字体、读写输入框的小工具；反向只有"配没配按钮 / 开窗 / 关窗 / 显隐按钮 / 注册类"五个入口） |
+| `settings/settings.c` | **独立的设置程序**（`CapsEnhanceSettings.exe`，单独 exe，但链接 `src/config.c`）。**表单式**界面：布尔项 = 勾选框、数值项 = 数字框、五份名单各是一个可增删的列表（行内还有"选取窗口"：取到的值先填进输入框，点"添加"才入名单）；保存 = `ConfigSet*` + `ConfigSaveFile`（增量写回，保留注释/未知段/BOM/行尾） + `CapsEnhance.exe --restart`。为什么独立：本体主线程是钩子宿主，不能同时拥有设置窗口。为什么不做成文本编辑器：值域与布尔语义在 ini 里只是注释，摊开原文编辑等于允许写出"解析得出但不合理"的值。高 DPI：Per-Monitor V2 + `WM_DPICHANGED` 重排。页签：表单分「常规」（配置项，按通用/按词跳转/滚动/输入法分段渲染半粗段头）/「名单」（五份按程序/窗口生效的名单）两页（页签自绘为下划线式），页签只控显隐 —— 控件不分页，Load/Save 照旧按 id 找 |
 | `nav.c` | **按词跳转核心**。多通道读取文本与光标（Edit / Scintilla / UIA / IA2 / WPS）、直接置光标、诊断 `NavProbe` / `NavBaseInfo`；词边界算法已挪到 `nav_word.c`。只把 WPS 当成"又一条通道"（一行分派），WPS 细节不在这个文件里 |
 | `nav_word.c` | **词边界算法**（`nav.c` 里唯一不碰 HWND / COM / 线程预算的部分）。字符分类（反向判定）、代理对处理、`WordJumpTarget`（往某方向跳一次的落点 + 步数）、`ComputeSteps`。单独成文件是为了让它能脱离一堆 COM 前置知识被读懂与测试 —— `test/test_nav.c` 直接对着 `ComputeSteps` 断言。跳转语义见下文[按词跳转](#按词跳转wordjump实现) |
 | `autodisp.c` | **通用**的 COM 自动化按名调用（`GetIDsOfNames` + `Invoke`：参数逆序、`PROPERTYPUT` 的命名参数、`EXCEPINFO` 里三个 BSTR 必须释放）。不认识任何具体程序；Word / WPS / Excel 这类对象模型都能用 |
@@ -123,12 +122,10 @@
 | `drag.c` | **Caps+左键拖动窗口**。判定在鼠标钩子（按下那一刻决定吞不吞），执行在专用线程（"最新点 wins"，钩子每帧只写一次状态 + SetEvent）；含最大化异步还原、全屏（判据取自 `winmove.c` 的 `WinIsFullscreen`）/最小化/桌面/任务栏/黑名单的接管判定 |
 | `ime.c` | **单键强制切换输入法**。判定在键盘钩子（"单击"），执行在专用线程（跨进程 IME 消息 + 键盘布局切换）；单槽 latest-wins，见[单键切换输入法](#单键切换输入法imec) |
 | `folder.c` | **打开焦点程序所在文件夹**（`C+F3`），以及**打开日志文件所在位置**（日志结束气泡被点击时，走 `FolderRevealPath`）。走标准 shell 接口（`SHParseDisplayName` → `SHOpenFolderAndSelectItems`，**不拼 `explorer.exe` 命令行**）；目标窗口由 `ActJob.hwnd` 在开火那一刻快照；执行在自己的**一次性线程**上（MTA + `CoInitializeEx`），不占 `act.c` 的动作队列；UWP 走"宿主 `ApplicationFrameHost` → 子窗口 `Windows.UI.Core.CoreWindow` → 真实进程"；失败原因经 `WM_FOLDER_OPEN` 回主线程弹气泡。两个入口共用同一个 `FolderJob` 与线程过程 |
-| `child.c` | **子进程生命周期**（帮助窗口与剪贴板浮层的共同底座）。两件事：**父死子退** —— `CreateProcess(CREATE_SUSPENDED)` → 挂进一个只自己持有的 Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）→ 放行；主程序一没（正常退出 / 崩溃 / 被强杀），内核收掉这两个子进程，零协作、卡死也照杀。**子死父知** —— `RegisterWaitForSingleObject` 盯子进程句柄，它一死就给主窗口 `PostMessage`（内核通知，零轮询）。取代了原来那套 200ms 心跳 + 800ms 超时自杀。见[子进程的收场](#子进程的收场帮助--剪贴板浮层共同底座) |
+| `child.c` | **子进程生命周期**（帮助浮层的底座）。两件事：**父死子退** —— `CreateProcess(CREATE_SUSPENDED)` → 挂进一个只自己持有的 Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）→ 放行；主程序一没（正常退出 / 崩溃 / 被强杀），内核收掉帮助进程，零协作、卡死也照杀。**子死父知** —— `RegisterWaitForSingleObject` 盯子进程句柄，它一死就给主窗口 `PostMessage`（内核通知，零轮询）；帮助窗口自己退出、用不上这一半，保留为子进程底座能力。取代了原来那套 200ms 心跳 + 800ms 超时自杀。见[子进程的收场](#子进程的收场帮助浮层) |
 | `pin.cpp` | **窗口置顶**（`C+T`）—— **PowerToys AlwaysOnTop 模块的移植**。钉 / 放开（`WS_EX_TOPMOST` + 私有属性）、layered + color-key + blur-behind 的边框浮层、D2D 绘制的强调色圆角环、`Speech On/Sleep` 两声、7 个 WinEvent 钩子 + 每边框 100ms 定时器、虚拟桌面判定、提权失败上报。整套住在**自己的线程**里（主线程是钩子宿主、动作线程是串行队列），动作线程只投递一个 `HWND` 过来。见[窗口置顶](#窗口置顶pincppct) |
 | `help.c` | **按键帮助的开合（主程序侧）**（`C+F1`）：拉起同目录的 `CapsEnhanceHelp.exe`，并把"当前该显示还是该隐藏"告诉它（注册消息 + 40ms 对账重试）。窗口**不常驻**，所以每次显示都是一次冷启动 —— 而"按一下就松手"会让 SHOW/HIDE 都发在窗口出生之前，重试就是为这个竞态准备的。寿命由和弦决定：按下开、抬起关、松开 Caps（`ResetEngine`）也关 |
 | `help/help.c` | **按键帮助窗口本体**（独立 exe `CapsEnhanceHelp.exe`）。自包含：不装钩子、不初始化 COM/TSF，只做"GDI+ 起一次 + 铺底一帧 + GDI 画一遍字 + 送进分层窗口"（只读 `CapsEnhance.ini` 里那三个 `Ime*Mode`，用来决定底部三条"单击切输入法"的文案）。逐像素 alpha（32bpp DIB + `UpdateLayeredWindow`）实现半透明；文字用 **GDI + ClearType**；`WS_EX_NOACTIVATE` 保证不抢焦点；键位表从 `keymap_table.h` 编进来（不跨进程取数据）。见[按键帮助](#按键帮助helphelpc) |
-| `clip.c` | **剪贴板浮层的开合（主程序侧）**（`C+V`）：拉起 `CapsEnhanceClip.exe`（把 ini 里的 `DittoDir` 按**自己的** exe 目录展开成绝对路径后经 `--dir` 传过去）、Show/Hide 对账重试、盯住浮层进程的生死（见 `child.c`）、以及把钩子代收的 `Esc` / 导航键转过去。**寿命 ≠ 和弦**（松开 Caps 不关），`ClipShow` 是 toggle；`ClipIsOpen()` 被钩子用来决定"要不要吞 Esc"，所以送达超时必须把它清假。见[剪贴板浮层](#剪贴板浮层clipclipc--srcclipc) |
-| `clip/clip.c` | **剪贴板浮层本体**（独立 exe `CapsEnhanceClip.exe`）。分层窗口框架与 `help/help.c` 同源；**只读**打开 Ditto 的 SQLite 取最近 100 条（只取 `mText` 显示，正文选中时才查 `Data`）；粘贴时把该条记录的所有格式原样回写剪贴板并挂 `"Clipboard Viewer Ignore"` 防污染历史；`SetWinEventHook` 记住要粘回哪个窗口并兼做"点外面就关"。它是唯一链接第三方代码（SQLite3 Multiple Ciphers）的 exe |
 
 > 分层意义：以后要支持"另一个只有 COM 才读得到的程序"（如 WPS 表格），照 `wps.c` 再写一个文件即可，`autodisp.c` 与 `bridge.c` 原样复用。
 > 激活键（`Alt/D`、`F`）**不做成配置项**：它们属于和弦语法本身，改变量级 < 配置项，历史实装成 `EnhanceKeys` / `ShiftKeys` 后已回退（改它们等于改功能）。但 `keymap.c` 那层模式抽象仍在，以后想改常量只需动 `cap.h` 一处。
@@ -500,68 +497,42 @@ WPS 置位的回读校验返回**三态**：
 
 ---
 
-## 子进程的收场（帮助 / 剪贴板浮层，共同底座）
+## 子进程的收场（帮助浮层）
 
-主程序有两个"窗口在**独立 exe** 里"的协作进程：`CapsEnhanceHelp.exe`（`C+F1` 按住期间的键位图）与 `CapsEnhanceClip.exe`（剪贴板浮层）。它们都得**跟着主程序走** —— 主程序没了，谁去看它们的窗口？这一节讲这件事怎么保证，实现在 `src/child.c`，两个模块共用。
+主程序会拉起 `CapsEnhanceHelp.exe`（`C+F1` 按住期间的键位图）。它得**跟着主程序走** —— 主程序没了，谁去看那个窗口？这一节讲这件事怎么保证，实现在 `src/child.c`。
 
 ### 曾经的做法：心跳（已删）
 
-主程序每 200ms 给子进程喂一条注册消息（KA），子进程 250ms 轮询一次、800ms 收不到就自杀。它同时兼着三件事：
+主程序每 200ms 给子进程喂一条注册消息（KA），子进程 250ms 轮询一次、800ms 收不到就自杀。它同时兼着两件事：
 
 1. **子测父活** —— 上面那条超时自杀；
-2. **父测子活** —— 主程序每 200ms `FindWindow` 一次，连空 3 拍（600ms）才认定浮层没了，清掉 `s_want`（不清的话钩子会一直替一个**不存在的窗口**吞 `Esc` / 回车 / 方向键 —— 这个 bug 用户实测撞过一次）；
-3. **驻留到期** —— 浮层收起后要待命一段时间，主程序那份 `CLIP_IDLE_TIMER` 到点就停喂心跳，浮层 800ms 后自己退。
+2. **父测子活** —— 主程序每 200ms `FindWindow` 一次，确认窗口还在。
 
-后两件是它被删掉的主要理由：
+两件都在"用超时推测事实"，两个方向都会误伤：
 
-- **第 3 件是重复实现**。浮层自己已经有一份同事件、同时长的计时（`clip/clip.c` 的 `GRACE_MS`：`DoHideClose` 起表、`DoShow` 撤表）—— 两个钟各算各的，谁也不比谁准。（2026-09-26 更新：这一档**整个删掉**了，详见下面「驻留不限时」。）
-- **第 1、2 件都在"用超时推测事实"，两个方向都会误伤**：
-  · **假阳性** —— 主程序消息循环忙过 800ms 不等于"它死了"，但子进程照判并自杀，下一次 `C+V` 又冷启动，正是用户抱怨的"频繁启动"；
-  · **盲窗** —— 从子进程真死到主程序敢下结论之间有 600ms，这期间钩子还在替它吞键。
+- **假阳性** —— 主程序消息循环忙过 800ms 不等于"它死了"，但子进程照判并自杀；
+- **盲窗** —— 从子进程真死到主程序敢下结论之间有 600ms。
 
 ### 现在的做法：两条 OS 原语
 
 | 方向 | 机制 | 为什么它更好 |
 |---|---|---|
-| 父死 → 子退 | **Job Object**（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`） | **零协作**：子进程一行都不用改、甚至不需要知道有这回事；**立即**（不是 800ms 后）；**卡死也照杀** —— 看门狗是 `WM_TIMER`，子进程消息循环一卡（读库 / 绘制 / 等锁）定时器根本不到点，那个孤儿会一直活着 |
-| 子死 → 父知 | **进程句柄等待**（`RegisterWaitForSingleObject`） | 内核通知而不是轮询：`test_child` 实测**从子进程结束到主程序收到消息 31ms**，零延迟零 CPU |
-| 驻留到期 | **子进程自己的计时**（帮助 `TID_LIFE`；浮层已无限期，见下） | 唯一知道"自己刚被收起"的就是它，主程序不再需要参与 |
+| 父死 → 子退 | **Job Object**（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`） | **零协作**：子进程一行都不用改、甚至不需要知道有这回事；**立即**（不是 800ms 后）；**卡死也照杀** —— 看门狗是 `WM_TIMER`，子进程消息循环一卡（绘制 / 等锁）定时器根本不到点，那个孤儿会一直活着 |
+| 子死 → 父知 | **进程句柄等待**（`RegisterWaitForSingleObject`） | 内核通知而不是轮询：`test_child` 实测**从子进程结束到主程序收到消息 31ms**，零延迟零 CPU。帮助窗口用不上这一半（它自己退出），保留为子进程底座能力 |
 
-四个关键实现点：
+三个关键实现点：
 
 - **必须挂起着起**：`CreateProcess(CREATE_SUSPENDED)` → `AssignProcessToJobObject` → `ResumeThread`。反过来的话子进程可能在赋值之前就退出（job 里就没它了），或者先起出自己的孙进程（那些就跑出 job 管辖了）。
-- **只挂该跟着走的两个**。设置程序与"转交 Ditto 本体"的 `-open` 子进程都**不进** job —— 用户期望它们活过主程序。（Windows 会把子进程自动加进**父进程所在**的 job，但主程序自己不在任何 job 里，所以成员资格完全由 `src/child.c` 显式决定。）
-- **死亡通知只投递消息，不碰共享状态**。`ChildGoneProc` 跑在线程池线程上，而 `s_want` 那类状态是主线程在写、钩子在读的 —— 它只 `PostMessage`，由主线程去改，这是唯一不用加锁的形状。
-- **拿子进程句柄用"窗口的 pid"而不是 `CreateProcess` 的返回值**：冷启动那份是我们拉起的，"驻留复用"甚至手动双击起来的那份不是 —— 按 pid 走就只有一条路径。
-
-### 换来的一张表
-
-| 场景 | 心跳时代 | 现在 |
-|---|---|---|
-| 主程序正常退出 | 最多 800ms 后子进程退出 | 立即（内核收） |
-| 主程序崩溃 / 被强杀 | 最多 800ms；子进程自己卡住则**永不退** | 立即，卡住也收 |
-| 浮层崩溃 / 被任务管理器杀掉 | 主程序 600ms 后才知道 | 31ms |
-| 主程序主线程忙 1 秒 | 子进程**误判**父死而自杀 → 下次冷启动 | 无影响 |
-| 待命期（浮层**无限期**）的开销 | 主程序 200ms 定时器 + 每拍一次 `FindWindow`；子进程 250ms 定时器 | **零** |
-
-### 驻留不限时 + 送达由子进程报信（2026-09-26）
-
-用户反馈"剪贴板浮层偶发要 2-5 秒才出来"。查下来冷启动本来就慢的时候不多，但机制把它**放大**了：
-
-1. **`GRACE_MS` 每到期一次就白付一次冷启动**。原来浮层收起后只待命 10 分钟，而"用户隔十几分钟不用"恰恰是常态 —— 下一次按要把 DLL 装载、杀软扫描（1.67MB 未签名 exe）、静态 `sqlite3mc`、GDI+ 初始化全部重来一遍。**让其少发生一次，远比让它快一点更管用**，所以到期退出这一档直接删掉：浮层一直活到主程序退出（job 收）。代价是一个隐藏窗口常驻，换来的是开机后**第一次** `C+V` 之后再也冷不起来。
-2. **原来的送达对账会自杀似的把慢的那份杀掉**。`CLIP_TICK_MS 40 × CLIP_TRIES_MAX 25 ≈ 1s` 到点会 `TerminateProcess` 那个还没出窗的进程 —— 冷启动慢过 1 秒时用户按的每一次都把它重起一遍，于是每次都从零开始（表现为"要多按几次才出来"）。改成两条：
-   · **子进程开口**：浮层建窗成功后自己发 `CLIP_MSG_BORN`（带着自报的启动耗时），主程序收到那一刻才发 `SHOW`/`HIDE`。**只有它知道自己出生了**，主程序不再为"该等多久"编数字。
-   · **轮询降为兜底**：`CLIP_TIMER` 保留但预算放宽到 10 秒，且**到点不杀进程**，只把 `s_want` 清假（钩子不能替一个没握过手的窗口吞 `Esc`）。此刻最可能的情况是它还在慢，接着等才是对的；它若终于出生而那时已经没人要它，报信会落到 `HIDE` 分支让它自己收起来。
-   · 失去 `TerminateProcess` 之后"活着但永不出窗"这种真卡死没有最后的强杀手段，靠两件事补：**拉起时立刻按 pid 登记死亡通知**（崩在出窗之前由内核告知，不必等预算），以及上面那条把 `s_want` 清假的操作 —— 最坏的结果是一个能用鼠标关掉的浮层，而不是永久吃键的钩子。
+- **只挂该跟着走的帮助进程**。设置程序**不进** job —— 用户期望它活过主程序。（Windows 会把子进程自动加进**父进程所在**的 job，但主程序自己不在任何 job 里，所以成员资格完全由 `src/child.c` 显式决定。）
+- **死亡通知只投递消息，不碰共享状态**。`ChildGoneProc` 跑在线程池线程上，而调用方的状态是主线程在写、钩子在读的 —— 它只 `PostMessage`，由主线程去改，这是唯一不用加锁的形状。
 
 ### 覆盖不到的一处（明说）
 
-**主程序"卡住"而不是"死"**：job 不触发（它还活着），子进程也收不到任何消息。这不是新问题 —— 心跳那 800ms 其实也救不了，子进程的看门狗同样是 `WM_TIMER`，它自己卡死时也不响。只能靠子进程自己的上限兜底：帮助窗口可见期间有 3 分钟上限（`TID_LIFE`）。**剪贴板浮层没有上限也不再有到期退出** —— 它是可见的、鼠标就能关（常驻时则是隐藏的、不占用户视线），而"卡住"本身就意味着用户正在别处忙，比起"看着看着提示自己消失"（那正是 800ms 心跳的误伤），留着更不打扰；要清掉它，从托盘退出主程序即可（job 会把它一起收走）。
+**主程序"卡住"而不是"死"**：job 不触发（它还活着），子进程也收不到任何消息。心跳那 800ms 其实也救不了，子进程的看门狗同样是 `WM_TIMER`，它自己卡死时也不响。只能靠帮助 exe 自己的 3 分钟上限（`TID_LIFE`）兜底。
 
 ### 怎么验
 
-- `test_child`（接在 `build_nav.bat`）：**include 真的 `src/child.c`**（不另写一份实现），拉起一个真进程，`IsProcessInJob` **指定我们那个 job 句柄**问成员资格 —— 传 `NULL` 问"在不在任何 job 里"会恒真（CI 或某些启动器下父进程本身就在某个 job 里），那样等于没测；再结束子进程，看通知是否及时到。
-- `smoke_clip.sh`：验 **OS 行为**那一半 —— `cliphack.exe` 建 job、拉起浮层，它一退出浮层必须被收掉（① 启动、② 父退子死 两问）。它是独立 exe，`build` / `analyze` / `restarttest` / `logsmoke` 都不跑它。
+`test_child`（接在 `build_nav.bat`）：**include 真的 `src/child.c`**（不另写一份实现），拉起一个真进程，`IsProcessInJob` **指定我们那个 job 句柄**问成员资格 —— 传 `NULL` 问"在不在任何 job 里"会恒真（CI 或某些启动器下父进程本身就在某个 job 里），那样等于没测；再结束子进程，看通知是否及时到。
 
 ---
 
@@ -577,7 +548,7 @@ WPS 置位的回读校验返回**三态**：
 - **显隐靠主程序发消息，而且要重试**。冷启动意味着"按下 30ms 就松手"这种操作会让 SHOW 与 HIDE **都落在窗口出生之前** —— 窗口起来后不知道该显示还是该消失。两边的对策缺一不可：
   · 帮助 exe 启动后**先建隐藏窗口**，等主程序告诉它状态；1.5 秒等不到就自己退出（防呆，见 `TID_ARMED`）。
   · 主程序把"期望状态"记下来，用 40ms 的定时器反复对账直到送达或超时（1s）。状态幂等，重发没有副作用。
-  另：**寿命的兜底分两层**（心跳已删，见[子进程的收场](#子进程的收场帮助--剪贴板浮层共同底座)）—— 主程序**死了**由 Job Object 直接收掉帮助进程（内核执行，不需要它配合）；主程序只是**卡住**（活着但响应不了，谁也发不出 HIDE）则由帮助 exe 自己的 3 分钟上限兜底（`TID_LIFE`，两种模式都上，正常路径下 F1 一抬就 HIDE，根本走不到那儿）。
+  另：**寿命的兜底分两层**（心跳已删，见[子进程的收场](#子进程的收场帮助浮层)）—— 主程序**死了**由 Job Object 直接收掉帮助进程（内核执行，不需要它配合）；主程序只是**卡住**（活着但响应不了，谁也发不出 HIDE）则由帮助 exe 自己的 3 分钟上限兜底（`TID_LIFE`，两种模式都上，正常路径下 F1 一抬就 HIDE，根本走不到那儿）。
 - **文字用 GDI+ 的灰阶抗锯齿（`TextRenderingHintAntiAliasGridFit`），刻意不上 ClearType**。理由是本窗口的性质：它是**逐像素 alpha 的半透明浮层**，而 ClearType 是次像素渲染 —— 它对"文字下面是什么颜色"有假设，在带透明背景的位图上支持并不完美：会留下**彩色镶边**（看着像锯齿），深底亮字还会 blooming（观感"莫名其妙地粗"）。四种渲染并排实测过（同一块 DIB、同一字号：GDI+ GridFit / GDI+ AntiAlias / GDI ClearType / GDI ANTIALIASED）：ClearType 最粗且有彩边，ANTIALIASED 偏细软，**GDI+ 的 AntiAliasGridFit 在深底亮字上最锐利、且完全没有彩边**。
   ✗ 别加 `SetTextContrast(5)`：中文密集笔画会糊成块，"增强"两个字会粘在一起。
 - ★★ **去掉 ClearType 之后，"清不清晰"就只剩字号这一个变量了** —— 而字号的上限是**几何**的：键帽内宽 ÷ 每行字数。所以：
@@ -601,113 +572,7 @@ WPS 置位的回读校验返回**三态**：
 - **底部两栏**列出不是"某个键"的功能（滚轮、单击、鼠标拖动）。键名区的宽度取**本栏最长键名的实测宽度** + 一个间隔，而不是"半个栏宽" —— 那样键名贴最左、说明从栏中间开始，一行字会被扯成断开的两半。
 - **三条"单击 Caps / 左 Shift / 右 Shift"的文案来自配置文件**（`CapsEnhance.ini` 的 `ImeCapsMode / ImeLShiftMode / ImeRShiftMode`：0 不处理 / 1 切中文 / 2 切英文）。写死一个"切中文"在这里，用户把配置一改图就开始撒谎。
 - **读 ini 不用 `GetPrivateProfileIntW`**：本 ini 是 **UTF-8（带 BOM）**，而 Windows 的 profile API 会把带 BOM 的 UTF-8 当成 ANSI 认，BOM 那三个字节会粘在第一行的段名前面。这里只关心三个纯 ASCII 的键名与它们的十进制值，按字节扫一遍就够，也不受编码 / BOM / API 缓存那些怪癖影响；读不到就保持默认（与 `config.c` 同一条规矩）。
-- **测试边界**：窗口像素测不了（要真人按住键）。能离线钉住的是"键位接线 + 寿命语义 + 每条动作都有图上文案"（`test_chord` 场景 AI，文案那条靠遍历共享的键位表）。跨进程那份契约用一次性工具单独验过：`--hold` 起来时不显示、发 SHOW 出现、发 HIDE 消失并在 300ms 缓冲到点后退出；"主程序被强杀"那条不再靠子进程自己发现，而由 Job Object 保证（见[子进程的收场](#子进程的收场帮助--剪贴板浮层共同底座)）。渲染效果靠一次性抓图工具（屏幕 DC + `BitBlt`，`PrintWindow` 抓不到分层窗口）对着真机看。
-
----
-
-## 剪贴板浮层（`clip/clip.c` + `src/clip.c`）
-
-一句话：`C + V` **按一下**就弹出一个不抢焦点的列表（Ditto 历史最近 100 条），挑一条粘回原来那个程序。窗口在**独立 exe** 里，分层窗口框架与 `help/help.c` 同源。
-
-**为什么拆成独立 exe**：与帮助图同一条理由，但更重一层 —— 它要打开并查询别人的 SQLite 数据库、把一条记录的多个剪贴板格式解码后回写进系统剪贴板，这些都属于"可能慢、可能失败"的事，绝不能发生在承载钩子的主线程上。
-
-### 与帮助窗口最关键的差别：寿命不跟和弦走
-
-帮助是"按住 F1 才显示"，寿命 = 和弦（松开 Caps 时 `ResetEngine` 会 `HelpHide`）。剪贴板**不能这样**：松开 V 之后窗口必须还在，否则用户根本来不及挑条目。所以：
-
-- 主程序侧**没有**"松开 Caps 就隐"这条路径，只有明确关闭途径；
-- `ClipShow` 是 **toggle**（窗口已在 = 再按一次关掉它）；
-- 由此多出一个必须堵的洞：`ClipIsOpen()` 直接返回 `s_want`，而钩子据此决定"要不要替浮层吞 Esc"。**送达超时时必须把 `s_want` 清掉** —— 否则窗口根本没起来，Esc 却被永久吃掉。
-
-### 键盘：浮层收不到，全部由主程序的钩子代收
-
-`WS_EX_NOACTIVATE` 意味着它一个键盘消息都收不到。所以 `hook.c` 在 `ClipIsOpen()` 期间拦截并转发：`Esc`、回车、`↑↓`、`PgUp/PgDn`、`Alt+数字`。拦的范围刻意很窄 —— **数字键只在 Alt 按着时才拦**，不带 Alt 的数字留给出路（也免得"浮层开着时打不出数字"）。
-
-### 读 Ditto 的数据库（只读）
-
-| 事实 | 出处 |
-| --- | --- |
-| 库是普通 SQLite：`Main`（`lID`/`mText`/`clipOrder`/`stickyClipOrder`/`bIsGroup`）+ `Data`（`lParentID`/`strClipBoardFormat`/`ooData`），正文在 `Data.ooData` 里**不压缩不加密** | Ditto `DatabaseUtilities.cpp` |
-| 排序照 Ditto 自己那句：`stickyClipOrder DESC, clipOrder DESC`（`clipOrder` 才是它维护的顺序，不是 `lDate`） | Ditto `QPasteWnd.cpp` |
-| 文本是 **UTF-16**（Ditto 的封装走 `sqlite3_column_text16`）→ 这里也必须 `sqlite3_column_text16` | Ditto `CppSQLite3.cpp` |
-| 格式名到剪贴板格式号的映射是"标准名查表 + 其余 `RegisterClipboardFormat`" | Ditto `Misc.cpp` 的 `GetFormatID` |
-| 默认 rollback journal（非 WAL）→ 只读打开安全，配 `busy_timeout` 扛"Ditto 正在写"的瞬间 | 同上 |
-
-落地的几条取舍：
-
-- **只取 `mText` 用作显示，正文留到选中时再查 `Data`** —— 100 条正文可能是 100 篇文章。
-- "这是文本还是图片"靠 `group_concat(strClipBoardFormat)` 一次带出来，不为它再发 100 条查询。
-- `sqlite3_open_v2` 只认 UTF-8 路径，所以宽路径先转一次；它是唯一带 flags 的打开接口，而**只读必须走它**（`sqlite3_open16` 没有 flags 参数，只能读写打开）。
-- 路径的**相对基准由主程序展开**（它自己的 exe 目录）后用 `--db` 传给浮层 —— 基准只有那个进程知道，让子进程再解一次就是同一件事的两份实现。
-
-### 粘贴：按键选择、注入标记与"先让开屏幕"
-
-三条按顺序说明（合起来是一次 `DoPaste`）：
-
-1. **先收起浮层，再抢前台**。写剪贴板成功之后立刻 `HideIfVisible()`，然后才 `SetForegroundWindow(目标)` + 轮询等它真的接管前台 —— 浮层留着会挡住用户看不到的粘贴落点，抢前台时还多一个置顶窗口当对手。**顺序不能反过来**：写剪贴板失败时要让用户看到浮层、能重试（那条分支直接 return，不隐藏）。退出计时（`DoHideClose`）留到最后一步，`HideIfVisible` 只负责"让开屏幕"。
-2. **粘贴键按目标类型选**：控制台 / 终端系窗口（`ConsoleWindowClass`（本机用 AllocConsole 探针实测确认）、`CASCADIA_HOSTING_WINDOW_CLASS`、`mintty`、`PuTTY`）发 **`Shift+Insert`**，其余发 `Ctrl+V`。`Shift+Insert` 是这些窗口**共同**认的粘贴键，而 `Ctrl+V` 在 mintty / PuTTY 里是原样的控制字符、在 Vim 里是"可视块"—— 不换等于浮层对终端完全不可用。判据用**窗口类名**（WSL / cmd / PowerShell 全在同一个 conhost 类里，比按进程名判更全）。
-3. **注入键打 `dwExtraInfo` 标记**（`CLIP_INJECT_MARKER = 'CLIP'`，定义在 `cap.h`，浮层与主程序共用一个常量）。`LLKHF_INJECTED` 只说明"有程序注入了键"、分不清是谁，于是钩子在那条放行之前多一条**显式**分支：认出自家的粘贴注入 -> 一律放行 + 记录模式记一行。它的价值是"不吞自家粘贴"这条不变量从此有代码保证（而不是依赖"注入的键恰好在最前面放行"这个位置巧合），并让记录日志能把"浮层注入的键"与"用户真实按键"分开 —— "点了条目没粘上"这类问题第一问就是"键到底发出去了没有"。
-
-### 粘贴：不污染历史的关键是一个私有格式
-
-粘贴必须把内容写进系统剪贴板，而 Ditto 正盯着剪贴板 —— 于是每次粘贴都会在历史里多出一条。可用的屏蔽手段实测只有一条走得通：
-
-- **`"Clipboard Viewer Ignore"`**（Ditto 私有格式）：Ditto 在 `Clip.cpp` 与 `ClipboardViewer.cpp` 里**无条件**检查它（`IsClipboardFormatAvailable` 命中就 `return FALSE`），不需要用户在 Ditto 里开任何开关。
-- `ExcludeClipboardContentFromMonitorProcessing` 需要用户先开 `m_enforceClipboardIgnoreFormats` 才生效，不能指望。
-- `CopyAppExclude`（按活动窗口进程名排除）**对我们无效**：浮层是 `NOACTIVATE`，写剪贴板时活动窗口仍是目标应用 —— 排除它就等于把正常复制也一起废掉。
-- Ditto 另有 CRC 去重（`Clip.cpp`），所以即便漏挂标记，重复也多半会被合并；但那取决于用户的"允许重复"设置，不能当保险。
-
-另外两条：
-
-- **原样回写所有格式**（图片 / `CF_HDROP` / RTF 都靠它），但要跳过 Ditto 的私有格式（`Ditto File Data`、`Ditto Remote CF_HDROP` …）和不是 `HGLOBAL` 的那几个标准格式（`CF_METAFILEPICT`、`CF_PALETTE`、`CF_ENHMETAFILE` …）。
-- **抬 Alt 必须先塞一个中性键**（`0xFF`，AHK 的 `#MenuMaskKey` 那一招，与 `src/send.c` 的 `ReleaseMod` 同源）：用户是用 `C+V` 打开的，Alt 很可能仍物理按着，不先放掉 `Ctrl+V` 会被对端理解成 `Ctrl+Alt+V`。
-
-### 色块与悬停提示：跟随 Ditto 的设置而不是自己的开关
-
-**配置来源**：便携版 Ditto 的全部设置在 `<DittoDir>\Ditto.Settings`（UTF-16 LE 带 BOM 的 INI）。浮层启动后按需读一次（文件不存在就用默认值，**不建也不写**）：
-
-| 键 | 默认（Ditto 同款） | 用途 |
-| --- | --- | --- |
-| `DrawCopiedColorCode` | `1` | 色值前画色块；`0` = 关 |
-| `MaxToolTipCharacters` | `1000`（Ditto 源码再 +200 余量） | 悬停提示截断 |
-| `MaxToolTipLines` | `30` | 提示最大行数 |
-| `ToolTipTimeout` | `-1` = 5 秒；`0` = 关 | 提示自动消失 |
-
-色值判据照抄 Ditto `QListCtrl.cpp` 的 `DrawCopiedColorCode`（`src/colorcode.c`，纯函数、有单测 `test/test_color.c`）：先 `Trim` 掉 `»` 后缀与空白、再剥结尾 `;`，然后依次试 W3C 命名色（141 个，表从 Ditto 源码脚本化提取）、`#RGB/#RGBA/#RRGGBB/#RRGGBBAA`、无前缀 6 位 hex、`0x` 前缀、`rgb()/rgba()`（支持百分比）、`hsl()/hsla()`。alpha < 255 时先画棋盘格再 alpha 混合，同 Ditto。
-
-**悬停提示是自绘分层窗口**（照 Ditto 的 CToolTipEx 架构 —— 它也不是 tooltip 控件，
-而是自绘 WS_POPUP）。圆角白底 + #CCC 边框 + 浮层行字体，`UpdateLayeredWindow`
-逐像素 alpha、边缘 1.5px 羽化；显示 ~90ms 渐显、收起渐隐（`TID_TIPFADE` 步进，
-每步重发一次 ULW，`SourceConstantAlpha` 当全局乘数，不用改位图）。窗口带
-`WS_EX_TRANSPARENT`（鼠标穿透），压到光标也不打断悬停选中。
-几个要点：
-
-- **节奏两段式**：没显示时行变就重计 500ms（`TID_TIPSHOW`）—— 停稳才弹；
-  已显示时行变 = 立即换内容并跟手移位（不收起、不重计）。弹出点按"当下"光标算。
-- **时间行在最下面**：`Added: <lDate>` / `Last Used: <lastPasteDate>`（unix 秒、
-  本地时区、不补零）。`lastPasteDate` 列不存在（很老的库）时整条 SELECT 退回旧
-  查询、时间行不显示。
-- **换行自己写**（`TipWrapInPlace`）：CJK 无空格按字断；ASCII 词内不断（超长词
-  硬断）；空格断行时空格不进行尾。
-- **GDI 不写 alpha**：文字和底色画完后再按圆角几何给整个 DIB 补 alpha，
-  并按 a 预乘 RGB（`AC_SRC_ALPHA` 要求）。alpha 几何必须与 `RoundRect` 同一半径。
-- **ULW 与 SLWA 互斥**：一旦调过 `SetLayeredWindowAttributes`，ULW 会失败 ——
-  渐变只能走"重发 ULW + SourceConstantAlpha"这条路。
-- 历史（系统 tooltip 控件路线，已弃）留档：无清单进程 = comctl32 v5，
-  `TTM_ADDTOOLW` 传 v6 `sizeof(TOOLINFOW)` 静默失败（须 `TTTOOLINFOW_V1_SIZE`）；
-  v5 的 `TTF_SUBCLASS` 在 NOACTIVATE 窗口上不触发；`TTM_POP` 对 TRACK 工具无效。
-  弃用它就是因为观感"硬"：弹/收/切换全是瞬时的，调不出 Ditto 的"软"。
-
-
-文本取法：条目没被截断（≤160 字符）直接用摘要；被截断的按需回库取全文（`TipTextOf`，与缩略图同一条"用到才付"的思路）。TTN_NEEDTEXT 里同步查库只针对当前悬停那一条，单条毫秒级。
-
-### 焦点归还
-
-用 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)` 记住"最后一个不是自己的窗口"（clippi 的做法）。为什么不能直接现取 `GetForegroundWindow`：用户在挑条目的过程中完全可能点过别处，而他真正要粘的是**打开浮层那一刻**在用的那个程序。同一个钩子顺带承担"点击外部 / 切到别的程序就自动关"（置顶期间与粘贴进行中停用 —— 粘贴自己会调 `SetForegroundWindow`，那条事件是**我们**引起的）。
-
-### 测试边界
-
-真机才能验的是"粘出来对不对"；能离线钉住的是接线与寿命语义（`test_chord` 场景 AI2）：`C+V` 接到 `ClipShow`、松开 Caps 之后仍开着（寿命 ≠ 和弦）、这期间 `Esc` 被吞并转发、**关掉后 `Esc` 恢复放行**。
+- **测试边界**：窗口像素测不了（要真人按住键）。能离线钉住的是"键位接线 + 寿命语义 + 每条动作都有图上文案"（`test_chord` 场景 AI，文案那条靠遍历共享的键位表）。跨进程那份契约用一次性工具单独验过：`--hold` 起来时不显示、发 SHOW 出现、发 HIDE 消失并在 300ms 缓冲到点后退出；"主程序被强杀"那条不再靠子进程自己发现，而由 Job Object 保证（见[子进程的收场](#子进程的收场帮助浮层)）。渲染效果靠一次性抓图工具（屏幕 DC + `BitBlt`，`PrintWindow` 抓不到分层窗口）对着真机看。
 
 ---
 
@@ -1098,7 +963,7 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 ## 构建 / 测试 / CI
 
-**源文件清单只有一份**：主 exe 的 TU 列在 `src/sources.txt`（一行一个相对路径），`build.bat` 与 `test\build_analyze.bat` 都用 `cl @src\sources.txt` 读它。两个脚本原先各有一份列表，结果是 `src\child.c` 被本体链接、却从没被静态分析过（补进名单后当场抓出一条 `C6031`）。两个前提：① **在仓库根运行**（响应文件里的路径是相对的）；② 该文件**只能是纯文件名** —— `cl` 的响应文件没有注释语法（写 `rem` 会变成"未知选项"，破坏零告警基线），任何位置的 `@` 又会嵌套下一层响应文件（`D8035`）。独立编译的 TU（`thirdparty` 的 sqlite、`src\colorcode.c`、以及 settings / help / clip 三个 exe）不在名单里，各自留在自己的 cl 命令行上。
+**源文件清单只有一份**：主 exe 的 TU 列在 `src/sources.txt`（一行一个相对路径），`build.bat` 与 `test\build_analyze.bat` 都用 `cl @src\sources.txt` 读它。两个脚本原先各有一份列表，结果是 `src\child.c` 被本体链接、却从没被静态分析过（补进名单后当场抓出一条 `C6031`）。两个前提：① **在仓库根运行**（响应文件里的路径是相对的）；② 该文件**只能是纯文件名** —— `cl` 的响应文件没有注释语法（写 `rem` 会变成"未知选项"，破坏零告警基线），任何位置的 `@` 又会嵌套下一层响应文件（`D8035`）。独立编译的 TU（settings / help 两个 exe）不在名单里，各自留在自己的 cl 命令行上。
 
 依赖 **MSVC x64**（Windows 10/11），工具链由 `build_env.bat` 统一定位：用 vswhere 探测 VS/MSVC/SDK 并显式设置 `PATH/INCLUDE/LIB`（不走 vvcvars64，避开它的注册表探测；批处理里含 `(x86)` 的路径不能内联展开，也无法出现在 `( )` 块 / FOR 集合里）。
 
@@ -1116,11 +981,11 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 | 脚本 | 内容 |
 | --- | --- |
-| `build.bat` | 生成四个 exe：`bin/CapsEnhance.exe`（源文件清单在 **`src/sources.txt`**，由 `cl @src\sources.txt` 读入 —— 与 `test\build_analyze.bat` **共用同一份**，新增一个源文件只改这一个地方）、`bin/CapsEnhanceSettings.exe`（settings/settings.c + settings/sizepick.c + src/config.c，两个编译单元共享 `settings/settings_int.h`）、`bin/CapsEnhanceHelp.exe`（help/help.c，只吃一个共享头、不链接 src 下任何模块）、`bin/CapsEnhanceClip.exe`（clip/clip.c + `thirdparty\sqlite3mc_amalgamation.c` 编出的 obj，后者走**独立的 cl 命令行**：`/W0 /analyze-`、不加 `/TP`、`/bigobj`） |
-| `test\build_nav.bat` | 按词跳转测试：算法单测（`ComputeSteps`）+ Scintilla / Edit 通道集成（`test_sci`）+ 配置解析（`test_config`） |
+| `build.bat` | 生成三个 exe：`bin/CapsEnhance.exe`（源文件清单在 **`src/sources.txt`**，由 `cl @src\sources.txt` 读入 —— 与 `test\build_analyze.bat` **共用同一份**，新增一个源文件只改这一个地方）、`bin/CapsEnhanceSettings.exe`（settings/settings.c + src/config.c，共享 `settings/settings_int.h`）、`bin/CapsEnhanceHelp.exe`（help/help.c，只吃一个共享头、不链接 src 下任何模块） |
+| `test\build_nav.bat` | 按词跳转测试：算法单测（`ComputeSteps`）+ Scintilla / Edit 通道集成（`test_sci`）+ 配置解析（`test_config`）+ 子进程底座（`test_child`） |
 | `test\build_test.bat` | 和弦引擎回归：模式修饰的顺序语义（先按修饰再按触发键）、按下即开火、长按、增强补齐、多键同按、左 Alt=增强、清卡键判定、原生按词跳转序列、快速滚动 / 持续滚动、横向滚动、打开所在文件夹的键位接线与取路径、**全屏窗口在 `C+Q` 与 Caps+拖动两边都不动作**、**最大化窗口同屏连一次位置变化都没有**（数 `WM_WINDOWPOSCHANGED`）、按键帮助的键位接线与"寿命=和弦"、日志结束气泡的可点击接线与"点气泡不弹菜单 / 点图标才弹菜单"、键位表每条动作都有图上文案。带 `/DCAP_TEST`（让 `folder.c` 把"退成目录"这个判定结果通过可选形参带出来给断言看），链接 `winmm.lib`（`main.c` 的 `RecBeep` 用 `PlaySoundW`） |
 | `test\build_dbg.bat` | Debug CRT（`/MTd`）config 测试：Release CRT 不校验堆块，"越界写"这类 bug 只有这里拦得住 |
-| `test\build_analyze.bat` | 静态分析（`/W4` + `/analyze`）：只编译不链接。数据流引擎能发现"按 X 分配、按 Y 读"和 Interlocked 混用这类问题。源文件清单与 `build.bat` 共用 `src\sources.txt`（自身只额外列出 4 个独立编译的 TU），所以两边**不会漏**——`src\child.c` 就曾在 `build.bat` 里链接、却从没进过分析列表（补上之后当场抓出一条 `C6031`） |
+| `test\build_analyze.bat` | 静态分析（`/W4` + `/analyze`）：只编译不链接。数据流引擎能发现"按 X 分配、按 Y 读"和 Interlocked 混用这类问题。源文件清单与 `build.bat` 共用 `src\sources.txt`（自身只额外列出 2 个独立编译的 exe），所以两边**不会漏**——`src\child.c` 就曾在 `build.bat` 里链接、却从没进过分析列表（补上之后当场抓出一条 `C6031`） |
 | `test\build_keytest.bat` | 诊断工具：`keytest`（按键投递实测）、`uiprobe`（UIA 逐步探测）、`memtest`（UIA 内存压测）、`restarttest`（重启握手 + 单实例）、`traymemtest`（托盘菜单内存定位）、`logsmoke`（日志轮转）、`ilcheck`（打印各进程完整性级别）、`lowrun`（借 shell 令牌以普通权限启动任意程序）、`wspset`（WPS 直接置位三招实测：以普通权限跑 `lowrun.exe obj\test\wspset.exe`） |
 | `test\build_wpsjump.bat` | WPS 通道真机检查：把 WPS 文字窗口置前直接调 `NavJump`，核对"选中的是 WPS 通道"且光标落在算出的目标上。没装 / 没开 WPS 时打印 `[SKIP]` 以 0 退出（CI 友好）。**会移动 WPS 里文档的光标**（不改内容），先存盘 |
 | `test\build_wheelprobe.bat` | 滚轮落点计数探针 `obj\test\wheelprobe.exe`：一个窗口 + 一个只读的 `WH_MOUSE_LL`，分别给出"本窗口收到的条数/delta 合计"与"物理格 / 注入格"。用于把"有时候不加速"按三段对账（见"快速滚动细节"一节）。它也是 `test_chord` 场景AK 的目标窗口 —— 那个场景不编探针就 `[SKIP]`，所以 CI 不受影响 |
@@ -1131,11 +996,11 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 所有构建（含 `build.bat`）统一 **`/W4`**，CI 里再跑一轮 `/analyze`：这两级都抓过真实缺陷（`act.c` 停止标志 Interlocked 混用、`config.c` "按 A 分配按 B 读"），代价只是编译时间。目前全项目 `/W4` + `/analyze` **零告警**，新增告警会立刻被看见而不是淹在已知噪音里。
 
-### 产物落点、图标、四个 exe 的同目录约定
+### 产物落点、图标、三个 exe 的同目录约定
 
-- **产物落点**：中间产物（obj / 静态分析输出）与**全部测试/诊断 exe** 落在 `obj\`（测试在 `obj\test\`），`bin\` 只有四个发布 exe 与运行文件（ini / log / 构建指纹）。发布 = 直接拿走 `bin\`。
-- **图标**：`res\app.rc` 把 `res\app.ico` 作为资源 **#1** 编进**本体** exe（`main.c` 按 `MAKEINTRESOURCEW(1)` 取，`build.bat` 只把 `obj\app_res.obj` 链进第一条链接命令，另外三个 exe 不带图标）。`app.ico` 里带 16/24/32 三帧，帧源是 `res\icon16.png` / `icon24.png` / `icon32.png`。换图标：替换三张 PNG 后自己生成同名 `app.ico`（仓库里没有打包脚本，用任意 ICO 工具即可），再构建。`app.rc` 必须保持 ASCII（`rc.exe` 按 ANSI 读它）。
-- **四个 exe 必须同目录**：托盘菜单的"设置"按**同目录**找 `CapsEnhanceSettings.exe`；主程序按同目录找 `CapsEnhanceHelp.exe` / `CapsEnhanceClip.exe`；设置程序也按同目录找 `CapsEnhance.ini` 与 `CapsEnhance.exe`。三处都只做同目录查找，**不搜索 PATH**。
+- **产物落点**：中间产物（obj / 静态分析输出）与**全部测试/诊断 exe** 落在 `obj\`（测试在 `obj\test\`），`bin\` 只有三个发布 exe 与运行文件（ini / log / 构建指纹）。发布 = 直接拿走 `bin\`。
+- **图标**：`res\app.rc` 把 `res\app.ico` 作为资源 **#1** 编进**本体** exe（`main.c` 按 `MAKEINTRESOURCEW(1)` 取，`build.bat` 只把 `obj\app_res.obj` 链进第一条链接命令，另外两个 exe 不带图标）。`app.ico` 里带 16/24/32 三帧，帧源是 `res\icon16.png` / `icon24.png` / `icon32.png`。换图标：替换三张 PNG 后自己生成同名 `app.ico`（仓库里没有打包脚本，用任意 ICO 工具即可），再构建。`app.rc` 必须保持 ASCII（`rc.exe` 按 ANSI 读它）。
+- **三个 exe 必须同目录**：托盘菜单的"设置"按**同目录**找 `CapsEnhanceSettings.exe`；主程序按同目录找 `CapsEnhanceHelp.exe`；设置程序也按同目录找 `CapsEnhance.ini` 与 `CapsEnhance.exe`。三处都只做同目录查找，**不搜索 PATH**。
 
 ---
 
@@ -1152,4 +1017,4 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 **顺带一个容易误判的点**：exe 的节按 512 字节对齐，几百字节的代码变化可能根本不体现在文件大小上（大小相同 ≠ 内容相同）。要判断是否同源看哈希；要判断工具链是否一致看 `[ENV]` 行。
 
-> 编译中间产物一律落在 `obj\`（静态分析另落在 `obj\an\`），`bin\` 只有四个发布 exe 与运行文件（ini / log / BUILD-FINGERPRINT.txt）—— 测试与诊断工具在 `obj\test\`，发布时直接拿走 `bin\` 即可，不会带出一堆 `.obj`。`bin\`、`obj\`、`*.obj`、`*.exe`、`*.log` 都在 `.gitignore` 里，可随时删除，构建会重新生成。
+> 编译中间产物一律落在 `obj\`（静态分析另落在 `obj\an\`），`bin\` 只有三个发布 exe 与运行文件（ini / log / BUILD-FINGERPRINT.txt）—— 测试与诊断工具在 `obj\test\`，发布时直接拿走 `bin\` 即可，不会带出一堆 `.obj`。`bin\`、`obj\`、`*.obj`、`*.exe`、`*.log` 都在 `.gitignore` 里，可随时删除，构建会重新生成。

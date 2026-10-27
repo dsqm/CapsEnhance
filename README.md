@@ -1,6 +1,6 @@
 # CapsEnhance
 
-Windows **CapsLock** 快捷键增强程序：按住 `CapsLock`（下称 **C**）当修饰键，把它变成一套贴身的编辑 / 窗口 / 剪贴板 / 滚动工具。
+Windows **CapsLock** 快捷键增强程序：按住 `CapsLock`（下称 **C**）当修饰键，把它变成一套贴身的编辑 / 窗口 / 滚动工具。
 
 - 便携免安装：不写注册表、不改系统设置，卸载 = 删掉整个目录。
 - 常驻系统托盘，可随时暂停 / 重启 / 退出。
@@ -8,7 +8,7 @@ Windows **CapsLock** 快捷键增强程序：按住 `CapsLock`（下称 **C**）
 
 ## 快速开始
 
-1. 四个 exe（`CapsEnhance.exe` / `CapsEnhanceSettings.exe` / `CapsEnhanceHelp.exe` / `CapsEnhanceClip.exe`）放**同一目录**，双击 `CapsEnhance.exe` 运行。
+1. 三个 exe（`CapsEnhance.exe` / `CapsEnhanceSettings.exe` / `CapsEnhanceHelp.exe`）放**同一目录**，双击 `CapsEnhance.exe` 运行。
 2. 托盘右键菜单：**程序文件夹 / 暂停映射 / 取消全部置顶 / 设置… / 重启程序 / 退出**。
 3. 单实例运行；需要管理员权限时在设置里开 `RunAsAdmin = 1`（默认关）。
 
@@ -31,7 +31,6 @@ Windows **CapsLock** 快捷键增强程序：按住 `CapsLock`（下称 **C**）
 | `F3` | 打开当前程序所在文件夹并选中它的 exe |
 | `F6` / `F7` / `F8` | 系统静音（开关）/ 音量减 / 音量加（后两条长按连续调） |
 | `F1`（按住） | 按键帮助图 |
-| `V` | 剪贴板列表（读 Ditto 历史） |
 | `Tab` | 发送一次真实 CapsLock |
 | 反引号（`） | 开始 / 结束记录日志 |
 | 滚轮 | 快速滚动（倍数可配） |
@@ -93,43 +92,6 @@ AlwaysOnTop 模块**（窗口模型、事件、定时器、D2D 绘制都同源�
 
 > 目标窗口以管理员身份运行时，非提权的本程序改不动它：会弹托盘气泡提示，
 > 需要置顶这类窗口请开 `RunAsAdmin = 1`。
-
-### 剪贴板：`C + V`
-
-弹出一个**不抢焦点**的剪贴板列表（Ditto 历史最近 100 条，只读 Ditto 数据库，不改历史排序）：
-
-| 操作 | 效果 |
-| --- | --- |
-| 悬停 / `↑` `↓` / `PgUp` `PgDn` | 移动选中行（按着 C 时 `I` / `K` 也是上下） |
-| 滚轮 | 滚动 |
-| 单击条目 | 直接粘贴（`ClipClickPaste=0` 则改为单击选中、双击才粘） |
-| 双击条目 / `Enter` | 粘贴（原格式：图片、文件、富文本原样回写） |
-| 任一粘贴动作 + `Shift` | 纯文本粘贴（只写 `CF_UNICODETEXT`） |
-| `Alt` + `1..9` / `0` | 直接粘第 1..10 条 |
-| `Esc` / `✕` / 点窗口外 / 再按 `C+V` | 关闭 |
-| 拖动标题栏 / 双击标题栏 | 移动窗口 / **置顶**（粘完不关、点外面不关） |
-
-- 粘贴写入会挂 Ditto 的屏蔽标记，**不会污染 Ditto 历史**，你不用改 Ditto 任何设置。
-- 悬停约半秒弹出该条**完整内容**（含复制时间 / 最后使用）；色值条目显示色块。
-- 目标是终端（Windows Terminal、mintty、PuTTY、conhost）时自动改用 **`Shift+Insert`** 粘贴。
-- 启用与否只看 `DittoDir` 配置；没配 = 不开。字体 / 窗口大小在设置界面「剪贴板」段调。
-- 浮层由独立的 `CapsEnhanceClip.exe` 承担，常驻待命（主程序启动 3 秒后预热），所以第一次 `C+V` 也是瞬时的。
-- 点标题栏 **Ditto** 按钮或浮层开着时**单击 Caps** = 关浮层并拉起 Ditto 本体的快速粘贴。
-
-#### 图片预览：预览开着时按 `F3`
-
-选中条目带图片时按 `F3`，在列表旁弹出**大图预览**：
-
-| 操作 | 效果 |
-| --- | --- |
-| `F3` / `Esc` / `✕` / 点窗口外 / 按别的键 | 收起 |
-| **单击图片** | 「100% ↔ 适应窗口」切换（Ditto 同款） |
-| `Ctrl + 滚轮` | 缩放（锚 = 窗口中心） |
-| 滚轮 / 滚动条 | 平移超出部分 |
-| 拖标题栏 | 挪窗 |
-
-- 窗口贴着图片内容开：上限 `ClipViewMaxW/H`，小图也撑到 `ClipViewMinW/H`，都不超过工作区。
-- 选中行换到别的图片时预览跟着换；同一条目关了再开**立即显示**（解码结果留着）。非图片条目按 `F3` 什么都不做。全程不抢焦点。
 
 ### 单键切输入法（单击 Caps / 左右 Shift）
 
@@ -201,12 +163,6 @@ ImeRShiftMode = 1   ; 右Shift -> 中文
 | `MaxArrowSteps` | `4` | 逐格发方向键的步数上限（只约束"直接置位不可用"的场合；支持的控件 3 步起就走瞬跳）；`0` = 不限制（上限 256） |
 | `OverStepMode` | `1` | 逐格到上限后：`0` = 只发一个方向键；`1` = 改发 `Ctrl+方向` |
 | `ImeCapsMode` / `ImeLShiftMode` / `ImeRShiftMode` | `1` / `2` / `1` | 单击 Caps / 左 Shift / 右 Shift 切中文 / 英文 / 中文；`0` = 不处理 |
-| `DittoDir` | *(空)* | Ditto 的**文件夹**（`C+V` 用），`Ditto.db` 与 `Ditto.exe` 都从它派生。相对路径相对本程序目录；**留空 = 不启用** |
-| `ClipFont` / `ClipFontSize` | *(空)* / `10` | 快速粘贴窗口字体 / 字号（磅，`6..72`）。设置界面里一个按钮一并设置 |
-| `ClipW` / `ClipH` | `220` / `300` | 快速粘贴窗口宽 / 高（96 DPI 像素），`160..1600` / `140..1600`。设置界面行右侧的「调整…」弹示例窗拖着定 |
-| `ClipViewMaxW` / `MaxH` | `1024` / `530` | F3 预览窗格**最大**宽 / 高（96 DPI 像素），`160..8192` / `140..8192`，仍不超过工作区 |
-| `ClipViewMinW` / `MinH` | `480` / `320` | F3 预览窗格**最小**宽 / 高，`40..4096` / `80..4096` |
-| `ClipClickPaste` | `1` | 单击条目直接上屏；`0` = 单击选中、双击才粘 |
 | `HyperPassthrough` | `0` | Hyper 透传（进阶，默认关）：按下**未映射键**时才临时按住右侧 `RWin+RCtrl+RShift`（**不含 Alt**），该键以 Hyper+X 的形态送出 |
 
 > **Hyper 透传是给谁用的**：外部自动化工具（AutoHotkey 等）可以把 `>#^+某键` 绑成 Hyper 热键，例如 AHK 里 `>#^+g::` 对应按住 Caps 再按 G（G 未映射）。
@@ -257,11 +213,3 @@ AltSnap: Copyright (C) 2015 Stefan Sundin
 ```
 
 AltSnap 同样以 GPL-3.0-or-later 授权，因此本项目也采用同一许可证。若你要分发本程序的二进制，请一并提供对应源码（GPL-3.0 第 6 节）。
-
-剪贴板浮层（`CapsEnhanceClip.exe`）静态链接了 [SQLite3 Multiple Ciphers](https://github.com/utelle/SQLite3MultipleCiphers)（MIT 许可，源码在 `thirdparty\`），用于只读访问 Ditto 的数据库：
-
-```
-SQLite3 Multiple Ciphers: Copyright (c) 2019-2026 Ulrich Telle
-                          MIT License
-                          https://github.com/utelle/SQLite3MultipleCiphers
-```

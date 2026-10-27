@@ -54,16 +54,6 @@ enum {
     CFG_IME_CAPS_MODE,         /* [General] ImeCapsMode */
     CFG_IME_LSHIFT_MODE,       /* [General] ImeLShiftMode */
     CFG_IME_RSHIFT_MODE,       /* [General] ImeRShiftMode */
-    CFG_DITTO_DIR,             /* [General] DittoDir（文本项） */
-    CFG_CLIP_FONT,             /* [General] ClipFont（文本项） */
-    CFG_CLIP_FONT_SIZE,        /* [General] ClipFontSize（磅） */
-    CFG_CLIP_W,                /* [General] ClipW（窗口宽，96 DPI 下的像素） */
-    CFG_CLIP_H,                /* [General] ClipH（窗口高，同上） */
-    CFG_CLIP_CLICK_PASTE,      /* [General] ClipClickPaste */
-    CFG_CLIP_VIEW_MAX_W,       /* [General] ClipViewMaxW（F3 预览窗格最大宽，96 DPI 下的像素） */
-    CFG_CLIP_VIEW_MAX_H,       /* [General] ClipViewMaxH（F3 预览窗格最大高，同上） */
-    CFG_CLIP_VIEW_MIN_W,       /* [General] ClipViewMinW（F3 预览窗格最小宽，同上） */
-    CFG_CLIP_VIEW_MIN_H,       /* [General] ClipViewMinH（F3 预览窗格最小高，同上） */
     CFG_HYPER_PASSTHROUGH,     /* [General] HyperPassthrough（Hyper 透传，默认关） */
     CFG_COUNT
 };
@@ -77,54 +67,6 @@ void CfgSetInt(int id, int v);       /* 改值：按表里的值域钳制（与�
 void CfgSetBool(int id, BOOL v);
 void CfgSetStr(int id, const WCHAR* v);   /* NULL = 清空；过长按缓冲截断，不 fastfail */
 
-/* [General] DittoDir 的派生：<DittoDir>\Ditto.db 与 <DittoDir>\Ditto.exe。
-   文本项的值用 CfgStr(CFG_DITTO_DIR) 取（返回内部缓冲，**不要写它**）。 */
-
-/* [General] ClipFontSize 的取值范围由 CfgLo/CfgHi(CFG_CLIP_FONT_SIZE) 给出。 */
-#define DITTO_DIR_MAX 320                   /* 路径缓冲区字符数（含结尾的 0）。
-                                               比 MAX_PATH 宽一点：相对路径虽短，但拼出来的
-                                               绝对路径可能落在较深的目录里。 */
-/* [General] ClipFont / ClipFontSize：快速粘贴窗口的字体与字号（磅）。
-   ★ 字号用**磅**而不是像素：系统字体对话框（ChooseFont）给的就是磅，两边
-   不用换算 —— 存像素的话每次开对话框都要按 DPI 折回去，误差会累积。 */
-#define CLIP_FONT_MAX  64                   /* 字体名缓冲（LF_FULLFACESIZE = 64） */
-#define CLIP_FONT_SIZE_DEFAULT 10
-#define CLIP_FONT_SIZE_MAX     72
-/* 快速粘贴窗口的大小：单位是 **96 DPI 下的像素**（与窗口里其它尺寸同一套
-   记法），实际像素 = 值 × 显示器 DPI/96 —— 存"当前显示器上看到的像素"会让
-   同一份配置换个屏就变成另一个尺寸。设置界面里直接可改（剪贴板段）。
-   默认 220x300 是按"与 Ditto 的快速粘贴窗口观感相近"取的（在 175% 缩放的
-   屏幕上约为 385x525 物理像素）；嫌大嫌小都在设置里改。 */
-#define CLIP_W_DEFAULT 220
-#define CLIP_W_FALLBACK 220
-#define CLIP_W_MIN     160
-#define CLIP_W_MAX     1600
-#define CLIP_H_DEFAULT 300
-#define CLIP_H_FALLBACK 300
-#define CLIP_H_MIN     140
-#define CLIP_H_MAX     1600
-/* [General] ClipViewMaxW / ClipViewMaxH：**F3 图片预览窗格**的最大宽/高
-   （96 DPI 像素，实际 = 值 × 显示器 DPI/96，且仍不超过所在屏幕工作区）。
-   默认取"工作区 70%"在 175% 缩放屏幕上的等效值（1024x530 逻辑像素），
-   与旧版按百分比限制的行为在用户机器上完全一致。纯本程序配置，
-   **不读 Ditto.Settings**。 */
-#define CLIP_VIEW_MAX_W_DEFAULT 1024
-#define CLIP_VIEW_MAX_W_MIN     160
-#define CLIP_VIEW_MAX_W_MAX     8192
-#define CLIP_VIEW_MAX_H_DEFAULT 530
-#define CLIP_VIEW_MAX_H_MIN     140
-#define CLIP_VIEW_MAX_H_MAX     8192
-/* ClipViewMinW / ClipViewMinH：预览窗格的**最小**宽/高（同样 96 DPI 像素）。
-   窗口贴着小图开时"适应窗口"跟 100% 没差别、看不清 —— 给个最小尺寸，
-   小图的预览窗也撑到这个大小，点一下"适应窗口"就是实打实的放大。
-   默认 480x320；窗口仍不超过 ClipViewMaxW/H 与工作区。 */
-#define CLIP_VIEW_MIN_W_DEFAULT 480
-#define CLIP_VIEW_MIN_W_MIN     40
-#define CLIP_VIEW_MIN_W_MAX     4096
-#define CLIP_VIEW_MIN_H_DEFAULT 320
-#define CLIP_VIEW_MIN_H_MIN     80
-#define CLIP_VIEW_MIN_H_MAX     4096
-#define CLIP_CLICK_PASTE_DEFAULT 1  /* 单击条目直接上屏（默认开） */
 /* 单键切换输入法：key 为 IME_KEY_*，返回 IME_MODE_*（0=不处理 1=中文 2=英文） */
 int  ConfigGetImeMode(int key);
 BOOL ConfigIsNativeWordJump(HWND focus);    /* 焦点窗口的进程是否命中 [NativeWordJump] */

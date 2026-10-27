@@ -1,6 +1,6 @@
-/* ================= cap_overlay：子进程底座与两个浮层 =================
-   child.c（父死子退 / 子死父知）+ 主程序侧的 help.c / clip.c
-   （拉起、送达对账、按键代收）。三个独立 exe 都走这一层。
+/* ================= cap_overlay：子进程底座与按键帮助浮层 =================
+   child.c（父死子退 / 子死父知）+ 主程序侧的 help.c
+   （拉起、送达对账）。帮助浮层是独立 exe，设置程序也独立但没有子进程关系。
    本文件**只被 cap.h 包含**。 */
 /* ---------- 按键帮助（`C+F1`；窗口在**独立 exe** `CapsEnhanceHelp.exe` 里） ----------
    为什么拆成独立 exe：键位图要一次性叠一大堆 GDI+ 绘制，还要常驻一张位图、
@@ -41,95 +41,7 @@ void HelpShow(void);   /* F1 按下：让帮助窗口可见（必要时先拉起
 void HelpHide(void);   /* 抬起 / 松开 Caps / 引擎复位：让它隐（它会自己退出） */
 void HelpTick(void);   /* HELP_TIMER 到点：把期望状态再送一次（见上面的说明） */
 
-/* ---------- 剪贴板浮层（`Caps+V`；窗口在**独立 exe** `CapsEnhanceClip.exe` 里） ----------
-   与帮助窗口同一条理由拆成独立 exe，但比它更重一层：它要打开 Ditto 的 SQLite
-   数据库（只读）取最近 100 条，还要在粘贴时把整条记录的多份格式回写进剪贴板 ——
-   这些都属于"可能慢、可能失败"的事，绝不能发生在承载钩子的主线程上。
-
-   ★★ 寿命与帮助窗口**不同**：帮助是"按住才显示"（寿命 = 和弦），剪贴板是
-   **按一下就开、之后自己活着** —— 按住 V 松手之后窗口还得留着让人挑条目，
-   所以这里没有"Caps 抬起就隐"，只有明确的关闭途径（见下）。主程序侧因此
-   只做三件事：拉起、转发按键、在它死掉时立刻恢复按键放行。
-
-   关闭途径（浮层自己是 WS_EX_NOACTIVATE，收不到键盘，所以 Esc 只能由主程序的
-   键盘钩子代收转发）：
-     · Esc            -> 钩子拦下 -> WM_CLIP_ESC -> 主程序通知浮层关闭
-     · 点击外部 / 前台窗口变了 -> 浮层用 SetWinEventHook 自己判定
-     · 标题栏的 X     -> 浮层自绘，命中测试在它自己那里
-     · 再按一次热键   -> toggle（ClipShow 时窗口已在，直接让它关）
-   另有一条：**双击标题栏置顶（钉住）**。置顶期间停用"粘贴后自动关"与
-   "点击外部自动关"，为的是连粘多条不被打断 —— 置顶态只能靠 X / Esc / 热键退出。
-
-   寿命兜底与帮助窗口同一套（Job Object），差别有两条：
-     · **驻留改成不限时**（2026-09-26）：浮层收起后**进程永久待命**，不再有"待命
-       10 分钟就退出"这一档。冷启动每重经历一次就完整地再付一次（杀软扫 1.67MB
-       未签名 exe、装载静态 sqlite3mc、起 GDI+）—— 那正是"偶发要 2-5 秒"的来源，
-       而待命到期（用户隔十几分钟不用）恰好是我们要付它的时候。代价是一个隐藏
-       进程活到主程序退出为止；"父死子退"这条因此更值钱 —— 主程序一退，内核立刻
-       收掉待命中的浮层，不留孤儿。
-     · **送达靠子进程报信，不靠主程序猜**：浮层建窗成功后自己向主窗口发
-       `CLIP_MSG_BORN`，主程序收到那一刻才确认它存在、才发 SHOW/HIDE。40ms 的
-       `CLIP_TIMER` 轮询降为**兜底**，预算放宽到 10 秒，**到点不再杀进程**（见下面
-       CLIP_TRIES_MAX 的注释）。 */
-#define CLIP_TIMER   6                    /* 主窗口定时器 id（4=帮助对账） */
-#define CLIP_PREWARM_TIMER 7              /* 主窗口定时器 id：启动后预热浮层进程（见 ClipPrewarm） */
-#define CLIP_TICK_MS  40                  /* 兜底轮询间隔（正常路径用不上，见 ClipBorn） */
-#define CLIP_TRIES_MAX 250                /* 40ms x 250 ≈ 10s：报信始终没来才判异常 */
-#define CLIP_CLASS   L"CapsEnhanceClip"   /* 剪贴板窗口类名（跨进程握手靠它 FindWindow） */
-#define CLIP_MAIN_CLASS L"CapsEnhanceMain" /* 主窗口类名（浮层反向报信用它 FindWindow） */
-/* 浮层注入按键时打的标记（dwExtraInfo）。浮层是独立 exe，这个值就是跨进程的
-   唯一约定，两边共用这一个常量。
-   为什么要它：LLKHF_INJECTED 只说明"有程序注入了键"，分不清是谁 —— 浮层粘贴
-   发的 Ctrl+V、别的映射工具注入的键，在这一位上是同一个样子。带上标记之后，
-   钩子能**精确**认出"这是自家浮层在粘贴"，从而：① 永远不吞它（这条不变量
-   从此有代码保证，而不是靠"反正注入的键都在最前面放行"这个位置巧合）；
-   ② 记录模式下能把它与用户真实按键分开记，"粘贴没反应"这类问题第一问就是
-   "键到底发出去了没有"。 */
-#define CLIP_INJECT_MARKER 0x434C4950u    /* 'CLIP' */
-#define CLIP_MSG_SHOW L"CapsEnhanceClipShow"  /* 注册消息：让它显示 */
-#define CLIP_MSG_HIDE L"CapsEnhanceClipHide"  /* 注册消息：让它隐藏并退出 */
-#define CLIP_MSG_ESC  L"CapsEnhanceClipEsc"   /* 注册消息：主程序代收的 Esc */
-#define CLIP_MSG_KEY  L"CapsEnhanceClipKey"   /* 注册消息：主程序代收的导航键（wParam=vk，lParam=CLIPKF_*） */
-#define CLIP_MSG_CLOSED L"CapsEnhanceClipClosed" /* 注册消息：浮层自行关闭（粘贴/Esc/超时收起）-> 主程序清 s_want */
-/* 浮层 -> 主程序：图片预览窗状态变了（注册消息）。wParam = 1 开 / 0 关。
-   主程序据此记一份镜像（s_viewOpen），钩子在**主线程上**直接读 —— 两个
-   低级钩子与消息处理同在主线程串行（见 cap_core.h 的分界说明），这份镜像
-   不需要任何同步原语。为什么必须让主程序知道：预览窗是 NOACTIVATE 的，
-   键盘全部由钩子代收，"预览开着时按了别的键=预览退场"这条规则只有钩子能
-   执行，它就得知道预览开没开。 */
-#define CLIP_MSG_VIEWSTATE L"CapsEnhanceClipViewState"
-/* 主程序 -> 浮层：wParam=1 切换图片预览（裸 F3，浮层自己判当前条目是不是
-   图片）；wParam=0 让预览退场（用户按了无关键）。 */
-#define CLIP_MSG_VIEW  L"CapsEnhanceClipView"
-/* 浮层 -> 主程序：我的窗口已经出生，可以说话了（注册消息）。
-   wParam = 浮层自报的启动耗时 ms（进程入口 -> 建窗成功），lParam = 其中读库那一段的 ms。
-   为什么要有这条：握手原来全靠主程序 40ms 一次 `FindWindow` 去**猜**它出生了没有 ——
-   猜得急（1 秒预算）就把还没出窗的那份杀掉，猜得松用户就干等。子进程是唯一知道自己
-   出生了的人，让它说了算，主程序这边不必再为"该等多久"编数字。
-   注册消息天生可重复投递（重发几次也只是一次幂等的再确认），所以这条即使重复到达、
-   或在没有任何人等待它时到达，都只是让主程序把账补齐，不会有副作用。 */
-#define CLIP_MSG_BORN L"CapsEnhanceClipBorn"
-#define CLIP_EXE     L"CapsEnhanceClip.exe"
-void ClipPrewarm(void); /* 主程序启动后把浮层进程先拉起来（隐藏驻留），首次 Caps+V 免冷启动 */
-void ClipShow(void);    /* Caps+V 按下：显示（已在显示则 toggle 成隐藏） */
-void ClipHide(void);    /* 明确关闭（Esc / toggle / 引擎复位） */
-void ClipTick(void);    /* CLIP_TIMER 到点：把期望状态再送一次（送达后开始盯它） */
-void ClipEsc(void);     /* WM_CLIP_ESC：钩子代收的 Esc -> 通知浮层关闭 */
-void ClipCallDitto(void); /* 单击 Caps（浮层开着时）/ 浮层按钮：关浮层并拉起 Ditto 本体 -open */
-void ClipKey(int vk, unsigned flags); /* WM_CLIP_KEY：钩子代收的导航键 -> 转给浮层 */
-void ClipViewToggle(void);  /* WM_CLIP_VIEW(1)：钩子代收的裸 F3 -> 转给浮层（浮层自己 toggle） */
-void ClipViewHide(void);    /* WM_CLIP_VIEW(0)：用户按了无关键 -> 让预览退场（钉住时忽略） */
-BOOL ClipViewIsOpen(void);  /* 预览窗当前开着吗（钩子据此拦空格/发退场通知；镜像值） */
-BOOL ClipViewIsStateMsg(UINT msg); /* 主窗口收到这条注册消息 = 预览窗状态变了 */
-void ClipViewState(int open);            /* 收到 CLIP_MSG_VIEWSTATE：更新镜像 */
-BOOL ClipIsOpen(void);  /* 浮层当前是否"该开着"（钩子据此决定要不要拦 Esc） */
-BOOL ClipIsClosedMsg(UINT msg); /* 主窗口收到这条注册消息 = 浮层自行关闭了 */
-void ClipClosed(void);  /* 收到 CLIP_MSG_CLOSED：清 s_want，恢复按键放行 */
-void ClipGone(void);    /* 收到 WM_CLIP_GONE：浮层进程没了（同一件事，但由内核告知） */
-BOOL ClipIsBornMsg(UINT msg); /* 主窗口收到这条注册消息 = 浮层窗口已出生（与 ClipIsClosedMsg 同图案） */
-void ClipBorn(DWORD selfMs, DWORD dbMs); /* 收到 CLIP_MSG_BORN：握手完成（自报耗时，用于日志） */
-
-/* ---------- 子进程生命周期（帮助 / 剪贴板浮层的共同底座；实现在 src/child.c） ----------
+/* ---------- 子进程生命周期（帮助浮层的底座；实现在 src/child.c） ----------
    两件事：**父死子退**（Job Object，零协作、卡死也照杀）与**子死父知**（进程句柄
    等待，内核通知、零轮询）。原心跳（每 200ms 一条 KA + 对面 800ms 超时自杀）同时
    兼着这两件事、外加一份与子进程自身计时器重复的驻留到期信号，已整体删除。
