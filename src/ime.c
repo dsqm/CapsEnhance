@@ -16,11 +16,9 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
    ------------------------------------------------------------------
-   切换中文/英文的两条关键做法取自 KBLAutoSwitch
-     https://github.com/flyinclouds/KBLAutoSwitch  （GPL-3.0）
-   以及 InputTip 的 IME 状态模型
-     https://github.com/miaokela/InputTip          （MIT）
-   本项目同样以 GPL-3.0-or-later 授权。
+   中英切换基于 IMM32 的 WM_IME_CONTROL 事实标准（命令常量与 open status /
+   conversion mode 状态模型均为公开通用的做法），本文件为独立实现。
+   本项目以 GPL-3.0-or-later 授权。
    ------------------------------------------------------------------ */
 
 #include "cap.h"

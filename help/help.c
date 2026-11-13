@@ -17,11 +17,11 @@
 
    ------------------------------------------------------------------
    分层窗口（半透明浮层）的实现思路取自本机的 IMEIndicator 项目
-     https://github.com/  （同作者，GPL-3.0-or-later）
+     https://github.com/dsqm/IMEIndicator  （同作者，GPL-3.0-or-later）
    那里也是 `WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` + 32bpp DIB
    Section + `UpdateLayeredWindow(ULW_ALPHA)`，本文件沿用同一套。
-   键盘布局的键位宽度/间隔按 ANSI 104 标准（15u 主键区、功能行 Esc 与 F1 之间
-   隔 1u、F 键每四个一组各隔 0.5u），取自 keyboard-layout-editor 的 ANSI-104 定义。
+   键盘布局的键位宽度/间隔按 ANSI-104 标准键位几何（15u 主键区、功能行 Esc 与
+   F1 之间隔 1u、F 键每四个一组各隔 0.5u）。
    ------------------------------------------------------------------ */
 
 #include "cap.h"

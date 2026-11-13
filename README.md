@@ -204,12 +204,10 @@ ImeRShiftMode = 1   ; 右Shift -> 中文
 
 本项目以 **GNU General Public License v3.0 或更新版本**（GPL-3.0-or-later）发布，全文见 [LICENSE](LICENSE)。
 
-部分内容派生自 [AltSnap](https://github.com/RamonUnch/AltSnap)（`Caps+左键拖动窗口`的交互与实现思路、以及 `[DragWindowBlacklist]` / `[DragProcessBlacklist]` 的默认名单）：
+本项目引入了以下第三方代码，完整来源与许可证文本见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)：
 
-```
-AltSnap: Copyright (C) 2015 Stefan Sundin
-         Modified By Raymond Gillibert in 2022
-         https://github.com/RamonUnch/AltSnap
-```
+- **[AltSnap](https://github.com/RamonUnch/AltSnap)**（GPL-3.0-or-later）：`Caps+左键拖动窗口`的交互与实现思路，以及 `[DragWindowBlacklist]` / `[DragProcessBlacklist]` 的默认名单。版权 `Copyright (C) 2015 Stefan Sundin`，`Modified By Raymond Gillibert in 2021`。
+- **[Microsoft PowerToys](https://github.com/microsoft/PowerToys)**（MIT）：`Caps+T 窗口置顶`整模块移植自其 AlwaysOnTop 模块，Microsoft 版权声明与 MIT 全文见 `src/pin.cpp` 文件头。
+- **[IMEIndicator](https://github.com/dsqm/IMEIndicator)**（同作者，GPL-3.0-or-later）：按键帮助浮层的分层窗口实现思路。
 
-AltSnap 同样以 GPL-3.0-or-later 授权，因此本项目也采用同一许可证。若你要分发本程序的二进制，请一并提供对应源码（GPL-3.0 第 6 节）。
+AltSnap、IMEIndicator 与本项目同为 GPL-3.0-or-later，PowerToys 的 MIT 代码单向兼容并入 GPL-3.0，无许可证冲突。若你要分发本程序的二进制，请一并提供对应源码（GPL-3.0 第 6 节）。

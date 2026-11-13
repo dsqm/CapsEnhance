@@ -33,3 +33,10 @@
 - `test/build_analyze.bat`、`test/build_nav.bat`、`test/test_chord.c`、`test/test_config.c`：对应的分析与测试项
 
 更完整的旧代码可从本仓库 git 历史中本次移除提交的父提交取出。
+
+## 许可证
+
+本归档含第三方代码，随仓库一并分发，许可证如下（详见根目录 [THIRD-PARTY-NOTICES.md](../../THIRD-PARTY-NOTICES.md)）：
+
+- **Ditto**（GPL-3.0）：浮层的窗口/文字画法、默认主题配色与数据库只读访问定义派生自 [Ditto](https://github.com/sabrogden/Ditto)（作者 Scott Brogden）。GPL-3.0 与本仓库根 [LICENSE](../../LICENSE)（GPL-3.0-or-later）兼容。
+- **SQLite3 Multiple Ciphers（sqlite3mc）v2.3.5**（MIT）：`thirdparty/` 下的 amalgamation，版权 (c) 2019-2026 Ulrich Telle。其内嵌子组件（SQLite 核心 public domain、AEGIS MIT、SHA-2 BSD-3-Clause、MD5/miniz public domain 等）的完整许可证均已逐字保留在源文件头部。

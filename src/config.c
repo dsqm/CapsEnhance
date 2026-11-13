@@ -18,7 +18,7 @@
    ------------------------------------------------------------------
    本文件的部分内容派生自 AltSnap
      AltSnap: Copyright (C) 2015 Stefan Sundin
-              Modified By Raymond Gillibert in 2022
+              Modified By Raymond Gillibert in 2021
               https://github.com/RamonUnch/AltSnap
    AltSnap 以 GPL-3.0-or-later 授权；本项目同样以 GPL-3.0-or-later 授权。
    ------------------------------------------------------------------ */
