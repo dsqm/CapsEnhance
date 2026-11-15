@@ -26,7 +26,7 @@ typedef struct {
 enum {
     /* ---- 窗口层：身份 ---- */
     IF_TITLE = 0, IF_TITLELEN, IF_CLASS, IF_UNICODE, IF_HANDLE, IF_WNDUID, IF_WNDID,
-    IF_STATE, IF_CLOAKED,
+    IF_STATE, IF_CLOAKED, IF_AFFINITY,
     /* ---- 窗口层：几何 ---- */
     IF_RECT, IF_NORMALRECT, IF_CLIENT, IF_MONITOR, IF_DPI, IF_DPICTX,
     /* ---- 窗口层：关系与线程 ---- */
@@ -39,12 +39,14 @@ enum {
     /* ---- 进程层：身份 ---- */
     IF_PROCNAME, IF_PID, IF_IMAGE, IF_VER, IF_PRODUCT, IF_COMPANY, IF_IMAGETYPE,
     /* ---- 进程层：运行 ---- */
-    IF_ARCH, IF_CMDLINE, IF_CWD, IF_START, IF_PPROC, IF_PPROCTIME,
+    IF_ARCH, IF_CMDLINE, IF_CWD, IF_START, IF_PPROC, IF_PPROCTIME, IF_CRITICAL, IF_INJOB,
     /* ---- 进程层：安全上下文 ---- */
-    IF_ACCOUNT, IF_USERSID, IF_INTEGRITY, IF_ELEVATION, IF_UIAACCESS, IF_VIRTUALIZED,
+    IF_ACCOUNT, IF_USERSID, IF_INTEGRITY, IF_ELEVATION, IF_UIAACCESS,
+    IF_MANDATORY, IF_RESTRICTIONS, IF_VIRTUALIZED, IF_LINKED,
+    IF_CONTAINER, IF_CAPABILITIES, IF_APPSID, IF_LOGONSID,
     IF_PROTECTION, IF_MITIGATION, IF_PRIVS, IF_PKGNAME,
     /* ---- 进程层：资源 ---- */
-    IF_SESSION, IF_HANDLES, IF_WORKSET,
+    IF_SESSION, IF_HANDLES, IF_WORKSET, IF_PRIORITY,
     IF_COUNT
 };
 
@@ -58,6 +60,7 @@ static const InfoFieldDef kInfoFields[IF_COUNT] = {
     { "wndid",      0, L"控件 ID" },
     { "state",      0, L"状态" },
     { "cloaked",    0, L"DWM 隐藏" },
+    { "affinity",   0, L"截图保护" },
 
     { "rect",       0, L"窗口位置" },
     { "normalrect", 0, L"还原矩形" },
@@ -104,13 +107,22 @@ static const InfoFieldDef kInfoFields[IF_COUNT] = {
     { "start",      1, L"启动时间" },
     { "pproc",      1, L"父进程" },
     { "pproctime",  1, L"父进程创建时间" },
+    { "critical",   1, L"关键进程" },
+    { "injob",      1, L"在 Job 里" },
 
     { "account",    1, L"账户" },
     { "usersid",    1, L"用户 SID" },
     { "integrity",  1, L"完整性级别" },
     { "elevation",  1, L"运行权限" },
     { "uiaccess",   1, L"UIAccess 标志" },
+    { "mandatory",  1, L"完整性策略" },
+    { "restrictions",1,L"令牌限制" },
     { "virtualized",1, L"UAC 虚拟化" },
+    { "linked",     1, L"关联令牌" },
+    { "container",  1, L"容器" },
+    { "capabilities",1,L"能力" },
+    { "appsid",     1, L"包 SID" },
+    { "logonsid",   1, L"登录会话 SID" },
     { "protection", 1, L"保护级别" },
     { "mitigation", 1, L"缓解策略" },
     { "privs",      1, L"已启用特权" },
@@ -119,6 +131,7 @@ static const InfoFieldDef kInfoFields[IF_COUNT] = {
     { "session",    1, L"会话" },
     { "handles",    1, L"句柄数" },
     { "workset",    1, L"工作集" },
+    { "priority",   1, L"优先级类" },
 };
 
 /* 默认「常用」：默认显示的那 11 项，顺序即显示顺序（逗号分隔的 key）。

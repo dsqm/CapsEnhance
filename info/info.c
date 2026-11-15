@@ -676,6 +676,18 @@ static const StyleBit kStyle[] = {
     { WS_GROUP,        L"WS_GROUP" },
     { WS_TABSTOP,      L"WS_TABSTOP" },
 };
+/* 截图保护的两个取值不是所有 SDK 版本都定义（WDA_EXCLUDEFROMCAPTURE 要
+   Win10 2004 的 SDK），自己补一份，语义与 winuser.h 一致。 */
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+
+/* 扩展样式表只列"看到名字就明白现象"的那些位。NOREDIRECTIONBITMAP 一定要有：
+   带这一位的窗口（DirectComposition / 部分 UWP）没有重定向表面，PrintWindow
+   与 BitBlt 截出来就是全黑 —— 这正是"截图黑"最常见的第二种原因。 */
+#ifndef WS_EX_NOREDIRECTIONBITMAP
+#define WS_EX_NOREDIRECTIONBITMAP 0x00200000L
+#endif
 static const StyleBit kExStyle[] = {
     { WS_EX_TOPMOST,       L"WS_EX_TOPMOST" },
     { WS_EX_TOOLWINDOW,    L"WS_EX_TOOLWINDOW" },
@@ -689,6 +701,10 @@ static const StyleBit kExStyle[] = {
     { WS_EX_CLIENTEDGE,    L"WS_EX_CLIENTEDGE" },
     { WS_EX_STATICEDGE,    L"WS_EX_STATICEDGE" },
     { WS_EX_MDICHILD,      L"WS_EX_MDICHILD" },
+    { WS_EX_DLGMODALFRAME, L"WS_EX_DLGMODALFRAME" },
+    { WS_EX_NOPARENTNOTIFY,L"WS_EX_NOPARENTNOTIFY" },
+    { WS_EX_COMPOSITED,    L"WS_EX_COMPOSITED" },
+    { WS_EX_NOREDIRECTIONBITMAP, L"WS_EX_NOREDIRECTIONBITMAP" },
 };
 
 static void StyleText(DWORD v, const StyleBit* tab, int n, WCHAR* out, size_t cap) {
@@ -852,7 +868,14 @@ typedef struct {
     WCHAR integrity[128];    /* Low / Medium / High / System */
     WCHAR elevation[128];    /* 管理员（已提升）/ 标准用户（未提升）… */
     WCHAR uiaccess[96];      /* UIAccess 标志（令牌上的位，不随清单声明） */
-    WCHAR virtualized[96];   /* UAC 文件与注册表虚拟化 */
+    WCHAR mandatory[96];     /* 完整性策略：禁写高 / 禁读高 */
+    WCHAR restrictions[128]; /* 普通 / 受限令牌 / 曾被过滤 */
+    WCHAR virtualized[96];   /* UAC 文件与注册表虚拟化（含"允不允许"） */
+    WCHAR linked[96];        /* 拆分令牌的另一半是否存在 */
+    WCHAR container[160];    /* AppContainer / 沙箱 / AppSilo / 私有命名空间 */
+    WCHAR capabilities[64];  /* 能力数量（只有容器进程才有内容） */
+    WCHAR appsid[192];       /* AppContainer 的包 SID */
+    WCHAR logonsid[96];      /* 登录会话 SID（S-1-5-5-…） */
     WCHAR protection[128];   /* PPL 类型与签名者 */
     WCHAR mitigation[256];   /* DEP / ASLR / CFG / ACG / 严格句柄 */
     WCHAR privs[1400];       /* 已启用的特权（前 12 个 + 总数） */
@@ -1187,18 +1210,193 @@ static void ProcSecurityGet(DWORD pid, ProcSecurity* s) {
             _snwprintf_s(s->uiaccess, 96, _TRUNCATE,
                          uia ? L"已启用（可绕前台锁与 UIPI；常见高完整性但未提升）"
                              : L"未启用");
-        /* UAC 虚拟化：32 位老程序写 HKLM / Program Files 被重定向就是它 */
-        DWORD v = 0;
-        sz = sizeof(v);
-        if (GetTokenInformation(tok, TokenVirtualizationEnabled, &v, sizeof(v), &sz))
-            _snwprintf_s(s->virtualized, 96, _TRUNCATE,
-                         v ? L"已启用（32 位写入会被重定向）" : L"未启用");
+        /* 完整性策略：令牌上的 MIC 义务（NO_WRITE_UP = 不能写更高完整性的
+           对象）。它说的不是"目标有多高"，而是"这个进程能往多高读写"。 */
+        DWORD mp = 0;
+        sz = sizeof(mp);
+        if (GetTokenInformation(tok, TokenMandatoryPolicy, &mp, sizeof(mp), &sz)) {
+            if (mp & 3) {
+                const WCHAR* t = L"";
+                switch (mp & 3) {
+                case 1:  t = L"禁写高（NO_WRITE_UP）"; break;
+                case 2:  t = L"禁读高（NO_READ_UP）"; break;
+                default: t = L"禁写高 + 禁读高"; break;
+                }
+                _snwprintf_s(s->mandatory, 96, _TRUNCATE, L"%s", t);
+            } else {
+                _snwprintf_s(s->mandatory, 96, _TRUNCATE, L"无（读写都能上探）");
+            }
+        }
+        /* 令牌限制：IsRestricted = 现在是受限令牌（服务 / 沙箱那一套），
+           HasRestrictions = 历史上被过滤过（UAC 拆分令牌就是这种）。 */
+        {
+            DWORD hr = 0, ir = 0;
+            sz = sizeof(hr);
+            BOOL okH = GetTokenInformation(tok, TokenHasRestrictions, &hr, sizeof(hr), &sz);
+            sz = sizeof(ir);
+            BOOL okI = GetTokenInformation(tok, TokenIsRestricted, &ir, sizeof(ir), &sz);
+            if (okI && ir)
+                _snwprintf_s(s->restrictions, 128, _TRUNCATE, L"受限令牌（SeRestrictedSids 生效）");
+            else if (okH && hr)
+                _snwprintf_s(s->restrictions, 128, _TRUNCATE, L"普通（曾被过滤：UAC 拆分令牌）");
+            else if (okH || okI)
+                _snwprintf_s(s->restrictions, 128, _TRUNCATE, L"普通（未经过滤）");
+        }
+        /* UAC 虚拟化：Allowed 与 Enabled 是两个位 —— 64 位进程常见"允许但未启用" */
+        {
+            DWORD va = 0, ve = 0;
+            sz = sizeof(va);
+            BOOL okA = GetTokenInformation(tok, TokenVirtualizationAllowed, &va, sizeof(va), &sz);
+            sz = sizeof(ve);
+            BOOL okE = GetTokenInformation(tok, TokenVirtualizationEnabled, &ve, sizeof(ve), &sz);
+            if (okA && !va)
+                _snwprintf_s(s->virtualized, 96, _TRUNCATE, L"不支持（令牌不允许）");
+            else if (okE)
+                _snwprintf_s(s->virtualized, 96, _TRUNCATE,
+                             ve ? L"已启用（32 位写入会被重定向）" : L"允许但未启用");
+        }
+        /* 关联令牌：拆分令牌机制下"高权那一半"是否存在。查询失败但错误码是
+           NO_SUCH_LOGON_SESSION 就是"没有另一份"，与"读不到"要分开。 */
+        {
+            TOKEN_LINKED_TOKEN lt;
+            memset(&lt, 0, sizeof(lt));
+            sz = sizeof(lt);
+            if (GetTokenInformation(tok, TokenLinkedToken, &lt, sizeof(lt), &sz))
+                _snwprintf_s(s->linked, 96, _TRUNCATE, L"有（拆分令牌的高权那一半）");
+            else if (GetLastError() == ERROR_NO_SUCH_LOGON_SESSION)
+                _snwprintf_s(s->linked, 96, _TRUNCATE, L"无（单一令牌）");
+        }
+        /* 容器：AppContainer / 沙箱 / AppSilo / 私有命名空间 —— 四个位都读得到 */
+        {
+            DWORD ac = 0, sb = 0, silo = 0, pns = 0;
+            sz = sizeof(ac);
+            BOOL okc = GetTokenInformation(tok, TokenIsAppContainer, &ac, sizeof(ac), &sz);
+            sz = sizeof(sb);
+            BOOL oks = GetTokenInformation(tok, TokenIsSandboxed, &sb, sizeof(sb), &sz);
+            sz = sizeof(silo);
+            BOOL okSilo = GetTokenInformation(tok, TokenIsAppSilo, &silo, sizeof(silo), &sz);
+            sz = sizeof(pns);
+            BOOL okP = GetTokenInformation(tok, TokenPrivateNameSpace, &pns, sizeof(pns), &sz);
+            if (okc && !ac && (!okSilo || !silo) && (!okP || !pns))
+                _snwprintf_s(s->container, 160, _TRUNCATE, L"无（普通 Win32 进程）");
+            else if (okc || okSilo || okP || oks) {
+                WCHAR t[160] = L"";
+                if (ac)  wcscat_s(t, 160, L"AppContainer");
+                if (sb)  wcscat_s(t, 160, t[0] ? L" + 沙箱" : L"沙箱");
+                if (silo) wcscat_s(t, 160, t[0] ? L" + AppSilo" : L"AppSilo");
+                if (pns) wcscat_s(t, 160, t[0] ? L" + 私有命名空间" : L"私有命名空间");
+                _snwprintf_s(s->container, 160, _TRUNCATE, L"%s", t);
+            }
+        }
+        /* 能力清单：容器里"能访问什么"由它决定（Internet 客户端、runFullTrust…）。
+           名字要逐个 LookupAccountSid，成本高，这里只给数量。 */
+        {
+            sz = 0;
+            if (GetTokenInformation(tok, TokenCapabilities, NULL, 0, &sz) ||
+                GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+                TOKEN_GROUPS* g = sz ? (TOKEN_GROUPS*)calloc(1, sz) : NULL;
+                if (g && GetTokenInformation(tok, TokenCapabilities, g, sz, &sz))
+                    _snwprintf_s(s->capabilities, 64, _TRUNCATE, L"%lu 项", g->GroupCount);
+                else
+                    _snwprintf_s(s->capabilities, 64, _TRUNCATE, L"0 项");
+                free(g);
+            }
+        }
+        /* 包 SID：容器进程的稳定身份（包名会改名，SID 不会） */
+        {
+            sz = 0;
+            if (GetTokenInformation(tok, TokenAppContainerSid, NULL, 0, &sz) ||
+                GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+                TOKEN_APPCONTAINER_INFORMATION* ai =
+                    sz ? (TOKEN_APPCONTAINER_INFORMATION*)calloc(1, sz) : NULL;
+                if (ai && GetTokenInformation(tok, TokenAppContainerSid, ai, sz, &sz) &&
+                    ai->TokenAppContainer) {
+                    LPWSTR sid = NULL;
+                    if (ConvertSidToStringSidW(ai->TokenAppContainer, &sid) && sid) {
+                        _snwprintf_s(s->appsid, 192, _TRUNCATE, L"%s", sid);
+                        LocalFree(sid);
+                    }
+                } else {
+                    _snwprintf_s(s->appsid, 192, _TRUNCATE, L"无（非容器进程）");
+                }
+                free(ai);
+            }
+        }
+        /* 登录会话 SID：同一个 SID 的窗口才互相看得见（跨会话窗口互相不可见） */
+        {
+            sz = 0;
+            if (GetTokenInformation(tok, TokenLogonSid, NULL, 0, &sz) ||
+                GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+                TOKEN_GROUPS* g = sz ? (TOKEN_GROUPS*)calloc(1, sz) : NULL;
+                if (g && GetTokenInformation(tok, TokenLogonSid, g, sz, &sz) &&
+                    g->GroupCount > 0 && g->Groups[0].Sid) {
+                    LPWSTR sid = NULL;
+                    if (ConvertSidToStringSidW(g->Groups[0].Sid, &sid) && sid) {
+                        _snwprintf_s(s->logonsid, 96, _TRUNCATE, L"%s", sid);
+                        LocalFree(sid);
+                    }
+                }
+                free(g);
+            }
+        }
         PrivilegeText(tok, s->privs, 1400);
         CloseHandle(tok);
     }
     ProcMitigationText(h, s->mitigation, 256);
     ProcProtectionText(h, s->protection, 128);
     CloseHandle(h);
+}
+
+/* ---------- 进程标志：关键进程 / 在 Job 里 ----------
+   两项都要进程句柄，但都不是令牌数据，所以与安全上下文分开：开一次句柄问两遍，
+   比各开一次省一半。优先级类放在资源段，用那里已经开好的句柄查。
+   打不开进程时逐项写"不可用"——整段消失会让人以为字段没实现。 */
+static void ProcFlagsEmit(Buf* b, DWORD pid) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) {
+        BufUnavail(b, IF_CRITICAL, L"进程无权限打开");
+        BufUnavail(b, IF_INJOB, L"进程无权限打开");
+        return;
+    }
+    EnsureNt();
+    WCHAR t[96];
+    t[0] = 0;
+    if (s_ntQip) {
+        /* ProcessBreakOnTermination：置位 = 结束它会直接蓝屏（关键进程） */
+        ULONG v = 0, ret = 0;
+        if (s_ntQip(h, 29, &v, sizeof(v), &ret) == 0)
+            _snwprintf_s(t, 96, _TRUNCATE, v ? L"是（结束它会触发蓝屏）" : L"否");
+    }
+    if (t[0]) BufField(b, IF_CRITICAL, t);
+    else      BufUnavail(b, IF_CRITICAL, L"该信息类不可用");
+
+    BOOL injob = FALSE;
+    if (IsProcessInJob(h, NULL, &injob))
+        BufField(b, IF_INJOB, injob ? L"是（受 Job 的资源 / UI 限制）" : L"否");
+    else
+        BufUnavail(b, IF_INJOB, L"IsProcessInJob 失败");
+    CloseHandle(h);
+}
+
+/* 优先级类：数值一起给，便于比对。REALTIME 还额外要
+   SeIncreaseBasePriorityPrivilege，光看类别名看不出来，所以保留十六进制。 */
+static void ProcPriorityText(HANDLE h, WCHAR* out, size_t cap) {
+    out[0] = 0;
+    if (!h) return;
+    DWORD pc = GetPriorityClass(h);
+    if (!pc) return;
+    const WCHAR* n = NULL;
+    switch (pc) {
+    case IDLE_PRIORITY_CLASS:          n = L"低（Idle）"; break;
+    case BELOW_NORMAL_PRIORITY_CLASS:  n = L"低于普通";   break;
+    case NORMAL_PRIORITY_CLASS:        n = L"普通";       break;
+    case ABOVE_NORMAL_PRIORITY_CLASS:  n = L"高于普通";   break;
+    case HIGH_PRIORITY_CLASS:          n = L"高";         break;
+    case REALTIME_PRIORITY_CLASS:      n = L"实时";       break;
+    default: break;
+    }
+    if (n) _snwprintf_s(out, cap, _TRUNCATE, L"%s（0x%lX）", n, (unsigned long)pc);
+    else   _snwprintf_s(out, cap, _TRUNCATE, L"0x%lX", (unsigned long)pc);
 }
 
 /* PE 架构：IsWow64Process2 能区分 ARM64 与 x64；老系统退回 IsWow64Process。 */
@@ -1472,6 +1670,24 @@ static Collected* Collect(HWND target) {
         CloakedText(target, cloak, 64);
         if (cloak[0]) BufField(&b, IF_CLOAKED, cloak);
     }
+    /* 截图保护（显示亲和性）：这一位决定"截图 / 录屏里能不能看见它"。
+       它是**可读的**（GetWindowDisplayAffinity），不需要特殊权限；黑屏截图的
+       第一大原因就是 WDA_EXCLUDEFROMCAPTURE / WDA_MONITOR。 */
+    {
+        DWORD aff = 0;
+        if (GetWindowDisplayAffinity(target, &aff)) {
+            if (aff == WDA_NONE)
+                BufField(&b, IF_AFFINITY, L"无（可被截图 / 录屏）");
+            else if (aff == WDA_MONITOR)
+                BufField(&b, IF_AFFINITY, L"仅显示器可见（截图里是黑块）");
+            else if (aff == WDA_EXCLUDEFROMCAPTURE)
+                BufField(&b, IF_AFFINITY, L"已排除（截图 / 录屏里不出现该窗口）");
+            else
+                BufFieldF(&b, IF_AFFINITY, L"0x%lX（未知取值）", (unsigned long)aff);
+        } else {
+            BufUnavail(&b, IF_AFFINITY, L"GetWindowDisplayAffinity 失败");
+        }
+    }
 
     /* 位置与尺寸 */
     BufBlankLine(&b);
@@ -1653,6 +1869,7 @@ static Collected* Collect(HWND target) {
     } else {
         BufUnavail(&b, IF_PPROC, L"进程无权限打开");
     }
+    ProcFlagsEmit(&b, pid);
 
     /* 安全上下文（同源于一次 OpenProcess + 一次 OpenProcessToken）。
        ★ 这个结构体带 1.4 KB 的特权清单，放栈上会把采集线程的栈用量顶过
@@ -1672,8 +1889,22 @@ static Collected* Collect(HWND target) {
             else                   BufUnavail(&b, IF_ELEVATION, L"令牌不可读");
             if (sec->uiaccess[0]) BufField(&b, IF_UIAACCESS, sec->uiaccess);
             else                  BufUnavail(&b, IF_UIAACCESS, L"令牌不可读");
+            if (sec->mandatory[0]) BufField(&b, IF_MANDATORY, sec->mandatory);
+            else                   BufUnavail(&b, IF_MANDATORY, L"令牌不可读");
+            if (sec->restrictions[0]) BufField(&b, IF_RESTRICTIONS, sec->restrictions);
+            else                      BufUnavail(&b, IF_RESTRICTIONS, L"令牌不可读");
             if (sec->virtualized[0]) BufField(&b, IF_VIRTUALIZED, sec->virtualized);
             else                     BufUnavail(&b, IF_VIRTUALIZED, L"令牌不可读");
+            if (sec->linked[0]) BufField(&b, IF_LINKED, sec->linked);
+            else                BufUnavail(&b, IF_LINKED, L"令牌不可读");
+            if (sec->container[0]) BufField(&b, IF_CONTAINER, sec->container);
+            else                   BufUnavail(&b, IF_CONTAINER, L"令牌不可读");
+            if (sec->capabilities[0]) BufField(&b, IF_CAPABILITIES, sec->capabilities);
+            else                      BufUnavail(&b, IF_CAPABILITIES, L"令牌不可读");
+            if (sec->appsid[0]) BufField(&b, IF_APPSID, sec->appsid);
+            else                BufUnavail(&b, IF_APPSID, L"令牌不可读");
+            if (sec->logonsid[0]) BufField(&b, IF_LOGONSID, sec->logonsid);
+            else                  BufUnavail(&b, IF_LOGONSID, L"令牌不可读");
             if (sec->protection[0]) BufField(&b, IF_PROTECTION, sec->protection);
             else                    BufUnavail(&b, IF_PROTECTION, L"进程句柄不可读");
             if (sec->mitigation[0]) BufField(&b, IF_MITIGATION, sec->mitigation);
@@ -1711,6 +1942,12 @@ static Collected* Collect(HWND target) {
             pmc.cb = sizeof(pmc);
             if (gm(hp, &pmc, sizeof(pmc)))
                 BufFieldF(&b, IF_WORKSET, L"%.1f MB", (double)pmc.WorkingSetSize / (1024.0 * 1024.0));
+        }
+        {   /* 优先级类：顺手用这里已经开好的句柄问，不必再开一次 */
+            WCHAR pr[64];
+            ProcPriorityText(hp, pr, 64);
+            if (pr[0]) BufField(&b, IF_PRIORITY, pr);
+            else       BufUnavail(&b, IF_PRIORITY, L"GetPriorityClass 失败");
         }
         CloseHandle(hp);
     }
