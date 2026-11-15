@@ -877,7 +877,7 @@ typedef struct {
     WCHAR appsid[192];       /* AppContainer 的包 SID */
     WCHAR logonsid[96];      /* 登录会话 SID（S-1-5-5-…） */
     WCHAR protection[128];   /* PPL 类型与签名者 */
-    WCHAR mitigation[256];   /* DEP / ASLR / CFG / ACG / 严格句柄 */
+    WCHAR mitigation[512];   /* ASLR / CFG / 各条"禁止"策略 */
     WCHAR privs[1400];       /* 已启用的特权（前 12 个 + 总数） */
 } ProcSecurity;
 
@@ -893,36 +893,74 @@ static void SidToText(PSID sid, WCHAR* out, size_t cap) {
     }
 }
 
-/* 缓解策略摘要：只列"装没装"最容易解释现象的几项（DEP / ASLR / CFG / ACG /
-   句柄严格校验）。十来个策略全列会把这一屏撑长，需要细看时另有专门工具。 */
+/* 一条缓解策略 = 策略号 + "已开启"对应的位。除系统调用过滤（值是枚举不是位）
+   之外，其余策略的主开关都在第 0 位，所以整张表只有两项特殊值。
+   策略号是 PROCESS_MITIGATION_POLICY 的枚举值，SDK 里老版本不一定有名字。 */
+typedef struct {
+    int          policy;
+    DWORD        mask;
+    const WCHAR* name;
+} MitiDef;
+
+static const MitiDef kMiti[] = {
+    { 2,  0x1,        L"禁止动态代码" },
+    { 4,  0x1,        L"禁止 Win32k 调用" },
+    { 6,  0x1,        L"禁用扩展点" },
+    { 9,  0x1,        L"禁止加载字体" },
+    { 10, 0x1,        L"映像加载限制" },
+    { 11, 0xFFFFFFFF, L"系统调用过滤" },
+    { 13, 0x1,        L"禁止子进程" },
+    { 14, 0x1,        L"侧信道隔离" },
+    { 15, 0x1,        L"用户态影子栈" },
+    { 16, 0x1,        L"重定向信任" },
+};
+
+/* 追加一项，放不下就少列一项 —— 绝不用会触发 invalid parameter 的 wcscat_s */
+static void MitiAppend(WCHAR* s, size_t cap, const WCHAR* name) {
+    size_t n = wcslen(s);
+    if (n + 4 >= cap) return;
+    _snwprintf_s(s + n, cap - n, _TRUNCATE, L"%s%s", n ? L" / " : L"", name);
+}
+
+/* 缓解策略摘要：列"装没装"能解释现象的项。DEP 与 SEHOP 要
+   PROCESS_QUERY_INFORMATION 才给读，QUERY_LIMITED 句柄下恒被拒，所以那一项
+   在这条路径上永远不会出现（不是漏写）。其余十项都是同一个句柄一次调用。 */
 static void ProcMitigationText(HANDLE hp, WCHAR* out, size_t cap) {
     out[0] = 0;
     if (!hp) return;
-    WCHAR s[256] = L"";
+    WCHAR s[512] = L"";
     PROCESS_MITIGATION_DEP_POLICY dep;
     memset(&dep, 0, sizeof(dep));
     if (GetProcessMitigationPolicy(hp, ProcessDEPPolicy, &dep, sizeof(dep)) && dep.Enable)
-        wcscat_s(s, 256, L"DEP");
+        MitiAppend(s, 512, L"DEP");
     PROCESS_MITIGATION_ASLR_POLICY aslr;
     memset(&aslr, 0, sizeof(aslr));
     if (GetProcessMitigationPolicy(hp, ProcessASLRPolicy, &aslr, sizeof(aslr)) &&
         (aslr.EnableBottomUpRandomization || aslr.EnableForceRelocateImages))
-        wcscat_s(s, 256, s[0] ? L" / ASLR" : L"ASLR");
+        MitiAppend(s, 512, L"ASLR");
     PROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY cfg;
     memset(&cfg, 0, sizeof(cfg));
     if (GetProcessMitigationPolicy(hp, ProcessControlFlowGuardPolicy, &cfg, sizeof(cfg)) &&
         cfg.EnableControlFlowGuard)
-        wcscat_s(s, 256, s[0] ? L" / CFG" : L"CFG");
+        MitiAppend(s, 512, L"CFG");
     PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY sig;
     memset(&sig, 0, sizeof(sig));
     if (GetProcessMitigationPolicy(hp, ProcessSignaturePolicy, &sig, sizeof(sig)) &&
         (sig.MicrosoftSignedOnly || sig.StoreSignedOnly))
-        wcscat_s(s, 256, s[0] ? L" / 仅签名映像(ACG)" : L"仅签名映像(ACG)");
+        MitiAppend(s, 512, L"仅签名映像(ACG)");
     PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY sh;
     memset(&sh, 0, sizeof(sh));
     if (GetProcessMitigationPolicy(hp, ProcessStrictHandleCheckPolicy, &sh, sizeof(sh)) &&
         sh.RaiseExceptionOnInvalidHandleReference)
-        wcscat_s(s, 256, s[0] ? L" / 句柄严格校验" : L"句柄严格校验");
+        MitiAppend(s, 512, L"句柄严格校验");
+    for (int i = 0; i < (int)(sizeof(kMiti) / sizeof(kMiti[0])); i++) {
+        DWORD v = 0;
+        if (!GetProcessMitigationPolicy(hp, (PROCESS_MITIGATION_POLICY)kMiti[i].policy,
+                                        &v, sizeof(v)))
+            continue;
+        if ((kMiti[i].mask == 0xFFFFFFFF) ? (v != 0) : ((v & kMiti[i].mask) != 0))
+            MitiAppend(s, 512, kMiti[i].name);
+    }
     _snwprintf_s(out, cap, _TRUNCATE, L"%s", s[0] ? s : L"无");
 }
 
@@ -1342,7 +1380,7 @@ static void ProcSecurityGet(DWORD pid, ProcSecurity* s) {
         PrivilegeText(tok, s->privs, 1400);
         CloseHandle(tok);
     }
-    ProcMitigationText(h, s->mitigation, 256);
+    ProcMitigationText(h, s->mitigation, 512);
     ProcProtectionText(h, s->protection, 128);
     CloseHandle(h);
 }
@@ -1659,8 +1697,15 @@ static Collected* Collect(HWND target) {
        留一行永远是 0x0 的字段只会让人以为取数坏了；要判断"是哪个窗口类"，
        类名（上一行）才是可用的那个信息。 */
     WCHAR st[256];
+    /* 可见性断点：`IsWindowVisible` 会把"自己没 WS_VISIBLE"和"自己被父窗口藏了"
+       说成同一件事，排查"窗口明明在却看不见"时这两者要分开。 */
+    const WCHAR* vis = L"可见";
+    if (!IsWindowVisible(target))
+        vis = (GetWindowLongPtrW(target, GWL_STYLE) & WS_VISIBLE)
+                  ? L"隐藏（自身 WS_VISIBLE，是父 / 祖先隐藏）"
+                  : L"隐藏";
     _snwprintf_s(st, 256, _TRUNCATE, L"%s%s%s%s",
-                 IsWindowVisible(target) ? L"可见" : L"隐藏",
+                 vis,
                  IsWindowEnabled(target) ? L"" : L" / 已禁用",
                  IsIconic(target) ? L" / 最小化" : (IsZoomed(target) ? L" / 最大化" : L""),
                  GetForegroundWindow() == target ? L" / 前台" : L"");
@@ -1686,6 +1731,52 @@ static Collected* Collect(HWND target) {
                 BufFieldF(&b, IF_AFFINITY, L"0x%lX（未知取值）", (unsigned long)aff);
         } else {
             BufUnavail(&b, IF_AFFINITY, L"GetWindowDisplayAffinity 失败");
+        }
+    }
+    /* 分层透明：alpha=0 或颜色键命中的像素在截图里就是空的 —— 窗口还在、
+       截图却是"什么都没有"，这一行能直接说清是哪种。只有 WS_EX_LAYERED 的
+       窗口才有这套属性，非分层窗口不必单独报"不可用"。 */
+    if (GetWindowLongPtrW(target, GWL_EXSTYLE) & WS_EX_LAYERED) {
+        COLORREF key = 0;
+        BYTE alpha = 0;
+        DWORD lw = 0;
+        if (GetLayeredWindowAttributes(target, &key, &alpha, &lw)) {
+            WCHAR t[128];
+            BOOL hasA = (lw & LWA_ALPHA) != 0;
+            BOOL hasK = (lw & LWA_COLORKEY) != 0;
+            if (hasA && hasK)
+                _snwprintf_s(t, 128, _TRUNCATE, L"alpha=%u + 颜色键 0x%06lX",
+                             (unsigned)alpha, (unsigned long)key);
+            else if (hasA)
+                _snwprintf_s(t, 128, _TRUNCATE, L"alpha=%u（整窗按此不透明度合成）",
+                             (unsigned)alpha);
+            else if (hasK)
+                _snwprintf_s(t, 128, _TRUNCATE, L"颜色键 0x%06lX（该色像素透明）",
+                             (unsigned long)key);
+            else
+                _snwprintf_s(t, 128, _TRUNCATE, L"已设 LWA 标志但无 alpha / 颜色键");
+            BufField(&b, IF_LAYERED, t);
+        } else {
+            BufUnavail(&b, IF_LAYERED, L"GetLayeredWindowAttributes 失败");
+        }
+    } else {
+        BufField(&b, IF_LAYERED, L"非分层窗口");
+    }
+    /* 所在桌面：安全桌面（Winlogon）上的窗口既截不到、也抓不到焦点；
+       GetThreadDesktop 返回的句柄由系统拥有，不要 CloseHandle。 */
+    {
+        WCHAR dname[96];
+        DWORD need = 0;
+        HDESK desk = GetThreadDesktop(tid);
+        if (desk && GetUserObjectInformationW(desk, UOI_NAME, dname, sizeof(dname), &need)) {
+            if (_wcsicmp(dname, L"Default") == 0)
+                BufField(&b, IF_DESKTOP, L"Default（交互桌面）");
+            else
+                BufFieldF(&b, IF_DESKTOP, L"%s%s", dname,
+                          _wcsicmp(dname, L"Winlogon") == 0
+                              ? L"（安全桌面：截不到、抓不到焦点）" : L"");
+        } else {
+            BufUnavail(&b, IF_DESKTOP, L"GetThreadDesktop 失败");
         }
     }
 

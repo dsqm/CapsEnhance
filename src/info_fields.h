@@ -26,7 +26,7 @@ typedef struct {
 enum {
     /* ---- 窗口层：身份 ---- */
     IF_TITLE = 0, IF_TITLELEN, IF_CLASS, IF_UNICODE, IF_HANDLE, IF_WNDUID, IF_WNDID,
-    IF_STATE, IF_CLOAKED, IF_AFFINITY,
+    IF_STATE, IF_CLOAKED, IF_AFFINITY, IF_LAYERED, IF_DESKTOP,
     /* ---- 窗口层：几何 ---- */
     IF_RECT, IF_NORMALRECT, IF_CLIENT, IF_MONITOR, IF_DPI, IF_DPICTX,
     /* ---- 窗口层：关系与线程 ---- */
@@ -61,6 +61,8 @@ static const InfoFieldDef kInfoFields[IF_COUNT] = {
     { "state",      0, L"状态" },
     { "cloaked",    0, L"DWM 隐藏" },
     { "affinity",   0, L"截图保护" },
+    { "layered",    0, L"分层透明" },
+    { "desktop",    0, L"所在桌面" },
 
     { "rect",       0, L"窗口位置" },
     { "normalrect", 0, L"还原矩形" },
