@@ -118,12 +118,26 @@
 #define IDM_REFRESH   2007
 #define IDM_PICK      2008                /* 瞄准窗口：点一下就采集那个窗口 */
 
-#define WM_APP_COLLECTED (WM_APP + 1)   /* 工作线程 -> UI：wParam 保留，lParam = WCHAR* 缓冲 */
+#define WM_INFO_COLLECTED_NAME L"CapsEnhanceInfoCollected"
+                                        /* 工作线程 -> UI：采集结果就绪。**注册消息**而不是
+                                           WM_APP+1：后者的消息号是固定的，任何进程都能
+                                           PostMessage 一条伪造的过来，lParam 被当成
+                                           Collected* 解引用就是一次崩溃。注册消息号由系统
+                                           分配（>= 0xC000），外面猜不到。 */
 
 #define TID_ARMED 1                     /* 1.5s 等不到目标就自己退（见 wWinMain） */
 #define ARMED_MS  1500
-#define TID_POLL  2                     /* 采集超时保护（见 ArmCollectGuard） */
+#define TID_POLL  2                     /* 采集看门狗（见 StartCollect / WM_TIMER） */
 #define TID_SMOOTH 3                    /* 滚轮平滑滚动的一帧（见 ScrollSmoothTick） */
+
+/* 采集看门狗的时限。正常一整屏（含 400 个树节点）实测在 1s 量级，6s 是"肯定出事了"。
+   到点就作废这一轮的等待状态、把控制权还给用户 —— 而不是让窗口永远停在
+   「正在收集…」（采集线程可能已经卡死在一个不响应的目标进程里，那一步没法取消）。 */
+#define COLLECT_TIMEOUT_MS 6000
+
+/* 同时在跑的采集线程上限。看门狗作废的只是 UI 侧的等待，挂住的线程本身收不回来；
+   没有这个上限，反复按 F12 会一直叠线程。到上限就明说"上一次还没结束"。 */
+#define MAX_COLLECT_THREADS 2
 
 /* 采集上限：Chromium 系的顶层窗口底下能有上千个子窗口，全量列出来是几 MB
    的文本，编辑控件排版与滚动都会明显变沉，而真正要看的通常是前几层。 */
@@ -140,8 +154,11 @@ static HINSTANCE g_inst;
 static HWND   g_hwnd, g_edit;
 static HWND   g_parent;          /* 主程序窗口：关窗时把尺寸投给它 */
 static HWND   g_target;          /* 要看的窗口（开火那一刻的前台窗口快照） */
-static UINT   g_msgOpen, g_msgSize;
-static BOOL   g_busy;            /* 采集线程在跑 */
+static UINT   g_msgOpen, g_msgSize, g_msgCollected;
+static BOOL   g_busy;            /* 采集线程在跑（UI 侧的等待状态） */
+static UINT   g_gen;             /* 采集代数：只认最新一轮的结果，迟到的旧结果直接丢弃 */
+static LONG   g_threads;         /* 还在跑的采集线程数（含已被看门狗作废、但仍卡着的） */
+static HWND   g_pendingTarget;   /* 采集期间又送来的目标：这一轮结束后立刻补采一次 */
 static int    g_dpi = 96;
 
 static int    g_wDip = INFO_W_DEFAULT, g_hDip = INFO_H_DEFAULT;   /* 96 DPI 逻辑像素 */
@@ -184,7 +201,7 @@ typedef struct {
     WCHAR font[LF_FACESIZE];
     int   pt;
     int   wDip, hDip;
-    WCHAR common[512];     /* InfoCommonFields：常用视图的有序字段 key 列表 */
+    WCHAR common[INFO_COMMON_CHARS];  /* InfoCommonFields：常用视图的有序字段 key 列表 */
 } Ini;
 
 static void TrimW(WCHAR* s) {
@@ -276,7 +293,7 @@ static void IniLoad(Ini* ini) {
                 else if (_wcsicmp(key, L"InfoH") == 0)
                     ini->hDip = ClampInt(ParseIntW(val, INFO_H_DEFAULT), INFO_H_MIN, INFO_H_MAX);
                 else if (_wcsicmp(key, L"InfoCommonFields") == 0)
-                    _snwprintf_s(ini->common, 512, _TRUNCATE, L"%s", val);
+                    _snwprintf_s(ini->common, INFO_COMMON_CHARS, _TRUNCATE, L"%s", val);
             }
         }
         line = nl ? nl + 1 : NULL;
@@ -408,17 +425,48 @@ static void BufAddf(Buf* b, const WCHAR* fmt, ...) {
     b->p[b->n] = 0;
 }
 
+/* 追加一段**原样**文本（不解释格式符）。字段值可能上千字符，逐字符走
+   BufAddf 就是上千次 _vscwprintf；改成"遇到需要转义的字符才冲一段"，
+   一段普通文本一次 memcpy。 */
+static void BufAddN(Buf* b, const WCHAR* s, size_t n) {
+    if (!n || !s) return;
+    if (!BufReserve(b, b->n + n + 1)) return;
+    memcpy(b->p + b->n, s, n * sizeof(WCHAR));
+    b->n += n;
+    b->p[b->n] = 0;
+}
+
 /* ================= 字段值暂存（「常用」视图重排用） =================
    采集时每发一条「键: 值」，按字段 id 把**原始值**存一份；采完再按用户配置的
    常用字段顺序另拼一份「常用」文本。只在采集线程里读写（g_busy 保证不并发），
    UI 线程拿的是采完后的成品文本。 */
-#define FV_MAX 2048
-static BOOL  s_fvHas[IF_COUNT];
-static WCHAR s_fvVal[IF_COUNT][FV_MAX];
+/* 按字段 id 各留一份**可增长**的缓冲。固定 2048 会把命令行 / 长路径在「常用」
+   视图里砍掉一截，而「全部」视图仍是完整的，同一字段两处对不上。缓冲跨采集
+   复用（realloc 到够用就留着），进程退出由系统回收；FV_LIMIT 只是防御性的
+   天花板 —— 实际字段值受 PATH_CAP 限制，远达不到。 */
+#define FV_LIMIT 32768
+static BOOL   s_fvHas[IF_COUNT];
+static WCHAR* s_fvVal[IF_COUNT];
+static size_t s_fvCap[IF_COUNT];
 
 static void FvStore(int id, const WCHAR* value) {
     if (id < 0 || id >= IF_COUNT) return;
-    _snwprintf_s(s_fvVal[id], FV_MAX, _TRUNCATE, L"%s", value ? value : L"");
+    const WCHAR* v = value ? value : L"";
+    size_t n = wcslen(v);
+    if (n >= FV_LIMIT) n = FV_LIMIT - 1;
+    size_t need = n + 1;
+    if (need > s_fvCap[id]) {
+        size_t cap = need < 256 ? 256 : need;
+        WCHAR* p = (WCHAR*)realloc(s_fvVal[id], cap * sizeof(WCHAR));
+        if (!p) { s_fvHas[id] = FALSE; return; }
+        s_fvVal[id] = p;
+        s_fvCap[id] = cap;
+    }
+    /* 再把上界写一遍：n 来自别的进程的文本，/analyze 推不出
+       "n + 1 <= cap" 这个关系，会报 C6386。 */
+    if (n >= s_fvCap[id]) n = s_fvCap[id] - 1;
+    if (n) memcpy(s_fvVal[id], v, n * sizeof(WCHAR));
+    s_fvVal[id][n] = 0;
     s_fvHas[id] = TRUE;
 }
 
@@ -433,12 +481,24 @@ static void FvStore(int id, const WCHAR* value) {
 static void BufFieldRaw(Buf* b, int id, const WCHAR* label, const WCHAR* value) {
     FvStore(id, value);
     BufAddf(b, L"%s:\t", label);
-    for (const WCHAR* q = value ? value : L""; *q; q++) {
-        if (*q == L'\r')      BufAddf(b, L"\\r");
-        else if (*q == L'\n') BufAddf(b, L"\\n");
-        else if (*q == L'\t') BufAddf(b, L"\\t");
-        else if (*q < 0x20)    BufAddf(b, L"\\x%02X", (unsigned)*q);
-        else                   BufAddf(b, L"%c", *q);
+    const WCHAR* v = value ? value : L"";
+    const WCHAR* seg = v;                 /* 当前这一段普通文本的起点 */
+    for (const WCHAR* q = v; ; q++) {
+        const WCHAR* esc = NULL;
+        WCHAR xbuf[8];
+        if (*q == L'\r')      esc = L"\\r";
+        else if (*q == L'\n') esc = L"\\n";
+        else if (*q == L'\t') esc = L"\\t";
+        else if (*q && *q < 0x20) {
+            _snwprintf_s(xbuf, 8, _TRUNCATE, L"\\x%02X", (unsigned)*q);
+            esc = xbuf;
+        }
+        if (esc || !*q) {
+            if (q > seg) BufAddN(b, seg, (size_t)(q - seg));
+            if (!*q) break;
+            BufAddf(b, L"%s", esc);
+            seg = q + 1;
+        }
     }
     BufAddf(b, L"\n");
 }
@@ -615,10 +675,20 @@ static void DpiAwarenessText(HWND h, WCHAR* out, size_t cap) {
 }
 
 /* 窗口字体：WM_GETFONT 只给 HFONT。GDI 句柄属于目标进程，GetObject 多半失败，
-   那就把句柄值写出来（至少能看出"有没有设字体"）。 */
+   那就把句柄值写出来（至少能看出"有没有设字体"）。
+   ★ 这是整份采集里唯一一条**跨进程 SendMessage**：普通 SendMessage 要等目标
+     线程取消息，而本工具面对的常常正是"已经卡死、想看它怎么了"的窗口 ——
+     那一步会把采集线程无限期挂住，UI 从此永远停在「正在收集…」。改用
+     SMTO_ABORTIFHUNG + 300ms 上限，宁可这一行写"取不到"也不能拖住整屏。 */
 static void FontText(HWND h, WCHAR* out, size_t cap) {
     out[0] = 0;
-    HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+    DWORD_PTR res = 0;
+    if (!SendMessageTimeoutW(h, WM_GETFONT, 0, 0,
+                             SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, &res)) {
+        _snwprintf_s(out, cap, _TRUNCATE, L"取不到（窗口无响应，已跳过跨进程询问）");
+        return;
+    }
+    HFONT f = (HFONT)res;
     if (!f) { _snwprintf_s(out, cap, _TRUNCATE, L"未设置（用系统默认）"); return; }
     LOGFONTW lf;
     memset(&lf, 0, sizeof(lf));
@@ -1025,8 +1095,11 @@ static void PrivilegeText(HANDLE tok, WCHAR* out, size_t cap) {
             WCHAR nm[128] = L"";
             DWORD nl = 128;
             if (!LookupPrivilegeNameW(NULL, &tp->Privileges[i].Luid, nm, &nl)) continue;
-            if (shown) wcscat_s(list, 1200, L"，");
-            wcscat_s(list, 1200, nm);
+            /* 与 MitiAppend 同一口径：放不下就少列一项，不用会触发 invalid
+               parameter 的 wcscat_s（它把"缓冲不够"当致命参数错误直接 fastfail）。 */
+            size_t n = wcslen(list);
+            if (n + 4 >= 1200) continue;
+            _snwprintf_s(list + n, 1200 - n, _TRUNCATE, L"%s%s", n ? L"，" : L"", nm);
             shown++;
         }
         if (!total) _snwprintf_s(out, cap, _TRUNCATE, L"无（未启用任何特权）");
@@ -1601,7 +1674,7 @@ static BOOL CALLBACK CountChildCb(HWND ch, LPARAM lp) {
 
 /* 一次采集的成品：全部视图文本 + 常用视图文本（都由采集线程拼好，UI 线程直接
    换上去即可，切换视图不必重新采集）。两个指针都在堆上，调用方负责 free。 */
-typedef struct { WCHAR* all; WCHAR* common; } Collected;
+typedef struct { UINT gen; WCHAR* all; WCHAR* common; } Collected;
 
 /* 常用视图文本：按用户配置的顺序，从 s_fv（本次采集暂存的字段值）里取。 */
 static WCHAR* BuildCommonText(void) {
@@ -1692,10 +1765,10 @@ static Collected* Collect(HWND target) {
     BufFieldF(&b, IF_WNDUID, L"0x%04X", (unsigned)((((ULONG_PTR)target) >> 16) & 0x7FFF));
     int ctlId = GetDlgCtrlID(target);
     BufFieldF(&b, IF_WNDID, L"%d（0x%X）%s", ctlId, ctlId, ctlId ? L"" : L"  （0 = 未设 ID）");
-    /* 这里**不列"窗口过程地址"**：`GetWindowLongPtrW(hwnd, GWLP_WNDPROC)` 对别的
-       进程的窗口自 Vista 起恒返回 0（系统不再把对方的代码地址暴露给外部进程）。
-       留一行永远是 0x0 的字段只会让人以为取数坏了；要判断"是哪个窗口类"，
-       类名（上一行）才是可用的那个信息。 */
+    /* 这里不取 `GetWindowLongPtrW(hwnd, GWLP_WNDPROC)`：对别的进程的窗口自
+       Vista 起恒返回 0（系统不再暴露对方的代码地址），留一行永远是 0x0 的
+       字段只会让人以为取数坏了。下面「内部字段」那行 WNDPROC 取的是
+       `GetClassLongPtrW(GCLP_WNDPROC)` —— **窗口类**的窗口过程，两者不是一回事。 */
     WCHAR st[256];
     /* 可见性断点：`IsWindowVisible` 会把"自己没 WS_VISIBLE"和"自己被父窗口藏了"
        说成同一件事，排查"窗口明明在却看不见"时这两者要分开。 */
@@ -2066,13 +2139,16 @@ static Collected* Collect(HWND target) {
 
 /* ================= 工作线程 ================= */
 
-typedef struct { HWND notify; HWND target; } Job;
+typedef struct { HWND notify; HWND target; UINT gen; } Job;
 
 static DWORD WINAPI CollectThread(LPVOID p) {
     Job* j = (Job*)p;
-    Collected* col = Collect(j->target);
     HWND n = j->notify;
+    HWND target = j->target;
+    UINT gen = j->gen;
     free(j);
+
+    Collected* col = Collect(target);
     if (!col) {
         col = (Collected*)calloc(1, sizeof(Collected));
         if (col) {
@@ -2084,9 +2160,14 @@ static DWORD WINAPI CollectThread(LPVOID p) {
             if (col->common) wcscpy_s(col->common, cn, kMsg);
         }
     }
-    if (col && !PostMessageW(n, WM_APP_COLLECTED, 0, (LPARAM)col)) {
-        free(col->all); free(col->common); free(col);
+    /* 带上本轮代号：看门狗已经作废的一轮，即使迟到也不许覆盖新内容。 */
+    if (col) {
+        col->gen = gen;
+        if (!PostMessageW(n, g_msgCollected, 0, (LPARAM)col)) {
+            free(col->all); free(col->common); free(col);
+        }
     }
+    InterlockedDecrement(&g_threads);
     return 0;
 }
 
@@ -2107,29 +2188,63 @@ static BOOL ConfirmDiscard(const WCHAR* what) {
     return MessageBoxW(g_hwnd, msg, APP_TITLE, MB_OKCANCEL | MB_ICONWARNING) == IDOK;
 }
 
+/* 目标没了就把两份源文本一起丢掉：只改控件文本的话，按 Tab 切视图或在筛选框
+   里敲一个字，都会把**上一个窗口**的旧资料重新摆出来，看着像又采了一次。 */
+static void DropViewText(void) {
+    free(g_viewText[0]); g_viewText[0] = NULL;
+    free(g_viewText[1]); g_viewText[1] = NULL;
+}
+
 static void StartCollect(void) {
     if (g_busy) return;
     if (!g_target || !IsWindow(g_target)) {
         WCHAR m[128];
         _snwprintf_s(m, 128, _TRUNCATE, L"目标窗口已销毁（0x%llX）\n",
                      (unsigned long long)(ULONG_PTR)g_target);
+        DropViewText();
         SetEditText(m);
+        return;
+    }
+    /* 看门狗作废的只是 UI 侧的等待，卡住的线程收不回来。到上限就明说，
+       否则反复按 F12 会一直叠线程。 */
+    if (InterlockedCompareExchange(&g_threads, 0, 0) >= MAX_COLLECT_THREADS) {
+        SetEditText(L"（上一次采集还没结束，请稍候；也可以关闭窗口重开）\n");
         return;
     }
     Job* j = (Job*)calloc(1, sizeof(Job));
     if (!j) return;
     j->notify = g_hwnd;
     j->target = g_target;
+    j->gen    = ++g_gen;
     g_busy = TRUE;
     SetEditText(L"正在收集…\n");
+    InterlockedIncrement(&g_threads);
+    SetTimer(g_hwnd, TID_POLL, COLLECT_TIMEOUT_MS, NULL);
     HANDLE t = CreateThread(NULL, 0, CollectThread, j, 0, NULL);
     if (!t) {
+        InterlockedDecrement(&g_threads);
         g_busy = FALSE;
+        KillTimer(g_hwnd, TID_POLL);
         free(j);
         SetEditText(L"（无法创建采集线程）\n");
         return;
     }
     CloseHandle(t);
+}
+
+/* 换目标 / 瞄准取样走这里：采集还在跑就只记下目标，等这一轮落地后立刻补采，
+   不留下"g_target 已是新窗口、屏幕上却是旧窗口资料"这种半新半旧的状态。 */
+static void RequestCollect(void) {
+    if (g_busy) { g_pendingTarget = g_target; return; }
+    StartCollect();
+}
+
+/* 一轮结束后（成功或超时）把欠着的目标补上。 */
+static void FlushPendingTarget(void) {
+    HWND t = g_pendingTarget;
+    g_pendingTarget = NULL;
+    if (!t) return;
+    if (IsWindow(t)) { g_target = t; StartCollect(); }
 }
 
 static void Refresh(void) {
@@ -2691,7 +2806,7 @@ static void PickEnd(BOOL take) {
         if (GetCursorPos(&pt)) {
             HWND h = WindowFromPoint(pt);
             if (h) h = GetAncestor(h, GA_ROOT);
-            if (h && h != g_hwnd) { g_target = h; StartCollect(); }
+            if (h && h != g_hwnd) { g_target = h; RequestCollect(); }
         }
     }
     if (g_edit) SetFocus(g_edit);
@@ -2716,7 +2831,17 @@ static HWND PickLaunchTarget(void) {
 static void SaveSizeToParent(void) {
     if (!g_parent || IsIconic(g_hwnd) || !IsWindow(g_parent)) return;
     RECT rc;
-    if (!GetWindowRect(g_hwnd, &rc)) return;
+    if (IsZoomed(g_hwnd)) {
+        /* 最大化时 GetWindowRect 给的是整块工作区，把这个尺寸写回 InfoW/InfoH
+           等于下次一按 F12 就铺满屏幕。要存的是**还原后**的尺寸。 */
+        WINDOWPLACEMENT wp;
+        memset(&wp, 0, sizeof(wp));
+        wp.length = sizeof(wp);
+        if (!GetWindowPlacement(g_hwnd, &wp)) return;
+        rc = wp.rcNormalPosition;
+    } else if (!GetWindowRect(g_hwnd, &rc)) {
+        return;
+    }
     int dpi = g_dpi > 0 ? g_dpi : 96;
     typedef UINT (WINAPI* PFN_GetDpiForWindow)(HWND);
     PFN_GetDpiForWindow gdfw = (PFN_GetDpiForWindow)(void*)ModFn(L"user32.dll", "GetDpiForWindow");
@@ -2729,6 +2854,26 @@ static void SaveSizeToParent(void) {
 }
 
 static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (g_msgCollected && msg == g_msgCollected) {
+        Collected* col = (Collected*)lp;
+        if (!col) return 0;
+        if (col->gen != g_gen) {          /* 已被看门狗作废的一轮：迟到结果直接丢 */
+            free(col->all); free(col->common); free(col);
+            return 0;
+        }
+        KillTimer(hwnd, TID_POLL);
+        g_busy = FALSE;
+        free(g_viewText[0]); g_viewText[0] = col->common;
+        free(g_viewText[1]); g_viewText[1] = col->all;
+        free(col);
+        /* 源文本换了：控件里还是上一份（或"正在收集…"），不许回写 */
+        g_noSync = TRUE;
+        g_filtering = FALSE;
+        ApplyView(g_view);         /* 按当前视图与筛选词渲染新数据 */
+        g_noSync = FALSE;
+        FlushPendingTarget();
+        return 0;
+    }
     if (g_msgOpen && msg == g_msgOpen) {
         HWND t = (HWND)wp;
         if (t) g_target = t;
@@ -2737,7 +2882,7 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
            那条确认只属于右键菜单里用户主动点的"刷新"（见 Refresh）—— 把它套在
            唤出上，会让每次按 F12 都先问一句，且首帧字体/主题格式化已把缓冲标脏，
            第一次唤出就会平白弹框。 */
-        StartCollect();
+        RequestCollect();
         return 0;
     }
     switch (msg) {
@@ -2756,6 +2901,15 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetTextColor(dc, EditFg());
         SetBkColor(dc, EditBg());
         return (LRESULT)(g_editBrush ? g_editBrush : (HBRUSH)(COLOR_WINDOW + 1));
+    }
+
+    case WM_GETMINMAXINFO: {
+        /* 顶部工具条是两颗固定宽度的按钮 + 搜索框，窗口拖得太窄会互相压住。
+           下限与配置里的 INFO_W_MIN / INFO_H_MIN 同源，按目标屏 DPI 换算。 */
+        MINMAXINFO* mm = (MINMAXINFO*)lp;
+        mm->ptMinTrackSize.x = MulDiv(INFO_W_MIN, g_dpi, 96);
+        mm->ptMinTrackSize.y = MulDiv(INFO_H_MIN, g_dpi, 96);
+        return 0;
     }
 
     case WM_SIZE:
@@ -2783,6 +2937,17 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_TIMER:
         if (wp == TID_SMOOTH) { ScrollSmoothTick(); return 0; }
+        if (wp == TID_POLL) {
+            KillTimer(hwnd, TID_POLL);
+            if (g_busy) {
+                g_busy = FALSE;
+                g_gen++;                 /* 作废这一轮：迟到的结果不许再进 UI */
+                DropViewText();          /* 与"目标已销毁"同理，别让旧资料回流 */
+                SetEditText(L"（采集超时：目标窗口无响应，已放弃这次采集）\n");
+                FlushPendingTarget();
+            }
+            return 0;
+        }
         if (wp == TID_ARMED) {
             /* 1.5s 没等到主程序的 OPEN：用命令行带来的目标自己开工；
                连目标都没有（用户双击）就退出 —— 不留一个空白窗口在屏上。 */
@@ -2814,22 +2979,6 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CONTEXTMENU:
         ShowContextMenu((int)(short)LOWORD(lp), (int)(short)HIWORD(lp));
         return 0;
-
-    case WM_APP_COLLECTED: {
-        Collected* col = (Collected*)lp;
-        g_busy = FALSE;
-        if (col) {
-            free(g_viewText[0]); g_viewText[0] = col->common;
-            free(g_viewText[1]); g_viewText[1] = col->all;
-            free(col);
-            /* 源文本换了：控件里还是上一份（或"正在收集…"），不许回写 */
-            g_noSync = TRUE;
-            g_filtering = FALSE;
-            ApplyView(g_view);         /* 按当前视图与筛选词渲染新数据 */
-            g_noSync = FALSE;
-        }
-        return 0;
-    }
 
     case WM_DPICHANGED:
         /* 只更新字体与布局：**不照抄**系统给的建议矩形（原因见 PlaceNearCursor
@@ -2937,6 +3086,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     if (standalone) launchTarget = PickLaunchTarget();   /* 必须在 ShowWindow 之前取：那时我们还是后台 */
     g_msgOpen = RegisterWindowMessageW(INFO_MSG_OPEN);
     g_msgSize = RegisterWindowMessageW(INFO_MSG_SIZE);
+    g_msgCollected = RegisterWindowMessageW(WM_INFO_COLLECTED_NAME);
 
     /* Msftedit.dll：RICHEDIT50W 类由它提供。系统自带，加载失败就没有编辑器，
        直接退出比给一个残窗更好（正常 Windows 上不会失败）。 */

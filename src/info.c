@@ -69,18 +69,23 @@ static void StopTick(void) {
    消息会丢（40ms 重试能兜，但第一次按下就要白等一拍）；而 `--hwnd` 让它在
    建窗后立刻开始采集。`--parent` 是它回存尺寸时要投递的窗口句柄 —— 主程序的
    窗口是 message-only 的，FindWindow 找不到它，只能由我们自己告诉它。 */
-static void SpawnInfo(void) {
-    WCHAR exe[MAX_PATH] = L"";
-    WCHAR dir[MAX_PATH] = L"";
-    WCHAR cmd[MAX_PATH + 96];
+/* exe 路径按长路径留容量：MAX_PATH(260) 在深目录里会截断，拼出来的
+   CapsEnhanceInfo.exe 路径不存在，F12 就只是静默没反应。 */
+#define INFO_PATH_CAP 1024
 
-    if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return;
-    wcscpy_s(dir, MAX_PATH, exe);
+static void SpawnInfo(void) {
+    WCHAR self[INFO_PATH_CAP] = L"";
+    WCHAR dir[INFO_PATH_CAP] = L"";
+    WCHAR exe[INFO_PATH_CAP] = L"";
+    WCHAR cmd[INFO_PATH_CAP + 96];
+
+    if (!GetModuleFileNameW(NULL, self, INFO_PATH_CAP)) return;
+    wcscpy_s(dir, INFO_PATH_CAP, self);
     WCHAR* slash = wcsrchr(dir, L'\\');
     if (!slash) return;
     *slash = 0;
-    _snwprintf_s(exe, MAX_PATH, _TRUNCATE, L"%s\\%s", dir, INFO_EXE);
-    _snwprintf_s(cmd, MAX_PATH + 96, _TRUNCATE, L"\"%s\" --parent 0x%llX --hwnd 0x%llX",
+    _snwprintf_s(exe, INFO_PATH_CAP, _TRUNCATE, L"%s\\%s", dir, INFO_EXE);
+    _snwprintf_s(cmd, INFO_PATH_CAP + 96, _TRUNCATE, L"\"%s\" --parent 0x%llX --hwnd 0x%llX",
                  exe, (unsigned long long)(ULONG_PTR)g_mainWnd,
                  (unsigned long long)(ULONG_PTR)s_target);
 

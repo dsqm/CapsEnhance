@@ -271,7 +271,7 @@ static BOOL GetCheck(HWND btn) {
    ★ 最少留一项：空列表在配置层是"用默认那 11 项"的哨兵（与弹窗的判据同源），
    删空再保存等于把用户的选择悄悄换回默认值，所以最后一颗不许删。 */
 #define CMN_KEY_MAX 16                                  /* 一个字段标识的缓冲（最长 exstylesym） */
-#define CMN_TEXT_MAX (IF_COUNT * CMN_KEY_MAX)           /* 整串拼接的字符上限 */
+#define CMN_TEXT_MAX INFO_COMMON_CHARS                  /* 整串上限与 config.c / 弹窗同源 */
 
 static WCHAR g_baseCommon[CMN_TEXT_MAX];                /* 已保存基线（拼接文本，与落盘同口径） */
 
@@ -352,8 +352,8 @@ static int CmnAddKeys(const char* src) {
 static void CmnFill(void) {
     SendMessageW(CmnList(), LB_RESETCONTENT, 0, 0);
     const WCHAR* s = CfgStr(CFG_INFO_COMMON);
-    char narrow[512] = "";
-    if (s && s[0]) WideCharToMultiByte(CP_ACP, 0, s, -1, narrow, 512, NULL, NULL);
+    char narrow[CMN_TEXT_MAX] = "";
+    if (s && s[0]) WideCharToMultiByte(CP_ACP, 0, s, -1, narrow, CMN_TEXT_MAX, NULL, NULL);
     if (!narrow[0] || !CmnAddKeys(narrow))
         CmnAddKeys(INFO_COMMON_DEFAULT);
 }

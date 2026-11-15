@@ -58,4 +58,12 @@
 #define INFO_H_MIN     200
 #define INFO_H_MAX     2000
 
+/* InfoCommonFields（逗号分隔的字段 key 列表）的容量：**字符数**，配置表与弹窗
+   两处共用这一个值。按最大的可能值算：全量 75 个 key 全连起来是 594 字符
+   （最长的是 capabilities / restrictions 的 12），留一倍余量取 1200。
+   ★ 曾经的 512 装不下全量：第 66 项起被截断，而且截点落在 key 中间
+   （"protection" 变成 "prot" 直接被当成未知字段丢掉）—— 设置里把常用加满、
+   保存、重启，最后十来个字段就静默消失了。上限不能按"常见的十来个"来定。 */
+#define INFO_COMMON_CHARS 1200
+
 #endif /* INFO_SHARED_H */

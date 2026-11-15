@@ -248,7 +248,7 @@ static WCHAR g_infoFont[LF_FACESIZE];
 
 /* 常用视图的有序字段列表（逗号分隔的字段 key，ASCII）。空 = 用默认那 11 项；
    默认值由消费端（info / settings）用 INFO_COMMON_DEFAULT 解释，表里不存串。 */
-static WCHAR g_infoCommon[512];
+static WCHAR g_infoCommon[INFO_COMMON_CHARS];
 #define INFO_COMMON_CAP ((int)(sizeof(g_infoCommon) / sizeof(g_infoCommon[0])))
 
 static CfgDef kCfg[CFG_COUNT] = {
@@ -645,9 +645,12 @@ void ConfigLoadFrom(const WCHAR* path) {
             WCHAR* eq = wcschr(line, L'=');
             if (eq) {
                 *eq = 0;
-                WCHAR key[CFG_NAME_MAX], val[CFG_VAL_LEN];
+                /* 「= 右边」按最宽的文本项留容量：InfoCommonFields 全量是
+                   594 字符，用 CFG_VAL_LEN(256) 会在读进来时就截掉大半，
+                   写回又照着截断后的串写，用户看到的是"保存后重启悄悄少了项"。 */
+                WCHAR key[CFG_NAME_MAX], val[INFO_COMMON_CHARS];
                 _snwprintf_s(key, CFG_NAME_MAX, _TRUNCATE, L"%s", line);
-                _snwprintf_s(val, CFG_VAL_LEN, _TRUNCATE, L"%s", eq + 1);
+                _snwprintf_s(val, INFO_COMMON_CHARS, _TRUNCATE, L"%s", eq + 1);
                 TrimW(key); TrimW(val); LowerW(key);
                 /* 具名项：按 key 在 kCfg 里找（大小写不敏感）。找不到就忽略 ——
                    本项目所有配置项都在表里，不认识的键（含已废弃的旧键名：
@@ -1144,11 +1147,13 @@ static const char* const kListSec[CFGLIST_COUNT] = {
 
 /* 写回用的"键 = 值"清单：直接遍历 kCfg。
    key = 比较用的形态（小写）；name = 写进文件的形态（见 CfgDef 的说明）。
-   val 的容量按**最宽的那个值**定：文本项若出现，UTF-8 下一个汉字/非拉丁字符
-   最多 3 字节，320 个 WCHAR 就是 960 字节上限，取 1024 留余量。
+   val 的容量按**最宽的那个值**定：文本项能到 INFO_COMMON_CHARS 个 WCHAR，
+   UTF-8 下一个非拉丁字符最多 3 字节，取 3 倍就装得下任何文本项 —— 否则
+   读时放宽了、写回又截回去，等于没修。
    写成固定数组而不是指针，是为了让"值"与"键"一样留在结构里 —— 调用方拿到
    的 KeyVal 数组在它的整个生命周期内都有效，不需要再管谁 owns 哪块内存。 */
-typedef struct { int id; const char* key; const char* name; char val[1024]; } KeyVal;
+typedef struct { int id; const char* key; const char* name;
+                 char val[INFO_COMMON_CHARS * 3]; } KeyVal;
 static int GeneralValues(KeyVal* out, int cap) {
     int n = 0;
     for (int i = 0; i < CFG_COUNT && n < cap; i++) {
@@ -1227,10 +1232,10 @@ BOOL ConfigSaveFile(const WCHAR* path) {
     size_t bodyLen = raw.size();
     if (hasBom && bodyLen >= 3) { body += 3; bodyLen -= 3; }
 
-    /* static 不是随手加的：KeyVal 的 val 为了装得下可能的文本值（320 个 WCHAR
-       的 UTF-8）是 1KB，16 条就是 ~17KB —— 放栈上会撞 /analyze 的 C6262
-       （"函数使用堆叠的 17840 字节"）。这只函数只在保存配置时跑一次、且只有
-       主线程会调（设置程序 / 主程序都不并发写 ini），静态化是安全的。 */
+    /* static 不是随手加的：KeyVal 的 val 要装下最宽文本项的 UTF-8（约 3.6KB），
+       乘上 CFG_COUNT 就是几十 KB —— 放栈上会撞 /analyze 的 C6262。这只函数
+       只在保存配置时跑一次、且只有主线程会调（设置程序 / 主程序都不并发写
+       ini），静态化是安全的。 */
     static KeyVal kv[CFG_COUNT];
     int nkv = GeneralValues(kv, (int)(sizeof(kv) / sizeof(kv[0])));
     BOOL done[CFG_COUNT];
