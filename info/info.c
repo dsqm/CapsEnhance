@@ -121,6 +121,7 @@
 #define TID_ARMED 1                     /* 1.5s 等不到目标就自己退（见 wWinMain） */
 #define ARMED_MS  1500
 #define TID_POLL  2                     /* 采集超时保护（见 ArmCollectGuard） */
+#define TID_SMOOTH 3                    /* 滚轮平滑滚动的一帧（见 ScrollSmoothTick） */
 
 /* 采集上限：Chromium 系的顶层窗口底下能有上千个子窗口，全量列出来是几 MB
    的文本，编辑控件排版与滚动都会明显变沉，而真正要看的通常是前几层。 */
@@ -146,6 +147,8 @@ static WCHAR  g_face[LF_FACESIZE];      /* 实际使用的字体名（回落已�
 static int    g_pt = INFO_FONT_SIZE_DEFAULT;
 
 static HFONT  g_editFont;
+static int    g_lineH = 0;            /* 编辑区一行的高度（像素）：滚轮折算用 */
+static int    g_scrollTargetY = -1;   /* 平滑滚动的目标（像素）；<0 = 没在滚 */
 
 static BOOL   g_dark;            /* 系统应用主题为深色（跟随，见 ApplyTheme） */
 static HBRUSH g_bgBrush;         /* 窗口留白区底色刷（随主题重建） */
@@ -1433,6 +1436,17 @@ static void ApplyEditFont(void) {
        换字体/字号后要重发一次（DU 随字体走，列位置才会跟着缩放）。 */
     LONG tab = LABEL_COL * 4;
     SendMessageW(g_edit, EM_SETTABSTOPS, 1, (LPARAM)&tab);
+
+    /* 一行的高度（像素）：滚轮一格滚几行、横向一格滚几"行宽"都按它折算。 */
+    HDC dc = GetDC(g_edit);
+    if (dc) {
+        HGDIOBJ old = SelectObject(dc, g_editFont);
+        TEXTMETRICW tm;
+        if (GetTextMetricsW(dc, &tm)) g_lineH = tm.tmHeight + tm.tmExternalLeading;
+        SelectObject(dc, old);
+        ReleaseDC(g_edit, dc);
+    }
+    if (g_lineH < 8) g_lineH = MulDiv(16, g_dpi, 96);
 }
 
 /* 筛选框 / 按钮 / 状态文字用的界面字体（不用编辑器那套等宽字体）。 */
@@ -1564,6 +1578,24 @@ static void ViewSyncText(void) {
     g_viewText[g_view] = t;
 }
 
+/* 批量改文本/格式时关掉重绘：换视图（常用 ↔ 全部）要整篇替换 + 逐行刷段头，
+   中间态会闪一下；抑制期间只在最后统一重画。用计数支持嵌套调用（ApplyView
+   里套 RefreshEditText）。 */
+static int g_batch;
+
+static void BeginBatch(void) {
+    if (!g_edit) return;
+    if (g_batch++ == 0) SendMessageW(g_edit, WM_SETREDRAW, FALSE, 0);
+}
+
+static void EndBatch(void) {
+    if (!g_edit) return;
+    if (g_batch > 0 && --g_batch == 0) {
+        SendMessageW(g_edit, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(g_edit, NULL, FALSE);
+    }
+}
+
 /* 按当前搜索词重排编辑区：没词 → 放回源文本、可编辑；有词 → 只显示命中的行、
    只读（过滤结果和原文没有逐行对应关系，在上面改字改的是"哪一行"说不清）。
    视图切换、搜索词变化、采集到新数据，三条路都汇到这里。 */
@@ -1573,6 +1605,7 @@ static void RefreshEditText(void) {
     if (g_search) GetWindowTextW(g_search, q, 256);
     BOOL wasDirty = (BOOL)SendMessageW(g_edit, EM_GETMODIFY, 0, 0);
     const WCHAR* src = g_viewText[g_view] ? g_viewText[g_view] : L"";
+    BeginBatch();
     if (!q[0]) {
         if (g_filtering) {                       /* 退出筛选：源文本原样放回 */
             g_filtering = FALSE;
@@ -1592,6 +1625,7 @@ static void RefreshEditText(void) {
     }
     StyleHeaders();
     SendMessageW(g_edit, EM_SETMODIFY, wasDirty, 0);
+    EndBatch();
     UpdateTitle();
 }
 
@@ -1605,12 +1639,16 @@ static void ApplyView(int v) {
     if (g_btnCommon) SendMessageW(g_btnCommon, BM_SETCHECK, v == 0 ? BST_CHECKED : BST_UNCHECKED, 0);
     if (g_btnAll)    SendMessageW(g_btnAll,    BM_SETCHECK, v == 1 ? BST_CHECKED : BST_UNCHECKED, 0);
     /* 控件里现在是**另一个视图**的内容：整篇换掉，并且不许 RefreshEditText
-       把它当成"本视图的编辑"回写（g_noSync 只在这一段生效）。 */
+       把它当成"本视图的编辑"回写（g_noSync 只在这一段生效）。整段关重绘：
+       换文本 + 逐行刷段头 + 重算滚动范围，中途重画会闪。 */
     BOOL savedNoSync = g_noSync;
     g_noSync = TRUE;
     g_filtering = FALSE;
+    g_scrollTargetY = -1;               /* 内容整篇换了，旧的滚动目标作废 */
+    BeginBatch();
     SetEditText(g_viewText[v] ? g_viewText[v] : L"");
     RefreshEditText();                  /* 有筛选词就按它重新筛这个视图 */
+    EndBatch();
     g_noSync = savedNoSync;
     SendMessageW(g_edit, EM_SETMODIFY, FALSE, 0);
 }
@@ -1751,7 +1789,64 @@ static void ShowContextMenu(int sx, int sy) {
     DestroyMenu(m);
 }
 
-/* ---------- 编辑控件的子类化：Esc 关窗 ----------
+/* ---------- 滚轮：平滑纵向 / Shift 横向 ----------
+   RichEdit 自带的滚轮是"一次跳三行"，240Hz 屏上看得出一格一格地顿。这里自己接：
+   累计一个**像素级**目标位置，再用帧定时器逐帧靠近（每次走剩余距离的一半、最少
+   1 像素），停下就 KillTimer。EM_GETSCROLLPOS / EM_SETSCROLLPOS 用的就是像素，
+   而系统那条路只有"行"这一档粒度。
+   ★ 只处理能吃下的情况（拿得到滚动位置）；拿不到就交回默认处理，别把滚轮吞掉。 */
+
+/* 走一帧：把滚动位置往目标挪。挪不动（已在顶/底）就收手，别让定时器空转。 */
+static void ScrollSmoothTick(void) {
+    if (g_scrollTargetY < 0 || !g_edit) { KillTimer(g_hwnd, TID_SMOOTH); return; }
+    POINT sp;
+    if (!SendMessageW(g_edit, EM_GETSCROLLPOS, 0, (LPARAM)&sp)) {
+        g_scrollTargetY = -1;
+        KillTimer(g_hwnd, TID_SMOOTH);
+        return;
+    }
+    int dy = g_scrollTargetY - sp.y;
+    if (dy == 0) { g_scrollTargetY = -1; KillTimer(g_hwnd, TID_SMOOTH); return; }
+    int step = dy / 2;
+    if (step == 0) step = (dy > 0) ? 1 : -1;
+    POINT to = sp;
+    to.y += step;
+    if (to.y < 0) to.y = 0;
+    SendMessageW(g_edit, EM_SETSCROLLPOS, 0, (LPARAM)&to);
+    POINT now;
+    if (SendMessageW(g_edit, EM_GETSCROLLPOS, 0, (LPARAM)&now) && now.y == sp.y) {
+        g_scrollTargetY = -1;                 /* 位置没变 = 撞到内容边界 */
+        KillTimer(g_hwnd, TID_SMOOTH);
+    }
+}
+
+/* 滚轮：Shift = 横向，否则纵向平滑。返回 TRUE 表示已处理。 */
+static BOOL EditWheel(HWND h, WPARAM wp) {
+    int delta = GET_WHEEL_DELTA_WPARAM(wp);
+    if (!delta) return TRUE;
+    POINT sp;
+    if (!SendMessageW(h, EM_GETSCROLLPOS, 0, (LPARAM)&sp)) return FALSE;
+    int lineH = g_lineH > 0 ? g_lineH : MulDiv(16, g_dpi, 96);
+    int perNotch = lineH * 3;                 /* 一格滚三行，跟系统默认的观感一致 */
+
+    if (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT) {
+        /* 横向：一格滚"三行高"那么宽（等宽字体下约等于十几个字符） */
+        sp.x -= MulDiv(delta, perNotch, WHEEL_DELTA);
+        if (sp.x < 0) sp.x = 0;
+        SendMessageW(h, EM_SETSCROLLPOS, 0, (LPARAM)&sp);
+        return TRUE;
+    }
+
+    int base = (g_scrollTargetY >= 0) ? g_scrollTargetY : sp.y;
+    int target = base - MulDiv(delta, perNotch, WHEEL_DELTA);
+    if (target < 0) target = 0;
+    g_scrollTargetY = target;
+    SetTimer(g_hwnd, TID_SMOOTH, 10, NULL);
+    ScrollSmoothTick();                       /* 先走一帧，别等到第一次定时器 */
+    return TRUE;
+}
+
+/* ---------- 编辑控件的子类化：Esc 关窗 / Tab 切视图 ----------
    RichEdit 会把键盘消息都吃掉，主窗口收不到 WM_KEYDOWN；又不想为此上
    对话框（本窗口不是 dialog，没有 IsDialogMessage 那条捷径）。
    刷新不绑快捷键：它唯一的入口是右键菜单，见 ShowContextMenu。 */
@@ -1759,6 +1854,17 @@ static LRESULT CALLBACK EditSub(HWND h, UINT m, WPARAM wp, LPARAM lp,
                                 UINT_PTR id, DWORD_PTR ref) {
     (void)id; (void)ref;
     if (m == WM_KEYDOWN && wp == VK_ESCAPE) { DestroyWindow(g_hwnd); return 0; }
+    /* Tab / Shift+Tab：在两个视图之间切。只认 WM_KEYDOWN —— 同一次按键还会被
+       消息循环翻译成一条 WM_CHAR('\t')，那条**只吞不做**：两条都切的话一次 Tab
+       会切两次、等于没切（实测过）。 */
+    if (m == WM_KEYDOWN && wp == VK_TAB) {
+        ApplyView(1 - g_view);
+        return 0;
+    }
+    if (m == WM_CHAR && wp == L'\t') return 0;   /* 别把制表符插进正文 */
+    if (m == WM_MOUSEWHEEL) {
+        if (EditWheel(h, wp)) return 0;       /* 吃不下就交回默认 */
+    }
     return DefSubclassProc(h, m, wp, lp);
 }
 
@@ -1828,6 +1934,7 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_TIMER:
+        if (wp == TID_SMOOTH) { ScrollSmoothTick(); return 0; }
         if (wp == TID_ARMED) {
             /* 1.5s 没等到主程序的 OPEN：用命令行带来的目标自己开工；
                连目标都没有（用户双击）就退出 —— 不留一个空白窗口在屏上。 */
@@ -2013,13 +2120,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
        值的列位置冲掉，也没法用横向滚动看全一条路径。WS_HSCROLL +
        ES_AUTOHSCROLL 给横向滚动条；竖直滚动条常驻，内容一定比窗口长。
        ES_WANTRETURN 让回车能打进去（可编辑的语义）。
+       ★ ES_DISABLENOSCROLL：内容没超出一屏时也**留着**滚动条（灰色不可拖）。
+       否则「常用」那屏用不着竖向滚动条、「全部」那屏用得上，两条滚动条一隐一现
+       就把编辑区宽高改了，切视图时整篇文字跟着重排、看着像抖了一下。
        扩展样式给 0：**不**用 WS_EX_CLIENTEDGE 那圈 Win95 式凹陷边框，编辑区做成
        平底面板，靠与窗口留白区的一档色差托出边界（现代观感，见 ApplyTheme）。 */
     g_edit = CreateWindowExW(0, EDIT_CLASS, L"正在收集…\n",
                              WS_CHILD | WS_VISIBLE | WS_TABSTOP |
                              WS_VSCROLL | WS_HSCROLL |
                              ES_MULTILINE | ES_AUTOHSCROLL | ES_WANTRETURN |
-                             ES_NOHIDESEL | ES_AUTOVSCROLL,
+                             ES_NOHIDESEL | ES_AUTOVSCROLL | ES_DISABLENOSCROLL,
                              0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)IDC_EDIT, hInst, NULL);
     if (!g_edit) { DestroyWindow(g_hwnd); return 1; }
 
