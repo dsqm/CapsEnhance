@@ -2828,6 +2828,31 @@ static HWND PickLaunchTarget(void) {
 
 /* ---------- 窗口过程 ---------- */
 
+/* 把本窗口抬回前面。再按一次 C+F12 时，主程序只是把目标 Post 过来 —— 它是
+   托盘后台进程，按前台锁规则**没有资格**替别人设前台窗口，那一步通常只闪一下
+   任务栏按钮，窗口仍被别的程序压着。抢前台要连输入队列一起抢（AttachThreadInput
+   到前台线程），而这件事必须在弹窗自己的线程上做：主程序主线程是低级键盘钩子
+   宿主，把它的输入队列接到一个可能无响应的前台线程上，等于把钩子也一起搭进去。
+
+   顺序有讲究：先抬 Z 序（即使激活被拒，窗口也不该被挡住），再试激活；真被拒了
+   才附加输入队列补一次。 */
+static void ForceForeground(void) {
+    if (IsIconic(g_hwnd)) ShowWindow(g_hwnd, SW_RESTORE);
+    SetWindowPos(g_hwnd, HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    HWND fg = GetForegroundWindow();
+    if (fg == g_hwnd) return;
+    SetForegroundWindow(g_hwnd);
+    if (GetForegroundWindow() == g_hwnd) return;
+
+    DWORD fgTid = fg ? GetWindowThreadProcessId(fg, NULL) : 0;
+    DWORD myTid = GetCurrentThreadId();
+    BOOL att = (fgTid && fgTid != myTid) ? AttachThreadInput(fgTid, myTid, TRUE) : FALSE;
+    SetForegroundWindow(g_hwnd);
+    BringWindowToTop(g_hwnd);
+    if (att) AttachThreadInput(fgTid, myTid, FALSE);
+}
+
 static void SaveSizeToParent(void) {
     if (!g_parent || IsIconic(g_hwnd) || !IsWindow(g_parent)) return;
     RECT rc;
@@ -2883,6 +2908,7 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
            唤出上，会让每次按 F12 都先问一句，且首帧字体/主题格式化已把缓冲标脏，
            第一次唤出就会平白弹框。 */
         RequestCollect();
+        ForceForeground();           /* 再按一次 F12 要连"看得见"一起保证 */
         return 0;
     }
     switch (msg) {
@@ -3112,7 +3138,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     int w = MulDiv(g_wDip, g_dpi, 96);
     int h = MulDiv(g_hDip, g_dpi, 96);
     /* 不置顶：这是个要长期摆在一边的编辑器，盖住别人家窗口反而是干扰。
-       再按一次 C+F12 时由主程序 SetForegroundWindow 把它抬回来（src/info.c）。
+       再按一次 C+F12 时由本窗口收到 OPEN 后自己抬回来（ForceForeground）。
        不用 TOOLWINDOW：它需要进任务栏（用户可能顺手点回去看别的窗口）。 */
     g_hwnd = CreateWindowExW(0, INFO_CLASS, APP_TITLE,
                              WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,

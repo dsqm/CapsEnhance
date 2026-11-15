@@ -125,10 +125,9 @@ void InfoTick(void) {
     HWND w = FindWindowW(INFO_CLASS, NULL);
     if (w) {
         PostMessageW(w, s_msgOpen, (WPARAM)s_target, 0);
-        /* 已经开着（用户看的是上一个窗口）：抬到前面，否则他看不到刷新后的内容。
-           弹窗不再置顶，这一步是「再按一次 F12 能看见它」的关键。 */
-        if (IsIconic(w)) ShowWindow(w, SW_RESTORE);
-        SetForegroundWindow(w);
+        /* 前置不在这里做：主程序是托盘后台进程，按前台锁规则没有资格替别的进程
+           设前台窗口，从这儿调 SetForegroundWindow 通常只闪一下任务栏按钮。
+           弹窗收到 OPEN 后由自己的线程抬窗（info/info.c 的 ForceForeground）。 */
         s_pending = FALSE;
         StopTick();
         if (g_recording.load())
