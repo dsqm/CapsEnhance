@@ -30,7 +30,7 @@ enum {
     IF_HOSTNOTE,
     IF_PROCNAME, IF_PID, IF_IMAGE, IF_VER, IF_PRODUCT, IF_COMPANY,
     IF_ARCH, IF_CMDLINE, IF_CWD, IF_START, IF_PPROC,
-    IF_ACCOUNT, IF_INTEGRITY, IF_SESSION, IF_HANDLES, IF_WORKSET,
+    IF_ACCOUNT, IF_INTEGRITY, IF_ELEVATION, IF_SESSION, IF_HANDLES, IF_WORKSET,
     IF_COUNT
 };
 
@@ -67,6 +67,7 @@ static const InfoFieldDef kInfoFields[IF_COUNT] = {
     { "pproc",      1, L"父进程" },
     { "account",    1, L"账户" },
     { "integrity",  1, L"完整性级别" },
+    { "elevation",  1, L"运行权限" },
     { "session",    1, L"会话" },
     { "handles",    1, L"句柄数" },
     { "workset",    1, L"工作集" },

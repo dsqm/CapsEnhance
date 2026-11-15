@@ -99,7 +99,6 @@
 
 #define IDC_EDIT    1001
 #define IDC_SEARCH  1002                /* 顶部筛选框 */
-#define IDC_STATUS  1003                /* 底部状态文字（行数 / 命中数） */
 #define IDC_VCOMMON 1004                /* 顶部工具条按钮：常用 */
 #define IDC_VALL    1005                /* 顶部工具条按钮：全部 */
 
@@ -151,7 +150,7 @@ static HFONT  g_editFont;
 static BOOL   g_dark;            /* 系统应用主题为深色（跟随，见 ApplyTheme） */
 static HBRUSH g_bgBrush;         /* 窗口留白区底色刷（随主题重建） */
 
-static HWND   g_search, g_status, g_btnCommon, g_btnAll;  /* 筛选框 / 状态文字 / 视图按钮 */
+static HWND   g_search, g_btnCommon, g_btnAll;   /* 筛选框 / 视图按钮 */
 static int    g_view;            /* 0 = 常用，1 = 全部；两个视图都可编辑 */
 /* 两个视图各存一份**源文本**（用户编辑后的版本就是它）。筛选只是显示层：
    控件里显示过滤结果时，源文本原样留着，清掉筛选词就把它放回去 —— 否则
@@ -748,11 +747,15 @@ static BOOL ProcCwd(DWORD pid, WCHAR* out, size_t cap) {
     return out[0] != 0;
 }
 
-/* 完整性级别 + 是否提升。受保护进程（PPL/System）在 OpenProcessToken 就会被拒，
-   那属于正常失败，调用方写"不可用"。 */
-static void ProcIntegrity(DWORD pid, WCHAR* out, size_t cap, BOOL* elevated) {
+/* 完整性级别 + 提权状态。两者同源于一次 OpenProcessToken，所以一起取：
+   提权判定看 TokenElevation.TokenIsElevated，再配合 TokenElevationType 说清
+   "是管理员且已提升" / "在管理员组但只有受限令牌" / "就是标准用户"（前者与后
+   两者的区别只在组，光看完整性级别或光看是否提升都分不出来）。
+   受保护进程（PPL/System）在 OpenProcessToken 就会被拒，那属于正常失败，
+   调用方写"不可用"。 */
+static void ProcIntegrity(DWORD pid, WCHAR* out, size_t cap, WCHAR* elevOut, size_t capE) {
     out[0] = 0;
-    if (elevated) *elevated = FALSE;
+    if (elevOut && capE) elevOut[0] = 0;
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!h) {
         /* System 进程（PID 4）连打开都不行 —— 单独说清楚，这是"权限"不是"错" */
@@ -762,13 +765,23 @@ static void ProcIntegrity(DWORD pid, WCHAR* out, size_t cap, BOOL* elevated) {
     HANDLE tok = NULL;
     if (OpenProcessToken(h, TOKEN_QUERY, &tok)) {
         DWORD sz = 0;
+        BOOL elevated = FALSE;
         GetTokenInformation(tok, TokenElevation, NULL, 0, &sz);
         if (sz == sizeof(TOKEN_ELEVATION)) {
             TOKEN_ELEVATION te;
             memset(&te, 0, sizeof(te));
-            if (GetTokenInformation(tok, TokenElevation, &te, sizeof(te), &sz) && elevated)
-                *elevated = te.TokenIsElevated ? TRUE : FALSE;
+            if (GetTokenInformation(tok, TokenElevation, &te, sizeof(te), &sz))
+                elevated = te.TokenIsElevated ? TRUE : FALSE;
         }
+        /* 提权类型：Default = 没有拆分成对令牌（UAC 关闭，或内置 Administrator
+           这类"始终完整"的账户）；Full = 已提升的那一半；Limited = 管理员组
+           成员拿到的是受限令牌（未提升）。 */
+        TOKEN_ELEVATION_TYPE et = TokenElevationTypeDefault;
+        BOOL hasType = FALSE;
+        sz = sizeof(et);
+        if (GetTokenInformation(tok, TokenElevationType, &et, sizeof(et), &sz))
+            hasType = TRUE;
+        DWORD rid = 0;
         GetTokenInformation(tok, TokenIntegrityLevel, NULL, 0, &sz);
         if (sz > 0 && sz < 4096) {
             TOKEN_MANDATORY_LABEL* tml = (TOKEN_MANDATORY_LABEL*)calloc(1, sz);
@@ -776,7 +789,7 @@ static void ProcIntegrity(DWORD pid, WCHAR* out, size_t cap, BOOL* elevated) {
                 if (GetTokenInformation(tok, TokenIntegrityLevel, tml, sz, &sz) &&
                     tml->Label.Sid) {
                     DWORD cnt = *GetSidSubAuthorityCount(tml->Label.Sid);
-                    DWORD rid = (cnt > 0) ? *GetSidSubAuthority(tml->Label.Sid, cnt - 1) : 0;
+                    rid = (cnt > 0) ? *GetSidSubAuthority(tml->Label.Sid, cnt - 1) : 0;
                     const WCHAR* name = L"未知";
                     switch (rid) {
                     case SECURITY_MANDATORY_UNTRUSTED_RID:  name = L"Untrusted"; break;
@@ -792,6 +805,21 @@ static void ProcIntegrity(DWORD pid, WCHAR* out, size_t cap, BOOL* elevated) {
                 }
                 free(tml);
             }
+        }
+        /* 提权文案放在完整性级别之后写：SYSTEM 进程的令牌同样是"已提升"，但把它
+           写成"管理员"是错的（系统账户比管理员高），这里按完整性级别改口径。 */
+        if (elevOut && capE) {
+            if (rid >= SECURITY_MANDATORY_SYSTEM_RID)
+                _snwprintf_s(elevOut, capE, _TRUNCATE, L"SYSTEM（系统账户，高于管理员）");
+            else if (elevated)
+                _snwprintf_s(elevOut, capE, _TRUNCATE,
+                             (hasType && et != TokenElevationTypeFull)
+                                 ? L"管理员（已提升，UAC 未拆分令牌）"
+                                 : L"管理员（已提升）");
+            else if (hasType && et == TokenElevationTypeLimited)
+                _snwprintf_s(elevOut, capE, _TRUNCATE, L"标准用户（管理员组，未提升）");
+            else
+                _snwprintf_s(elevOut, capE, _TRUNCATE, L"标准用户（未提升）");
         }
         CloseHandle(tok);
     }
@@ -1143,7 +1171,7 @@ static Collected* Collect(HWND target) {
 
     /* ---- 进程层 ----
        同样按"先看什么"分四组：身份（进程名/PID/路径/版本）→ 运行（架构/命令行/
-       目录/启动/父进程）→ 安全上下文（账户/完整性/会话）→ 资源（句柄/内存）。 */
+       目录/启动/父进程）→ 安全上下文（账户/完整性/运行权限/会话）→ 资源（句柄/内存）。 */
     BufSection(&b, L"进程");
     if (hostPid != pid)
         BufFieldF(&b, IF_HOSTNOTE, L"ApplicationFrameHost（PID %lu）；以下为窗口内 UWP 应用本体", hostPid);
@@ -1195,14 +1223,13 @@ static Collected* Collect(HWND target) {
     ProcAccount(pid, tmp, 196);
     if (tmp[0]) BufField(&b, IF_ACCOUNT, tmp);
     else BufUnavail(&b, IF_ACCOUNT, L"令牌不可读");
-    BOOL elevated = FALSE;
-    ProcIntegrity(pid, tmp, 128, &elevated);
-    if (tmp[0]) {
-        WCHAR line[192];
-        _snwprintf_s(line, 192, _TRUNCATE, L"%s%s", tmp, elevated ? L"（已提升）" : L"");
-        BufField(&b, IF_INTEGRITY, line);
-    } else {
-        BufUnavail(&b, IF_INTEGRITY, L"令牌不可读");
+    {
+        WCHAR integ[128], elev[128];
+        ProcIntegrity(pid, integ, 128, elev, 128);
+        if (integ[0]) BufField(&b, IF_INTEGRITY, integ);
+        else          BufUnavail(&b, IF_INTEGRITY, L"令牌不可读");
+        if (elev[0])  BufField(&b, IF_ELEVATION, elev);
+        else          BufUnavail(&b, IF_ELEVATION, L"令牌不可读");
     }
     DWORD sess = 0;
     if (ProcessIdToSessionId(pid, &sess)) BufFieldF(&b, IF_SESSION, L"%lu", sess);
@@ -1413,14 +1440,14 @@ static void ApplyUiFont(void) {
     if (g_uiFont) DeleteObject(g_uiFont);
     g_uiFont = MakeFont(L"Microsoft YaHei UI", 9, g_dpi, FALSE);
     if (!g_uiFont) return;
-    HWND ctls[4] = { g_search, g_status, g_btnCommon, g_btnAll };
-    for (int i = 0; i < 4; i++)
+    HWND ctls[3] = { g_search, g_btnCommon, g_btnAll };
+    for (int i = 0; i < 3; i++)
         if (ctls[i]) SendMessageW(ctls[i], WM_SETFONT, (WPARAM)g_uiFont, TRUE);
 }
 
 /* ---------- 段头样式 / 筛选 / 视图切换 ---------- */
 
-static int g_matches;            /* 最近一次筛选命中的行数（状态栏用） */
+static int g_matches;            /* 最近一次筛选命中的行数（写进标题） */
 
 /* 给 `[段名]` 行加粗 + 强调色，让分段一眼可辨。逐行用**控件的行索引**取行文本：
    早先的写法是把 WM_GETTEXT 的整篇按 '\r' 切分、再拿字符偏移去选段 —— 那偏移
@@ -1468,18 +1495,14 @@ static void StyleHeaders(void) {
     SendMessageW(g_edit, EM_SETMODIFY, wasDirty, 0);
 }
 
-/* 底部状态文字：有筛选词报命中行数，否则报行数与当前视图。 */
-static void UpdateStatus(void) {
-    if (!g_status) return;
-    WCHAR msg[192];
-    if (g_filtering)
-        _snwprintf_s(msg, 192, _TRUNCATE, L"筛选：命中 %d 行（Esc 清空）", g_matches);
-    else {
-        int lines = g_edit ? (int)SendMessageW(g_edit, EM_GETLINECOUNT, 0, 0) : 0;
-        _snwprintf_s(msg, 192, _TRUNCATE, L"%d 行 · %s", lines,
-                     g_view == 0 ? L"常用视图（可编辑）" : L"全部视图（可编辑）");
-    }
-    SetWindowTextW(g_status, msg);
+/* 筛选期间在标题里带一句命中行数：没有状态条之后，"到底有没有命中"总得有个
+   反馈（否则筛出个空窗口看不出是没匹配还是控件坏了）。不筛选时恢复纯标题。 */
+static void UpdateTitle(void) {
+    if (!g_hwnd) return;
+    if (!g_filtering) { SetWindowTextW(g_hwnd, APP_TITLE); return; }
+    WCHAR t[128];
+    _snwprintf_s(t, 128, _TRUNCATE, L"%s — 筛选命中 %d 行", APP_TITLE, g_matches);
+    SetWindowTextW(g_hwnd, t);
 }
 
 /* 不区分大小写的子串查找。整屏文本最多几十 KB，逐位置比就够，不必上算法。 */
@@ -1569,7 +1592,7 @@ static void RefreshEditText(void) {
     }
     StyleHeaders();
     SendMessageW(g_edit, EM_SETMODIFY, wasDirty, 0);
-    UpdateStatus();
+    UpdateTitle();
 }
 
 /* 切视图。两个视图都可编辑，各自留着自己那份源文本：离开前把编辑存回去，
@@ -1607,8 +1630,8 @@ static void ApplyTextMargins(void) {
                  MAKELPARAM(left, right));
 }
 
-/* 三层：顶部工具条（筛选框 + 常用/全部）→ 中间编辑区（**贴边**）→ 底部状态条
-   （只有一行状态文字）。文字离边的距离由 ApplyTextMargins 负责，外层不再加 pad。 */
+/* 两层：顶部工具条（常用/全部 + 筛选框）→ 编辑区（**贴边**，一直铺到客户区
+   底边）。文字离边的距离由 ApplyTextMargins 负责，外层不再加 pad。 */
 static void Layout(void) {
     if (!g_hwnd) return;
     RECT rc;
@@ -1616,34 +1639,28 @@ static void Layout(void) {
     int cw = rc.right, ch = rc.bottom;
     int pad = MulDiv(8, g_dpi, 96);
     int toolH = MulDiv(34, g_dpi, 96);
-    int statH = MulDiv(26, g_dpi, 96);
     int bh = MulDiv(22, g_dpi, 96);
 
-    /* 顶部一栏：左边筛选框（吃掉剩下的宽度），右边两个视图按钮。视图切换是
-       常驻操作，放顶上比压在状态条里顺手，状态条也就只剩一行字。 */
+    /* 顶部一栏：左边两个视图按钮，右边筛选框吃掉剩下的宽度。按钮在左、输入框
+       在右 —— 先选视图再筛，视线也是从左往右。 */
     int bw = MulDiv(56, g_dpi, 96);
     int bg = MulDiv(6, g_dpi, 96);
     int sy = (toolH - bh) / 2;
-    int bx = cw - pad - bw;                 /* 「全部」贴右 */
-    if (g_btnAll)    MoveWindow(g_btnAll, bx, sy, bw, bh, TRUE);
-    if (g_btnCommon) MoveWindow(g_btnCommon, bx - bw - bg, sy, bw, bh, TRUE);
+    if (g_btnCommon) MoveWindow(g_btnCommon, pad, sy, bw, bh, TRUE);
+    if (g_btnAll)    MoveWindow(g_btnAll, pad + bw + bg, sy, bw, bh, TRUE);
     if (g_search) {
-        int sw = bx - bw - bg - bg - pad;   /* 到「常用」左边，再留一个间距 */
+        int sx = pad + (bw + bg) * 2;
+        int sw = cw - sx - pad;
         int minW = MulDiv(90, g_dpi, 96);
         if (sw < minW) sw = minW;
-        MoveWindow(g_search, pad, sy, sw, bh, TRUE);
+        MoveWindow(g_search, sx, sy, sw, bh, TRUE);
     }
-    /* 中间编辑区：左右下都贴边 */
+    /* 中间编辑区：左右下都贴边（没有状态条了，一直铺到客户区底边） */
     int editTop = toolH;
-    int editH = ch - toolH - statH;
+    int editH = ch - toolH;
     if (editH < 10) editH = 10;
     if (g_edit) MoveWindow(g_edit, 0, editTop, cw, editH, TRUE);
     ApplyTextMargins();
-
-    /* 底部状态条：只有状态文字 */
-    if (g_status)
-        MoveWindow(g_status, pad, ch - statH + MulDiv(4, g_dpi, 96),
-                   cw - pad * 2, MulDiv(18, g_dpi, 96), TRUE);
 }
 
 /* ---------- 定位：光标居中 + 工作区钳制（CLaunch-search 的做法） ---------- */
@@ -1798,14 +1815,6 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 1;
     }
 
-    case WM_CTLCOLORSTATIC: {
-        /* 筛选框旁 / 状态文字等静态控件：字色跟主题、底用窗口底色，免得
-           在主题底色上贴一块默认灰底。 */
-        HDC dc = (HDC)wp;
-        SetTextColor(dc, EditFg());
-        SetBkColor(dc, WinBg());
-        return (LRESULT)(g_bgBrush ? g_bgBrush : (HBRUSH)(COLOR_BTNFACE + 1));
-    }
     case WM_CTLCOLOREDIT: {
         /* 筛选框（RichEdit 自己用 EM_SETBKGNDCOLOR 画底，不走这里）。 */
         HDC dc = (HDC)wp;
@@ -2033,7 +2042,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                                0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)IDC_SEARCH, hInst, NULL);
     if (g_search) {
         SetWindowSubclass(g_search, SearchSub, 2, 0);
-        SendMessageW(g_search, EM_SETCUEBANNER, TRUE, (LPARAM)L"筛选：键或值…");
+        SendMessageW(g_search, EM_SETCUEBANNER, TRUE, (LPARAM)L"筛选：键或值（Esc 清空）");
     }
     /* 顶部右侧：常用 / 全部 两个切换按钮（toggle 外观）。 */
     g_btnCommon = CreateWindowExW(0, L"BUTTON", L"常用",
@@ -2044,9 +2053,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                                WS_CHILD | WS_VISIBLE | WS_TABSTOP |
                                BS_AUTOCHECKBOX | BS_PUSHLIKE,
                                0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)IDC_VALL, hInst, NULL);
-    g_status = CreateWindowExW(0, L"STATIC", L"正在收集…",
-                               WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS,
-                               0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)IDC_STATUS, hInst, NULL);
 
     ApplyUiFont();
     /* 默认「常用」视图（可编辑）；文本等采集回来由 ApplyView 填。 */
@@ -2056,7 +2062,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     ApplyTheme();          /* 跟随系统深 / 浅色：标题栏、滚动条、编辑区配色 */
     Layout();
-    UpdateStatus();
+    UpdateTitle();
     PlaceNearCursor();
     ShowWindow(g_hwnd, SW_SHOW);
     SetForegroundWindow(g_hwnd);
