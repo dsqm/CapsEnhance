@@ -851,6 +851,7 @@ typedef struct {
     WCHAR sid[192];          /* S-1-5-21-... */
     WCHAR integrity[128];    /* Low / Medium / High / System */
     WCHAR elevation[128];    /* 管理员（已提升）/ 标准用户（未提升）… */
+    WCHAR uiaccess[96];      /* UIAccess 标志（令牌上的位，不随清单声明） */
     WCHAR virtualized[96];   /* UAC 文件与注册表虚拟化 */
     WCHAR protection[128];   /* PPL 类型与签名者 */
     WCHAR mitigation[256];   /* DEP / ASLR / CFG / ACG / 严格句柄 */
@@ -1143,7 +1144,7 @@ static void ProcSecurityGet(DWORD pid, ProcSecurity* s) {
                     tml->Label.Sid) {
                     DWORD cnt = *GetSidSubAuthorityCount(tml->Label.Sid);
                     rid = (cnt > 0) ? *GetSidSubAuthority(tml->Label.Sid, cnt - 1) : 0;
-                    const WCHAR* name = L"未知";
+                    const WCHAR* name = NULL;
                     switch (rid) {
                     case SECURITY_MANDATORY_UNTRUSTED_RID:  name = L"Untrusted"; break;
                     case SECURITY_MANDATORY_LOW_RID:        name = L"Low";       break;
@@ -1154,7 +1155,12 @@ static void ProcSecurityGet(DWORD pid, ProcSecurity* s) {
                         if (rid >= SECURITY_MANDATORY_PROTECTED_PROCESS_RID) name = L"Protected";
                         break;
                     }
-                    _snwprintf_s(s->integrity, 128, _TRUNCATE, L"%s", name);
+                    /* 非标准档（既不是五档标准 RID 也不是 Protected，例如某些
+                       被 AppInfo 抬过完整性的进程）：给出数值，别只写"未知"。 */
+                    if (name)
+                        _snwprintf_s(s->integrity, 128, _TRUNCATE, L"%s", name);
+                    else
+                        _snwprintf_s(s->integrity, 128, _TRUNCATE, L"非标准（RID 0x%X）", rid);
                 }
                 free(tml);
             }
@@ -1170,6 +1176,17 @@ static void ProcSecurityGet(DWORD pid, ProcSecurity* s) {
             _snwprintf_s(s->elevation, 128, _TRUNCATE, L"标准用户（管理员组，未提升）");
         else
             _snwprintf_s(s->elevation, 128, _TRUNCATE, L"标准用户（未提升）");
+        /* UIAccess：令牌上的一位，和清单里的 uiAccess="true" 不是一回事 ——
+           声明只是申请，AppInfo 校验签名与安装位置通过后才把这一位写进令牌；
+           子进程拿到的是父进程那份令牌，所以这一位会连带传给后代。它**不是**
+           提权：UIAccess 进程最常见的形态恰恰是"高完整性 + 未提升"，能力是
+           绕过前台锁、绕过 UIPI 去驱动高权限窗口。 */
+        DWORD uia = 0;
+        sz = sizeof(uia);
+        if (GetTokenInformation(tok, TokenUIAccess, &uia, sizeof(uia), &sz))
+            _snwprintf_s(s->uiaccess, 96, _TRUNCATE,
+                         uia ? L"已启用（可绕前台锁与 UIPI；常见高完整性但未提升）"
+                             : L"未启用");
         /* UAC 虚拟化：32 位老程序写 HKLM / Program Files 被重定向就是它 */
         DWORD v = 0;
         sz = sizeof(v);
@@ -1653,6 +1670,8 @@ static Collected* Collect(HWND target) {
             else                   BufUnavail(&b, IF_INTEGRITY, L"令牌不可读");
             if (sec->elevation[0]) BufField(&b, IF_ELEVATION, sec->elevation);
             else                   BufUnavail(&b, IF_ELEVATION, L"令牌不可读");
+            if (sec->uiaccess[0]) BufField(&b, IF_UIAACCESS, sec->uiaccess);
+            else                  BufUnavail(&b, IF_UIAACCESS, L"令牌不可读");
             if (sec->virtualized[0]) BufField(&b, IF_VIRTUALIZED, sec->virtualized);
             else                     BufUnavail(&b, IF_VIRTUALIZED, L"令牌不可读");
             if (sec->protection[0]) BufField(&b, IF_PROTECTION, sec->protection);

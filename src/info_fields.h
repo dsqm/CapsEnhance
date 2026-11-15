@@ -41,7 +41,7 @@ enum {
     /* ---- 进程层：运行 ---- */
     IF_ARCH, IF_CMDLINE, IF_CWD, IF_START, IF_PPROC, IF_PPROCTIME,
     /* ---- 进程层：安全上下文 ---- */
-    IF_ACCOUNT, IF_USERSID, IF_INTEGRITY, IF_ELEVATION, IF_VIRTUALIZED,
+    IF_ACCOUNT, IF_USERSID, IF_INTEGRITY, IF_ELEVATION, IF_UIAACCESS, IF_VIRTUALIZED,
     IF_PROTECTION, IF_MITIGATION, IF_PRIVS, IF_PKGNAME,
     /* ---- 进程层：资源 ---- */
     IF_SESSION, IF_HANDLES, IF_WORKSET,
@@ -109,6 +109,7 @@ static const InfoFieldDef kInfoFields[IF_COUNT] = {
     { "usersid",    1, L"用户 SID" },
     { "integrity",  1, L"完整性级别" },
     { "elevation",  1, L"运行权限" },
+    { "uiaccess",   1, L"UIAccess 标志" },
     { "virtualized",1, L"UAC 虚拟化" },
     { "protection", 1, L"保护级别" },
     { "mitigation", 1, L"缓解策略" },
