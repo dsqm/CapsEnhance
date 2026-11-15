@@ -20,7 +20,8 @@
 #include <commctrl.h>   /* SetWindowSubclass / DefSubclassProc / InitCommonControlsEx */
 #include <richedit.h>   /* CHARFORMAT2W / MSFTEDIT_CLASS */
 #include <winver.h>     /* GetFileVersionInfoW / VerQueryValueW */
-#include <dwmapi.h>     /* DwmSetWindowAttribute：深色标题栏 */
+#include <sddl.h>       /* ConvertSidToStringSidW：用户 SID 的文本形态 */
+#include <dwmapi.h>     /* DwmSetWindowAttribute / DwmGetWindowAttribute：深色标题栏与 cloak */
 #include <uxtheme.h>    /* SetWindowTheme：现代滚动条主题段 */
 
 #include <stdarg.h>
@@ -564,8 +565,97 @@ static void BufHandleField(Buf* b, int id, HWND h) {
     BufField(b, id, line);
 }
 
-/* 样式位 -> 可读符号（枚举够用就行：全列出来反而更难读） */
-typedef struct { DWORD bit; const WCHAR* name; } StyleBit;
+/* ---------- 窗口层的"内部字段"：都是单次 user32 / DWM 调用 ---------- */
+
+/* 还原矩形：最大化/最小化时 GetWindowRect 给的是"当前"，这一行给"还原后"。 */
+static void NormalRectText(HWND h, WCHAR* out, size_t cap) {
+    out[0] = 0;
+    WINDOWPLACEMENT wp;
+    memset(&wp, 0, sizeof(wp));
+    wp.length = sizeof(wp);
+    if (!GetWindowPlacement(h, &wp)) return;
+    RECT r = wp.rcNormalPosition;
+    _snwprintf_s(out, cap, _TRUNCATE, L"(%ld,%ld)-(%ld,%ld)  %ldx%ld",
+                 r.left, r.top, r.right, r.bottom, r.right - r.left, r.bottom - r.top);
+}
+
+/* DWM cloak：UWP 挂起、虚拟桌面切走、被 DWM 主动隐藏的窗口，IsWindowVisible 仍是
+   TRUE —— "看不见但活着"的窗口全靠这一项解释。 */
+static void CloakedText(HWND h, WCHAR* out, size_t cap) {
+    out[0] = 0;
+    DWORD cloak = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloak, sizeof(cloak))))
+        _snwprintf_s(out, cap, _TRUNCATE, cloak ? L"是（DWM 隐藏）" : L"否");
+}
+
+/* 窗口的 DPI 感知上下文：同一个 DPI 数值下，"PMv2 / System / Unaware" 决定了它
+   会不会被系统拉伸（模糊）—— 排查缩放假象第一步。 */
+static void DpiAwarenessText(HWND h, WCHAR* out, size_t cap) {
+    out[0] = 0;
+    typedef DPI_AWARENESS_CONTEXT (WINAPI* PFN_GETCTX)(HWND);
+    typedef BOOL (WINAPI* PFN_EQUAL)(DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT);
+    typedef DPI_AWARENESS (WINAPI* PFN_AWARE)(DPI_AWARENESS_CONTEXT);
+    PFN_GETCTX fget = (PFN_GETCTX)(void*)ModFn(L"user32.dll", "GetWindowDpiAwarenessContext");
+    if (!fget) { _snwprintf_s(out, cap, _TRUNCATE, L"取不到（Win10 1607 之前）"); return; }
+    DPI_AWARENESS_CONTEXT ctx = fget(h);
+    PFN_EQUAL feq = (PFN_EQUAL)(void*)ModFn(L"user32.dll", "AreDpiAwarenessContextsEqual");
+    if (feq && feq(ctx, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+        _snwprintf_s(out, cap, _TRUNCATE, L"每显示器 V2");
+        return;
+    }
+    PFN_AWARE faware = (PFN_AWARE)(void*)ModFn(L"user32.dll", "GetAwarenessFromDpiAwarenessContext");
+    if (!faware) return;
+    switch (faware(ctx)) {
+    case DPI_AWARENESS_UNAWARE:               _snwprintf_s(out, cap, _TRUNCATE, L"未感知（会被系统拉伸）"); break;
+    case DPI_AWARENESS_SYSTEM_AWARE:          _snwprintf_s(out, cap, _TRUNCATE, L"系统"); break;
+    case DPI_AWARENESS_PER_MONITOR_AWARE:     _snwprintf_s(out, cap, _TRUNCATE, L"每显示器"); break;
+    default:                                  _snwprintf_s(out, cap, _TRUNCATE, L"未知"); break;
+    }
+}
+
+/* 窗口字体：WM_GETFONT 只给 HFONT。GDI 句柄属于目标进程，GetObject 多半失败，
+   那就把句柄值写出来（至少能看出"有没有设字体"）。 */
+static void FontText(HWND h, WCHAR* out, size_t cap) {
+    out[0] = 0;
+    HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+    if (!f) { _snwprintf_s(out, cap, _TRUNCATE, L"未设置（用系统默认）"); return; }
+    LOGFONTW lf;
+    memset(&lf, 0, sizeof(lf));
+    if (GetObjectW(f, sizeof(lf), &lf) == sizeof(lf) && lf.lfFaceName[0])
+        _snwprintf_s(out, cap, _TRUNCATE, L"%s  %d 像素%s", lf.lfFaceName,
+                     lf.lfHeight < 0 ? -lf.lfHeight : lf.lfHeight,
+                     lf.lfWeight >= 700 ? L" 粗体" : L"");
+    else
+        _snwprintf_s(out, cap, _TRUNCATE, L"0x%llX（句柄属于目标进程，取不到字体名）",
+                     (unsigned long long)(ULONG_PTR)f);
+}
+
+/* AppUserModelID / 包名：都在 appmodel.h，一次调用，不需要 COM。 */
+static void PackageText(DWORD pid, WCHAR* aumid, size_t capA, WCHAR* pkg, size_t capP) {
+    if (aumid && capA) aumid[0] = 0;
+    if (pkg && capP) pkg[0] = 0;
+    typedef LONG (WINAPI* PFN_AUMID)(HANDLE, UINT32*, PWSTR);
+    typedef LONG (WINAPI* PFN_PKG)(HANDLE, UINT32*, PWSTR);
+    PFN_AUMID fa = (PFN_AUMID)(void*)ModFn(L"kernel32.dll", "GetApplicationUserModelId");
+    PFN_PKG fp = (PFN_PKG)(void*)ModFn(L"kernel32.dll", "GetPackageFullName");
+    if (!fa && !fp) return;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return;
+    WCHAR buf[512];
+    if (fa && aumid && capA) {
+        UINT32 n = 512;
+        if (fa(h, &n, buf) == ERROR_SUCCESS)
+            _snwprintf_s(aumid, capA, _TRUNCATE, L"%s", buf);
+    }
+    if (fp && pkg && capP) {
+        UINT32 n = 512;
+        if (fp(h, &n, buf) == ERROR_SUCCESS)
+            _snwprintf_s(pkg, capP, _TRUNCATE, L"%s", buf);
+    }
+    CloseHandle(h);
+}
+
+/* 样式位 -> 可读符号（枚举够用就行：全列出来反而更难读） */typedef struct { DWORD bit; const WCHAR* name; } StyleBit;
 static const StyleBit kStyle[] = {
     { WS_POPUP,        L"WS_POPUP" },
     { WS_CHILD,        L"WS_CHILD" },
@@ -750,24 +840,285 @@ static BOOL ProcCwd(DWORD pid, WCHAR* out, size_t cap) {
     return out[0] != 0;
 }
 
-/* 完整性级别 + 提权状态。两者同源于一次 OpenProcessToken，所以一起取：
-   提权判定看 TokenElevation.TokenIsElevated，再配合 TokenElevationType 说清
-   "是管理员且已提升" / "在管理员组但只有受限令牌" / "就是标准用户"（前者与后
-   两者的区别只在组，光看完整性级别或光看是否提升都分不出来）。
-   受保护进程（PPL/System）在 OpenProcessToken 就会被拒，那属于正常失败，
-   调用方写"不可用"。 */
-static void ProcIntegrity(DWORD pid, WCHAR* out, size_t cap, WCHAR* elevOut, size_t capE) {
+/* ---------- 安全上下文：一次 OpenProcess + 一次 OpenProcessToken 取全 ----------
+   账户 / 用户 SID / 完整性级别 / 运行权限 / UAC 虚拟化 / 缓解策略 / 保护级别
+   都来自同一份数据源（进程句柄 + 令牌）。分七次各开一遍对象既慢，也容易只读到
+   一半。受保护进程（PPL / System）在 OpenProcessToken 就会被拒，那是"权限"
+   不是"错"，调用方逐项写"不可用"。 */
+typedef struct {
+    WCHAR account[196];      /* 机器\用户 */
+    WCHAR sid[192];          /* S-1-5-21-... */
+    WCHAR integrity[128];    /* Low / Medium / High / System */
+    WCHAR elevation[128];    /* 管理员（已提升）/ 标准用户（未提升）… */
+    WCHAR virtualized[96];   /* UAC 文件与注册表虚拟化 */
+    WCHAR protection[128];   /* PPL 类型与签名者 */
+    WCHAR mitigation[256];   /* DEP / ASLR / CFG / ACG / 严格句柄 */
+    WCHAR privs[1400];       /* 已启用的特权（前 12 个 + 总数） */
+} ProcSecurity;
+
+/* SID -> "S-1-5-21-..."。账户名会被改名、也可能同名的本地/域账户打架，
+   只有 SID 是稳定标识。 */
+static void SidToText(PSID sid, WCHAR* out, size_t cap) {
     out[0] = 0;
-    if (elevOut && capE) elevOut[0] = 0;
+    if (!sid) return;
+    WCHAR* s = NULL;
+    if (ConvertSidToStringSidW(sid, &s) && s) {
+        _snwprintf_s(out, cap, _TRUNCATE, L"%s", s);
+        LocalFree(s);
+    }
+}
+
+/* 缓解策略摘要：只列"装没装"最容易解释现象的几项（DEP / ASLR / CFG / ACG /
+   句柄严格校验）。十来个策略全列会把这一屏撑长，需要细看时另有专门工具。 */
+static void ProcMitigationText(HANDLE hp, WCHAR* out, size_t cap) {
+    out[0] = 0;
+    if (!hp) return;
+    WCHAR s[256] = L"";
+    PROCESS_MITIGATION_DEP_POLICY dep;
+    memset(&dep, 0, sizeof(dep));
+    if (GetProcessMitigationPolicy(hp, ProcessDEPPolicy, &dep, sizeof(dep)) && dep.Enable)
+        wcscat_s(s, 256, L"DEP");
+    PROCESS_MITIGATION_ASLR_POLICY aslr;
+    memset(&aslr, 0, sizeof(aslr));
+    if (GetProcessMitigationPolicy(hp, ProcessASLRPolicy, &aslr, sizeof(aslr)) &&
+        (aslr.EnableBottomUpRandomization || aslr.EnableForceRelocateImages))
+        wcscat_s(s, 256, s[0] ? L" / ASLR" : L"ASLR");
+    PROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    if (GetProcessMitigationPolicy(hp, ProcessControlFlowGuardPolicy, &cfg, sizeof(cfg)) &&
+        cfg.EnableControlFlowGuard)
+        wcscat_s(s, 256, s[0] ? L" / CFG" : L"CFG");
+    PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY sig;
+    memset(&sig, 0, sizeof(sig));
+    if (GetProcessMitigationPolicy(hp, ProcessSignaturePolicy, &sig, sizeof(sig)) &&
+        (sig.MicrosoftSignedOnly || sig.StoreSignedOnly))
+        wcscat_s(s, 256, s[0] ? L" / 仅签名映像(ACG)" : L"仅签名映像(ACG)");
+    PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY sh;
+    memset(&sh, 0, sizeof(sh));
+    if (GetProcessMitigationPolicy(hp, ProcessStrictHandleCheckPolicy, &sh, sizeof(sh)) &&
+        sh.RaiseExceptionOnInvalidHandleReference)
+        wcscat_s(s, 256, s[0] ? L" / 句柄严格校验" : L"句柄严格校验");
+    _snwprintf_s(out, cap, _TRUNCATE, L"%s", s[0] ? s : L"无");
+}
+
+/* 保护级别（PPL）：level 位布局 = 签名者 << 4 | 审计位 | 类型（0 无 1 Light 2 Full）。
+   受保护进程读不到令牌时，这一行是"为什么读不到"的解释。
+   ★ 这个策略号与结构体是 Win10 才进 SDK 的，老 SDK 上自己补一份（枚举值固定 8）。 */
+#ifndef PROCESS_MITIGATION_PROTECTION_LEVEL_POLICY
+typedef struct _PROCESS_MITIGATION_PROTECTION_LEVEL_POLICY_LOCAL {
+    union {
+        DWORD Flags;
+        struct {
+            DWORD ProtectionLevel : 8;
+            DWORD ReservedFlags : 24;
+        } s;
+    } u;
+} PROCESS_MITIGATION_PROTECTION_LEVEL_POLICY;
+#define ProcessProtectionLevelInfo ((PROCESS_MITIGATION_POLICY)8)
+#endif
+
+static void ProcProtectionText(HANDLE hp, WCHAR* out, size_t cap) {
+    out[0] = 0;
+    if (!hp) return;
+    PROCESS_MITIGATION_PROTECTION_LEVEL_POLICY pl;
+    memset(&pl, 0, sizeof(pl));
+    if (!GetProcessMitigationPolicy(hp, ProcessProtectionLevelInfo, &pl, sizeof(pl))) return;
+    DWORD lv = pl.u.Flags & 0xFF;
+    if (!lv) { _snwprintf_s(out, cap, _TRUNCATE, L"无（未受保护）"); return; }
+    DWORD type = lv & 0x7;
+    DWORD signer = (lv >> 4) & 0xF;
+    const WCHAR* tn = (type == 1) ? L"Light" : (type == 2) ? L"Full" : L"None";
+    const WCHAR* sn = L"未知";
+    switch (signer) {
+    case 1:  sn = L"Authenticode"; break;
+    case 2:  sn = L"CodeGen";      break;
+    case 3:  sn = L"Antimalware";  break;
+    case 4:  sn = L"LSA";          break;
+    case 5:  sn = L"Windows";      break;
+    case 6:  sn = L"WinTcb";       break;
+    case 7:  sn = L"WinSystem";    break;
+    case 8:  sn = L"App";          break;
+    default: break;
+    }
+    _snwprintf_s(out, cap, _TRUNCATE, L"PPL %s·%s", sn, tn);
+}
+
+/* 已启用的特权：全列会撑很长，这里给总数 + 前 12 个名字（剩下的用"…"）。
+   排查"为什么打不开进程/为什么能调试"时，SeDebugPrivilege 在不在这一眼可见。 */
+static void PrivilegeText(HANDLE tok, WCHAR* out, size_t cap) {
+    out[0] = 0;
+    DWORD sz = 0;
+    GetTokenInformation(tok, TokenPrivileges, NULL, 0, &sz);
+    if (sz < sizeof(TOKEN_PRIVILEGES) || sz > 64 * 1024) return;
+    TOKEN_PRIVILEGES* tp = (TOKEN_PRIVILEGES*)calloc(1, sz);
+    if (!tp) return;
+    if (GetTokenInformation(tok, TokenPrivileges, tp, sz, &sz)) {
+        int shown = 0, total = 0;
+        WCHAR list[1200] = L"";
+        for (DWORD i = 0; i < tp->PrivilegeCount; i++) {
+            if (!(tp->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED)) continue;
+            total++;
+            if (shown >= 12) continue;
+            WCHAR nm[128] = L"";
+            DWORD nl = 128;
+            if (!LookupPrivilegeNameW(NULL, &tp->Privileges[i].Luid, nm, &nl)) continue;
+            if (shown) wcscat_s(list, 1200, L"，");
+            wcscat_s(list, 1200, nm);
+            shown++;
+        }
+        if (!total) _snwprintf_s(out, cap, _TRUNCATE, L"无（未启用任何特权）");
+        else _snwprintf_s(out, cap, _TRUNCATE, L"%d 项：%s%s", total, list,
+                          total > shown ? L"，…" : L"");
+    }
+    free(tp);
+}
+
+/* 映像类型：直接从 exe 文件读 PE 头 —— 子系统（GUI / 控制台 / Native）、EXE 还是
+   DLL、是否 .NET。版本资源那条路已经在读同一个文件，这里另开一次只读前 4 KB。 */
+static void ImageTypeText(const WCHAR* path, WCHAR* out, size_t cap) {
+    out[0] = 0;
+    if (!path || !path[0]) return;
+    HANDLE f = CreateFileW(path, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    BYTE hdr[4096];
+    DWORD got = 0;
+    BOOL ok = ReadFile(f, hdr, sizeof(hdr), &got, NULL);
+    CloseHandle(f);
+    if (!ok || got < sizeof(IMAGE_DOS_HEADER) + sizeof(IMAGE_NT_HEADERS32)) return;
+
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)hdr;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) return;
+    if ((size_t)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS32) > got) return;
+    IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)(hdr + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+
+    WORD subsystem = 0, chars = nt->FileHeader.Characteristics;
+    BOOL dotnet = FALSE;
+    if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+        subsystem = nt->OptionalHeader.Subsystem;
+        dotnet = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress != 0;
+    } else if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+        if ((size_t)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64) > got) return;
+        IMAGE_NT_HEADERS64* nt64 = (IMAGE_NT_HEADERS64*)(hdr + dos->e_lfanew);
+        subsystem = nt64->OptionalHeader.Subsystem;
+        dotnet = nt64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress != 0;
+    } else {
+        return;
+    }
+    const WCHAR* sub = L"未知子系统";
+    switch (subsystem) {
+    case IMAGE_SUBSYSTEM_WINDOWS_GUI:     sub = L"GUI";      break;
+    case IMAGE_SUBSYSTEM_WINDOWS_CUI:     sub = L"控制台";   break;
+    case IMAGE_SUBSYSTEM_NATIVE:          sub = L"Native";   break;
+    case IMAGE_SUBSYSTEM_EFI_APPLICATION: sub = L"EFI";      break;
+    default: break;
+    }
+    _snwprintf_s(out, cap, _TRUNCATE, L"%s 子系统，%s%s", sub,
+                 (chars & IMAGE_FILE_DLL) ? L"DLL" : L"EXE",
+                 dotnet ? L"，.NET" : L"");
+}
+
+/* FILETIME（100ns）-> 本地时间 "YYYY-MM-DD hh:mm:ss" */
+static void FileTimeToLocalText(ULONGLONG ft, WCHAR* out, size_t cap) {
+    out[0] = 0;
+    if (!ft) return;
+    FILETIME f, lf;
+    SYSTEMTIME st;
+    f.dwLowDateTime = (DWORD)(ft & 0xFFFFFFFFu);
+    f.dwHighDateTime = (DWORD)(ft >> 32);
+    if (FileTimeToLocalFileTime(&f, &lf) && FileTimeToSystemTime(&lf, &st))
+        _snwprintf_s(out, cap, _TRUNCATE, L"%04d-%02d-%02d %02d:%02d:%02d",
+                     st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+}
+
+/* 父进程的创建时间：光看父 PID 分不清"同一个父进程"和"父 PID 被复用"，
+   (PID, 创建时间) 这一对才是判定父进程的口径。用 NtQuerySystemInformation 一次
+   拿整张进程表 —— 比逐个 OpenProcess + GetProcessTimes 便宜得多。
+   ★ 结构体自己写前缀：winternl.h 里的 SYSTEM_PROCESS_INFORMATION 视 SDK 版本
+   省掉了 CreateTime，而这里只要"前 13 个字段的偏移对得上"就够。 */
+typedef struct {
+    ULONG         NextEntryOffset;
+    ULONG         NumberOfThreads;
+    LARGE_INTEGER WorkingSetPrivateSize;
+    ULONG         HardFaultCount;
+    ULONG         NumberOfThreadsHighWatermark;
+    ULONGLONG     CycleTime;
+    LARGE_INTEGER CreateTime;
+    LARGE_INTEGER UserTime;
+    LARGE_INTEGER KernelTime;
+    struct { USHORT Length, MaximumLength; PWSTR Buffer; } ImageName;   /* UNICODE_STRING 的布局 */
+    LONG          BasePriority;
+    HANDLE        UniqueProcessId;
+} SysProcPrefix;
+
+static BOOL ProcessCreateTime(DWORD pid, ULONGLONG* out) {
+    *out = 0;
+    typedef NTSTATUS (NTAPI* PFN_QSI)(ULONG, PVOID, ULONG, PULONG);
+    PFN_QSI q = (PFN_QSI)(void*)ModFn(L"ntdll.dll", "NtQuerySystemInformation");
+    if (!q) return FALSE;
+    ULONG size = 1u << 20;
+    BYTE* buf = NULL;
+    for (int tries = 0; tries < 6; tries++) {
+        buf = (BYTE*)malloc(size);
+        if (!buf) return FALSE;
+        ULONG need = 0;
+        NTSTATUS st = q(5 /*SystemProcessInformation*/, buf, size, &need);
+        if (st >= 0) break;
+        free(buf);
+        buf = NULL;
+        if ((ULONG)st != 0xC0000004UL /*STATUS_INFO_LENGTH_MISMATCH*/) return FALSE;
+        size = need ? need + 65536 : size * 2;
+    }
+    if (!buf) return FALSE;
+    BOOL found = FALSE;
+    BYTE* p = buf;
+    for (;;) {
+        SysProcPrefix* spi = (SysProcPrefix*)p;
+        if ((DWORD)(ULONG_PTR)spi->UniqueProcessId == pid) {
+            *out = (ULONGLONG)spi->CreateTime.QuadPart;
+            found = TRUE;
+            break;
+        }
+        if (!spi->NextEntryOffset) break;
+        p += spi->NextEntryOffset;
+    }
+    free(buf);
+    return found;
+}
+
+static void ProcSecurityGet(DWORD pid, ProcSecurity* s) {
+    memset(s, 0, sizeof(*s));
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!h) {
-        /* System 进程（PID 4）连打开都不行 —— 单独说清楚，这是"权限"不是"错" */
-        if (pid == 4) _snwprintf_s(out, cap, _TRUNCATE, L"System（受保护，不可查）");
+        /* System 进程（PID 4）连打开都不行 —— 单独说清楚 */
+        if (pid == 4) _snwprintf_s(s->integrity, 128, _TRUNCATE, L"System（受保护，不可查）");
         return;
     }
     HANDLE tok = NULL;
     if (OpenProcessToken(h, TOKEN_QUERY, &tok)) {
         DWORD sz = 0;
+        /* 账户 + SID */
+        GetTokenInformation(tok, TokenUser, NULL, 0, &sz);
+        if (sz > 0 && sz < 4096) {
+            TOKEN_USER* tu = (TOKEN_USER*)calloc(1, sz);
+            if (tu && GetTokenInformation(tok, TokenUser, tu, sz, &sz) && tu->User.Sid) {
+                WCHAR name[128], domain[128];
+                DWORD cn = 128, cd = 128;
+                SID_NAME_USE use;
+                if (LookupAccountSidW(NULL, tu->User.Sid, name, &cn, domain, &cd, &use)) {
+                    if (domain[0])
+                        _snwprintf_s(s->account, 196, _TRUNCATE, L"%s\\%s", domain, name);
+                    else
+                        _snwprintf_s(s->account, 196, _TRUNCATE, L"%s", name);
+                }
+                SidToText(tu->User.Sid, s->sid, 192);
+            }
+            free(tu);
+        }
+        /* 提权：TokenIsElevated 只说"提没提"，配合 TokenElevationType 才说得清
+           "管理员组成员但只有受限令牌"和"就是标准用户"的差别。 */
         BOOL elevated = FALSE;
         GetTokenInformation(tok, TokenElevation, NULL, 0, &sz);
         if (sz == sizeof(TOKEN_ELEVATION)) {
@@ -776,14 +1127,12 @@ static void ProcIntegrity(DWORD pid, WCHAR* out, size_t cap, WCHAR* elevOut, siz
             if (GetTokenInformation(tok, TokenElevation, &te, sizeof(te), &sz))
                 elevated = te.TokenIsElevated ? TRUE : FALSE;
         }
-        /* 提权类型：Default = 没有拆分成对令牌（UAC 关闭，或内置 Administrator
-           这类"始终完整"的账户）；Full = 已提升的那一半；Limited = 管理员组
-           成员拿到的是受限令牌（未提升）。 */
         TOKEN_ELEVATION_TYPE et = TokenElevationTypeDefault;
         BOOL hasType = FALSE;
         sz = sizeof(et);
         if (GetTokenInformation(tok, TokenElevationType, &et, sizeof(et), &sz))
             hasType = TRUE;
+        /* 完整性级别（顺便给提权文案定口径：SYSTEM 不是"管理员"） */
         DWORD rid = 0;
         GetTokenInformation(tok, TokenIntegrityLevel, NULL, 0, &sz);
         if (sz > 0 && sz < 4096) {
@@ -804,56 +1153,33 @@ static void ProcIntegrity(DWORD pid, WCHAR* out, size_t cap, WCHAR* elevOut, siz
                         if (rid >= SECURITY_MANDATORY_PROTECTED_PROCESS_RID) name = L"Protected";
                         break;
                     }
-                    _snwprintf_s(out, cap, _TRUNCATE, L"%s", name);
+                    _snwprintf_s(s->integrity, 128, _TRUNCATE, L"%s", name);
                 }
                 free(tml);
             }
         }
-        /* 提权文案放在完整性级别之后写：SYSTEM 进程的令牌同样是"已提升"，但把它
-           写成"管理员"是错的（系统账户比管理员高），这里按完整性级别改口径。 */
-        if (elevOut && capE) {
-            if (rid >= SECURITY_MANDATORY_SYSTEM_RID)
-                _snwprintf_s(elevOut, capE, _TRUNCATE, L"SYSTEM（系统账户，高于管理员）");
-            else if (elevated)
-                _snwprintf_s(elevOut, capE, _TRUNCATE,
-                             (hasType && et != TokenElevationTypeFull)
-                                 ? L"管理员（已提升，UAC 未拆分令牌）"
-                                 : L"管理员（已提升）");
-            else if (hasType && et == TokenElevationTypeLimited)
-                _snwprintf_s(elevOut, capE, _TRUNCATE, L"标准用户（管理员组，未提升）");
-            else
-                _snwprintf_s(elevOut, capE, _TRUNCATE, L"标准用户（未提升）");
-        }
+        if (rid >= SECURITY_MANDATORY_SYSTEM_RID)
+            _snwprintf_s(s->elevation, 128, _TRUNCATE, L"SYSTEM（系统账户，高于管理员）");
+        else if (elevated)
+            _snwprintf_s(s->elevation, 128, _TRUNCATE,
+                         (hasType && et != TokenElevationTypeFull)
+                             ? L"管理员（已提升，UAC 未拆分令牌）"
+                             : L"管理员（已提升）");
+        else if (hasType && et == TokenElevationTypeLimited)
+            _snwprintf_s(s->elevation, 128, _TRUNCATE, L"标准用户（管理员组，未提升）");
+        else
+            _snwprintf_s(s->elevation, 128, _TRUNCATE, L"标准用户（未提升）");
+        /* UAC 虚拟化：32 位老程序写 HKLM / Program Files 被重定向就是它 */
+        DWORD v = 0;
+        sz = sizeof(v);
+        if (GetTokenInformation(tok, TokenVirtualizationEnabled, &v, sizeof(v), &sz))
+            _snwprintf_s(s->virtualized, 96, _TRUNCATE,
+                         v ? L"已启用（32 位写入会被重定向）" : L"未启用");
+        PrivilegeText(tok, s->privs, 1400);
         CloseHandle(tok);
     }
-    CloseHandle(h);
-}
-
-static void ProcAccount(DWORD pid, WCHAR* out, size_t cap) {
-    out[0] = 0;
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!h) return;
-    HANDLE tok = NULL;
-    if (OpenProcessToken(h, TOKEN_QUERY, &tok)) {
-        DWORD sz = 0;
-        GetTokenInformation(tok, TokenUser, NULL, 0, &sz);
-        if (sz > 0 && sz < 4096) {
-            TOKEN_USER* tu = (TOKEN_USER*)calloc(1, sz);
-            if (tu && GetTokenInformation(tok, TokenUser, tu, sz, &sz) && tu->User.Sid) {
-                WCHAR name[128], domain[128];
-                DWORD cn = 128, cd = 128;
-                SID_NAME_USE use;
-                if (LookupAccountSidW(NULL, tu->User.Sid, name, &cn, domain, &cd, &use)) {
-                    if (domain[0])
-                        _snwprintf_s(out, cap, _TRUNCATE, L"%s\\%s", domain, name);
-                    else
-                        _snwprintf_s(out, cap, _TRUNCATE, L"%s", name);
-                }
-            }
-            free(tu);
-        }
-        CloseHandle(tok);
-    }
+    ProcMitigationText(h, s->mitigation, 256);
+    ProcProtectionText(h, s->protection, 128);
     CloseHandle(h);
 }
 
@@ -1090,6 +1416,9 @@ static Collected* Collect(HWND target) {
        哪个窗口、在不在前台、多大；组与组之间空一行便于扫读。 */
     BufSection(&b, L"窗口");
     WCHAR title[512], cls[128], hx[32];
+    WCHAR aumid[512], pkgname[512];
+    aumid[0] = 0;
+    pkgname[0] = 0;
     GetWinTitle(target, title, 512);
     cls[0] = 0;
     GetClassNameW(target, cls, 128);
@@ -1100,7 +1429,15 @@ static Collected* Collect(HWND target) {
     BufFieldF(&b, IF_TITLELEN, L"%d 个字符%s", (int)wcslen(title),
               wcslen(title) >= 511 ? L"（已截断）" : L"");
     BufField(&b, IF_CLASS, cls[0] ? cls : L"(无)");
+    /* Unicode 窗口与否决定 SendMessage 要不要走 A/W 转换（跨进程发自定义消息
+       踩到乱码时，第一眼看的就是它）。 */
+    BufField(&b, IF_UNICODE, IsWindowUnicode(target) ? L"是" : L"否（ANSI 窗口）");
     BufFieldF(&b, IF_HANDLE, L"%s（%llu）", hx, (unsigned long long)(ULONG_PTR)target);
+    /* 句柄的**唯一性序号**：USER 句柄被回收后会复用同一个数值，高 15 位这个
+       计数器能把"同一个窗口"和"复用了句柄的新窗口"分开。 */
+    BufFieldF(&b, IF_WNDUID, L"0x%04X", (unsigned)((((ULONG_PTR)target) >> 16) & 0x7FFF));
+    int ctlId = GetDlgCtrlID(target);
+    BufFieldF(&b, IF_WNDID, L"%d（0x%X）%s", ctlId, ctlId, ctlId ? L"" : L"  （0 = 未设 ID）");
     /* 这里**不列"窗口过程地址"**：`GetWindowLongPtrW(hwnd, GWLP_WNDPROC)` 对别的
        进程的窗口自 Vista 起恒返回 0（系统不再把对方的代码地址暴露给外部进程）。
        留一行永远是 0x0 的字段只会让人以为取数坏了；要判断"是哪个窗口类"，
@@ -1112,6 +1449,11 @@ static Collected* Collect(HWND target) {
                  IsIconic(target) ? L" / 最小化" : (IsZoomed(target) ? L" / 最大化" : L""),
                  GetForegroundWindow() == target ? L" / 前台" : L"");
     BufField(&b, IF_STATE, st);
+    {
+        WCHAR cloak[64];
+        CloakedText(target, cloak, 64);
+        if (cloak[0]) BufField(&b, IF_CLOAKED, cloak);
+    }
 
     /* 位置与尺寸 */
     BufBlankLine(&b);
@@ -1121,6 +1463,18 @@ static Collected* Collect(HWND target) {
                   wr.left, wr.top, wr.right, wr.bottom, wr.right - wr.left, wr.bottom - wr.top);
     else
         BufUnavail(&b, IF_RECT, L"GetWindowRect 失败");
+    {
+        /* 最大化/最小化时上面那行是"当前"，这行是"还原后"——贴边/记忆位置的判断
+           都发生在还原矩形上。 */
+        WCHAR nr[128];
+        NormalRectText(target, nr, 128);
+        if (!nr[0]) BufUnavail(&b, IF_NORMALRECT, L"GetWindowPlacement 失败");
+        else if (wr.right > wr.left && wr.bottom > wr.top &&
+                 !IsIconic(target) && !IsZoomed(target))
+            BufFieldF(&b, IF_NORMALRECT, L"%s  （同窗口位置）", nr);
+        else
+            BufField(&b, IF_NORMALRECT, nr);
+    }
     if (GetClientRect(target, &cr)) {
         POINT tl = { cr.left, cr.top }, br = { cr.right, cr.bottom };
         ClientToScreen(target, &tl);
@@ -1145,6 +1499,11 @@ static Collected* Collect(HWND target) {
     UINT wdpi = gdfw ? gdfw(target) : 0;
     if (!wdpi) wdpi = 96;
     BufFieldF(&b, IF_DPI, L"%u（%d%%）", wdpi, MulDiv((int)wdpi, 100, 96));
+    {
+        WCHAR aware[96];
+        DpiAwarenessText(target, aware, 96);
+        if (aware[0]) BufField(&b, IF_DPICTX, aware);
+    }
 
     /* 窗口关系 + 线程 */
     BufBlankLine(&b);
@@ -1152,8 +1511,47 @@ static Collected* Collect(HWND target) {
     BufHandleField(&b, IF_OWNER, GetWindow(target, GW_OWNER));
     BufHandleField(&b, IF_ROOT, GetAncestor(target, GA_ROOT));
     BufHandleField(&b, IF_ROOTOWNER, GetAncestor(target, GA_ROOTOWNER));
+    BufField(&b, IF_TOPLEVEL,
+             GetAncestor(target, GA_ROOT) == target ? L"是" : L"否（嵌在别的窗口里）");
     BufFieldF(&b, IF_TID, L"0x%lX（%lu）%s", tid, tid,
               IsHungAppWindow(target) ? L"  ** 无响应 **" : L"");
+
+    /* 内部字段（调试向）：一次 user32 调用就能拿到，排查"这窗口是谁建的、
+       有没有设字体、是不是挂在某个 IME/菜单上"时省一趟 Spy++。 */
+    BufBlankLine(&b);
+    {
+        HMENU mn = GetMenu(target);
+        if (mn) BufFieldF(&b, IF_MENU, L"0x%llX", (unsigned long long)(ULONG_PTR)mn);
+        else    BufField(&b, IF_MENU, L"无");
+        HINSTANCE hi = (HINSTANCE)GetWindowLongPtrW(target, GWLP_HINSTANCE);
+        if (hi) BufFieldF(&b, IF_HINSTANCE, L"0x%llX", (unsigned long long)(ULONG_PTR)hi);
+        ULONG_PTR wndproc = (ULONG_PTR)GetClassLongPtrW(target, GCLP_WNDPROC);
+        if (wndproc) BufFieldF(&b, IF_WNDPROC, L"0x%llX（目标进程内的地址，仅供比对）",
+                               (unsigned long long)wndproc);
+        else         BufField(&b, IF_WNDPROC, L"取不到（跨进程不暴露）");
+        ULONG_PTR ud = (ULONG_PTR)GetWindowLongPtrW(target, GWLP_USERDATA);
+        if (ud) BufFieldF(&b, IF_USERDATA, L"0x%llX", (unsigned long long)ud);
+        else    BufField(&b, IF_USERDATA, L"空（0）");
+        DWORD extra = (DWORD)GetClassLongPtrW(target, GCL_CBWNDEXTRA);
+        BufFieldF(&b, IF_WNDEXTRA, L"%lu 字节", (unsigned long)extra);
+        ATOM atom = (ATOM)GetClassLongPtrW(target, GCW_ATOM);
+        if (atom) BufFieldF(&b, IF_CLASSATOM, L"0x%04X（系统注册类）", (unsigned)atom);
+        else      BufField(&b, IF_CLASSATOM, L"0（动态注册，无原子）");
+        BufFieldF(&b, IF_CLASSSTYLE, L"0x%08lX", (unsigned long)GetClassLongPtrW(target, GCL_STYLE));
+        WCHAR fnt[256];
+        FontText(target, fnt, 256);
+        BufField(&b, IF_WNDFONT, fnt[0] ? fnt : L"取不到");
+        /* AppUserModelID 是**进程**级的（任务栏按它分组），一次取好留给下面
+           「包名（UWP）」那行复用，不重复开进程句柄。 */
+        PackageText(pid, aumid, 512, pkgname, 512);
+        BufField(&b, IF_APPID, aumid[0] ? aumid : L"无（未声明）");
+        HWND ime = NULL;
+        typedef HWND (WINAPI* PFN_IMM)(HWND);
+        PFN_IMM fi = (PFN_IMM)(void*)ModFn(L"imm32.dll", "ImmGetDefaultIMEWnd");
+        if (fi) ime = fi(target);
+        if (ime) BufFieldF(&b, IF_IMEWND, L"0x%llX", (unsigned long long)(ULONG_PTR)ime);
+        else     BufField(&b, IF_IMEWND, L"无（尚未创建）");
+    }
 
     /* 原始样式位（最技术，放最后）。数值与符号表各占**带键名的一行**：符号若
        另起一行只缩进到值列，那一行没有键名，扫一眼分不出是续值还是新字段；
@@ -1196,6 +1594,12 @@ static Collected* Collect(HWND target) {
     if (ver[0])  BufField(&b, IF_VER, ver);
     if (prod[0]) BufField(&b, IF_PRODUCT, prod);
     if (comp[0]) BufField(&b, IF_COMPANY, comp);
+    {
+        WCHAR it[128];
+        ImageTypeText(path, it, 128);
+        if (it[0]) BufField(&b, IF_IMAGETYPE, it);
+        else       BufUnavail(&b, IF_IMAGETYPE, L"读不到映像文件头");
+    }
 
     /* 运行 */
     BufBlankLine(&b);
@@ -1217,22 +1621,50 @@ static Collected* Collect(HWND target) {
         const WCHAR* pb = ppath;
         for (const WCHAR* q = ppath; *q; q++) if (*q == L'\\') pb = q + 1;
         BufFieldF(&b, IF_PPROC, L"%s（PID %lu）", ppath[0] ? pb : L"(取不到进程名)", ppid);
+        /* 父进程的创建时间：只有 (PID, 创建时间) 这一对才能排除"父 PID 被复用"
+           —— 父进程早就退了、PID 被新进程接手时，只给 PID 会认错爹。 */
+        ULONGLONG pct = 0;
+        WCHAR pt[64];
+        if (ProcessCreateTime(ppid, &pct) && pct) {
+            FileTimeToLocalText(pct, pt, 64);
+            BufFieldF(&b, IF_PPROCTIME, L"%s%s", pt,
+                      ppid == 4 ? L"（System，启动最早）" : L"");
+        } else {
+            BufUnavail(&b, IF_PPROCTIME, L"父进程已退出（PID 可能被复用）");
+        }
     } else {
         BufUnavail(&b, IF_PPROC, L"进程无权限打开");
     }
 
-    /* 安全上下文 */
+    /* 安全上下文（同源于一次 OpenProcess + 一次 OpenProcessToken）。
+       ★ 这个结构体带 1.4 KB 的特权清单，放栈上会把采集线程的栈用量顶过
+       /analyze 的 16 KB 线（实测 20 KB），所以放堆上。 */
     BufBlankLine(&b);
-    ProcAccount(pid, tmp, 196);
-    if (tmp[0]) BufField(&b, IF_ACCOUNT, tmp);
-    else BufUnavail(&b, IF_ACCOUNT, L"令牌不可读");
     {
-        WCHAR integ[128], elev[128];
-        ProcIntegrity(pid, integ, 128, elev, 128);
-        if (integ[0]) BufField(&b, IF_INTEGRITY, integ);
-        else          BufUnavail(&b, IF_INTEGRITY, L"令牌不可读");
-        if (elev[0])  BufField(&b, IF_ELEVATION, elev);
-        else          BufUnavail(&b, IF_ELEVATION, L"令牌不可读");
+        ProcSecurity* sec = (ProcSecurity*)calloc(1, sizeof(ProcSecurity));
+        if (sec) {
+            ProcSecurityGet(pid, sec);
+            if (sec->account[0]) BufField(&b, IF_ACCOUNT, sec->account);
+            else                 BufUnavail(&b, IF_ACCOUNT, L"令牌不可读");
+            if (sec->sid[0])     BufField(&b, IF_USERSID, sec->sid);
+            else                 BufUnavail(&b, IF_USERSID, L"令牌不可读");
+            if (sec->integrity[0]) BufField(&b, IF_INTEGRITY, sec->integrity);
+            else                   BufUnavail(&b, IF_INTEGRITY, L"令牌不可读");
+            if (sec->elevation[0]) BufField(&b, IF_ELEVATION, sec->elevation);
+            else                   BufUnavail(&b, IF_ELEVATION, L"令牌不可读");
+            if (sec->virtualized[0]) BufField(&b, IF_VIRTUALIZED, sec->virtualized);
+            else                     BufUnavail(&b, IF_VIRTUALIZED, L"令牌不可读");
+            if (sec->protection[0]) BufField(&b, IF_PROTECTION, sec->protection);
+            else                    BufUnavail(&b, IF_PROTECTION, L"进程句柄不可读");
+            if (sec->mitigation[0]) BufField(&b, IF_MITIGATION, sec->mitigation);
+            else                    BufUnavail(&b, IF_MITIGATION, L"进程句柄不可读");
+            if (sec->privs[0])      BufField(&b, IF_PRIVS, sec->privs);
+            else                    BufUnavail(&b, IF_PRIVS, L"令牌不可读");
+            free(sec);
+        }
+        /* 包名放在安全上下文末尾：只有 UWP / MSIX 进程才有，普通 Win32 是空的 */
+        if (pkgname[0])        BufField(&b, IF_PKGNAME, pkgname);
+        else                   BufField(&b, IF_PKGNAME, L"无（非打包进程）");
     }
     DWORD sess = 0;
     if (ProcessIdToSessionId(pid, &sess)) BufFieldF(&b, IF_SESSION, L"%lu", sess);
