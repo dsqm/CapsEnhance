@@ -2120,8 +2120,13 @@ static void Layout(void) {
     if (g_btnCommon) MoveWindow(g_btnCommon, pad, sy, bw, bh, TRUE);
     if (g_btnAll)    MoveWindow(g_btnAll, pad + bw + bg, sy, bw, bh, TRUE);
     if (g_search) {
+        /* 右边界对齐**竖向滚动条的左边**（不是客户区右边界）：编辑区下面那一条
+           17px 的滚动条是常驻的，筛选框若按 pad 收边就会压到滚动条上方、右边缘
+           落在空白区中间，看着别扭。对齐之后工具栏的右边与正文那一列是同一条竖线。 */
+        int sbW = GetSystemMetrics(SM_CXVSCROLL);
+        if (sbW <= 0) sbW = MulDiv(17, g_dpi, 96);
         int sx = pad + (bw + bg) * 2;
-        int sw = cw - sx - pad;
+        int sw = cw - sbW - sx;
         int minW = MulDiv(90, g_dpi, 96);
         if (sw < minW) sw = minW;
         MoveWindow(g_search, sx, sy, sw, bh, TRUE);
