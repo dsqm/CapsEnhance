@@ -1,0 +1,11 @@
+; ASCII only (rc.exe reads this as ANSI).
+; 1 ICON = the exe's own icon (title bar / taskbar / Alt-Tab). Same app.ico as
+; the main exe, referenced by MAKEINTRESOURCEW(1) in info.c. Path is relative
+; to this .rc file's directory (info/), so ../res/app.ico = res/app.ico.
+1 ICON "../res/app.ico"
+
+; 1 24 = CREATEPROCESS_MANIFEST_RESOURCE_ID + RT_MANIFEST. Embeds the comctl32
+; v6 dependency (themed, modern scrollbars) and Win10/11 compatibility. Without
+; a v6 manifest the process falls back to comctl32 v5 and draws classic
+; Win95-style gray scrollbars -- the "retro" look this resource removes.
+1 24 "info.manifest"

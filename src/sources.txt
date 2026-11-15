@@ -17,3 +17,4 @@ src\folder.c
 src\help.c
 src\child.c
 src\lane.c
+src\info.c

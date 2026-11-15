@@ -41,6 +41,17 @@ void HelpShow(void);   /* F1 按下：让帮助窗口可见（必要时先拉起
 void HelpHide(void);   /* 抬起 / 松开 Caps / 引擎复位：让它隐（它会自己退出） */
 void HelpTick(void);   /* HELP_TIMER 到点：把期望状态再送一次（见上面的说明） */
 
+/* ---------- 窗口信息弹窗（`C+F12`；窗口在**独立 exe** `CapsEnhanceInfo.exe` 里）----------
+   与按键帮助同一类：本体只负责"拉起 / 告诉它看哪个窗口"，所有查询（窗口树、
+   跨进程进程信息）都在子进程里做。差在寿命 —— 帮助窗口是"按住显示、松开即隐"，
+   本窗口是持久的（用户要读、要选中、要编辑），按一下只是"换目标并刷新"。
+   为什么必须拆进程（而不是在主线程开窗口）、以及送达重试的理由，见 src/info.c。 */
+#define INFO_TIMER   5                    /* 主窗口定时器 id（4=帮助） */
+void InfoOpen(HWND target);               /* F12 按下：弹窗看这个窗口（已开着则刷新+前置） */
+void InfoTick(void);                      /* INFO_TIMER 到点：把目标再送一次 */
+BOOL InfoHandleMessage(UINT msg, WPARAM wp, LPARAM lp);
+                                          /* 弹窗回存的尺寸消息：吃掉则返回 TRUE */
+
 /* ---------- 子进程生命周期（帮助浮层的底座；实现在 src/child.c） ----------
    两件事：**父死子退**（Job Object，零协作、卡死也照杀）与**子死父知**（进程句柄
    等待，内核通知、零轮询）。原心跳（每 200ms 一条 KA + 对面 800ms 超时自杀）同时

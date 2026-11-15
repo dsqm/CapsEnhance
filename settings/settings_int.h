@@ -36,6 +36,19 @@
 #define IDC_IME_LSHF   210
 #define IDC_IME_RSHF   211
 #define IDC_HYPER      226   /* 勾选框：Hyper 透传（HyperPassthrough） */
+/* 窗口信息弹窗（C+F12）的字体三行：字体名（文本）/ 字号 / 选择字体…（按钮） */
+#define IDC_INFO_FONT    212
+#define IDC_INFO_FSIZE   213
+#define IDC_INFO_FONTBTN 214
+
+/* 窗口信息弹窗「常用」视图的字段编排：子段头 / 有序列表 / 添加… / 删除 / 上移 / 下移
+   —— 列表与四颗按钮的 id 必须连排（Layout 的显隐轮按 ADD..DOWN 扫一段）。 */
+#define IDC_CMN_HEAD 215
+#define IDC_CMN_LIST 216
+#define IDC_CMN_ADD  217
+#define IDC_CMN_DEL  218
+#define IDC_CMN_UP   219
+#define IDC_CMN_DOWN 220
 
 /* 五份名单各一组：列表框 / 输入框 / 添加 / 删除 / 标题 / 选取窗口 */
 #define IDC_LIST0  300

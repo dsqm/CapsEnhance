@@ -108,8 +108,8 @@
 | --- | --- |
 | `keymap.c` | **键位映射的查询与装配**。动作表本身**不在这个文件里**，而在 `keymap_table.h` —— 它是"某个键是什么意思"的唯一一份定义，键位图（`help/help.c`）也要用同一份，两边各自 include，谁都不抄第二份。本文件提供查询接口（`ActOfVk` / `ActOutVk` / `ActWordDir` / `ActHasFlag` / `ActName`）与模式表（修饰模式 ↔ 激活键集合，激活键取自 `cap.h` 的 `MODE_*_KEYS_DEFAULT`，编译期常量、不读配置）。hook.c / main.c 只做查询。**引擎从不判断按的是哪个键，只问"这个模式生效了吗"**，所以"把 `D` 删掉只留 `Alt`"只改一处常量。启动时由 `KeyMapInit()` 装配 |
 | `hook.c` | **底层输入钩子**。识别 C / 触发键 / 模式激活键，维护 `volatile` 状态与"事件时刻的修饰快照"，并**无条件跟踪真实 Shift**（横向滚动要用，且须放在"未按 C 就放行"之前）；屏蔽映射期间的无效按键；修饰键抬起使某模式失效时投 `WM_MODE_UP`。鼠标钩子只做一件事——按住 C 时把滚轮请求投递出去；**横向与持续滚动两路吞掉物理格**，只有放大档放行；回调在最热路径上，只允许几次比较 + `PostMessage` |
-| `main.c` | **消息窗口 + 消息循环**。和弦引擎（按下即开火 → 重复节奏 → 松手补齐）；路由：按词跳转动作用 `NavJump`，其余用 `SendActOnce`；滚轮 / 持续滚动 / 模式失效消息只做投递；托盘菜单（暂停 / 取消全部置顶 / 设置 / 重启 / 程序文件夹 / 退出，「程序文件夹」与日志气泡点击、C+F3 走同一条 `FolderRevealPath` shell 链路）；`--restart` 等命令行开关；日志 `CapLog`；启动时调用 `NavBaseInfo()` 采集环境基线、`KeyMapInit()` 装配激活键 |
-| `settings/settings.c` | **独立的设置程序**（`CapsEnhanceSettings.exe`，单独 exe，但链接 `src/config.c`）。**表单式**界面：布尔项 = 勾选框、数值项 = 数字框、五份名单各是一个可增删的列表（行内还有"选取窗口"：取到的值先填进输入框，点"添加"才入名单）；保存 = `ConfigSet*` + `ConfigSaveFile`（增量写回，保留注释/未知段/BOM/行尾） + `CapsEnhance.exe --restart`。为什么独立：本体主线程是钩子宿主，不能同时拥有设置窗口。为什么不做成文本编辑器：值域与布尔语义在 ini 里只是注释，摊开原文编辑等于允许写出"解析得出但不合理"的值。高 DPI：Per-Monitor V2 + `WM_DPICHANGED` 重排。页签：表单分「常规」（配置项，按通用/按词跳转/滚动/输入法分段渲染半粗段头）/「名单」（五份按程序/窗口生效的名单）两页（页签自绘为下划线式），页签只控显隐 —— 控件不分页，Load/Save 照旧按 id 找 |
+| `main.c` | **消息窗口 + 消息循环**。和弦引擎（按下即开火 → 重复节奏 → 松手补齐）；路由：按词跳转动作用 `NavJump`，其余用 `SendActOnce`；滚轮 / 持续滚动 / 模式失效消息只做投递；托盘菜单（暂停 / 取消全部置顶 / 设置 / 重启 / 程序文件夹 / 退出，「程序文件夹」与日志气泡点击、C+F4 走同一条 `FolderRevealPath` shell 链路）；`--restart` 等命令行开关；日志 `CapLog`；启动时调用 `NavBaseInfo()` 采集环境基线、`KeyMapInit()` 装配激活键 |
+| `settings/settings.c` | **独立的设置程序**（`CapsEnhanceSettings.exe`，单独 exe，但链接 `src/config.c`）。**表单式**界面：布尔项 = 勾选框、数值项 = 数字框、五份名单各是一个可增删的列表（行内还有"选取窗口"：取到的值先填进输入框，点"添加"才入名单）；保存 = `ConfigSet*` + `ConfigSaveFile`（增量写回，保留注释/未知段/BOM/行尾） + `CapsEnhance.exe --restart`。为什么独立：本体主线程是钩子宿主，不能同时拥有设置窗口。为什么不做成文本编辑器：值域与布尔语义在 ini 里只是注释，摊开原文编辑等于允许写出"解析得出但不合理"的值。高 DPI：Per-Monitor V2 + `WM_DPICHANGED` 重排。页签：表单分「常规」（配置项，按通用/按词跳转/滚动/输入法分段渲染半粗段头；末尾另有窗口信息弹窗的**常用字段编排**：有序列表 + 添加…/删除/上移/下移，写回 `InfoCommonFields`）/「名单」（五份按程序/窗口生效的名单）两页（页签自绘为下划线式），页签只控显隐 —— 控件不分页，Load/Save 照旧按 id 找（常用字段那块不进 `kFields`/`kLists`，读写与脏判定都是手写的一段） |
 | `nav.c` | **按词跳转核心**。多通道读取文本与光标（Edit / Scintilla / UIA / IA2 / WPS）、直接置光标、诊断 `NavProbe` / `NavBaseInfo`；词边界算法已挪到 `nav_word.c`。只把 WPS 当成"又一条通道"（一行分派），WPS 细节不在这个文件里 |
 | `nav_word.c` | **词边界算法**（`nav.c` 里唯一不碰 HWND / COM / 线程预算的部分）。字符分类（反向判定）、代理对处理、`WordJumpTarget`（往某方向跳一次的落点 + 步数）、`ComputeSteps`。单独成文件是为了让它能脱离一堆 COM 前置知识被读懂与测试 —— `test/test_nav.c` 直接对着 `ComputeSteps` 断言。跳转语义见下文[按词跳转](#按词跳转wordjump实现) |
 | `autodisp.c` | **通用**的 COM 自动化按名调用（`GetIDsOfNames` + `Invoke`：参数逆序、`PROPERTYPUT` 的命名参数、`EXCEPINFO` 里三个 BSTR 必须释放）。不认识任何具体程序；Word / WPS / Excel 这类对象模型都能用 |
@@ -121,10 +121,12 @@
 | `winmove.c` | **把焦点窗口挪到光标处**（`C+Q`）。落点计算是纯函数（单测覆盖多显示器几何）；执行部分只碰窗口几何：前台窗口 → `GA_ROOT` 顶层 → **全屏窗口直接拒**（`WinIsFullscreen`）→ **最大化且光标同屏则整个不动作**（结果不会变，做了只会闪）→ 还原（最小化/最大化）→ `MonitorFromPoint(DEFAULTTONEAREST)` + `MONITORINFO.rcWork` 钳制 → `SetWindowPos`。不认识键位（触发键在 `keymap.c`、分派在 `act.c`）。另：`WinIsFullscreen` 与 `WinIsShellClass` 是本模块对外提供的**共用判定**，`drag.c` 也用 |
 | `drag.c` | **Caps+左键拖动窗口**。判定在鼠标钩子（按下那一刻决定吞不吞），执行在专用线程（"最新点 wins"，钩子每帧只写一次状态 + SetEvent）；含最大化异步还原、全屏（判据取自 `winmove.c` 的 `WinIsFullscreen`）/最小化/桌面/任务栏/黑名单的接管判定 |
 | `ime.c` | **单键强制切换输入法**。判定在键盘钩子（"单击"），执行在专用线程（跨进程 IME 消息 + 键盘布局切换）；单槽 latest-wins，见[单键切换输入法](#单键切换输入法imec) |
-| `folder.c` | **打开焦点程序所在文件夹**（`C+F3`），以及**打开日志文件所在位置**（日志结束气泡被点击时，走 `FolderRevealPath`）。走标准 shell 接口（`SHParseDisplayName` → `SHOpenFolderAndSelectItems`，**不拼 `explorer.exe` 命令行**）；目标窗口由 `ActJob.hwnd` 在开火那一刻快照；执行在自己的**一次性线程**上（MTA + `CoInitializeEx`），不占 `act.c` 的动作队列；UWP 走"宿主 `ApplicationFrameHost` → 子窗口 `Windows.UI.Core.CoreWindow` → 真实进程"；失败原因经 `WM_FOLDER_OPEN` 回主线程弹气泡。两个入口共用同一个 `FolderJob` 与线程过程 |
+| `folder.c` | **打开焦点程序所在文件夹**（`C+F4`），以及**打开日志文件所在位置**（日志结束气泡被点击时，走 `FolderRevealPath`）。走标准 shell 接口（`SHParseDisplayName` → `SHOpenFolderAndSelectItems`，**不拼 `explorer.exe` 命令行**）；目标窗口由 `ActJob.hwnd` 在开火那一刻快照；执行在自己的**一次性线程**上（MTA + `CoInitializeEx`），不占 `act.c` 的动作队列；UWP 走"宿主 `ApplicationFrameHost` → 子窗口 `Windows.UI.Core.CoreWindow` → 真实进程"；失败原因经 `WM_FOLDER_OPEN` 回主线程弹气泡。两个入口共用同一个 `FolderJob` 与线程过程 |
 | `child.c` | **子进程生命周期**（帮助浮层的底座）。两件事：**父死子退** —— `CreateProcess(CREATE_SUSPENDED)` → 挂进一个只自己持有的 Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）→ 放行；主程序一没（正常退出 / 崩溃 / 被强杀），内核收掉帮助进程，零协作、卡死也照杀。**子死父知** —— `RegisterWaitForSingleObject` 盯子进程句柄，它一死就给主窗口 `PostMessage`（内核通知，零轮询）；帮助窗口自己退出、用不上这一半，保留为子进程底座能力。取代了原来那套 200ms 心跳 + 800ms 超时自杀。见[子进程的收场](#子进程的收场帮助浮层) |
 | `pin.cpp` | **窗口置顶**（`C+T`）—— **PowerToys AlwaysOnTop 模块的移植**。钉 / 放开（`WS_EX_TOPMOST` + 私有属性）、layered + color-key + blur-behind 的边框浮层、D2D 绘制的强调色圆角环、`Speech On/Sleep` 两声、7 个 WinEvent 钩子 + 每边框 100ms 定时器、虚拟桌面判定、提权失败上报。整套住在**自己的线程**里（主线程是钩子宿主、动作线程是串行队列），动作线程只投递一个 `HWND` 过来。见[窗口置顶](#窗口置顶pincppct) |
 | `help.c` | **按键帮助的开合（主程序侧）**（`C+F1`）：拉起同目录的 `CapsEnhanceHelp.exe`，并把"当前该显示还是该隐藏"告诉它（注册消息 + 40ms 对账重试）。窗口**不常驻**，所以每次显示都是一次冷启动 —— 而"按一下就松手"会让 SHOW/HIDE 都发在窗口出生之前，重试就是为这个竞态准备的。寿命由和弦决定：按下开、抬起关、松开 Caps（`ResetEngine`）也关 |
+| `info.c` | **窗口信息弹窗的开合（主程序侧）**（`C+F12`）：只维护"本轮要看的目标 HWND"，用注册消息 + 40ms 对账重试把目标送给同目录的 `CapsEnhanceInfo.exe`（已开着就只刷新 + 前置），并接住它关窗时回存的窗口尺寸，交给 `config.c` 的增量写回落盘。主程序侧一个 HWND 都不查询，采集全在子进程里 |
+| `info/info.c` | **窗口信息弹窗本体**（独立 exe `CapsEnhanceInfo.exe`）。RICHEDIT50W 编辑器（可编辑、自建右键菜单、刷新只在菜单里、不置顶、不折行、每行都有键名、值按 `EM_SETTABSTOPS` 制表位对齐）；**双视图**：常用 = 按 `InfoCommonFields` 排好的一批字段平铺（友好名、可编辑），全部 = 全量分组（`[...]` 段头加粗强调色、只读），底部状态栏两颗 `BS_PUSHLIKE` 按钮切换，切走前把常用视图的编辑内容回写、切完重刷段头与搜索；**搜索**用 `EM_FINDTEXTEXW` 逐个高亮（键或值、不区分大小写）+ 滚到首个 + 状态栏报命中数；字段词汇表与 `settings/settings.c` 共用 `src/info_fields.h`；工作线程采集窗口层 / 进程层 / 子窗口树（深度 8、400 条上限），把两份文本（全部 + 常用）一次性 `PostMessage` 回 UI 线程，切视图不必重采；光标居中 + 目标屏 `rcWork` 钳制（沿用 CLaunch-search 的做法）；字体与尺寸读 `info_shared.h` 里那四个 ini 键。为什么拆进程见该头文件的文件头 |
 | `help/help.c` | **按键帮助窗口本体**（独立 exe `CapsEnhanceHelp.exe`）。自包含：不装钩子、不初始化 COM/TSF，只做"GDI+ 起一次 + 铺底一帧 + GDI 画一遍字 + 送进分层窗口"（只读 `CapsEnhance.ini` 里那三个 `Ime*Mode`，用来决定底部三条"单击切输入法"的文案）。逐像素 alpha（32bpp DIB + `UpdateLayeredWindow`）实现半透明；文字用 **GDI + ClearType**；`WS_EX_NOACTIVATE` 保证不抢焦点；键位表从 `keymap_table.h` 编进来（不跨进程取数据）。见[按键帮助](#按键帮助helphelpc) |
 
 > 分层意义：以后要支持"另一个只有 COM 才读得到的程序"（如 WPS 表格），照 `wps.c` 再写一个文件即可，`autodisp.c` 与 `bridge.c` 原样复用。
@@ -411,7 +413,7 @@ WPS 置位的回读校验返回**三态**：
 
 | 入口 | 触发 | 路径来源 |
 | --- | --- | --- |
-| `FolderOpenRequest(HWND)` | `C+F3` | 该窗口所属进程的映像全路径（UWP 先换真实进程） |
+| `FolderOpenRequest(HWND)` | `C+F4` | 该窗口所属进程的映像全路径（UWP 先换真实进程） |
 | `FolderRevealPath(const WCHAR*)` | 日志结束气泡被点击 | 调用方给的路径，先过 `FolderResolveTarget` |
 
 两个入口共用一个 `FolderJob`（`{HWND target; WCHAR path[]}`）：`target` 非零走取路径那条，否则走"调用方给的路径"那条，最后都落到 `FolderRevealPidl`。抽成同一个线程过程是为了**不复制那份 shell 调用与错误回报**（`WM_FOLDER_OPEN` 的消息格式、失败码、日志都只有一份）。
@@ -553,7 +555,7 @@ WPS 置位的回读校验返回**三态**：
   ✗ 别加 `SetTextContrast(5)`：中文密集笔画会糊成块，"增强"两个字会粘在一起。
 - ★★ **去掉 ClearType 之后，"清不清晰"就只剩字号这一个变量了** —— 而字号的上限是**几何**的：键帽内宽 ÷ 每行字数。所以：
   · 键帽缝隙（`CAP_GAP_K`）与标签留边（`LABEL_PAD_K`）收到最小，把空间让给字号；
-  · 字号是**逐键帽各定各的**（`PickFuncSizes`）：短文案的键用目标字号，长文案的键（F3 的"打开|程序目录"、反引号的"记录日志"）自动降一档 —— 长文案不再把所有键拖小，文案也就不必为字号让路；
+  · 字号是**逐键帽各定各的**（`PickFuncSizes`）：短文案的键用目标字号，长文案的键（F4 的"打开|程序目录"、反引号的"记录日志"）自动降一档 —— 长文案不再把所有键拖小，文案也就不必为字号让路；
   · 实现是 `AllLabelsFit` 的按键版 `LabelLinesFit`（按 `|` 切段，每段都要装得下），从目标值往下找到第一个全通过的；绘制侧用一个小缓存按字号取 `Font`（档位最多三四档）。
   （GDI+ 的 `MeasureString` 每侧会多算 1/6 em，是它的既有行为 —— 直接拿它当判据会让字号白白小一号，所以 `TextWidth` 按 `em/3` 把这份 padding 补回来。）
 - **逐像素 alpha，不是整窗调透明度**。`SetLayeredWindowAttributes(LWA_ALPHA)` 会把键帽、文字一起变淡（观感发虚），而这里要的是"背板半透明、内容实心"。所以走 32bpp PARGB DIB + `UpdateLayeredWindow(ULW_ALPHA)`，做法沿用本机 IMEIndicator 的 `overlay.c`（同一套 `WS_EX_LAYERED | NOACTIVATE | TOPMOST | TOOLWINDOW`）。没有要 `WS_EX_TRANSPARENT`：窗口需要收点击（点一下关闭）。
@@ -567,7 +569,7 @@ WPS 置位的回读校验返回**三态**：
   ★ 功能名的字号是**几何约束**出来的（每颗键帽的内宽 ÷ 自己的每行字数），跟 u 只是间接关系 —— 所以 `FitUnit` 给的那个 `u × 0.28` 只是"上限目标"，真实值由 `PickFuncSizes` 逐键帽实测往下找。字号一律**取整**：非整数像素下同一行里每个字的 hint 结果不一致（有的胖有的瘦），看着就是"字体怪"。
 - **键帽上的颜色按对比度选，不是凭感觉挑亮/暗**。WCAG 的 AA 线是 4.5:1，十几像素的灰阶抗锯齿中文低于它就开始"看不清"：深蓝底 `#0C447C` 上键名用 `#C7DFF7`（7.3:1）；琥珀底原来是 `#BA7517`，而**那个亮度上任何浅色都到不了 4.5:1**（纯白也只有 3.8:1）—— 所以"橙色键的字母看不清"不是选色问题，是底色太亮，压到 `#96601A` 之后才站得住。
 - **键名位置统一在键帽上部**：未映射的键以前是居中的，于是同一行里两种键名的基线高低不一，扫过去是跳的。
-- ★ **GDI+ 的 `NoWrap` 在文字宽于矩形时是直接裁掉**（真机上 F3 的"程序目录"就这么变成了"程序目"—— 字直接消失，最难查）。所以 `DrawLine` 居中时把矩形**左右各放宽 10%**（对称，不改变居中位置），并且字号按实测留足余量。
+- ★ **GDI+ 的 `NoWrap` 在文字宽于矩形时是直接裁掉**（真机上 F4 的"程序目录"就这么变成了"程序目"—— 字直接消失，最难查）。所以 `DrawLine` 居中时把矩形**左右各放宽 10%**（对称，不改变居中位置），并且字号按实测留足余量。
 - **字体写死"微软雅黑 UI"，不跟随系统默认**：系统默认 UI 字体（`SPI_GETNONCLIENTMETRICS` 的 `lfMessageFont`）通常是 Segoe UI，中文会掉到回退字形（笔画细、像点阵），而这图上大半是中文 —— 拿系统默认只会更难看。雅黑 UI 是 Win8+ 自带的 UI 版，字形与系统界面一致；取不到再退标准雅黑。
 - **底部两栏**列出不是"某个键"的功能（滚轮、单击、鼠标拖动）。键名区的宽度取**本栏最长键名的实测宽度** + 一个间隔，而不是"半个栏宽" —— 那样键名贴最左、说明从栏中间开始，一行字会被扯成断开的两半。
 - **三条"单击 Caps / 左 Shift / 右 Shift"的文案来自配置文件**（`CapsEnhance.ini` 的 `ImeCapsMode / ImeLShiftMode / ImeRShiftMode`：0 不处理 / 1 切中文 / 2 切英文）。写死一个"切中文"在这里，用户把配置一改图就开始撒谎。
@@ -981,11 +983,11 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 | 脚本 | 内容 |
 | --- | --- |
-| `build.bat` | 生成三个 exe：`bin/CapsEnhance.exe`（源文件清单在 **`src/sources.txt`**，由 `cl @src\sources.txt` 读入 —— 与 `test\build_analyze.bat` **共用同一份**，新增一个源文件只改这一个地方）、`bin/CapsEnhanceSettings.exe`（settings/settings.c + src/config.c，共享 `settings/settings_int.h`）、`bin/CapsEnhanceHelp.exe`（help/help.c，只吃一个共享头、不链接 src 下任何模块） |
+| `build.bat` | 生成四个 exe：`bin/CapsEnhance.exe`（源文件清单在 **`src/sources.txt`**，由 `cl @src\sources.txt` 读入 —— 与 `test\build_analyze.bat` **共用同一份**，新增一个源文件只改这一个地方）、`bin/CapsEnhanceSettings.exe`（settings/settings.c + src/config.c，共享 `settings/settings_int.h`）、`bin/CapsEnhanceHelp.exe`（help/help.c，只吃一个共享头、不链接 src 下任何模块）、`bin/CapsEnhanceInfo.exe`（info/info.c，只吃一个共享头、不链接 src 下任何模块） |
 | `test\build_nav.bat` | 按词跳转测试：算法单测（`ComputeSteps`）+ Scintilla / Edit 通道集成（`test_sci`）+ 配置解析（`test_config`）+ 子进程底座（`test_child`） |
-| `test\build_test.bat` | 和弦引擎回归：模式修饰的顺序语义（先按修饰再按触发键）、按下即开火、长按、增强补齐、多键同按、左 Alt=增强、清卡键判定、原生按词跳转序列、快速滚动 / 持续滚动、横向滚动、打开所在文件夹的键位接线与取路径、**全屏窗口在 `C+Q` 与 Caps+拖动两边都不动作**、**最大化窗口同屏连一次位置变化都没有**（数 `WM_WINDOWPOSCHANGED`）、按键帮助的键位接线与"寿命=和弦"、日志结束气泡的可点击接线与"点气泡不弹菜单 / 点图标才弹菜单"、键位表每条动作都有图上文案。带 `/DCAP_TEST`（让 `folder.c` 把"退成目录"这个判定结果通过可选形参带出来给断言看），链接 `winmm.lib`（`main.c` 的 `RecBeep` 用 `PlaySoundW`） |
+| `test\build_test.bat` | 和弦引擎回归：模式修饰的顺序语义（先按修饰再按触发键）、按下即开火、长按、增强补齐、多键同按、左 Alt=增强、清卡键判定、原生按词跳转序列、快速滚动 / 持续滚动、横向滚动、打开所在文件夹的键位接线与取路径、**全屏窗口在 `C+Q` 与 Caps+拖动两边都不动作**、**最大化窗口同屏连一次位置变化都没有**（数 `WM_WINDOWPOSCHANGED`）、按键帮助的键位接线与"寿命=和弦"、窗口信息弹窗（C+F12）的接线与"只请求一次"、日志结束气泡的可点击接线与"点气泡不弹菜单 / 点图标才弹菜单"、键位表每条动作都有图上文案。带 `/DCAP_TEST`（让 `folder.c` 把"退成目录"这个判定结果通过可选形参带出来给断言看），链接 `winmm.lib`（`main.c` 的 `RecBeep` 用 `PlaySoundW`） |
 | `test\build_dbg.bat` | Debug CRT（`/MTd`）config 测试：Release CRT 不校验堆块，"越界写"这类 bug 只有这里拦得住 |
-| `test\build_analyze.bat` | 静态分析（`/W4` + `/analyze`）：只编译不链接。数据流引擎能发现"按 X 分配、按 Y 读"和 Interlocked 混用这类问题。源文件清单与 `build.bat` 共用 `src\sources.txt`（自身只额外列出 2 个独立编译的 exe），所以两边**不会漏**——`src\child.c` 就曾在 `build.bat` 里链接、却从没进过分析列表（补上之后当场抓出一条 `C6031`） |
+| `test\build_analyze.bat` | 静态分析（`/W4` + `/analyze`）：只编译不链接。数据流引擎能发现"按 X 分配、按 Y 读"和 Interlocked 混用这类问题。源文件清单与 `build.bat` 共用 `src\sources.txt`（自身只额外列出 3 个独立编译的 exe），所以两边**不会漏**——`src\child.c` 就曾在 `build.bat` 里链接、却从没进过分析列表（补上之后当场抓出一条 `C6031`） |
 | `test\build_keytest.bat` | 诊断工具：`keytest`（按键投递实测）、`uiprobe`（UIA 逐步探测）、`memtest`（UIA 内存压测）、`restarttest`（重启握手 + 单实例）、`traymemtest`（托盘菜单内存定位）、`logsmoke`（日志轮转）、`ilcheck`（打印各进程完整性级别）、`lowrun`（借 shell 令牌以普通权限启动任意程序）、`wspset`（WPS 直接置位三招实测：以普通权限跑 `lowrun.exe obj\test\wspset.exe`） |
 | `test\build_wpsjump.bat` | WPS 通道真机检查：把 WPS 文字窗口置前直接调 `NavJump`，核对"选中的是 WPS 通道"且光标落在算出的目标上。没装 / 没开 WPS 时打印 `[SKIP]` 以 0 退出（CI 友好）。**会移动 WPS 里文档的光标**（不改内容），先存盘 |
 | `test\build_wheelprobe.bat` | 滚轮落点计数探针 `obj\test\wheelprobe.exe`：一个窗口 + 一个只读的 `WH_MOUSE_LL`，分别给出"本窗口收到的条数/delta 合计"与"物理格 / 注入格"。用于把"有时候不加速"按三段对账（见"快速滚动细节"一节）。它也是 `test_chord` 场景AK 的目标窗口 —— 那个场景不编探针就 `[SKIP]`，所以 CI 不受影响 |
@@ -996,11 +998,11 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 所有构建（含 `build.bat`）统一 **`/W4`**，CI 里再跑一轮 `/analyze`：这两级都抓过真实缺陷（`act.c` 停止标志 Interlocked 混用、`config.c` "按 A 分配按 B 读"），代价只是编译时间。目前全项目 `/W4` + `/analyze` **零告警**，新增告警会立刻被看见而不是淹在已知噪音里。
 
-### 产物落点、图标、三个 exe 的同目录约定
+### 产物落点、图标、四个 exe 的同目录约定
 
-- **产物落点**：中间产物（obj / 静态分析输出）与**全部测试/诊断 exe** 落在 `obj\`（测试在 `obj\test\`），`bin\` 只有三个发布 exe 与运行文件（ini / log / 构建指纹）。发布 = 直接拿走 `bin\`。
+- **产物落点**：中间产物（obj / 静态分析输出）与**全部测试/诊断 exe** 落在 `obj\`（测试在 `obj\test\`），`bin\` 只有四个发布 exe 与运行文件（ini / log / 构建指纹）。发布 = 直接拿走 `bin\`。
 - **图标**：`res\app.rc` 把 `res\app.ico` 作为资源 **#1** 编进**本体** exe（`main.c` 按 `MAKEINTRESOURCEW(1)` 取，`build.bat` 只把 `obj\app_res.obj` 链进第一条链接命令，另外两个 exe 不带图标）。`app.ico` 里带 16/24/32 三帧，帧源是 `res\icon16.png` / `icon24.png` / `icon32.png`。换图标：替换三张 PNG 后自己生成同名 `app.ico`（仓库里没有打包脚本，用任意 ICO 工具即可），再构建。`app.rc` 必须保持 ASCII（`rc.exe` 按 ANSI 读它）。
-- **三个 exe 必须同目录**：托盘菜单的"设置"按**同目录**找 `CapsEnhanceSettings.exe`；主程序按同目录找 `CapsEnhanceHelp.exe`；设置程序也按同目录找 `CapsEnhance.ini` 与 `CapsEnhance.exe`。三处都只做同目录查找，**不搜索 PATH**。
+- **四个 exe 必须同目录**：托盘菜单的"设置"按**同目录**找 `CapsEnhanceSettings.exe`；主程序按同目录找 `CapsEnhanceHelp.exe` 与 `CapsEnhanceInfo.exe`；设置程序也按同目录找 `CapsEnhance.ini` 与 `CapsEnhance.exe`；信息弹窗按同目录找 `CapsEnhance.ini`。四处都只做同目录查找，**不搜索 PATH**。
 
 ---
 
@@ -1017,4 +1019,4 @@ path=Edit len=73 caret=58 -> steps=7 tgt=51
 
 **顺带一个容易误判的点**：exe 的节按 512 字节对齐，几百字节的代码变化可能根本不体现在文件大小上（大小相同 ≠ 内容相同）。要判断是否同源看哈希；要判断工具链是否一致看 `[ENV]` 行。
 
-> 编译中间产物一律落在 `obj\`（静态分析另落在 `obj\an\`），`bin\` 只有三个发布 exe 与运行文件（ini / log / BUILD-FINGERPRINT.txt）—— 测试与诊断工具在 `obj\test\`，发布时直接拿走 `bin\` 即可，不会带出一堆 `.obj`。`bin\`、`obj\`、`*.obj`、`*.exe`、`*.log` 都在 `.gitignore` 里，可随时删除，构建会重新生成。
+> 编译中间产物一律落在 `obj\`（静态分析另落在 `obj\an\`），`bin\` 只有四个发布 exe 与运行文件（ini / log / BUILD-FINGERPRINT.txt）—— 测试与诊断工具在 `obj\test\`，发布时直接拿走 `bin\` 即可，不会带出一堆 `.obj`。`bin\`、`obj\`、`*.obj`、`*.exe`、`*.log` 都在 `.gitignore` 里，可随时删除，构建会重新生成。

@@ -85,7 +85,7 @@
 #define ACT_WORD_R 12                /* 按词跳转向右                             */
 #define ACT_PROBE  13                /* 诊断：探测当前焦点控件                */
 #define ACT_MOVEWIN 14               /* 把焦点窗口挪到鼠标光标处（多显示器）  */
-#define ACT_OPENFOLDER 15            /* 打开焦点程序所在文件夹并选中该 exe（F3）  */
+#define ACT_OPENFOLDER 15            /* 打开焦点程序所在文件夹并选中该 exe（F4）  */
 #define ACT_HELP     16              /* 按键帮助（F1）：拉起/唤起独立 exe CapsEnhanceHelp */
 #define ACT_MUTE     18              /* 系统静音开关（F6）：发 VK_VOLUME_MUTE，翻转型 -> 单发 */
 #define ACT_VOLDOWN  19              /* 系统音量减（F7）：发 VK_VOLUME_DOWN，步进型 -> 可长按重复 */
@@ -93,6 +93,7 @@
 #define ACT_PGUP     21              /* 上翻页（-）：发 VK_PRIOR，光标/滚动类 -> 可重复、可带选区 */
 #define ACT_PGDOWN   22              /* 下翻页（=）：发 VK_NEXT，光标/滚动类 -> 可重复、可带选区 */
 #define ACT_PIN      23              /* 窗口置顶开关（T）：翻转类 -> 单发，见 pin.cpp */
+#define ACT_INFO     24              /* 窗口信息（F12）：拉起独立 exe 列出窗口/进程详情 */
 
 #define DIR_LEFT 0
 #define DIR_RIGHT 1
@@ -109,6 +110,7 @@
 #define ACTF_OPENFOLDER  0x20   /* 打开所在文件夹：交给 folder.c 的 shell 动作，不走按键发送 */
 #define ACTF_HELP        0x40   /* 按键帮助：由 main.c 直接在和弦上开合（见 help.c），不走按键发送 */
 #define ACTF_PIN         0x100  /* 窗口置顶：交给 pin.c 的置顶线程（投递窗口句柄），不走按键发送 */
+#define ACTF_INFO        0x200  /* 窗口信息：由 main.c 直接拉起/前置独立 exe（见 info.c），不走按键发送 */
 
 /* ---------- 修饰（和弦）模式 ----------
    按住 C 期间生效的"组合修饰"。**激活键是编译期常量，不读配置**（见下面

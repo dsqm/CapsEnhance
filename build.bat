@@ -114,10 +114,49 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem ---- info popup resources: icon + comctl32 v6 manifest (modern scrollbars) ----
+rem Same rc/cvtres path as the main exe's icon. The v6 manifest is what switches
+rem this exe from classic comctl32 v5 gray scrollbars to the themed modern ones;
+rem dwmapi/uxtheme below drive the dark title bar and the scrollbar theme.
+"%RC%" /nologo /fo obj\info.res info\info.rc
+if errorlevel 1 (
+    echo [ERROR] info resource compile failed
+    call :maybe_pause
+    exit /b 1
+)
+cvtres /nologo /MACHINE:X64 /OUT:obj\info_res.obj obj\info.res
+if errorlevel 1 (
+    echo [ERROR] info resource convert failed
+    call :maybe_pause
+    exit /b 1
+)
+
+rem Window info popup (C+F12): a fourth exe, same reasoning as the help overlay --
+rem it enumerates another process' window tree and queries its token/process info.
+rem Any of those calls can block on an unresponsive or protected target, and the
+rem main program's thread is the low-level keyboard hook host: blocking there gets
+rem the hook silently removed (LowLevelHooksTimeout). So the whole query lives here,
+rem behind its own process and its own worker thread.
+rem psapi is NOT linked: K32GetProcessMemoryInfo is exported by kernel32 on Win7+.
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
+   /Foobj\ ^
+   info\info.c ^
+   /link /OUT:bin/CapsEnhanceInfo.exe ^
+   obj\info_res.obj ^
+   user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib advapi32.lib version.lib dwmapi.lib uxtheme.lib ^
+   /SUBSYSTEM:WINDOWS
+if errorlevel 1 (
+    echo [ERROR] window info build failed
+    call :maybe_pause
+    exit /b 1
+)
+
 rem Report what actually got built, with which toolchain. Cheap here, and it
 rem turns "the two exes differ, why?" into a one-line diff of the logs.
 for %%F in (bin\CapsEnhance.exe) do echo [OK] bin/CapsEnhance.exe built. size=%%~zF bytes
 for %%F in (bin\CapsEnhanceSettings.exe) do echo [OK] bin/CapsEnhanceSettings.exe built. size=%%~zF bytes
+for %%F in (bin\CapsEnhanceHelp.exe) do echo [OK] bin/CapsEnhanceHelp.exe built. size=%%~zF bytes
+for %%F in (bin\CapsEnhanceInfo.exe) do echo [OK] bin/CapsEnhanceInfo.exe built. size=%%~zF bytes
 where certutil >nul 2>&1 && certutil -hashfile bin\CapsEnhance.exe SHA256 | findstr /R /V "SHA256 CertUtil hash" 
 call :maybe_pause
 exit /b 0

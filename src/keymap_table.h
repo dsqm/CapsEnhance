@@ -45,7 +45,7 @@ typedef struct {
                          切成"打开程 / 序目录"——语义上难看，所以断点由写文案的人
                          决定；不写 `|` 的才交给按宽度自动折行。
                          ★ 文案长没关系：帮助图的字号是**逐键帽实测**的，长文案的键
-                         （如这里的 F3）会自动用小一号的字，不拖累其他键。 */
+                         （如这里的 F4）会自动用小一号的字，不拖累其他键。 */
 } ActionDef;
 
 /* 顺序不敏感，ActOfVk 线性扫（表很小，且只在按键事件里查一次）。 */
@@ -78,10 +78,14 @@ static const ActionDef kActions[] = {
     { ACT_PIN,       'T',        0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_PIN, "置顶(T)", "置顶" },
     /* 打开所在文件夹：单发命令（不发键）。目标是**按下那一刻**的前台窗口 ——
        窗口由 main.c 的 PostAct 快照进 ActJob.hwnd，这里只声明它是这类动作。 */
-    { ACT_OPENFOLDER, VK_F3,     0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_OPENFOLDER, "文件夹(F3)", "打开|程序目录" },
+    { ACT_OPENFOLDER, VK_F4,     0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_OPENFOLDER, "文件夹(F4)", "打开|程序目录" },
     /* 按键帮助：单发命令，同样不发键。它由 main.c 直接在和弦上开合
        （不走执行线程，也不占动作队列 —— 见 help.c）：按下开、抬起关。 */
     { ACT_HELP,      VK_F1,      0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_HELP, "帮助(F1)", "帮助" },
+    /* 窗口信息：单发命令，同样不发键。窗口在独立 exe（CapsEnhanceInfo.exe）里，
+       目标取 main.c 在开火那一刻快照的前台窗口 —— 与「打开所在文件夹」同一个
+       快照时机、同一个理由（投递是异步的，等执行时前台可能已经换了）。 */
+    { ACT_INFO,      VK_F12,     0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_INFO, "窗口信息(F12)", "窗口信息" },
     /* 系统音量：走普通"发键"通道（outVk = 多媒体键，系统自己处理，与前台程序无关）。
        静音是**开关**：重复一次就多切一次（来回横跳），必须单发 —— 与 Caps(Tab) 同理。
        音量加减是**步进**：长按重复（与真实音量键的手感一致，重复节奏即引擎的

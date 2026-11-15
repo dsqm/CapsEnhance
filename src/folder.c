@@ -300,7 +300,7 @@ void FolderOpenRequest(HWND target) {
 }
 
 /* 打开**指定路径**所在的位置（托盘通知被点击时用它：那条通知说的是日志文件，
-   不是"前台程序"）。用同一个 shell 链路 —— 与 C+F3 走的是同一个函数。 */
+   不是"前台程序"）。用同一个 shell 链路 —— 与 C+F4 走的是同一个函数。 */
 void FolderRevealPath(const WCHAR* path) {
     if (!path || !path[0]) return;
     FolderJob* job = FolderJobNew();

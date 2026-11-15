@@ -24,6 +24,7 @@
    ------------------------------------------------------------------ */
 
 #include "cap.h"
+#include "info_shared.h"   /* 窗口信息弹窗的配置：默认值 / 值域 / ini 键名 */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -240,6 +241,16 @@ typedef struct {
     const char*  doc;
 } CfgDef;
 
+/* 文本项目标缓冲（CFG_F_TEXT）。文本项要"返回内部指针"，塞不进表里，所以
+   缓冲在表外，表里只放指针与容量（两者必须同源，故用 sizeof 现算容量）。 */
+static WCHAR g_infoFont[LF_FACESIZE];
+#define INFO_FONT_CAP ((int)(sizeof(g_infoFont) / sizeof(g_infoFont[0])))
+
+/* 常用视图的有序字段列表（逗号分隔的字段 key，ASCII）。空 = 用默认那 10 项；
+   默认值由消费端（info / settings）用 INFO_COMMON_DEFAULT 解释，表里不存串。 */
+static WCHAR g_infoCommon[512];
+#define INFO_COMMON_CAP ((int)(sizeof(g_infoCommon) / sizeof(g_infoCommon[0])))
+
 static CfgDef kCfg[CFG_COUNT] = {
     { "runasadmin", "RunAsAdmin", CFG_F_BOOL, 0, 0, 1, 0, NULL, 0,
       "; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）\n"
@@ -324,6 +335,35 @@ static CfgDef kCfg[CFG_COUNT] = {
       "; 「重置显卡驱动」（屏幕黑闪、全屏程序可能掉）。用不到 Hyper+B 的话，\n"
       "; 在 AHK 里加一行 >#^+b::return 兜底即可（AHK 已绑的键会被它自己吞掉，\n"
       "; 只有没绑的键才漏给系统）。\n" },
+
+    /* ---- 窗口信息弹窗（C + F12；独立 exe，见 info/info.c 与 src/info.c）----
+       四项都住在 [General]：本项目的标量配置一律在这里，且增量写回
+       （ConfigSaveFile）只把 kCfg 的键写进这一段 —— 另开一段的结果是"新键被
+       写回 [General]，而原文那段留着旧值"，同一项出现两处。 */
+    { "infofont", "InfoFont", CFG_F_TEXT, 0, 0, 0, INFO_FONT_CAP, g_infoFont, 0,
+      "; 窗口信息弹窗（C + F12）的字体名：留空 = 按 Cascadia Mono / Consolas /\n"
+      "; 微软雅黑 依次回落（用系统里实际装了的那个）。设置界面「窗口信息」段里\n"
+      "; 可以点「选择字体…」挑，也可以直接在这里填字体名。\n" },
+
+    { "infofontsize", "InfoFontSize", 0, INFO_FONT_SIZE_DEFAULT,
+      INFO_FONT_SIZE_MIN, INFO_FONT_SIZE_MAX, 0, NULL, 0,
+      "; 窗口信息弹窗的字号（磅）。范围 " STR(INFO_FONT_SIZE_MIN)
+      ".." STR(INFO_FONT_SIZE_MAX) "，超出按端点钳制\n" },
+
+    { "infow", "InfoW", 0, INFO_W_DEFAULT, INFO_W_MIN, INFO_W_MAX, 0, NULL, 0,
+      "; 窗口信息弹窗的宽度：96 DPI 下的逻辑像素（实际 = 值 × 目标屏 DPI / 96）。\n"
+      "; 范围 " STR(INFO_W_MIN) ".." STR(INFO_W_MAX)
+      "；用户在弹窗上拖出来的尺寸会在关窗时\n"
+      "; 自动写回这里，平时不必手改。\n" },
+
+    { "infoh", "InfoH", 0, INFO_H_DEFAULT, INFO_H_MIN, INFO_H_MAX, 0, NULL, 0,
+      "; 窗口信息弹窗的高度（同上，96 DPI 逻辑像素）。\n"
+      "; 范围 " STR(INFO_H_MIN) ".." STR(INFO_H_MAX) "。\n" },
+
+    { "infocommonfields", "InfoCommonFields", CFG_F_TEXT, 0, 0, 0, INFO_COMMON_CAP, g_infoCommon, 0,
+      "; 窗口信息弹窗「常用」视图的字段列表：逗号分隔的字段标识，顺序即显示顺序。\n"
+      "; 留空 = 用默认那 10 项（标题 / 进程 / 位置 / 路径 / PID / 类名 / 句柄 /\n"
+      "; 父 / 根 / 根所有者）。建议在设置程序「窗口信息」段里增删排序，不必手改。\n" },
 };
 
 /* 三键与 CFG_IME_* 三个编号必须同序连排（ConfigGetImeMode 靠下标直取） */
@@ -434,6 +474,16 @@ static void ConfigDefaultPath(WCHAR* out, size_t cap) {
     for (DWORD i = 0; i < n; i++) if (wexe[i] == L'\\') slash = &wexe[i];
     if (slash) *slash = 0;
     _snwprintf_s(out, cap, _TRUNCATE, L"%s\\CapsEnhance.ini", wexe);
+}
+
+/* 公开形态：主程序在收到弹窗回存的尺寸后要写回 ini，需要同一个路径判据。
+   以前只有设置程序要路径，它自己在 settings.c 里拼了一遍；两处拼法不同就会
+   "设置改了没生效"（写到另一份文件去了），所以这里只留一份。 */
+BOOL ConfigFilePath(WCHAR* out, size_t cap) {
+    if (!out || cap < 8) return FALSE;
+    out[0] = 0;
+    ConfigDefaultPath(out, cap);
+    return out[0] != 0;
 }
 
 /* 去掉结尾的 .exe（大小写不敏感） */

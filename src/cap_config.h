@@ -55,6 +55,11 @@ enum {
     CFG_IME_LSHIFT_MODE,       /* [General] ImeLShiftMode */
     CFG_IME_RSHIFT_MODE,       /* [General] ImeRShiftMode */
     CFG_HYPER_PASSTHROUGH,     /* [General] HyperPassthrough（Hyper 透传，默认关） */
+    CFG_INFO_FONT,             /* [General] InfoFont（窗口信息弹窗的字体名，文本项） */
+    CFG_INFO_FONT_SIZE,        /* [General] InfoFontSize（磅） */
+    CFG_INFO_W,                /* [General] InfoW（96 DPI 逻辑像素） */
+    CFG_INFO_H,                /* [General] InfoH（同上） */
+    CFG_INFO_COMMON,           /* [General] InfoCommonFields（常用视图的有序字段 key 列表） */
     CFG_COUNT
 };
 
@@ -89,3 +94,6 @@ void        ConfigSetList(int list, const WCHAR* const* names, int n); /* 整份
 int         ConfigListCount(int list);
 const WCHAR* ConfigListAt(int list, int i);
 BOOL ConfigSaveFile(const WCHAR* path);      /* 写回 ini；失败返回 FALSE（文件不落盘） */
+BOOL ConfigFilePath(WCHAR* out, size_t cap); /* 本程序认定的 ini 路径（exe 同目录）；
+                                                主程序把弹窗回存的尺寸写回去时要用它 ——
+                                                此前只有设置程序需要路径，它自己拼。 */

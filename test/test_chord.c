@@ -83,6 +83,19 @@ void HelpHide(void) { g_helpHide++; }
 void HelpTick(void) { }
 static void ResetHelpRec(void) { g_helpShow = 0; g_helpHide = 0; }
 
+/* ---- 窗口信息弹窗桩（src/info.c 不进本测试）----
+   真实现会 CreateProcess 拉起 CapsEnhanceInfo.exe，还要对账送达目标 HWND；
+   本测试既不弹窗也不起进程，只记"请求了几次"，用来钉 C+F12 的接线与单发语义。 */
+static int g_infoOpen = 0;
+void InfoOpen(HWND target) { (void)target; g_infoOpen++; }
+void InfoTick(void) { }
+BOOL InfoHandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
+    (void)msg; (void)wp; (void)lp; return FALSE;
+}
+static void ResetInfoRec(void) { g_infoOpen = 0; }
+
+
+
 /* ---- 捕获钩子：记录注入的完整事件序列（按下/抬起），并可统计次数 ---- */
 typedef struct { int vk; int n; } Rec;
 static Rec g_rec[256]; static int g_recN = 0;
@@ -2157,20 +2170,20 @@ int main(void) {
         }
     }
 
-    /* ---- 场景AH：打开焦点程序所在文件夹（C+\）----
+    /* ---- 场景AH：打开焦点程序所在文件夹（C+F4）----
        shell 那个调用本身**测不了**：它会真的弹出文件管理器窗口、还要等 explorer
        响应。所以只钉能离线断言的三件事：
-         ① 接线：`\` 接到这个动作，属性 = 单发 + 不吃选区 + 不发键（同 Q/W 那类表断言）；
+         ① 接线：`F4` 接到这个动作，属性 = 单发 + 不吃选区 + 不发键（同 Q/W 那类表断言）；
          ② 取路径：给一个真实窗口，解出来的就是**本进程 exe 的全路径**（UWP 那条
             分支要有真 UWP 程序在前台才走得到，只能手工验）；
          ③ 失败路径：拿不到目标时必须**报原因**返回，而不是崩溃或假装成功。
        另：这里顺带守住"ConfigGetProcessName = 全路径的最后一段"—— 它刚被改成
        复用一个取全路径的 helper，名单匹配全靠这个名字（多出个目录就会静默失配）。 */
     {
-        CHECK(ActOfVk(VK_F3) == ACT_OPENFOLDER,
-              "AH: 触发键 F3 -> 打开所在文件夹动作");
-        CHECK(ActOfVk(VK_OEM_5) == ACT_NONE,
-              "AH: 旧的 `\\` 键已不再映射（改到 F3 之后不留旧绑定）");
+        CHECK(ActOfVk(VK_F4) == ACT_OPENFOLDER,
+              "AH: 触发键 F4 -> 打开所在文件夹动作");
+        CHECK(ActOfVk(VK_F3) == ACT_NONE && ActOfVk(VK_OEM_5) == ACT_NONE,
+              "AH: 旧绑定（F3 / `\\`）已释放，不留第二个触发键");
         CHECK(ActHasFlag(ACT_OPENFOLDER, ACTF_OPENFOLDER) &&
               ActHasFlag(ACT_OPENFOLDER, ACTF_SINGLE_SHOT) &&
               ActHasFlag(ACT_OPENFOLDER, ACTF_NO_SHIFT),
@@ -2262,6 +2275,32 @@ int main(void) {
         CHECK(g_helpHide > hideBefore,
               "AI: 松开 Caps（F1 仍按着）-> 同样请求隐藏（寿命=和弦）");
         Sim(VK_F1, FALSE);    Pump(20);
+        Drain();
+    }
+
+    /* ---- 场景AJ：窗口信息弹窗（C+F12，独立 exe）----
+       与帮助窗口一样，弹窗本体是另一个进程，测不了像素与采集结果。能离线钉住
+       的是接线与寿命：F12 只接到这一个动作、不发键、单发；按下请求一次拉起，
+       抬起 / 松开 Caps 都**不重复**拉起（它的寿命与和弦无关，由用户关窗决定）。
+       顺带守住 F11 仍然空着 —— 功能键串行里新占的只有 F12 这一格。 */
+    {
+        CHECK(ActOfVk(VK_F12) == ACT_INFO, "AJ: 触发键 F12 -> 窗口信息动作");
+        CHECK(ActOfVk(VK_F11) == ACT_NONE, "AJ: F11 未被占用（新增的只有 F12）");
+        CHECK(ActHasFlag(ACT_INFO, ACTF_INFO) &&
+              ActHasFlag(ACT_INFO, ACTF_SINGLE_SHOT) &&
+              ActHasFlag(ACT_INFO, ACTF_NO_SHIFT),
+              "AJ: 属性 = 由 info 拉起独立 exe + 单发 + 不吃选区修饰");
+        CHECK(ActOutVk(ACT_INFO) == 0, "AJ: 该动作不发任何键");
+
+        ResetInfoRec();
+        Sim(CLI_CAPS, TRUE);  Pump(20);
+        Sim(VK_F12, TRUE);    Pump(20);
+        CHECK(g_infoOpen == 1, "AJ: 按下 C+F12 -> 请求拉起/前置信息窗一次");
+        Sim(VK_F12, FALSE);   Pump(20);
+        CHECK(g_infoOpen == 1, "AJ: 抬起不重复拉起（寿命不与和弦绑定）");
+        Sim(CLI_CAPS, FALSE); Pump(20);
+        CHECK(g_infoOpen == 1, "AJ: 松开 Caps 不重复拉起");
+        Sim(VK_F12, FALSE);   Pump(20);
         Drain();
     }
 

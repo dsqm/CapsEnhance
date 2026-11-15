@@ -48,23 +48,31 @@
    WM_COMMAND 照旧按 id 找、不分页（见 kTabNames / g_curTab / Layout）。
    页签**外观自绘**（PaintTab：comctl 默认的浮凸小块太旧，改成"文本 +
    强调色下划线"的现代样式，行为不动）；常规页的配置项按 group 列**分段**
-   渲染半粗段头（见 kFields 的 group 列 / InitGroups）。
+   渲染半粗段头（见 kFields 的 group 列 / InitGroups）。常规页最后还有一块
+   「常用字段」编排：窗口信息弹窗（C+F12）的「常用」视图显示哪些字段、按什么
+   顺序，就在这里增删排序（见"窗口信息「常用」视图的字段编排"一节）。
    ============================================================ */
 #define WIN32_LEAN_AND_MEAN
 #include "cap.h"
 #include "settings_int.h"
+#include "info_shared.h"   /* 字号默认值 / 值域：与 config.c、弹窗同一份 */
+#include "info_fields.h"   /* 窗口信息弹窗的字段注册表：与弹窗同一份词汇表 */
 
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
 #include <shellapi.h>      /* ShellExecuteW（CreateProcess 失败时的兜底） */
 #include <commctrl.h>      /* 页签控件（WC_TABCONTROL / TCM_* / TCN_SELCHANGE） */
+#include <commdlg.h>      /* ChooseFontW（窗口信息弹窗的字体对话框）*/
+                          /* WIN32_LEAN_AND_MEAN 把 commdlg.h 从 windows.h 里剔掉了，
+                             所以这一行不是多余的 */
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "comdlg32.lib")   /* ChooseFontW（窗口信息弹窗的字体） */
 
 #define APP_TITLE   L"CapsEnhance 设置"
 #define WND_CLASS   L"CapsEnhanceSettingsMain"
@@ -107,6 +115,13 @@ static Field kFields[] = {
     { IDC_IME_CAPS,   CFG_IME_CAPS_MODE,       L"单击 Caps 时切输入法（0=不处理 1=中文 2=英文）",  NULL,    0, 0, 0, 0, 0,      L"输入法" },
     { IDC_IME_LSHF,   CFG_IME_LSHIFT_MODE,     L"单击左 Shift 时切输入法（同上；英文键盘下都不处理）", NULL, 0, 0, 0, 0, 0,   L"输入法" },
     { IDC_IME_RSHF,   CFG_IME_RSHIFT_MODE,     L"单击右 Shift 时切输入法（同上；英文键盘下都不处理）", NULL, 0, 0, 0, 0, 0,   L"输入法" },
+    /* 窗口信息弹窗（C+F12）：字体名是文本项，所以"标签独占一行、输入框占满下一行"
+       （见 Layout 的 isText 分支）—— 字体名要看得全，也要能手打。
+       紧跟着的「选择字体…」把系统对话框的结果**填进这个框**，不直接写配置：
+       与"选窗"那条同一套礼貌，用户还能改，点保存才落盘。 */
+    { IDC_INFO_FONT,   CFG_INFO_FONT,          L"字体（留空 = 依次回落 Cascadia Mono / Consolas / 微软雅黑）", NULL, 0, 1, 0, 0, 0, L"窗口信息" },
+    { IDC_INFO_FSIZE,  CFG_INFO_FONT_SIZE,     L"字号",                                            L"磅",     0, 0, 0, 0, 0,      L"窗口信息" },
+    { IDC_INFO_FONTBTN, -1,                    L"选择字体…",                                       NULL,     0, 0, 1, 0, 0,      L"窗口信息" },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
 
@@ -240,6 +255,203 @@ static BOOL GetCheck(HWND btn) {
     return SendMessageW(btn, BM_GETCHECK, 0, 0) == BST_CHECKED;
 }
 
+/* ---------------- 窗口信息「常用」视图的字段编排 ----------------
+   `C+F12` 弹窗有两个视图：「常用」按这里排好的**有序字段列表**平铺显示、允许
+   编辑；「全部」是全量分组信息、只读。这块只编排序（谁在里面、什么顺序），
+   不承载任何值 —— 结果直接写回 `[General] InfoCommonFields`（逗号分隔的字段
+   标识，顺序即显示顺序）。
+
+   字段词汇表在 src/info_fields.h：ini 里用的标识 / 所属层 / 「全部」视图里的
+   键名 / 「常用」视图里的友好名，四者同源于一张表（弹窗与设置不各写一份）。
+
+   为什么是"列表 + 四颗按钮"而不是勾选清单：顺序本身就是需求的一部分，勾选框
+   只能表达"在不在"，排序还得再来一个界面。按钮贴着列表竖排，一眼看出动的是
+   这个列表。
+
+   ★ 最少留一项：空列表在配置层是"用默认那 10 项"的哨兵（与弹窗的判据同源），
+   删空再保存等于把用户的选择悄悄换回默认值，所以最后一颗不许删。 */
+#define CMN_KEY_MAX 16                                  /* 一个字段标识的缓冲（最长 exstylesym） */
+#define CMN_TEXT_MAX (IF_COUNT * CMN_KEY_MAX)           /* 整串拼接的字符上限 */
+
+static WCHAR g_baseCommon[CMN_TEXT_MAX];                /* 已保存基线（拼接文本，与落盘同口径） */
+
+static HWND CmnList(void) { return GetDlgItem(g_hwnd, IDC_CMN_LIST); }
+
+/* 第 i 项的字段编号（存在 LB_SETITEMDATA 里；无效返回 -1） */
+static int CmnIdAt(int i) {
+    if (i < 0) return -1;
+    LRESULT d = SendMessageW(CmnList(), LB_GETITEMDATA, (WPARAM)i, 0);
+    if (d == LB_ERR) return -1;
+    int id = (int)d;
+    return (id >= 0 && id < IF_COUNT) ? id : -1;
+}
+
+static int CmnIndexOf(int id) {
+    int n = (int)SendMessageW(CmnList(), LB_GETCOUNT, 0, 0);
+    for (int i = 0; i < n; i++) if (CmnIdAt(i) == id) return i;
+    return -1;
+}
+
+static void CmnInsert(int at, int id) {
+    HWND lb = CmnList();
+    SendMessageW(lb, LB_INSERTSTRING, (WPARAM)at, (LPARAM)kInfoFields[id].common);
+    SendMessageW(lb, LB_SETITEMDATA, (WPARAM)at, (LPARAM)id);
+}
+
+/* 字段标识 -> 宽串（标识是纯 ASCII 的编译期常量） */
+static void CmnKeyW(int id, WCHAR* out) {
+    out[0] = 0;
+    if (id < 0 || id >= IF_COUNT) return;
+    MultiByteToWideChar(CP_ACP, 0, kInfoFields[id].key, -1, out, CMN_KEY_MAX);
+}
+
+/* 当前列表 -> "key,key,..."。**用标识而不是友好名**：标识才是写进 ini 的东西，
+   比对基线与落盘必须同一口径，否则改名/翻译会让界面"看起来没改却是脏的"。 */
+static void CommonSnapshot(WCHAR* out, size_t cap) {
+    out[0] = 0;
+    int n = (int)SendMessageW(CmnList(), LB_GETCOUNT, 0, 0);
+    BOOL first = TRUE;
+    for (int i = 0; i < n; i++) {
+        int id = CmnIdAt(i);
+        if (id < 0) continue;
+        WCHAR key[CMN_KEY_MAX];
+        CmnKeyW(id, key);
+        if (!key[0]) continue;
+        if (!first) wcscat_s(out, cap, L",");
+        wcscat_s(out, cap, key);
+        first = FALSE;
+    }
+}
+
+/* 把逗号串里的已知标识追加进列表（未知的跳过、重复的跳过），返回加了几项。 */
+static int CmnAddKeys(const char* src) {
+    int added = 0, kn = 0;
+    char key[CMN_KEY_MAX];
+    for (const char* p = src; ; p++) {
+        if (*p == ',' || *p == 0) {
+            key[kn] = 0;
+            if (kn) {
+                int id = InfoFieldByKey(key);
+                if (id >= 0 && CmnIndexOf(id) < 0) {
+                    CmnInsert((int)SendMessageW(CmnList(), LB_GETCOUNT, 0, 0), id);
+                    added++;
+                }
+            }
+            kn = 0;
+            if (*p == 0) break;
+        } else if (kn < CMN_KEY_MAX - 1) {
+            key[kn++] = *p;
+        }
+    }
+    return added;
+}
+
+/* 装载：配置里的逗号串 -> 列表。空串（或一个都不认识）= 默认那 10 项，
+   与弹窗的 ParseCommon 同一判据 —— 两处判据不一致就会出现"设置里显示 X、
+   弹窗里显示 Y"这种查半天的怪事。 */
+static void CmnFill(void) {
+    SendMessageW(CmnList(), LB_RESETCONTENT, 0, 0);
+    const WCHAR* s = CfgStr(CFG_INFO_COMMON);
+    char narrow[512] = "";
+    if (s && s[0]) WideCharToMultiByte(CP_ACP, 0, s, -1, narrow, 512, NULL, NULL);
+    if (!narrow[0] || !CmnAddKeys(narrow))
+        CmnAddKeys(INFO_COMMON_DEFAULT);
+}
+
+/* 保存：列表 -> 逗号串。列表为空就写空串（配置层解释成默认那 10 项）——
+   与"最少留一项"的约束不冲突：真走到这里只可能是外部把控件内容清空了。 */
+static void CmnSave(void) {
+    WCHAR out[CMN_TEXT_MAX] = L"";
+    CommonSnapshot(out, CMN_TEXT_MAX);
+    CfgSetStr(CFG_INFO_COMMON, out);
+}
+
+/* 四颗按钮的可用性：没选中就不能删/移；首项不能上移、末项不能下移；
+   只剩一项不许删；全加进来了就没有可添加的。 */
+static void CmnSyncButtons(void) {
+    int n   = (int)SendMessageW(CmnList(), LB_GETCOUNT, 0, 0);
+    int sel = (int)SendMessageW(CmnList(), LB_GETCURSEL, 0, 0);
+    BOOL has = (sel >= 0 && sel != LB_ERR);
+    EnableWindow(GetDlgItem(g_hwnd, IDC_CMN_DEL),  has && n > 1);
+    EnableWindow(GetDlgItem(g_hwnd, IDC_CMN_UP),   has && sel > 0);
+    EnableWindow(GetDlgItem(g_hwnd, IDC_CMN_DOWN), has && sel < n - 1);
+    EnableWindow(GetDlgItem(g_hwnd, IDC_CMN_ADD),  n < IF_COUNT);
+}
+
+/* 「添加…」：弹出"还没有的字段"菜单（按窗口层 / 进程层分两段），选中即追加到
+   末尾并选中它 —— 追加比"插到选中项之后"可预期，位置用上移/下移调。 */
+static void CmnAddDlg(void) {
+    HMENU m = CreatePopupMenu();
+    if (!m) return;
+    UINT cnt = 0;
+    int  lastSec = -1;
+    for (int i = 0; i < IF_COUNT; i++) {
+        if (CmnIndexOf(i) >= 0) continue;
+        if (kInfoFields[i].section != lastSec) {
+            if (cnt) AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+            lastSec = kInfoFields[i].section;
+        }
+        /* 命令号 = 字段编号 + 1（0 保留给"没选"） */
+        AppendMenuW(m, MF_STRING, (UINT_PTR)(i + 1), kInfoFields[i].common);
+        cnt++;
+    }
+    if (!cnt) {
+        DestroyMenu(m);
+        SetStatus(L"全部字段都已经在常用里了");
+        return;
+    }
+    HWND btn = GetDlgItem(g_hwnd, IDC_CMN_ADD);
+    RECT r;
+    if (!btn || !GetWindowRect(btn, &r)) { DestroyMenu(m); return; }
+    int pick = (int)TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
+                                   r.left, r.bottom, 0, g_hwnd, NULL);
+    DestroyMenu(m);
+    if (pick <= 0) return;
+
+    int id = pick - 1;
+    if (id < 0 || id >= IF_COUNT) return;
+    int at = (int)SendMessageW(CmnList(), LB_GETCOUNT, 0, 0);
+    CmnInsert(at, id);
+    SendMessageW(CmnList(), LB_SETCURSEL, (WPARAM)at, 0);
+    CmnSyncButtons();
+    UpdateDirty();
+    SetStatus(L"已把「%s」加到最后 —— 用「上移」调整它的位置", kInfoFields[id].common);
+}
+
+static void CmnDel(void) {
+    HWND lb = CmnList();
+    int sel = (int)SendMessageW(lb, LB_GETCURSEL, 0, 0);
+    int n   = (int)SendMessageW(lb, LB_GETCOUNT, 0, 0);
+    if (sel < 0 || sel == LB_ERR) return;
+    if (n <= 1) {
+        SetStatus(L"常用至少要留一项（空列表等于用默认的 10 项）");
+        return;
+    }
+    SendMessageW(lb, LB_DELETESTRING, (WPARAM)sel, 0);
+    n--;
+    SendMessageW(lb, LB_SETCURSEL, (WPARAM)(sel < n ? sel : n - 1), 0);
+    CmnSyncButtons();
+    UpdateDirty();
+}
+
+/* 上移 / 下移一格（delta = -1 / +1）。删了再插回目标位置 —— 比交换文本简单，
+   也不会在"项数据与文本"之间出现对不齐。移动后选中跟着那一项走。 */
+static void CmnMove(int delta) {
+    HWND lb = CmnList();
+    int sel = (int)SendMessageW(lb, LB_GETCURSEL, 0, 0);
+    int n   = (int)SendMessageW(lb, LB_GETCOUNT, 0, 0);
+    if (sel < 0 || sel == LB_ERR) return;
+    int to = sel + delta;
+    if (to < 0 || to >= n) return;
+    int id = CmnIdAt(sel);
+    if (id < 0) return;
+    SendMessageW(lb, LB_DELETESTRING, (WPARAM)sel, 0);
+    CmnInsert(to, id);
+    SendMessageW(lb, LB_SETCURSEL, (WPARAM)to, 0);
+    CmnSyncButtons();
+    UpdateDirty();
+}
+
 /* ---------------- "有没有未保存的改动"：与**基线**比，不是"动过就脏" ----------------
 
    判据为什么必须是比对而不是记账：EDIT 控件收到 WM_SETTEXT **无条件**发
@@ -286,6 +498,7 @@ static void ListSnapshot(int i, WCHAR* out, size_t cap) {
 static void TakeSnapshot(void) {
     for (int i = 0; i < FIELD_N; i++) FieldSnapshot(i, g_baseField[i], FIELD_TEXT_MAX);
     for (int i = 0; i < LIST_N; i++)  ListSnapshot(i, g_baseList[i], LIST_SNAP_MAX);
+    CommonSnapshot(g_baseCommon, CMN_TEXT_MAX);
 }
 
 /* 重新判定：当前界面 vs 基线。装载期不判（那会儿正在往控件里写值）。 */
@@ -299,6 +512,11 @@ void UpdateDirty(void) {
     for (int i = 0; i < LIST_N && !d; i++) {
         ListSnapshot(i, g_snapTmp, LIST_SNAP_MAX);
         if (wcscmp(g_snapTmp, g_baseList[i]) != 0) d = TRUE;
+    }
+    if (!d) {
+        WCHAR cur[CMN_TEXT_MAX];
+        CommonSnapshot(cur, CMN_TEXT_MAX);
+        if (wcscmp(cur, g_baseCommon) != 0) d = TRUE;
     }
     if (d != g_dirty) { g_dirty = d; UpdateTitle(); }
 }
@@ -386,9 +604,10 @@ static void MakeFont(void) {
 }
 
 static BOOL CALLBACK FontApplyCb(HWND h, LPARAM lp) {
-    /* 段头走半粗体，其余控件统一消息字体 */
+    /* 段头（含「常用字段」那块子段头）走半粗体，其余控件统一消息字体 */
     int id = GetDlgCtrlID(h);
-    HFONT f = (id >= IDC_GROUP0 && id < IDC_GROUP0 + GROUP_MAX) ? g_fontBold : g_font;
+    HFONT f = ((id >= IDC_GROUP0 && id < IDC_GROUP0 + GROUP_MAX) || id == IDC_CMN_HEAD)
+                  ? g_fontBold : g_font;
     SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE);
     (void)lp;
     return TRUE;
@@ -424,6 +643,8 @@ static void LoadConfig(void) {
         FillList(GetDlgItem(g_hwnd, IDC_LIST0 + i * LIST_STRIDE), kLists[i].list);
         SetWindowTextW(GetDlgItem(g_hwnd, IDC_NAME0 + i * LIST_STRIDE), L"");
     }
+    CmnFill();           /* 「常用」字段的顺序（空 = 默认那 10 项，判据与弹窗同源） */
+    CmnSyncButtons();
     g_loading = FALSE;
     /* 装载完之后拍基线：此刻"界面 == ini"，之后任何偏离才算"未保存的改动" */
     TakeSnapshot();
@@ -485,6 +706,10 @@ static BOOL SaveConfig(void) {
         }
         ConfigSetList(kLists[i].list, n ? ptr : NULL, n);
     }
+
+    /* 「常用」字段顺序：以列表框为准整份替换（顺序即界面顺序）。它不在
+       kFields / kLists 里，所以这一段得手写 —— 别指望上面两个循环覆盖它。 */
+    CmnSave();
 
     if (!ConfigSaveFile(g_path)) {
         SetStatus(L"保存失败：写不进 %s（文件被占用或目录只读？）", g_path);
@@ -646,6 +871,11 @@ static void Layout(int w, int h) {
         if (g_grpHead[i])
             ShowCtrl(GetDlgItem(g_hwnd, g_grpHead[i]), fieldPage);
     }
+    /* 「常用」字段编排属于常规页（窗口信息段之后） */
+    ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_HEAD), fieldPage);
+    ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_LIST), fieldPage);
+    for (int k = 0; k < 4; k++)
+        ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_ADD + k), fieldPage);
     for (int i = 0; i < LIST_N; i++) {
         int base = IDC_LIST0 + i * LIST_STRIDE;
         for (int k = 0; k <= 5; k++)      /* 组内控件占 0..5 六个 id */
@@ -695,6 +925,24 @@ static void Layout(int w, int h) {
             y += rowInt;
         }
         y += gap;
+    }
+
+    /* 「常用」字段编排（紧跟「窗口信息」段，那是 kFields 的最后一段）：
+       子段头 + 左侧有序列表 + 右侧竖排四颗按钮。按钮贴着列表，动的是哪个
+       列表不用猜。列表给足默认那 10 项的高度（行高随字体走，所以按 DIP
+       折算而不是按"行数"写死，高分屏上不会只剩半截）；再多它自己出滚动条。 */
+    if (fieldPage) {
+        int cmnW = S(240), cmnRow = S(26), cmnGap = S(4);
+        int cmnH = S(170);
+        int bx = x + cmnW + S(8), bw = S(96);
+        y += S(12);
+        MoveWindow(GetDlgItem(g_hwnd, IDC_CMN_HEAD), x, y - off, w - x * 2, S(20), TRUE);
+        y += S(24);
+        MoveWindow(GetDlgItem(g_hwnd, IDC_CMN_LIST), x, y - off, cmnW, cmnH, TRUE);
+        for (int k = 0; k < 4; k++)
+            MoveWindow(GetDlgItem(g_hwnd, IDC_CMN_ADD + k),
+                       bx, y + k * (cmnRow + cmnGap) - off, bw, cmnRow, TRUE);
+        y += cmnH + S(6);
     }
 
     /* 名单高度固定（约五行，再多名单自己有滚动条），五组顺序往下排 */
@@ -1264,6 +1512,50 @@ static void PickFinish(void) {
     }
 }
 
+/* 「选择字体…」（窗口信息弹窗的字体与字号）。
+   走系统的 ChooseFont —— 不自己造字体列表：枚举、预览、字形与脚本的过滤、
+   非西文名的本地化全归系统管，与 Notepad3 用的是同一个对话框。
+   结果只**填进上面两行**（字体名 / 字号），由用户点保存才落盘 —— 与名单页
+   "选窗只把名字填进输入框"同一套礼貌：看得见、改得动、可反悔。
+   CF_NOVERTFONTS：@ 开头的竖排字体对横排正文没有意义，列出来只会让人选错。 */
+static void PickInfoFont(void) {
+    HWND edFace = GetDlgItem(g_hwnd, IDC_INFO_FONT);
+    HWND edSize = GetDlgItem(g_hwnd, IDC_INFO_FSIZE);
+    if (!edFace || !edSize) return;
+
+    WCHAR face[LF_FACESIZE] = L"";
+    GetWindowTextW(edFace, face, LF_FACESIZE);
+    if (!face[0]) _snwprintf_s(face, LF_FACESIZE, _TRUNCATE, L"%s", L"Consolas");
+
+    WCHAR sz[32] = L"";
+    GetWindowTextW(edSize, sz, 32);
+    int pt = _wtoi(sz);
+    if (pt < INFO_FONT_SIZE_MIN || pt > INFO_FONT_SIZE_MAX) pt = INFO_FONT_SIZE_DEFAULT;
+
+    LOGFONTW lf;
+    memset(&lf, 0, sizeof(lf));
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfHeight  = -MulDiv(pt, g_dpi, 72);      /* 磅 -> 逻辑高度（与弹窗同一算法） */
+    _snwprintf_s(lf.lfFaceName, LF_FACESIZE, _TRUNCATE, L"%s", face);
+
+    CHOOSEFONTW cf;
+    memset(&cf, 0, sizeof(cf));
+    cf.lStructSize = sizeof(cf);
+    cf.hwndOwner   = g_hwnd;
+    cf.lpLogFont   = &lf;
+    cf.Flags       = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_FORCEFONTEXIST |
+                     CF_NOVERTFONTS | CF_LIMITSIZE;
+    cf.nSizeMin    = INFO_FONT_SIZE_MIN;
+    cf.nSizeMax    = INFO_FONT_SIZE_MAX;
+    if (!ChooseFontW(&cf)) return;
+
+    SetWindowTextW(edFace, lf.lfFaceName);
+    _snwprintf_s(sz, 32, _TRUNCATE, L"%d", cf.iPointSize / 10);   /* iPointSize 是 1/10 磅 */
+    SetWindowTextW(edSize, sz);
+    SetStatus(L"已选 %s %d 磅 —— 保存后生效", lf.lfFaceName, cf.iPointSize / 10);
+    UpdateDirty();
+}
+
 /* "窗框"（顶部与底部共用的实底子窗口类）：状态栏/按钮/页签条放在它上面。
    为什么要它：表单内容滚动时，滑出可视区的部分不会被自动裁掉 —— 底部会从
    状态栏/按钮周围的缝隙里露出来，顶部则直接盖到页签条上；窗框在 z 序上
@@ -1294,6 +1586,16 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (g_dirty && MessageBoxW(h, L"放弃未保存的改动并重新加载？", APP_TITLE,
                                        MB_ICONQUESTION | MB_YESNO) != IDYES) return 0;
             LoadConfig();
+            return 0;
+        }
+        if (id == IDC_INFO_FONTBTN) { PickInfoFont(); return 0; }
+        /* 「常用」字段编排（窗口信息弹窗的两个视图之一） */
+        if (id == IDC_CMN_ADD)  { CmnAddDlg(); return 0; }
+        if (id == IDC_CMN_DEL)  { CmnDel(); return 0; }
+        if (id == IDC_CMN_UP)   { CmnMove(-1); return 0; }
+        if (id == IDC_CMN_DOWN) { CmnMove(+1); return 0; }
+        if (id == IDC_CMN_LIST) {          /* 选中项变了：按钮可用性跟着变 */
+            if (HIWORD(w) == LBN_SELCHANGE) CmnSyncButtons();
             return 0;
         }
         if (id >= IDC_LIST0 && id < IDC_LIST0 + LIST_N * LIST_STRIDE) {
@@ -1599,6 +1901,22 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
             HookChild(e);
         }
     }
+
+    /* 「常用」字段编排（窗口信息弹窗的「常用」视图）：子段头 + 有序列表 +
+       添加…/删除/上移/下移。列表项的文本是友好名，字段编号存在项数据里。 */
+    MakeLabel(hInst, g_hwnd,
+              L"「常用」视图的字段（自上而下就是弹窗里的顺序；「全部」视图始终只读）",
+              IDC_CMN_HEAD);
+    HookChild(CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                              WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS |
+                              WS_VSCROLL | WS_TABSTOP |
+                              LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+                              0, 0, 10, 10, g_hwnd,
+                              (HMENU)(INT_PTR)IDC_CMN_LIST, hInst, NULL));
+    MakeBtn(hInst, g_hwnd, L"添加…", IDC_CMN_ADD);
+    MakeBtn(hInst, g_hwnd, L"删除",  IDC_CMN_DEL);
+    MakeBtn(hInst, g_hwnd, L"上移",  IDC_CMN_UP);
+    MakeBtn(hInst, g_hwnd, L"下移",  IDC_CMN_DOWN);
 
     for (int i = 0; i < LIST_N; i++) {
         int base = IDC_LIST0 + i * LIST_STRIDE;

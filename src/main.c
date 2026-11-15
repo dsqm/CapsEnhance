@@ -355,7 +355,7 @@ static void DoRestart(void);     /* 前向声明（定义在下方，TrayShowMen
 void ApplyPauseState(void);
 void TrayAddHint(const WCHAR* s);
 /* 托盘气泡。`clickPath` != NULL 时气泡**可点击**：用户点了它就在资源管理器里
-   打开并选中那个路径（复用 C+F3 的 shell 链路，见 folder.c 的 FolderRevealPath）。
+   打开并选中那个路径（复用 C+F4 的 shell 链路，见 folder.c 的 FolderRevealPath）。
    `clickPath` 指向的内部缓冲区会被拷走，所以传栈上的临时变量也行。 */
 void TrayBalloon(const WCHAR* s, const WCHAR* clickPath);
 static void TrayBalloonClearClick(void);   /* 定义在下方：TrayRebuild 要作废旧目标 */
@@ -560,7 +560,7 @@ static void TrayShowMenu(void) {
     } else if (cmd == IDM_RESTART) {
         DoRestart();
     } else if (cmd == IDM_FOLDER) {
-        /* 「程序文件夹」：复用日志定位与 C+F3 的同一条 shell 链路
+        /* 「程序文件夹」：复用日志定位与 C+F4 的同一条 shell 链路
            （FolderRevealPath：一次性线程 + SHOpenFolderAndSelectItems，失败
            自动绕回主线程弹气泡）。传**exe 文件**而不是目录 —— 它的语义是
            "打开父文件夹并选中这一项"，正合"打开文件所在的位置"；传目录反而
@@ -920,7 +920,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             {   /* 结束气泡里带上实际文件名：一次记录一个文件，不给名字等于
                    让人去 log\ 里猜哪份是刚录的。
                    顺带把它做成**可点击**的：点了就在资源管理器里打开并选中这份
-                   日志（复用 C+F3 那条 shell 链路）。记录一旦结束，日志文件所在
+                   日志（复用 C+F4 那条 shell 链路）。记录一旦结束，日志文件所在
                    的目录就未必还找得到 —— 这是"刚录完那份"唯一的一键入口。
                    注意传的是 g_logPath 而不是拼出来的显示文本：气泡里那行是
                    "log\<文件名>"，是给人看的，不是能去解析的路径。 */
@@ -961,6 +961,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                它只是"拉起/唤起另一个进程的窗口"，在主线程上做才是对的
                （要按和弦的寿命开合，见 help.c）。 */
             if (ActHasFlag(act, ACTF_HELP)) HelpShow();
+            /* 窗口信息（C+F12）：同样不走执行线程 —— 它只拉起/前置另一个进程
+               的窗口。采集全部在子进程里做，这里的 CreateProcess + PostMessage
+               都是"发起"性质，不阻塞（理由见 src/info.c 的文件头）。 */
+            if (ActHasFlag(act, ACTF_INFO)) InfoOpen(GetForegroundWindow());
             if (!single) {
                 /* 开关键只切一次、也不接管重复节奏（原来那个动作继续重复） */
                 g_activeAct = act;
@@ -1041,6 +1045,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER: {
         if (wp == TRAY_RETRY_TIMER) { TrayRetryTick(); return 0; }
         if (wp == HELP_TIMER) { HelpTick(); return 0; }
+        if (wp == INFO_TIMER) { InfoTick(); return 0; }
         if (wp != 2) break;
         if (!g_cMod) { ResetEngine(); return 0; }
         ULONGLONG now = GetTickCount64();
@@ -1144,6 +1149,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         PostQuitMessage(0);
         return 0;
     default:
+        /* 注册消息（弹窗回存的尺寸）走这里：值在运行时才知道，不能写成 case。
+           不认识的仍交给 DefWindowProc —— 顺序不能反，否则普通消息的默认处理
+           会被一起吞掉。 */
+        if (InfoHandleMessage(msg, wp, lp)) return 0;
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
     return 0;
