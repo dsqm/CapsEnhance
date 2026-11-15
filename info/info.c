@@ -116,6 +116,7 @@
 #define IDM_DELETE    2005
 #define IDM_SELECTALL 2006
 #define IDM_REFRESH   2007
+#define IDM_PICK      2008                /* 瞄准窗口：点一下就采集那个窗口 */
 
 #define WM_APP_COLLECTED (WM_APP + 1)   /* 工作线程 -> UI：wParam 保留，lParam = WCHAR* 缓冲 */
 
@@ -283,7 +284,7 @@ static void IniLoad(Ini* ini) {
     free(wide);
 }
 
-/* 把逗号分隔的字段 key 解析成 g_common[]（去重、跳过未知 key）。空串 = 默认那 10 项。 */
+/* 把逗号分隔的字段 key 解析成 g_common[]（去重、跳过未知 key）。空串 = 默认那 11 项。 */
 static void AddCommonKey(const char* key) {
     int id = InfoFieldByKey(key);
     if (id < 0 || g_commonN >= IF_COUNT) return;
@@ -311,7 +312,7 @@ static void ParseCommon(const WCHAR* s) {
             }
         }
     }
-    if (!g_commonN) {          /* 空配置或解析失败：用默认那 10 项（ASCII 字面量） */
+    if (!g_commonN) {          /* 空配置或解析失败：用默认那 11 项（ASCII 字面量） */
         const char* d = INFO_COMMON_DEFAULT;
         char key[64];
         int kn = 0;
@@ -2208,6 +2209,7 @@ static void ShowContextMenu(int sx, int sy) {
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_SELECTALL, L"全选\tCtrl+A");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(m, MF_STRING, IDM_PICK, L"瞄准窗口（点击取样）");
     AppendMenuW(m, MF_STRING, IDM_REFRESH, L"刷新");
 
     if (sx == -1 && sy == -1) {          /* 键盘唤出（Shift+F10 / 菜单键） */
@@ -2314,6 +2316,49 @@ static LRESULT CALLBACK SearchSub(HWND h, UINT m, WPARAM wp, LPARAM lp,
     return DefSubclassProc(h, m, wp, lp);
 }
 
+/* ---------- 瞄准窗口（右键菜单 → 瞄准窗口）与"双击启动看什么" ----------
+   Spy++ / WinSpy / Window Detective 这类工具的标准交互：鼠标变十字，点哪个窗口就
+   看哪个。做法是 SetCapture 把鼠标消息全收到本窗口，按下左键时用 WindowFromPoint
+   取根窗口 —— 目标可以是任意程序的窗口，不需要主程序在场。 */
+static BOOL g_picking;
+
+static void PickBegin(void) {
+    if (g_picking) return;
+    g_picking = TRUE;
+    SetFocus(g_hwnd);                     /* 让 Esc 落到本窗口，而不是被编辑控件吃掉 */
+    SetCapture(g_hwnd);
+    SetCursor(LoadCursorW(NULL, IDC_CROSS));
+}
+
+static void PickEnd(BOOL take) {
+    if (!g_picking) return;
+    g_picking = FALSE;
+    ReleaseCapture();
+    if (take) {
+        POINT pt;
+        if (GetCursorPos(&pt)) {
+            HWND h = WindowFromPoint(pt);
+            if (h) h = GetAncestor(h, GA_ROOT);
+            if (h && h != g_hwnd) { g_target = h; StartCollect(); }
+        }
+    }
+    if (g_edit) SetFocus(g_edit);
+}
+
+/* 双击启动（没有主程序牵线）时挑一个目标：先看"现在的"前台窗口，再看指针下的
+   窗口，最后退回桌面。双击那一刻前台通常是资源管理器、指针也停在它上面 ——
+   两条都指向同一个东西，出来的是用户想看的资料，而不是一个空窗口。 */
+static HWND PickLaunchTarget(void) {
+    HWND fg = GetForegroundWindow();
+    if (fg && fg != g_hwnd) return fg;
+    POINT pt;
+    if (GetCursorPos(&pt)) {
+        HWND h = WindowFromPoint(pt);
+        if (h) return GetAncestor(h, GA_ROOT);
+    }
+    return GetDesktopWindow();
+}
+
 /* ---------- 窗口过程 ---------- */
 
 static void SaveSizeToParent(void) {
@@ -2365,6 +2410,25 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         Layout();
         return 0;
 
+    /* 瞄准窗口期间的鼠标：捕获状态下这些消息全落在本窗口，左键取样、右键/Esc 取消 */
+    case WM_LBUTTONDOWN:
+        if (g_picking) { PickEnd(TRUE); return 0; }
+        break;
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+        if (g_picking) { PickEnd(FALSE); return 0; }
+        break;
+    case WM_SETCURSOR:
+        if (g_picking) { SetCursor(LoadCursorW(NULL, IDC_CROSS)); return TRUE; }
+        break;
+    case WM_KEYDOWN:
+        if (g_picking && wp == VK_ESCAPE) { PickEnd(FALSE); return 0; }
+        break;
+    case WM_CAPTURECHANGED:
+        /* 捕获被别人抢走（弹了别的窗口等）：退出瞄准态，别卡在十字光标上 */
+        if (g_picking) g_picking = FALSE;
+        break;
+
     case WM_TIMER:
         if (wp == TID_SMOOTH) { ScrollSmoothTick(); return 0; }
         if (wp == TID_ARMED) {
@@ -2390,6 +2454,7 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_DELETE:  SendMessageW(g_edit, WM_CLEAR, 0, 0); return 0;
         case IDM_SELECTALL: SendMessageW(g_edit, EM_SETSEL, 0, -1); return 0;
         case IDM_REFRESH: Refresh(); return 0;
+        case IDM_PICK:    PickBegin(); return 0;
         default: break;
         }
         break;
@@ -2509,10 +2574,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     g_pt = ini.pt;
     g_wDip = ini.wDip;
     g_hDip = ini.hDip;
-    ParseCommon(ini.common);     /* 常用视图的字段顺序（空 = 默认那 10 项） */
+    ParseCommon(ini.common);     /* 常用视图的字段顺序（空 = 默认那 11 项） */
 
     g_parent = (HWND)ArgHWND(cmdLine, L"--parent");
     g_target = (HWND)ArgHWND(cmdLine, L"--hwnd");
+    /* 两个参数都没有 = 用户直接双击（不是主程序拉起的那一份）：此时没有"等主程序
+       送目标"这回事，自己挑一个目标立刻出内容（见 PickLaunchTarget）。 */
+    BOOL standalone = (!g_parent && !g_target);
+    HWND launchTarget = NULL;
+    if (standalone) launchTarget = PickLaunchTarget();   /* 必须在 ShowWindow 之前取：那时我们还是后台 */
     g_msgOpen = RegisterWindowMessageW(INFO_MSG_OPEN);
     g_msgSize = RegisterWindowMessageW(INFO_MSG_SIZE);
 
@@ -2584,7 +2654,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                                0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)IDC_SEARCH, hInst, NULL);
     if (g_search) {
         SetWindowSubclass(g_search, SearchSub, 2, 0);
-        SendMessageW(g_search, EM_SETCUEBANNER, TRUE, (LPARAM)L"筛选：键或值（Esc 清空）");
+        SendMessageW(g_search, EM_SETCUEBANNER, TRUE, (LPARAM)L"筛选");
     }
     /* 顶部右侧：常用 / 全部 两个切换按钮（toggle 外观）。 */
     g_btnCommon = CreateWindowExW(0, L"BUTTON", L"常用",
@@ -2611,8 +2681,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     SetFocus(g_edit);
 
     /* 主程序会在起窗后几十毫秒内把 OPEN 送来（它在重试到 FindWindow 成功为止）。
-       送不到就用命令行带来的目标兜底；两者都没有就自己退。 */
-    SetTimer(g_hwnd, TID_ARMED, ARMED_MS, NULL);
+       送不到就用命令行带来的目标兜底；两者都没有就自己退。
+       双击启动的那一份不等 —— 目标已经挑好，立刻采集，第一帧就是资料。 */
+    if (standalone) {
+        if (launchTarget) g_target = launchTarget;
+        StartCollect();
+    } else {
+        SetTimer(g_hwnd, TID_ARMED, ARMED_MS, NULL);
+    }
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {

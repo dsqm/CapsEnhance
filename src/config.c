@@ -246,7 +246,7 @@ typedef struct {
 static WCHAR g_infoFont[LF_FACESIZE];
 #define INFO_FONT_CAP ((int)(sizeof(g_infoFont) / sizeof(g_infoFont[0])))
 
-/* 常用视图的有序字段列表（逗号分隔的字段 key，ASCII）。空 = 用默认那 10 项；
+/* 常用视图的有序字段列表（逗号分隔的字段 key，ASCII）。空 = 用默认那 11 项；
    默认值由消费端（info / settings）用 INFO_COMMON_DEFAULT 解释，表里不存串。 */
 static WCHAR g_infoCommon[512];
 #define INFO_COMMON_CAP ((int)(sizeof(g_infoCommon) / sizeof(g_infoCommon[0])))
@@ -362,8 +362,9 @@ static CfgDef kCfg[CFG_COUNT] = {
 
     { "infocommonfields", "InfoCommonFields", CFG_F_TEXT, 0, 0, 0, INFO_COMMON_CAP, g_infoCommon, 0,
       "; 窗口信息弹窗「常用」视图的字段列表：逗号分隔的字段标识，顺序即显示顺序。\n"
-      "; 留空 = 用默认那 10 项（标题 / 进程 / 位置 / 路径 / PID / 类名 / 句柄 /\n"
-      "; 父 / 根 / 根所有者）。建议在设置程序「窗口信息」段里增删排序，不必手改。\n" },
+      "; 留空 = 用默认那 11 项（标题 / 进程 / 位置 / 路径 / PID / 类名 / 句柄 /\n"
+      "; 父 / 根 / 根所有者 / 运行权限）。建议在设置程序「窗口信息」段里增删排序，\n"
+      "; 不必手改。\n" },
 };
 
 /* 三键与 CFG_IME_* 三个编号必须同序连排（ConfigGetImeMode 靠下标直取） */

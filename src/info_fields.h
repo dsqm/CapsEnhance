@@ -120,9 +120,11 @@ static const InfoFieldDef kInfoFields[IF_COUNT] = {
     { "workset",    1, L"工作集" },
 };
 
-/* 默认「常用」：默认显示的那 10 项，顺序即显示顺序（逗号分隔的 key）。 */
+/* 默认「常用」：默认显示的那 11 项，顺序即显示顺序（逗号分隔的 key）。
+   「运行权限」排在最后：它是安全上下文里最常被问的一句（这个程序是管理员还是
+   普通权限跑的），但不该挤掉前面那串定位信息。 */
 #define INFO_COMMON_DEFAULT \
-    "title,procname,rect,image,pid,class,handle,parent,root,rootowner"
+    "title,procname,rect,image,pid,class,handle,parent,root,rootowner,elevation"
 
 /* 按 key 找 id，找不到返回 -1。inline：只被一个消费者用到时也不触发未用告警。 */
 static inline int InfoFieldByKey(const char* key) {

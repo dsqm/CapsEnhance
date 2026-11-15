@@ -150,8 +150,9 @@ ImeRShiftMode = 1   ; 右Shift -> 中文
 - `Tab` 在常用 / 全部之间切换；滚轮逐帧平滑滚动，`Shift+滚轮` 横向滚动。
 - 顶部**筛选**：键入即只留下包含该词的行（键或值都算，不区分大小写），筛选期间标题栏带一句命中行数；`Esc` 清空筛选、恢复全文。筛选期间文本框只读 —— 过滤结果与原文没有逐行对应关系，在其上改字说不清改的是哪一行。
 - 可编辑（`Ctrl+Z` / `Ctrl+C` / `Ctrl+A` 等），右键菜单里另有撤销、剪切、粘贴、删除、全选与**刷新**（`F5` 不绑）；关窗时把当前尺寸写回 `InfoW` / `InfoH`。
+- **双击 `CapsEnhanceInfo.exe` 也能直接用**：没有主程序牵线时，它自己挑目标（当前前台窗口 → 指针下的窗口 → 桌面）并立刻出资料；右键菜单里的「瞄准窗口（点击取样）」可以再换目标（鼠标变十字，点哪个窗口就看哪个）。
 - 再按一次 `C+F12` = 刷新到新的前台窗口并前置，不会开出第二个窗口。宿主窗口下带 `Windows.UI.Core.CoreWindow` 子窗口的 UWP 应用会换算成应用自己的进程（与 `C+F4` 同一判定）；没有该子窗口的新版窗口（如 Win11 设置）仍显示 `ApplicationFrameHost.exe`，弹窗里会注明原因。
-- 字体在设置程序「窗口信息」段里点「选择字体…」挑（也可直接改 `InfoFont`）；**常用的字段与顺序**在设置程序同一段下面的列表里增删排序（也可直接改 `InfoCommonFields`）；`Esc` 或标题栏 X 关闭。
+- 字体在设置程序「窗口信息」段里点「选择字体…」挑（也可直接改 `InfoFont`）；**常用的字段与顺序**在设置程序同一段下面的列表里增删排序（也可直接改 `InfoCommonFields`），右侧「重置默认」一键回到那 11 项；`Esc` 或标题栏 X 关闭。
 
 ### 日志：C + 反引号
 
@@ -184,7 +185,7 @@ ImeRShiftMode = 1   ; 右Shift -> 中文
 | `InfoFont` | 空 | `C+F12` 窗口信息弹窗的字体名；留空则按 Cascadia Mono / Consolas / 微软雅黑 依次回落 |
 | `InfoFontSize` | `12` | 同上，字号（磅），范围 `6..72` |
 | `InfoW` / `InfoH` | `620` / `700` | 弹窗尺寸（96 DPI 逻辑像素），关窗时把拖出来的尺寸自动写回 |
-| `InfoCommonFields` | 空（= 默认 10 项） | `C+F12` 弹窗**常用视图**的字段列表：逗号分隔的字段标识，顺序即显示顺序；留空用默认那 10 项（`title,procname,rect,image,pid,class,handle,parent,root,rootowner`）。建议在设置程序里增删排序 |
+| `InfoCommonFields` | 空（= 默认 11 项） | `C+F12` 弹窗**常用视图**的字段列表：逗号分隔的字段标识，顺序即显示顺序；留空用默认那 11 项（`title,procname,rect,image,pid,class,handle,parent,root,rootowner,elevation`）。建议在设置程序里增删排序，右侧「重置默认」一键回到这套 |
 | `HyperPassthrough` | `0` | Hyper 透传（进阶，默认关）：按下**未映射键**时才临时按住右侧 `RWin+RCtrl+RShift`（**不含 Alt**），该键以 Hyper+X 的形态送出 |
 
 > **Hyper 透传是给谁用的**：外部自动化工具（AutoHotkey 等）可以把 `>#^+某键` 绑成 Hyper 热键，例如 AHK 里 `>#^+g::` 对应按住 Caps 再按 G（G 未映射）。

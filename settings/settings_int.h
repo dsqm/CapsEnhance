@@ -49,6 +49,7 @@
 #define IDC_CMN_DEL  218
 #define IDC_CMN_UP   219
 #define IDC_CMN_DOWN 220
+#define IDC_CMN_RESET 221        /* 常用字段：恢复默认那 11 项 */
 
 /* 五份名单各一组：列表框 / 输入框 / 添加 / 删除 / 标题 / 选取窗口 */
 #define IDC_LIST0  300

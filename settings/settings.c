@@ -268,7 +268,7 @@ static BOOL GetCheck(HWND btn) {
    只能表达"在不在"，排序还得再来一个界面。按钮贴着列表竖排，一眼看出动的是
    这个列表。
 
-   ★ 最少留一项：空列表在配置层是"用默认那 10 项"的哨兵（与弹窗的判据同源），
+   ★ 最少留一项：空列表在配置层是"用默认那 11 项"的哨兵（与弹窗的判据同源），
    删空再保存等于把用户的选择悄悄换回默认值，所以最后一颗不许删。 */
 #define CMN_KEY_MAX 16                                  /* 一个字段标识的缓冲（最长 exstylesym） */
 #define CMN_TEXT_MAX (IF_COUNT * CMN_KEY_MAX)           /* 整串拼接的字符上限 */
@@ -346,7 +346,7 @@ static int CmnAddKeys(const char* src) {
     return added;
 }
 
-/* 装载：配置里的逗号串 -> 列表。空串（或一个都不认识）= 默认那 10 项，
+/* 装载：配置里的逗号串 -> 列表。空串（或一个都不认识）= 默认那 11 项，
    与弹窗的 ParseCommon 同一判据 —— 两处判据不一致就会出现"设置里显示 X、
    弹窗里显示 Y"这种查半天的怪事。 */
 static void CmnFill(void) {
@@ -358,7 +358,7 @@ static void CmnFill(void) {
         CmnAddKeys(INFO_COMMON_DEFAULT);
 }
 
-/* 保存：列表 -> 逗号串。列表为空就写空串（配置层解释成默认那 10 项）——
+/* 保存：列表 -> 逗号串。列表为空就写空串（配置层解释成默认那 11 项）——
    与"最少留一项"的约束不冲突：真走到这里只可能是外部把控件内容清空了。 */
 static void CmnSave(void) {
     WCHAR out[CMN_TEXT_MAX] = L"";
@@ -366,7 +366,7 @@ static void CmnSave(void) {
     CfgSetStr(CFG_INFO_COMMON, out);
 }
 
-/* 四颗按钮的可用性：没选中就不能删/移；首项不能上移、末项不能下移；
+/* 五颗按钮的可用性（「重置默认」始终可用）：没选中就不能删/移；首项不能上移、末项不能下移；
    只剩一项不许删；全加进来了就没有可添加的。 */
 static void CmnSyncButtons(void) {
     int n   = (int)SendMessageW(CmnList(), LB_GETCOUNT, 0, 0);
@@ -424,7 +424,7 @@ static void CmnDel(void) {
     int n   = (int)SendMessageW(lb, LB_GETCOUNT, 0, 0);
     if (sel < 0 || sel == LB_ERR) return;
     if (n <= 1) {
-        SetStatus(L"常用至少要留一项（空列表等于用默认的 10 项）");
+        SetStatus(L"常用至少要留一项（空列表等于用默认的 11 项）");
         return;
     }
     SendMessageW(lb, LB_DELETESTRING, (WPARAM)sel, 0);
@@ -450,6 +450,21 @@ static void CmnMove(int delta) {
     SendMessageW(lb, LB_SETCURSEL, (WPARAM)to, 0);
     CmnSyncButtons();
     UpdateDirty();
+}
+
+/* 「重置默认」：把列表恢复成内置那 11 项、顺序也回到默认。先问一句 —— 这个动作
+   会把用户排好的顺序整块丢掉，而它没有撤销（唯一"后悔药"是不点保存就退出）。 */
+static void CmnReset(void) {
+    if (MessageBoxW(g_hwnd,
+                    L"把「常用」恢复成默认的 11 项？\n\n"
+                    L"当前的增删与顺序会被丢弃（点「保存」才真正写入配置）。",
+                    APP_TITLE, MB_OKCANCEL | MB_ICONQUESTION) != IDOK) return;
+    SendMessageW(CmnList(), LB_RESETCONTENT, 0, 0);
+    CmnAddKeys(INFO_COMMON_DEFAULT);
+    SendMessageW(CmnList(), LB_SETCURSEL, 0, 0);
+    CmnSyncButtons();
+    UpdateDirty();
+    SetStatus(L"已恢复默认的 11 项（点「保存」才写入配置）");
 }
 
 /* ---------------- "有没有未保存的改动"：与**基线**比，不是"动过就脏" ----------------
@@ -643,7 +658,7 @@ static void LoadConfig(void) {
         FillList(GetDlgItem(g_hwnd, IDC_LIST0 + i * LIST_STRIDE), kLists[i].list);
         SetWindowTextW(GetDlgItem(g_hwnd, IDC_NAME0 + i * LIST_STRIDE), L"");
     }
-    CmnFill();           /* 「常用」字段的顺序（空 = 默认那 10 项，判据与弹窗同源） */
+    CmnFill();           /* 「常用」字段的顺序（空 = 默认那 11 项，判据与弹窗同源） */
     CmnSyncButtons();
     g_loading = FALSE;
     /* 装载完之后拍基线：此刻"界面 == ini"，之后任何偏离才算"未保存的改动" */
@@ -874,7 +889,7 @@ static void Layout(int w, int h) {
     /* 「常用」字段编排属于常规页（窗口信息段之后） */
     ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_HEAD), fieldPage);
     ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_LIST), fieldPage);
-    for (int k = 0; k < 4; k++)
+    for (int k = 0; k < 5; k++)
         ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_ADD + k), fieldPage);
     for (int i = 0; i < LIST_N; i++) {
         int base = IDC_LIST0 + i * LIST_STRIDE;
@@ -928,8 +943,8 @@ static void Layout(int w, int h) {
     }
 
     /* 「常用」字段编排（紧跟「窗口信息」段，那是 kFields 的最后一段）：
-       子段头 + 左侧有序列表 + 右侧竖排四颗按钮。按钮贴着列表，动的是哪个
-       列表不用猜。列表给足默认那 10 项的高度（行高随字体走，所以按 DIP
+       子段头 + 左侧有序列表 + 右侧竖排五颗按钮。按钮贴着列表，动的是哪个
+       列表不用猜。列表给足默认那 11 项的高度（行高随字体走，所以按 DIP
        折算而不是按"行数"写死，高分屏上不会只剩半截）；再多它自己出滚动条。 */
     if (fieldPage) {
         int cmnW = S(240), cmnRow = S(26), cmnGap = S(4);
@@ -939,7 +954,7 @@ static void Layout(int w, int h) {
         MoveWindow(GetDlgItem(g_hwnd, IDC_CMN_HEAD), x, y - off, w - x * 2, S(20), TRUE);
         y += S(24);
         MoveWindow(GetDlgItem(g_hwnd, IDC_CMN_LIST), x, y - off, cmnW, cmnH, TRUE);
-        for (int k = 0; k < 4; k++)
+        for (int k = 0; k < 5; k++)
             MoveWindow(GetDlgItem(g_hwnd, IDC_CMN_ADD + k),
                        bx, y + k * (cmnRow + cmnGap) - off, bw, cmnRow, TRUE);
         y += cmnH + S(6);
@@ -1594,6 +1609,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id == IDC_CMN_DEL)  { CmnDel(); return 0; }
         if (id == IDC_CMN_UP)   { CmnMove(-1); return 0; }
         if (id == IDC_CMN_DOWN) { CmnMove(+1); return 0; }
+        if (id == IDC_CMN_RESET) { CmnReset(); return 0; }
         if (id == IDC_CMN_LIST) {          /* 选中项变了：按钮可用性跟着变 */
             if (HIWORD(w) == LBN_SELCHANGE) CmnSyncButtons();
             return 0;
@@ -1917,6 +1933,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     MakeBtn(hInst, g_hwnd, L"删除",  IDC_CMN_DEL);
     MakeBtn(hInst, g_hwnd, L"上移",  IDC_CMN_UP);
     MakeBtn(hInst, g_hwnd, L"下移",  IDC_CMN_DOWN);
+    MakeBtn(hInst, g_hwnd, L"重置默认", IDC_CMN_RESET);
 
     for (int i = 0; i < LIST_N; i++) {
         int base = IDC_LIST0 + i * LIST_STRIDE;
