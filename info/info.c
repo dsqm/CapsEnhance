@@ -72,6 +72,13 @@
         留空时按 Cascadia Mono → Consolas → 微软雅黑 逐级回落（等宽优先：
         字段值靠空格对齐，比例字体下对齐会散）。
 
+   两个视图与筛选：**常用**按 InfoCommonFields 排好的一批字段平铺（友好名），
+   **全部**是全量分组信息（`[段名]` 行加粗 + 强调色）。两个视图**各自留一份源
+   文本**（用户改过的版本就是它），切换时各存各、互不覆盖。
+   顶部筛选框做的是**过滤**而不是高亮：只留下包含该词的行（键或值都算，不区分
+   大小写），同时把控件设成只读 —— 过滤结果和原文没有逐行对应关系，在其上改字
+   说不清改的是哪一行；清空筛选词就把源文本原样放回去。
+
    位置：**窗口中心对准鼠标光标**，并钳进光标所在显示器的工作区。这条几何
    规则照搬 CLaunch-search 的 `windowPos(光标)` 分支（同为作者的项目）：
    光标点 → `MonitorFromPoint` → `GetMonitorInfo(rcWork)` → 居中 → 双向钳制。
@@ -91,12 +98,12 @@
 #define EDIT_CLASS  MSFTEDIT_CLASS      /* "RICHEDIT50W"（Msftedit.dll） */
 
 #define IDC_EDIT    1001
-#define IDC_SEARCH  1002                /* 顶部搜索框 */
-#define IDC_STATUS  1003                /* 底部状态文字（命中数 / 提示） */
-#define IDC_VCOMMON 1004                /* 状态栏按钮：常用 */
-#define IDC_VALL    1005                /* 状态栏按钮：全部 */
+#define IDC_SEARCH  1002                /* 顶部筛选框 */
+#define IDC_STATUS  1003                /* 底部状态文字（行数 / 命中数） */
+#define IDC_VCOMMON 1004                /* 顶部工具条按钮：常用 */
+#define IDC_VALL    1005                /* 顶部工具条按钮：全部 */
 
-/* 搜索框的占位提示（cue banner）。放在这里免得依赖头文件是否声明了它。 */
+/* 筛选框的占位提示（cue banner）。放在这里免得依赖头文件是否声明了它。 */
 #ifndef EM_SETCUEBANNER
 #define EM_SETCUEBANNER (ECM_FIRST + 1)
 #endif
@@ -144,14 +151,18 @@ static HFONT  g_editFont;
 static BOOL   g_dark;            /* 系统应用主题为深色（跟随，见 ApplyTheme） */
 static HBRUSH g_bgBrush;         /* 窗口留白区底色刷（随主题重建） */
 
-static HWND   g_search, g_status, g_btnCommon, g_btnAll;  /* 搜索框 / 状态文字 / 视图按钮 */
-static int    g_view;            /* 0 = 常用（可编辑），1 = 全部（只读） */
-static WCHAR* g_allText;         /* 全部视图文本（最近一次采集的原样） */
-static WCHAR* g_commonText;      /* 常用视图文本（含用户编辑；切走时回写） */
+static HWND   g_search, g_status, g_btnCommon, g_btnAll;  /* 筛选框 / 状态文字 / 视图按钮 */
+static int    g_view;            /* 0 = 常用，1 = 全部；两个视图都可编辑 */
+/* 两个视图各存一份**源文本**（用户编辑后的版本就是它）。筛选只是显示层：
+   控件里显示过滤结果时，源文本原样留着，清掉筛选词就把它放回去 —— 否则
+   一边筛一边想改两笔，改的到底是哪一份就说不清了。 */
+static WCHAR* g_viewText[2];
+static BOOL   g_filtering;       /* 当前显示的是筛选结果（此时控件只读） */
+static BOOL   g_noSync;          /* 刚换过源文本：别拿控件里的旧内容回写 */
 static int    g_common[IF_COUNT];/* 常用字段顺序（字段 id，来自 InfoCommonFields） */
 static int    g_commonN;
-static HBRUSH g_editBrush;       /* 搜索框底色刷（随主题重建） */
-static HFONT  g_uiFont;          /* 搜索框 / 按钮 / 状态文字的界面字体 */
+static HBRUSH g_editBrush;       /* 筛选框底色刷（随主题重建） */
+static HFONT  g_uiFont;          /* 筛选框 / 按钮 / 状态文字的界面字体 */
 
 /* 动态取址：GetProcAddress 要求 hModule 非空（/analyze C6387）。kernel32 /
    user32 在本进程里必然已加载，把判空收在一处，调用点不必各自解释一遍。 */
@@ -407,16 +418,6 @@ static void FvStore(int id, const WCHAR* value) {
     s_fvHas[id] = TRUE;
 }
 
-/* 标签 -> 字段 id（按注册表的 label 精确匹配）。用"按标签反查"而不是给每个
-   BufField 调用点加 id 参数：Collect 里几十处调用原样不动，注册表里的 label
-   就是唯一词汇表。树节点（#N）、「合计/结果/截断」等没有对应字段，返回 -1，
-   FvStore 会忽略它们（它们也不进常用视图）。 */
-static int FieldIdByLabel(const WCHAR* label) {
-    for (int i = 0; i < IF_COUNT; i++)
-        if (wcscmp(kInfoFields[i].label, label) == 0) return i;
-    return -1;
-}
-
 /* 一行字段：`标签:` + **制表符** + 值。用制表符而不是按半角补空格，是为了让
    值精确对齐到同一像素列（EM_SETTABSTOPS 定了唯一的制表位）：等宽、比例字体
    都对得齐，也不会被"汉字按 2 个半角估算"的误差坑到。
@@ -425,8 +426,8 @@ static int FieldIdByLabel(const WCHAR* label) {
      命令行、子控件文本都来自别的进程，完全可能自带换行；原样写进去会把一行
      裂成几行，裂出来的那几行没有键名，整屏就分不清哪部分是键了。宁可让长值
      靠横向滚动看全，也不让一行字段占多行。 */
-static void BufField(Buf* b, const WCHAR* label, const WCHAR* value) {
-    FvStore(FieldIdByLabel(label), value);
+static void BufFieldRaw(Buf* b, int id, const WCHAR* label, const WCHAR* value) {
+    FvStore(id, value);
     BufAddf(b, L"%s:\t", label);
     for (const WCHAR* q = value ? value : L""; *q; q++) {
         if (*q == L'\r')      BufAddf(b, L"\\r");
@@ -436,6 +437,29 @@ static void BufField(Buf* b, const WCHAR* label, const WCHAR* value) {
         else                   BufAddf(b, L"%c", *q);
     }
     BufAddf(b, L"\n");
+}
+
+/* 注册表里的字段（重载：第二参数给 IF_* 编号）：名字一律取自 kInfoFields，
+   于是「常用」与「全部」永远同一套说法；值顺带按 id 存一份，供「常用」视图
+   重排。Collect 里因此不再出现字面标签 —— 也就没有"字面标签与注册表对不上、
+   值静默丢失"这种可能。 */
+static void BufField(Buf* b, int id, const WCHAR* value) {
+    if (id < 0 || id >= IF_COUNT) return;
+    BufFieldRaw(b, id, kInfoFields[id].name, value);
+}
+
+/* 不属于注册表的行（UWP 说明、子窗口树节点、合计 / 结果 / 截断）：只打印，不入暂存。 */
+static void BufField(Buf* b, const WCHAR* label, const WCHAR* value) {
+    BufFieldRaw(b, -1, label, value);
+}
+
+static void BufFieldF(Buf* b, int id, const WCHAR* fmt, ...) {
+    WCHAR tmp[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnwprintf_s(tmp, 1024, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    BufField(b, id, tmp);
 }
 
 static void BufFieldF(Buf* b, const WCHAR* label, const WCHAR* fmt, ...) {
@@ -448,11 +472,11 @@ static void BufFieldF(Buf* b, const WCHAR* label, const WCHAR* fmt, ...) {
 }
 
 /* 明确的"不可用"：写清原因。留空会让人以为字段坏了，写"无"又分不出
-   "本来就没有"和"取不到"。 */
-static void BufUnavail(Buf* b, const WCHAR* label, const WCHAR* why) {
+   "本来就没有"和"取不到"。第二参数给 IF_* 编号，名字走注册表。 */
+static void BufUnavail(Buf* b, int id, const WCHAR* why) {
     WCHAR tmp[256];
     _snwprintf_s(tmp, 256, _TRUNCATE, L"不可用（%s）", why);
-    BufField(b, label, tmp);
+    BufField(b, id, tmp);
 }
 
 /* 组与组之间空一行。幂等：已经以空行结尾就不再加 —— 某个条件组（如进程资源）
@@ -520,8 +544,11 @@ static void Hex(HWND h, WCHAR* out, size_t cap) {
 
 /* 一行"某窗口"：句柄 + 类名 + 标题（标题截断，免得一个网页标题把整行撑断）。
    句柄为 0 时写「无」——父窗口/所有者窗口本来就可能是 0，那不是失败。 */
-static void BufHandleField(Buf* b, const WCHAR* label, HWND h) {
-    if (!h) { BufField(b, label, L"无（0）"); return; }
+/* 窗口句柄类字段（父 / 所有者 / 根 / 根所有者）：没有就写「无（0）」，
+   有就给「句柄  类名  "标题"」。第二参数是 IF_* 编号 —— 名字走注册表。 */
+static void BufHandleField(Buf* b, int id, HWND h) {
+    if (id < 0 || id >= IF_COUNT) return;
+    if (!h) { BufField(b, id, L"无（0）"); return; }
     WCHAR hx[32], cls[128], title[160], line[512];
     Hex(h, hx, 32);
     cls[0] = 0;
@@ -532,7 +559,7 @@ static void BufHandleField(Buf* b, const WCHAR* label, HWND h) {
                      wcslen(title) >= 159 ? L"…" : L"");
     else
         _snwprintf_s(line, 512, _TRUNCATE, L"%s  %s", hx, cls[0] ? cls : L"(无类名)");
-    BufField(b, label, line);
+    BufField(b, id, line);
 }
 
 /* 样式位 -> 可读符号（枚举够用就行：全列出来反而更难读） */
@@ -974,7 +1001,7 @@ static WCHAR* BuildCommonText(void) {
     for (int i = 0; i < g_commonN; i++) {
         int id = g_common[i];
         if (id < 0 || id >= IF_COUNT || !s_fvHas[id]) continue;
-        BufField(&c, kInfoFields[id].common, s_fvVal[id]);
+        BufField(&c, id, s_fvVal[id]);
     }
     if (!c.n) BufAddf(&c, L"（常用视图为空：请在设置里挑选常用字段）\n");
     return c.p;
@@ -1038,11 +1065,11 @@ static Collected* Collect(HWND target) {
     Hex(target, hx, 32);
 
     /* 身份 */
-    BufField(&b, L"标题", title[0] ? title : L"(无标题)");
-    BufFieldF(&b, L"标题长度", L"%d 个字符%s", (int)wcslen(title),
+    BufField(&b, IF_TITLE, title[0] ? title : L"(无标题)");
+    BufFieldF(&b, IF_TITLELEN, L"%d 个字符%s", (int)wcslen(title),
               wcslen(title) >= 511 ? L"（已截断）" : L"");
-    BufField(&b, L"类名", cls[0] ? cls : L"(无)");
-    BufFieldF(&b, L"句柄", L"%s（%llu）", hx, (unsigned long long)(ULONG_PTR)target);
+    BufField(&b, IF_CLASS, cls[0] ? cls : L"(无)");
+    BufFieldF(&b, IF_HANDLE, L"%s（%llu）", hx, (unsigned long long)(ULONG_PTR)target);
     /* 这里**不列"窗口过程地址"**：`GetWindowLongPtrW(hwnd, GWLP_WNDPROC)` 对别的
        进程的窗口自 Vista 起恒返回 0（系统不再把对方的代码地址暴露给外部进程）。
        留一行永远是 0x0 的字段只会让人以为取数坏了；要判断"是哪个窗口类"，
@@ -1053,24 +1080,24 @@ static Collected* Collect(HWND target) {
                  IsWindowEnabled(target) ? L"" : L" / 已禁用",
                  IsIconic(target) ? L" / 最小化" : (IsZoomed(target) ? L" / 最大化" : L""),
                  GetForegroundWindow() == target ? L" / 前台" : L"");
-    BufField(&b, L"状态", st);
+    BufField(&b, IF_STATE, st);
 
     /* 位置与尺寸 */
     BufBlankLine(&b);
     RECT wr, cr;
     if (GetWindowRect(target, &wr))
-        BufFieldF(&b, L"窗口矩形", L"(%ld,%ld)-(%ld,%ld)  %ldx%ld",
+        BufFieldF(&b, IF_RECT, L"(%ld,%ld)-(%ld,%ld)  %ldx%ld",
                   wr.left, wr.top, wr.right, wr.bottom, wr.right - wr.left, wr.bottom - wr.top);
     else
-        BufUnavail(&b, L"窗口矩形", L"GetWindowRect 失败");
+        BufUnavail(&b, IF_RECT, L"GetWindowRect 失败");
     if (GetClientRect(target, &cr)) {
         POINT tl = { cr.left, cr.top }, br = { cr.right, cr.bottom };
         ClientToScreen(target, &tl);
         ClientToScreen(target, &br);
-        BufFieldF(&b, L"客户区", L"(%ld,%ld)-(%ld,%ld)  %ldx%ld",
+        BufFieldF(&b, IF_CLIENT, L"(%ld,%ld)-(%ld,%ld)  %ldx%ld",
                   tl.x, tl.y, br.x, br.y, cr.right - cr.left, cr.bottom - cr.top);
     } else {
-        BufUnavail(&b, L"客户区", L"GetClientRect 失败");
+        BufUnavail(&b, IF_CLIENT, L"GetClientRect 失败");
     }
     HMONITOR mon = MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST);
     if (mon) {
@@ -1079,22 +1106,22 @@ static Collected* Collect(HWND target) {
         memset(&mi, 0, sizeof(mi));
         mi.cbSize = sizeof(mi);
         if (GetMonitorInfoW(mon, &mi))
-            BufFieldF(&b, L"显示器", L"%s  工作区 (%ld,%ld)-(%ld,%ld)",
+            BufFieldF(&b, IF_MONITOR, L"%s  工作区 (%ld,%ld)-(%ld,%ld)",
                       mi.szDevice, mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom);
     }
     typedef UINT (WINAPI* PFN_GetDpiForWindow)(HWND);
     PFN_GetDpiForWindow gdfw = (PFN_GetDpiForWindow)(void*)ModFn(L"user32.dll", "GetDpiForWindow");
     UINT wdpi = gdfw ? gdfw(target) : 0;
     if (!wdpi) wdpi = 96;
-    BufFieldF(&b, L"窗口 DPI", L"%u（%d%%）", wdpi, MulDiv((int)wdpi, 100, 96));
+    BufFieldF(&b, IF_DPI, L"%u（%d%%）", wdpi, MulDiv((int)wdpi, 100, 96));
 
     /* 窗口关系 + 线程 */
     BufBlankLine(&b);
-    BufHandleField(&b, L"父窗口", GetParent(target));
-    BufHandleField(&b, L"所有者窗口", GetWindow(target, GW_OWNER));
-    BufHandleField(&b, L"根窗口", GetAncestor(target, GA_ROOT));
-    BufHandleField(&b, L"根所有者窗口", GetAncestor(target, GA_ROOTOWNER));
-    BufFieldF(&b, L"线程 ID", L"0x%lX（%lu）%s", tid, tid,
+    BufHandleField(&b, IF_PARENT, GetParent(target));
+    BufHandleField(&b, IF_OWNER, GetWindow(target, GW_OWNER));
+    BufHandleField(&b, IF_ROOT, GetAncestor(target, GA_ROOT));
+    BufHandleField(&b, IF_ROOTOWNER, GetAncestor(target, GA_ROOTOWNER));
+    BufFieldF(&b, IF_TID, L"0x%lX（%lu）%s", tid, tid,
               IsHungAppWindow(target) ? L"  ** 无响应 **" : L"");
 
     /* 原始样式位（最技术，放最后）。数值与符号表各占**带键名的一行**：符号若
@@ -1104,12 +1131,12 @@ static Collected* Collect(HWND target) {
     DWORD style = (DWORD)GetWindowLongPtrW(target, GWL_STYLE);
     DWORD exStyle = (DWORD)GetWindowLongPtrW(target, GWL_EXSTYLE);
     WCHAR sym[512];
-    BufFieldF(&b, L"样式", L"0x%08lX", style);
+    BufFieldF(&b, IF_STYLE, L"0x%08lX", style);
     StyleText(style, kStyle, (int)(sizeof(kStyle) / sizeof(kStyle[0])), sym, 512);
-    BufField(&b, L"样式符号", sym);
-    BufFieldF(&b, L"扩展样式", L"0x%08lX", exStyle);
+    BufField(&b, IF_STYLESYM, sym);
+    BufFieldF(&b, IF_EXSTYLE, L"0x%08lX", exStyle);
     StyleText(exStyle, kExStyle, (int)(sizeof(kExStyle) / sizeof(kExStyle[0])), sym, 512);
-    BufField(&b, L"扩展样式符号", sym);
+    BufField(&b, IF_EXSTYLESYM, sym);
 
     int total = 0;
     EnumChildWindows(target, CountChildCb, (LPARAM)&total);
@@ -1119,7 +1146,7 @@ static Collected* Collect(HWND target) {
        目录/启动/父进程）→ 安全上下文（账户/完整性/会话）→ 资源（句柄/内存）。 */
     BufSection(&b, L"进程");
     if (hostPid != pid)
-        BufFieldF(&b, L"窗口宿主", L"ApplicationFrameHost（PID %lu）；以下为窗口内 UWP 应用本体", hostPid);
+        BufFieldF(&b, IF_HOSTNOTE, L"ApplicationFrameHost（PID %lu）；以下为窗口内 UWP 应用本体", hostPid);
     else if (uwpUnresolved)
         BufField(&b, L"提示", L"这是 UWP 宿主窗口，其下没有 CoreWindow 子窗口可换算；以下为宿主进程本身");
     WCHAR path[PATH_CAP];
@@ -1129,27 +1156,27 @@ static Collected* Collect(HWND target) {
     WCHAR tmp[PATH_CAP];
 
     /* 身份 */
-    BufField(&b, L"进程名", path[0] ? base : L"(取不到)");
-    BufFieldF(&b, L"PID", L"%lu（0x%lX）", pid, pid);
-    if (path[0]) BufField(&b, L"映像路径", path);
-    else BufUnavail(&b, L"映像路径", L"进程无权限打开或已退出");
+    BufField(&b, IF_PROCNAME, path[0] ? base : L"(取不到)");
+    BufFieldF(&b, IF_PID, L"%lu（0x%lX）", pid, pid);
+    if (path[0]) BufField(&b, IF_IMAGE, path);
+    else BufUnavail(&b, IF_IMAGE, L"进程无权限打开或已退出");
     WCHAR ver[64], prod[128], comp[128];
     ProcVersion(pid, path, ver, 64, prod, 128, comp, 128);
-    if (ver[0])  BufField(&b, L"文件版本", ver);
-    if (prod[0]) BufField(&b, L"产品名", prod);
-    if (comp[0]) BufField(&b, L"公司", comp);
+    if (ver[0])  BufField(&b, IF_VER, ver);
+    if (prod[0]) BufField(&b, IF_PRODUCT, prod);
+    if (comp[0]) BufField(&b, IF_COMPANY, comp);
 
     /* 运行 */
     BufBlankLine(&b);
     ProcArch(pid, tmp, 128);
-    BufField(&b, L"架构", tmp);
-    if (ProcCommandLine(pid, tmp, PATH_CAP)) BufField(&b, L"命令行", tmp);
-    else BufUnavail(&b, L"命令行", L"该系统不支持该信息类，或进程无权限");
-    if (ProcCwd(pid, tmp, PATH_CAP)) BufField(&b, L"当前目录", tmp);
-    else BufUnavail(&b, L"当前目录", L"32 位目标或读取被拒");
+    BufField(&b, IF_ARCH, tmp);
+    if (ProcCommandLine(pid, tmp, PATH_CAP)) BufField(&b, IF_CMDLINE, tmp);
+    else BufUnavail(&b, IF_CMDLINE, L"该系统不支持该信息类，或进程无权限");
+    if (ProcCwd(pid, tmp, PATH_CAP)) BufField(&b, IF_CWD, tmp);
+    else BufUnavail(&b, IF_CWD, L"32 位目标或读取被拒");
     ProcStartTime(pid, tmp, 64);
-    if (tmp[0]) BufField(&b, L"启动时间", tmp);
-    else BufUnavail(&b, L"启动时间", L"进程无权限打开");
+    if (tmp[0]) BufField(&b, IF_START, tmp);
+    else BufUnavail(&b, IF_START, L"进程无权限打开");
     DWORD ppid = 0;
     ProcParent(pid, &ppid);
     if (ppid) {
@@ -1158,27 +1185,27 @@ static Collected* Collect(HWND target) {
         ProcPath(ppid, ppath, PATH_CAP);
         const WCHAR* pb = ppath;
         for (const WCHAR* q = ppath; *q; q++) if (*q == L'\\') pb = q + 1;
-        BufFieldF(&b, L"父进程", L"%s（PID %lu）", ppath[0] ? pb : L"(取不到进程名)", ppid);
+        BufFieldF(&b, IF_PPROC, L"%s（PID %lu）", ppath[0] ? pb : L"(取不到进程名)", ppid);
     } else {
-        BufUnavail(&b, L"父进程", L"进程无权限打开");
+        BufUnavail(&b, IF_PPROC, L"进程无权限打开");
     }
 
     /* 安全上下文 */
     BufBlankLine(&b);
     ProcAccount(pid, tmp, 196);
-    if (tmp[0]) BufField(&b, L"账户", tmp);
-    else BufUnavail(&b, L"账户", L"令牌不可读");
+    if (tmp[0]) BufField(&b, IF_ACCOUNT, tmp);
+    else BufUnavail(&b, IF_ACCOUNT, L"令牌不可读");
     BOOL elevated = FALSE;
     ProcIntegrity(pid, tmp, 128, &elevated);
     if (tmp[0]) {
         WCHAR line[192];
         _snwprintf_s(line, 192, _TRUNCATE, L"%s%s", tmp, elevated ? L"（已提升）" : L"");
-        BufField(&b, L"完整性级别", line);
+        BufField(&b, IF_INTEGRITY, line);
     } else {
-        BufUnavail(&b, L"完整性级别", L"令牌不可读");
+        BufUnavail(&b, IF_INTEGRITY, L"令牌不可读");
     }
     DWORD sess = 0;
-    if (ProcessIdToSessionId(pid, &sess)) BufFieldF(&b, L"会话", L"%lu", sess);
+    if (ProcessIdToSessionId(pid, &sess)) BufFieldF(&b, IF_SESSION, L"%lu", sess);
 
     /* 资源（可能整组取不到：受保护进程 OpenProcess 就被拒。整组为空时
        BufBlankLine 的幂等性保证不会在下一段段头前叠出两个空行）。 */
@@ -1186,7 +1213,7 @@ static Collected* Collect(HWND target) {
     HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (hp) {
         DWORD handles = 0;
-        if (GetProcessHandleCount(hp, &handles)) BufFieldF(&b, L"句柄数", L"%lu", handles);
+        if (GetProcessHandleCount(hp, &handles)) BufFieldF(&b, IF_HANDLES, L"%lu", handles);
         typedef BOOL (WINAPI* PFN_Mem)(HANDLE, PVOID, DWORD);
         PFN_Mem gm = (PFN_Mem)(void*)ModFn(L"kernel32.dll", "K32GetProcessMemoryInfo");
         if (gm) {
@@ -1201,7 +1228,7 @@ static Collected* Collect(HWND target) {
             memset(&pmc, 0, sizeof(pmc));
             pmc.cb = sizeof(pmc);
             if (gm(hp, &pmc, sizeof(pmc)))
-                BufFieldF(&b, L"工作集", L"%.1f MB", (double)pmc.WorkingSetSize / (1024.0 * 1024.0));
+                BufFieldF(&b, IF_WORKSET, L"%.1f MB", (double)pmc.WorkingSetSize / (1024.0 * 1024.0));
         }
         CloseHandle(hp);
     }
@@ -1381,7 +1408,7 @@ static void ApplyEditFont(void) {
     SendMessageW(g_edit, EM_SETTABSTOPS, 1, (LPARAM)&tab);
 }
 
-/* 搜索框 / 按钮 / 状态文字用的界面字体（不用编辑器那套等宽字体）。 */
+/* 筛选框 / 按钮 / 状态文字用的界面字体（不用编辑器那套等宽字体）。 */
 static void ApplyUiFont(void) {
     if (g_uiFont) DeleteObject(g_uiFont);
     g_uiFont = MakeFont(L"Microsoft YaHei UI", 9, g_dpi, FALSE);
@@ -1391,139 +1418,177 @@ static void ApplyUiFont(void) {
         if (ctls[i]) SendMessageW(ctls[i], WM_SETFONT, (WPARAM)g_uiFont, TRUE);
 }
 
-/* ---------- 段头样式 / 搜索高亮 / 视图切换 ---------- */
+/* ---------- 段头样式 / 筛选 / 视图切换 ---------- */
 
-static int g_matches;            /* 最近一次搜索的命中数（状态栏用） */
+static int g_matches;            /* 最近一次筛选命中的行数（状态栏用） */
 
-/* 给 `[段名]` 行加粗 + 强调色，让分段一眼可辨。只动这几行的字符格式，不碰文本；
+/* 给 `[段名]` 行加粗 + 强调色，让分段一眼可辨。逐行用**控件的行索引**取行文本：
+   早先的写法是把 WM_GETTEXT 的整篇按 '\r' 切分、再拿字符偏移去选段 —— 那偏移
+   是错的：GetWindowText 把段落分隔符扩成 CRLF（两个字符），而编辑控件内部的
+   cp 里一个段落只占一个，于是第一行之后每个段头都被推后几十个字符，选中的
+   其实是别的行，只有最前面那个段头真染上了色。EM_LINEINDEX / EM_LINELENGTH
+   用的就是控件自己的坐标，不存在这个换算。
    改格式会把缓冲标脏，所以前后保存/恢复 EM_GETMODIFY —— 用户没编辑过就仍是
    "未修改"，否则右键刷新会平白弹确认。 */
 static void StyleHeaders(void) {
     if (!g_edit) return;
     BOOL wasDirty = (BOOL)SendMessageW(g_edit, EM_GETMODIFY, 0, 0);
-    LONG len = (LONG)SendMessageW(g_edit, WM_GETTEXTLENGTH, 0, 0);
-    if (len > 0 && len < (32 * 1024 * 1024)) {
-        WCHAR* txt = (WCHAR*)calloc((size_t)len + 2, sizeof(WCHAR));
-        if (txt) {
-            GetWindowTextW(g_edit, txt, len + 1);
-            COLORREF accent = g_dark ? RGB(86, 156, 214) : RGB(0, 95, 184);
-            LONG start = 0;
-            for (LONG i = 0; i <= len; i++) {
-                if (i == len || txt[i] == L'\r' || txt[i] == L'\n') {
-                    LONG a = start, b = i;
-                    while (b > a && txt[b - 1] == L'\r') b--;
-                    if (b - a >= 2 && txt[a] == L'[' && txt[b - 1] == L']') {
-                        CHARRANGE cr; cr.cpMin = a; cr.cpMax = b;
-                        SendMessageW(g_edit, EM_EXSETSEL, 0, (LPARAM)&cr);
-                        CHARFORMAT2W cf;
-                        memset(&cf, 0, sizeof(cf));
-                        cf.cbSize = sizeof(cf);
-                        cf.dwMask = CFM_BOLD | CFM_COLOR;
-                        cf.dwEffects = CFE_BOLD;
-                        cf.crTextColor = accent;
-                        SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
-                    }
-                    start = i + 1;
-                }
-            }
-            free(txt);
-            SendMessageW(g_edit, EM_SETSEL, 0, 0);
+    LONG lines = (LONG)SendMessageW(g_edit, EM_GETLINECOUNT, 0, 0);
+    if (lines > 0 && lines < 200000) {
+        COLORREF accent = g_dark ? RGB(86, 156, 214) : RGB(0, 95, 184);
+        CHARRANGE sel;
+        SendMessageW(g_edit, EM_EXGETSEL, 0, (LPARAM)&sel);
+        WCHAR buf[512];
+        for (LONG l = 0; l < lines; l++) {
+            LONG idx = (LONG)SendMessageW(g_edit, EM_LINEINDEX, (WPARAM)l, 0);
+            if (idx < 0) continue;
+            LONG len = (LONG)SendMessageW(g_edit, EM_LINELENGTH, (WPARAM)idx, 0);
+            /* 段头是 "[" + 段名 + "]"，短行；超长的行不必去取文本 */
+            if (len < 2 || len >= (LONG)(sizeof(buf) / sizeof(buf[0]) - 1)) continue;
+            buf[0] = (WCHAR)(sizeof(buf) / sizeof(buf[0]) - 1);   /* EM_GETLINE 要求首字给容量 */
+            LONG got = (LONG)SendMessageW(g_edit, EM_GETLINE, (WPARAM)l, (LPARAM)buf);
+            if (got <= 0) continue;
+            if (got > (LONG)(sizeof(buf) / sizeof(buf[0]) - 1)) got = (LONG)(sizeof(buf) / sizeof(buf[0]) - 1);
+            while (got > 0 && (buf[got - 1] == L'\r' || buf[got - 1] == L'\n')) got--;
+            if (got < 2 || buf[0] != L'[' || buf[got - 1] != L']') continue;
+            CHARRANGE cr;
+            cr.cpMin = idx;
+            cr.cpMax = idx + got;
+            SendMessageW(g_edit, EM_EXSETSEL, 0, (LPARAM)&cr);
+            CHARFORMAT2W cf;
+            memset(&cf, 0, sizeof(cf));
+            cf.cbSize = sizeof(cf);
+            cf.dwMask = CFM_BOLD | CFM_COLOR;
+            cf.dwEffects = CFE_BOLD;
+            cf.crTextColor = accent;
+            SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
         }
+        SendMessageW(g_edit, EM_EXSETSEL, 0, (LPARAM)&sel);   /* 光标/选区还原 */
     }
     SendMessageW(g_edit, EM_SETMODIFY, wasDirty, 0);
 }
 
-/* 底部状态文字：有搜索词报命中数，否则报行数与当前视图属性。 */
+/* 底部状态文字：有筛选词报命中行数，否则报行数与当前视图。 */
 static void UpdateStatus(void) {
     if (!g_status) return;
     WCHAR msg[192];
-    int lines = g_edit ? (int)SendMessageW(g_edit, EM_GETLINECOUNT, 0, 0) : 0;
-    WCHAR q[256] = L"";
-    if (g_search) GetWindowTextW(g_search, q, 256);
-    if (q[0])
-        _snwprintf_s(msg, 192, _TRUNCATE, L"%d 行 · 命中 %d 处", lines, g_matches);
-    else
+    if (g_filtering)
+        _snwprintf_s(msg, 192, _TRUNCATE, L"筛选：命中 %d 行（Esc 清空）", g_matches);
+    else {
+        int lines = g_edit ? (int)SendMessageW(g_edit, EM_GETLINECOUNT, 0, 0) : 0;
         _snwprintf_s(msg, 192, _TRUNCATE, L"%d 行 · %s", lines,
-                     g_view == 0 ? L"常用：可直接编辑" : L"全部：只读");
+                     g_view == 0 ? L"常用视图（可编辑）" : L"全部视图（可编辑）");
+    }
     SetWindowTextW(g_status, msg);
 }
 
-/* 搜索：按搜索框的词高亮所有命中（不区分大小写，键或值都算），光标滚到第一处。
-   清空词 = 去掉全部高亮。只改背景色（不碰字色/加粗），段头样式与搜索高亮可叠加。 */
-static void SearchApply(void) {
+/* 不区分大小写的子串查找。整屏文本最多几十 KB，逐位置比就够，不必上算法。 */
+static BOOL ContainsNoCase(const WCHAR* hay, int hayLen, const WCHAR* needle, int ndLen) {
+    if (ndLen <= 0) return TRUE;
+    for (int i = 0; i + ndLen <= hayLen; i++)
+        if (_wcsnicmp(hay + i, needle, (size_t)ndLen) == 0) return TRUE;
+    return FALSE;
+}
+
+/* 筛选：只保留**包含**搜索词的整行（键或值命中都算，不区分大小写）。
+   返回堆上的结果（调用方 free）；词为空返回 NULL（= 不过滤）。空行不留 ——
+   筛选的意义是"把相关的那几行摆出来"，留一堆空隙反而更难扫。 */
+static WCHAR* FilterText(const WCHAR* src, const WCHAR* needle, int* outLines) {
+    *outLines = 0;
+    if (!src || !needle || !needle[0]) return NULL;
+    int ndLen = (int)wcslen(needle);
+    size_t cap = wcslen(src) + 2;                 /* 只会变短，这个容量够 */
+    WCHAR* out = (WCHAR*)calloc(cap, sizeof(WCHAR));
+    if (!out) return NULL;
+    size_t n = 0;
+    const WCHAR* p = src;
+    while (*p) {
+        const WCHAR* e = p;
+        while (*e && *e != L'\r' && *e != L'\n') e++;
+        int len = (int)(e - p);
+        if (ContainsNoCase(p, len, needle, ndLen)) {
+            memcpy(out + n, p, (size_t)len * sizeof(WCHAR));
+            n += (size_t)len;
+            out[n++] = L'\n';
+            (*outLines)++;
+        }
+        while (*e == L'\r' || *e == L'\n') e++;
+        p = e;
+    }
+    return out;
+}
+
+/* 取编辑区全文（堆）。失败返回 NULL。 */
+static WCHAR* EditTextDup(void) {
+    if (!g_edit) return NULL;
+    int n = GetWindowTextLengthW(g_edit);
+    if (n < 0) return NULL;
+    WCHAR* t = (WCHAR*)calloc((size_t)n + 1, sizeof(WCHAR));
+    if (!t) return NULL;
+    GetWindowTextW(g_edit, t, n + 1);
+    return t;
+}
+
+/* 把编辑区的改动存回当前视图的源文本。三种情况跳过：
+   · 筛选期间 —— 控件里是过滤结果，存回去会把原文冲掉；
+   · 采集进行中 —— 控件里是"正在收集…"那行占位文字；
+   · g_noSync —— 刚换过源文本，控件里的还是上一份内容。 */
+static void ViewSyncText(void) {
+    if (!g_edit || g_filtering || g_busy || g_noSync) return;
+    WCHAR* t = EditTextDup();
+    if (!t) return;
+    free(g_viewText[g_view]);
+    g_viewText[g_view] = t;
+}
+
+/* 按当前搜索词重排编辑区：没词 → 放回源文本、可编辑；有词 → 只显示命中的行、
+   只读（过滤结果和原文没有逐行对应关系，在上面改字改的是"哪一行"说不清）。
+   视图切换、搜索词变化、采集到新数据，三条路都汇到这里。 */
+static void RefreshEditText(void) {
     if (!g_edit) return;
     WCHAR q[256] = L"";
     if (g_search) GetWindowTextW(g_search, q, 256);
-
     BOOL wasDirty = (BOOL)SendMessageW(g_edit, EM_GETMODIFY, 0, 0);
-    CHARFORMAT2W rst;
-    memset(&rst, 0, sizeof(rst));
-    rst.cbSize = sizeof(rst);
-    rst.dwMask = CFM_BACKCOLOR;
-    rst.dwEffects = CFE_AUTOBACKCOLOR;
-    SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&rst);
-
-    g_matches = 0;
-    LONG first = -1;
-    if (q[0]) {
-        COLORREF hi = g_dark ? RGB(83, 74, 0) : RGB(255, 232, 122);
-        FINDTEXTEXW ft;
-        memset(&ft, 0, sizeof(ft));
-        ft.lpstrText = q;
-        ft.chrg.cpMin = 0;
-        ft.chrg.cpMax = -1;
-        for (;;) {
-            LRESULT pos = SendMessageW(g_edit, EM_FINDTEXTEXW, FR_DOWN, (LPARAM)&ft);
-            if (pos < 0) break;
-            LONG a = ft.chrgText.cpMin, b = ft.chrgText.cpMax;
-            if (b <= a) break;
-            if (first < 0) first = a;
-            CHARRANGE cr; cr.cpMin = a; cr.cpMax = b;
-            SendMessageW(g_edit, EM_EXSETSEL, 0, (LPARAM)&cr);
-            CHARFORMAT2W hl;
-            memset(&hl, 0, sizeof(hl));
-            hl.cbSize = sizeof(hl);
-            hl.dwMask = CFM_BACKCOLOR;
-            hl.crBackColor = hi;
-            SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&hl);
-            g_matches++;
-            ft.chrg.cpMin = b;
-            ft.chrg.cpMax = -1;
-            if (g_matches >= 5000) break;      /* 防手滑粘进长串卡死 */
+    const WCHAR* src = g_viewText[g_view] ? g_viewText[g_view] : L"";
+    if (!q[0]) {
+        if (g_filtering) {                       /* 退出筛选：源文本原样放回 */
+            g_filtering = FALSE;
+            SetEditText(src);
         }
-        if (first >= 0) {
-            SendMessageW(g_edit, EM_SETSEL, first, first);
-            SendMessageW(g_edit, EM_SCROLLCARET, 0, 0);
-        }
+        SendMessageW(g_edit, EM_SETREADONLY, FALSE, 0);
+        g_matches = 0;
+    } else {
+        if (!g_filtering) ViewSyncText();        /* 进筛选前先把编辑存回源 */
+        g_filtering = TRUE;
+        int hits = 0;
+        WCHAR* f = FilterText(src, q, &hits);
+        SetEditText(f ? f : L"");
+        free(f);
+        SendMessageW(g_edit, EM_SETREADONLY, TRUE, 0);
+        g_matches = hits;
     }
+    StyleHeaders();
     SendMessageW(g_edit, EM_SETMODIFY, wasDirty, 0);
     UpdateStatus();
 }
 
-/* 切视图。离开「常用」时把它的当前文本（可能被改过）回写缓存，切回来还在；
-   「全部」永远只读。 */
+/* 切视图。两个视图都可编辑，各自留着自己那份源文本：离开前把编辑存回去，
+   回来还是原样。筛选态下切视图 = 用同一个词去筛另一个视图。 */
 static void ApplyView(int v) {
     if (!g_edit) return;
     if (v != 0 && v != 1) v = 0;
-    if (g_view == 0 && v != 0) {
-        int n = GetWindowTextLengthW(g_edit);
-        if (n >= 0) {
-            WCHAR* t = (WCHAR*)calloc((size_t)n + 1, sizeof(WCHAR));
-            if (t) {
-                GetWindowTextW(g_edit, t, n + 1);
-                free(g_commonText);
-                g_commonText = t;
-            }
-        }
-    }
+    ViewSyncText();                     /* 离开前把（非筛选态的）编辑存回它自己那份 */
     g_view = v;
-    const WCHAR* text = (v == 0) ? g_commonText : g_allText;
-    SetEditText(text ? text : L"");
-    SendMessageW(g_edit, EM_SETREADONLY, v == 1, 0);   /* 只有常用可改 */
     if (g_btnCommon) SendMessageW(g_btnCommon, BM_SETCHECK, v == 0 ? BST_CHECKED : BST_UNCHECKED, 0);
     if (g_btnAll)    SendMessageW(g_btnAll,    BM_SETCHECK, v == 1 ? BST_CHECKED : BST_UNCHECKED, 0);
-    StyleHeaders();
-    SearchApply();                 /* 视图切换后按当前词重新高亮（内部会刷新状态） */
+    /* 控件里现在是**另一个视图**的内容：整篇换掉，并且不许 RefreshEditText
+       把它当成"本视图的编辑"回写（g_noSync 只在这一段生效）。 */
+    BOOL savedNoSync = g_noSync;
+    g_noSync = TRUE;
+    g_filtering = FALSE;
+    SetEditText(g_viewText[v] ? g_viewText[v] : L"");
+    RefreshEditText();                  /* 有筛选词就按它重新筛这个视图 */
+    g_noSync = savedNoSync;
     SendMessageW(g_edit, EM_SETMODIFY, FALSE, 0);
 }
 
@@ -1542,8 +1607,8 @@ static void ApplyTextMargins(void) {
                  MAKELPARAM(left, right));
 }
 
-/* 三层：顶部工具条（搜索框）→ 中间编辑区（**贴边**）→ 底部状态条（常用/全部 +
-   状态文字）。文字离边的距离由 ApplyTextMargins 负责，外层不再加 pad。 */
+/* 三层：顶部工具条（筛选框 + 常用/全部）→ 中间编辑区（**贴边**）→ 底部状态条
+   （只有一行状态文字）。文字离边的距离由 ApplyTextMargins 负责，外层不再加 pad。 */
 static void Layout(void) {
     if (!g_hwnd) return;
     RECT rc;
@@ -1551,13 +1616,22 @@ static void Layout(void) {
     int cw = rc.right, ch = rc.bottom;
     int pad = MulDiv(8, g_dpi, 96);
     int toolH = MulDiv(34, g_dpi, 96);
-    int statH = MulDiv(32, g_dpi, 96);
+    int statH = MulDiv(26, g_dpi, 96);
     int bh = MulDiv(22, g_dpi, 96);
 
-    /* 顶部搜索框（占满宽度，靠 cue banner 提示"搜索键或值"） */
+    /* 顶部一栏：左边筛选框（吃掉剩下的宽度），右边两个视图按钮。视图切换是
+       常驻操作，放顶上比压在状态条里顺手，状态条也就只剩一行字。 */
+    int bw = MulDiv(56, g_dpi, 96);
+    int bg = MulDiv(6, g_dpi, 96);
+    int sy = (toolH - bh) / 2;
+    int bx = cw - pad - bw;                 /* 「全部」贴右 */
+    if (g_btnAll)    MoveWindow(g_btnAll, bx, sy, bw, bh, TRUE);
+    if (g_btnCommon) MoveWindow(g_btnCommon, bx - bw - bg, sy, bw, bh, TRUE);
     if (g_search) {
-        int sy = (toolH - bh) / 2;
-        MoveWindow(g_search, pad, sy, cw - pad * 2, bh, TRUE);
+        int sw = bx - bw - bg - bg - pad;   /* 到「常用」左边，再留一个间距 */
+        int minW = MulDiv(90, g_dpi, 96);
+        if (sw < minW) sw = minW;
+        MoveWindow(g_search, pad, sy, sw, bh, TRUE);
     }
     /* 中间编辑区：左右下都贴边 */
     int editTop = toolH;
@@ -1566,18 +1640,10 @@ static void Layout(void) {
     if (g_edit) MoveWindow(g_edit, 0, editTop, cw, editH, TRUE);
     ApplyTextMargins();
 
-    /* 底部状态条：左边两个视图按钮，状态文字吃剩下的宽度 */
-    int bw = MulDiv(64, g_dpi, 96);
-    int bg = MulDiv(6, g_dpi, 96);
-    int by = ch - statH + (statH - bh) / 2;
-    if (g_btnCommon) MoveWindow(g_btnCommon, pad, by, bw, bh, TRUE);
-    if (g_btnAll)    MoveWindow(g_btnAll, pad + bw + bg, by, bw, bh, TRUE);
-    if (g_status) {
-        int sx = pad + (bw + bg) * 2 + MulDiv(6, g_dpi, 96);
-        int sw = cw - sx - pad;
-        if (sw < 10) sw = 10;
-        MoveWindow(g_status, sx, by + MulDiv(3, g_dpi, 96), sw, MulDiv(18, g_dpi, 96), TRUE);
-    }
+    /* 底部状态条：只有状态文字 */
+    if (g_status)
+        MoveWindow(g_status, pad, ch - statH + MulDiv(4, g_dpi, 96),
+                   cw - pad * 2, MulDiv(18, g_dpi, 96), TRUE);
 }
 
 /* ---------- 定位：光标居中 + 工作区钳制（CLaunch-search 的做法） ---------- */
@@ -1679,14 +1745,14 @@ static LRESULT CALLBACK EditSub(HWND h, UINT m, WPARAM wp, LPARAM lp,
     return DefSubclassProc(h, m, wp, lp);
 }
 
-/* 搜索框：Esc 先清空搜索（有内容时），空时关窗。 */
+/* 筛选框：Esc 先清空筛选（有词时），空时关窗。 */
 static LRESULT CALLBACK SearchSub(HWND h, UINT m, WPARAM wp, LPARAM lp,
                                   UINT_PTR id, DWORD_PTR ref) {
     (void)id; (void)ref;
     if (m == WM_KEYDOWN && wp == VK_ESCAPE) {
         WCHAR q[8] = L"";
         GetWindowTextW(h, q, 8);
-        if (q[0]) { SetWindowTextW(h, L""); SearchApply(); }
+        if (q[0]) { SetWindowTextW(h, L""); RefreshEditText(); }
         else DestroyWindow(g_hwnd);
         return 0;
     }
@@ -1733,7 +1799,7 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
 
     case WM_CTLCOLORSTATIC: {
-        /* 搜索框旁 / 状态文字等静态控件：字色跟主题、底用窗口底色，免得
+        /* 筛选框旁 / 状态文字等静态控件：字色跟主题、底用窗口底色，免得
            在主题底色上贴一块默认灰底。 */
         HDC dc = (HDC)wp;
         SetTextColor(dc, EditFg());
@@ -1741,7 +1807,7 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return (LRESULT)(g_bgBrush ? g_bgBrush : (HBRUSH)(COLOR_BTNFACE + 1));
     }
     case WM_CTLCOLOREDIT: {
-        /* 搜索框（RichEdit 自己用 EM_SETBKGNDCOLOR 画底，不走这里）。 */
+        /* 筛选框（RichEdit 自己用 EM_SETBKGNDCOLOR 画底，不走这里）。 */
         HDC dc = (HDC)wp;
         SetTextColor(dc, EditFg());
         SetBkColor(dc, EditBg());
@@ -1767,7 +1833,7 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (LOWORD(wp)) {
         case IDC_VCOMMON: if (HIWORD(wp) == BN_CLICKED) ApplyView(0); return 0;
         case IDC_VALL:    if (HIWORD(wp) == BN_CLICKED) ApplyView(1); return 0;
-        case IDC_SEARCH:  if (HIWORD(wp) == EN_CHANGE)  SearchApply();  return 0;
+        case IDC_SEARCH:  if (HIWORD(wp) == EN_CHANGE)  RefreshEditText(); return 0;
         /* 没有按钮行：关闭交给标题栏的 X，刷新只由右键菜单的 IDM_REFRESH 触发。 */
         case IDM_UNDO:    SendMessageW(g_edit, EM_UNDO, 0, 0); return 0;
         case IDM_CUT:     SendMessageW(g_edit, WM_CUT, 0, 0); return 0;
@@ -1788,10 +1854,14 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         Collected* col = (Collected*)lp;
         g_busy = FALSE;
         if (col) {
-            free(g_allText);    g_allText = col->all;
-            free(g_commonText); g_commonText = col->common;
+            free(g_viewText[0]); g_viewText[0] = col->common;
+            free(g_viewText[1]); g_viewText[1] = col->all;
             free(col);
-            ApplyView(g_view);         /* 按当前视图渲染新数据 */
+            /* 源文本换了：控件里还是上一份（或"正在收集…"），不许回写 */
+            g_noSync = TRUE;
+            g_filtering = FALSE;
+            ApplyView(g_view);         /* 按当前视图与筛选词渲染新数据 */
+            g_noSync = FALSE;
         }
         return 0;
     }
@@ -1810,7 +1880,7 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
            设置变更原样交给 DefWindowProc。 */
         if (lp && _wcsicmp((const WCHAR*)lp, L"ImmersiveColorSet") == 0) {
             ApplyTheme();
-            ApplyView(g_view);       /* 重铺后按新配色重刷段头/高亮 */
+            ApplyView(g_view);       /* 重铺后按新配色重刷段头 */
         }
         break;
 
@@ -1824,8 +1894,8 @@ static LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_uiFont) DeleteObject(g_uiFont);
         if (g_bgBrush) DeleteObject(g_bgBrush);
         if (g_editBrush) DeleteObject(g_editBrush);
-        free(g_allText);
-        free(g_commonText);
+        free(g_viewText[0]);
+        free(g_viewText[1]);
         PostQuitMessage(0);
         return 0;
 
@@ -1954,18 +2024,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                       几乎拖不动，看一条长路径全靠碰运气。
        取 1：超宽的长行交给横向滚动，值的列位置也不会被软折行冲掉。 */
     SendMessageW(g_edit, EM_SETTARGETDEVICE, 0, (LPARAM)1);
-    /* 只读按视图设：常用可编辑、全部只读（见 ApplyView）。 */
+    /* 可读可改：两个视图都可编辑，只读只出现在筛选态（见 RefreshEditText）。 */
 
-    /* 顶部搜索框（单行 EDIT；cue banner 给占位提示；WM_CTLCOLOREDIT 上底色）。
+    /* 顶部筛选框（单行 EDIT；cue banner 给占位提示；WM_CTLCOLOREDIT 上底色）。
        边框给 0：靠底色与工具条区分，避免 Win95 式凹陷边框。 */
     g_search = CreateWindowExW(0, L"EDIT", L"",
                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)IDC_SEARCH, hInst, NULL);
     if (g_search) {
         SetWindowSubclass(g_search, SearchSub, 2, 0);
-        SendMessageW(g_search, EM_SETCUEBANNER, TRUE, (LPARAM)L"搜索键或值…");
+        SendMessageW(g_search, EM_SETCUEBANNER, TRUE, (LPARAM)L"筛选：键或值…");
     }
-    /* 底部状态条：常用 / 全部 两个切换按钮（toggle 外观）+ 状态文字。 */
+    /* 顶部右侧：常用 / 全部 两个切换按钮（toggle 外观）。 */
     g_btnCommon = CreateWindowExW(0, L"BUTTON", L"常用",
                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP |
                                   BS_AUTOCHECKBOX | BS_PUSHLIKE,

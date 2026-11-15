@@ -256,10 +256,10 @@ static BOOL GetCheck(HWND btn) {
 }
 
 /* ---------------- 窗口信息「常用」视图的字段编排 ----------------
-   `C+F12` 弹窗有两个视图：「常用」按这里排好的**有序字段列表**平铺显示、允许
-   编辑；「全部」是全量分组信息、只读。这块只编排序（谁在里面、什么顺序），
-   不承载任何值 —— 结果直接写回 `[General] InfoCommonFields`（逗号分隔的字段
-   标识，顺序即显示顺序）。
+   `C+F12` 弹窗有两个视图：「常用」按这里排好的**有序字段列表**平铺显示；
+   「全部」是全量分组信息（两个视图都可编辑）。这块只编排序（谁在里面、
+   什么顺序），不承载任何值 —— 结果直接写回 `[General] InfoCommonFields`
+   （逗号分隔的字段标识，顺序即显示顺序）。
 
    字段词汇表在 src/info_fields.h：ini 里用的标识 / 所属层 / 「全部」视图里的
    键名 / 「常用」视图里的友好名，四者同源于一张表（弹窗与设置不各写一份）。
@@ -294,7 +294,7 @@ static int CmnIndexOf(int id) {
 
 static void CmnInsert(int at, int id) {
     HWND lb = CmnList();
-    SendMessageW(lb, LB_INSERTSTRING, (WPARAM)at, (LPARAM)kInfoFields[id].common);
+    SendMessageW(lb, LB_INSERTSTRING, (WPARAM)at, (LPARAM)kInfoFields[id].name);
     SendMessageW(lb, LB_SETITEMDATA, (WPARAM)at, (LPARAM)id);
 }
 
@@ -392,7 +392,7 @@ static void CmnAddDlg(void) {
             lastSec = kInfoFields[i].section;
         }
         /* 命令号 = 字段编号 + 1（0 保留给"没选"） */
-        AppendMenuW(m, MF_STRING, (UINT_PTR)(i + 1), kInfoFields[i].common);
+        AppendMenuW(m, MF_STRING, (UINT_PTR)(i + 1), kInfoFields[i].name);
         cnt++;
     }
     if (!cnt) {
@@ -415,7 +415,7 @@ static void CmnAddDlg(void) {
     SendMessageW(CmnList(), LB_SETCURSEL, (WPARAM)at, 0);
     CmnSyncButtons();
     UpdateDirty();
-    SetStatus(L"已把「%s」加到最后 —— 用「上移」调整它的位置", kInfoFields[id].common);
+    SetStatus(L"已把「%s」加到最后 —— 用「上移」调整它的位置", kInfoFields[id].name);
 }
 
 static void CmnDel(void) {
@@ -1905,7 +1905,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     /* 「常用」字段编排（窗口信息弹窗的「常用」视图）：子段头 + 有序列表 +
        添加…/删除/上移/下移。列表项的文本是友好名，字段编号存在项数据里。 */
     MakeLabel(hInst, g_hwnd,
-              L"「常用」视图的字段（自上而下就是弹窗里的顺序；「全部」视图始终只读）",
+              L"「常用」视图的字段（自上而下就是弹窗里的顺序）",
               IDC_CMN_HEAD);
     HookChild(CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
                               WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS |
