@@ -83,6 +83,10 @@ void ChildWatchStop(ChildWatch* w);
      （比如复制任务栏或底部工具栏上的字）时，无障碍命中测试会先命中**我们自己
      的窗口**，取回一堆提示文字。这是"浮层会污染取样"那条坑的落地。 */
 void ToastHideNow(void);   /* 同步隐藏（SendMessage 到窗口线程，返回时已隐藏） */
-void ToastShow(BOOL fail, const WCHAR* headline, const WCHAR* body);
-                           /* 显示一次提示；几何/字体/透明度读 [General] 的 Copy* 键。
+void ToastShow(BOOL fail, const WCHAR* title, const WCHAR* meta, const WCHAR* body);
+                           /* 显示一次提示：title = 顶部小字（来源程序 / 失败标题），
+                              meta = **右下角**那一行计数（"124 字 · 5 行"；NULL 或空串
+                              = 不显示这一行，浮层也就不会多出那段高度），
+                              body = 正文预览。
+                              几何/字体/透明度读 [General] 的 Copy* 键；
                               fail 只决定强调色与停留时长取哪一个。 */

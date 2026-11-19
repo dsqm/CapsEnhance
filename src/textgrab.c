@@ -694,7 +694,7 @@ void TextGrabRun(POINT pt) {
         else if (best.emptyEdit)      err = TG_ERR_NOINPUT;
         else                          err = TG_ERR_NOTEXT;
         if (g_recording.load()) CapLog("  [复制] 失败：%d", err);
-        ToastShow(TRUE, L"复制失败", TgReason(err));
+        ToastShow(TRUE, L"复制失败", NULL, TgReason(err));
         return;
     }
 
@@ -708,7 +708,7 @@ void TextGrabRun(POINT pt) {
     best.text = NULL;
     if (!clean || cleanLen == 0) {
         free(clean);
-        ToastShow(TRUE, L"复制失败", TgReason(TG_ERR_EMPTY));
+        ToastShow(TRUE, L"复制失败", NULL, TgReason(TG_ERR_EMPTY));
         return;
     }
 
@@ -723,7 +723,7 @@ void TextGrabRun(POINT pt) {
             CapLog("%.*ls", cap, clean);
         }
         free(clean);
-        ToastShow(TRUE, L"复制失败", TgReason(TG_ERR_CLIP));
+        ToastShow(TRUE, L"复制失败", NULL, TgReason(TG_ERR_CLIP));
         return;
     }
 
@@ -738,21 +738,25 @@ void TextGrabRun(POINT pt) {
         wcscpy_s(proc, 128, L"未知程序");
 
     WCHAR head[256];
+    WCHAR meta[128];
+    meta[0] = 0;
     if (CfgBool(CFG_COPY_SHOW_COUNT)) {
         /* 字数按**码点**数（代理对算一个字），不能用 cleanLen —— 那是 UTF-16
-           码元数，𰻝 / emoji 会被算成两个字。 */
+           码元数，𰻝 / emoji 会被算成两个字。
+           单行时不写"1 行"：那是冗余信息，只有真多行时行数才有意义。 */
         int chars = CopyCountChars(clean, cleanLen);
         int lines = CopyCountLines(clean, cleanLen);
-        _snwprintf_s(head, _countof(head), _TRUNCATE, L"%s · %d 字 · %d 行",
-                     proc, chars, lines);
-    } else {
-        _snwprintf_s(head, _countof(head), _TRUNCATE, L"%s", proc);
+        if (lines > 1)
+            _snwprintf_s(meta, _countof(meta), _TRUNCATE, L"%d 字 · %d 行", chars, lines);
+        else
+            _snwprintf_s(meta, _countof(meta), _TRUNCATE, L"%d 字", chars);
     }
+    _snwprintf_s(head, _countof(head), _TRUNCATE, L"%s", proc);
 
     if (g_recording.load())
         CapLog("  [复制] 成功 %d 字 %d 行 -> 剪贴板，原文前 60 字：%.*ls",
                cleanLen, (int)wcslen(head), 60, clean);
 
-    ToastShow(FALSE, head, clean);
+    ToastShow(FALSE, head, meta, clean);
     free(clean);
 }

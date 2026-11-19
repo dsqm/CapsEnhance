@@ -147,7 +147,7 @@ static Field kFields[] = {
     { IDC_COPY_FONTBTN,   -1,                     L"选择字体…",                                       NULL,      0, 0, 1, 0, 0,      L"超级复制" },
     { IDC_COPY_MAXLINES,  CFG_COPY_MAX_LINES,     L"预览最多显示行数（超出用 … 截断，剪贴板仍是全文）",  L"行",     0, 0, 0, 0, 0,      L"超级复制" },
     { IDC_COPY_MAXCHARS,  CFG_COPY_MAX_CHARS,     L"预览最多显示字数（同上）",                         L"字",     0, 0, 0, 0, 0,      L"超级复制" },
-    { IDC_COPY_SHOWCOUNT, CFG_COPY_SHOW_COUNT,    L"标题行显示「来源程序 · 字数 · 行数」",             NULL,      1, 0, 0, 0, 0,      L"超级复制" },
+    { IDC_COPY_SHOWCOUNT, CFG_COPY_SHOW_COUNT,    L"标题行右侧显示「字数 · 行数」（单行文本只显示字数）",  NULL,      1, 0, 0, 0, 0,      L"超级复制" },
     { IDC_COPY_STRIPTAIL, CFG_COPY_STRIP_TAIL,    L"复制时去掉尾部空白与换行（内部换行不受影响）",      NULL,      1, 0, 0, 0, 0,      L"超级复制" },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))

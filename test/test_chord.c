@@ -102,8 +102,8 @@ static void ResetInfoRec(void) { g_infoOpen = 0; }
 static int   g_grabRun = 0;
 static POINT g_grabPt;
 void TextGrabRun(POINT pt) { g_grabRun++; g_grabPt = pt; }
-void ToastShow(BOOL fail, const WCHAR* head, const WCHAR* body) {
-    (void)fail; (void)head; (void)body;
+void ToastShow(BOOL fail, const WCHAR* title, const WCHAR* meta, const WCHAR* body) {
+    (void)fail; (void)title; (void)meta; (void)body;
 }
 void ToastHideNow(void) { }
 static void ResetGrabRec(void) { g_grabRun = 0; g_grabPt.x = g_grabPt.y = 0; }

@@ -65,19 +65,22 @@ using namespace Gdiplus;
 #define C_BG_PANEL   RGB(252, 252, 252)
 #define C_BG_BORDER  RGB(C_BORDER_R, C_BORDER_G, C_BORDER_B)
 #define C_TEXT_HEAD  RGB(108, 108, 108)
+#define C_TEXT_META  RGB(154, 154, 154)   /* 标题行右侧的计数：比标题更淡一级 */
 #define C_TEXT_BODY  RGB(26, 26, 26)
 #define C_TEXT_FAIL  RGB(176, 0, 32)
 
 typedef struct {
     WCHAR* head;
+    WCHAR* meta;    /* 标题行右侧的计数（"124 字 · 5 行"）；NULL/空 = 不显示 */
     WCHAR* body;
     BOOL   fail;
 } ToastMsg;   /* 跨线程投递：由调用线程 malloc，窗口线程负责 free */
 
 typedef struct {
-    ToastMsg msg;        /* 已接管的两条字符串 */
+    ToastMsg msg;        /* 已接管的三条字符串 */
     HFONT    fHead, fBody;
     RECT     headRect;   /* 已排版好的矩形（窗口坐标） */
+    RECT     metaRect;
     RECT     bodyRect;
     int      w, h;
     int      radius;     /* 圆角半径（物理像素） */
@@ -205,6 +208,7 @@ static void AddRoundRect(GraphicsPath* p, REAL x, REAL y, REAL w, REAL h, REAL r
 
 static void FreeState(void) {
     free(s_st.msg.head);
+    free(s_st.msg.meta);
     free(s_st.msg.body);
     if (s_st.fHead) DeleteObject(s_st.fHead);
     if (s_st.fBody) DeleteObject(s_st.fBody);
@@ -215,6 +219,7 @@ static void FreeState(void) {
 static BOOL Layout(HWND hwnd, ToastMsg* in) {
     FreeState();
     s_st.msg.head = in->head;  in->head = NULL;
+    s_st.msg.meta = in->meta;  in->meta = NULL;
     s_st.msg.body = in->body;  in->body = NULL;
     s_st.msg.fail = in->fail;
 
@@ -222,8 +227,11 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
     if (!GetCursorPos(&cur)) cur.x = cur.y = 0;
     HMONITOR mon = MonitorFromPoint(cur, MONITOR_DEFAULTTONEAREST);
     int dpi = DpiOfMonitor(mon);
-    int pad = MulDiv(14, dpi, 96);
-    int gap = MulDiv(6, dpi, 96);
+    int pad = MulDiv(14, dpi, 96);          /* 左右内边距 */
+    int padTop = MulDiv(9, dpi, 96);        /* 顶部：小字号的行高自带留白，按 14 会显得空 */
+    int padBottom = MulDiv(10, dpi, 96);
+    int gap = MulDiv(5, dpi, 96);           /* 标题行与正文之间 */
+    int metaGapX = MulDiv(14, dpi, 96);     /* 标题与右侧计数之间至少留这么远 */
     int maxW = MulDiv(CfgInt(CFG_COPY_WIDTH_MAX), dpi, 96);
     int minW = MulDiv(280, dpi, 96);
     int radius = MulDiv(CfgInt(CFG_COPY_RADIUS), dpi, 96);
@@ -272,10 +280,26 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
     int bodyNaturalW = one.right - one.left;
     int lineH = one.bottom - one.top;
 
+    /* 计数（可选）：与标题同处**顶部一行**，贴右边缘。
+       先量出来 —— 窗口宽度必须同时容得下「标题 + 间隔 + 计数」。 */
+    int metaH = 0, metaW = 0;
+    if (s_st.msg.meta && s_st.msg.meta[0]) {
+        SelectObject(dc, s_st.fHead ? s_st.fHead : GetStockObject(DEFAULT_GUI_FONT));
+        RECT mr;
+        SetRect(&mr, 0, 0, textW, 0);
+        DrawTextW(dc, s_st.msg.meta, -1, &mr, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+        metaH = mr.bottom - mr.top;
+        metaW = mr.right - mr.left;
+    }
+
+    int rowW = headW + (metaW > 0 ? metaGapX + metaW : 0);
+    int rowH = headH > metaH ? headH : metaH;
+
     int w, bodyH;
     if (bodyNaturalW <= textW) {
         /* 一行放得下：窗口随内容收窄 */
-        w = (headW > bodyNaturalW ? headW : bodyNaturalW) + 2 * pad;
+        int contentW = rowW > bodyNaturalW ? rowW : bodyNaturalW;
+        w = contentW + 2 * pad;
         bodyH = lineH;
     } else {
         /* 需要折行：用满上限宽度，按这个宽度量高度 */
@@ -285,12 +309,15 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
         DrawTextW(dc, bodyText, -1, &wrap,
                   DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
         bodyH = wrap.bottom - wrap.top;
+        /* 标题 + 计数比正文上限还宽（长程序名 + 极短正文）时，宁可让窗口宽一点，
+           也不把计数挤出行外 */
+        if (rowW + 2 * pad > w) w = rowW + 2 * pad;
     }
     if (w < minW) w = minW;
     if (w > maxW) w = maxW;
     DeleteDC(dc);
 
-    int h = pad + headH + gap + bodyH + pad;
+    int h = padTop + rowH + gap + bodyH + padBottom;
     int minH = MulDiv(40, dpi, 96);
     if (h < minH) h = minH;
 
@@ -310,15 +337,28 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
     if (y < work.top) y = work.top;
     if (x < work.left) x = work.left;
 
+    /* 顶部一行：标题在左、计数贴右。标题的右边界让出计数所占的宽度，
+       两者永远不会重叠（标题过长时按 DT_END_ELLIPSIS 截）。 */
     s_st.headRect.left = pad;
-    s_st.headRect.top = pad;
-    s_st.headRect.right = w - pad;
-    s_st.headRect.bottom = pad + headH;
+    s_st.headRect.top = padTop;
+    s_st.headRect.right = (metaW > 0) ? (w - pad - metaW - metaGapX) : (w - pad);
+    if (s_st.headRect.right < s_st.headRect.left + MulDiv(24, dpi, 96))
+        s_st.headRect.right = s_st.headRect.left + MulDiv(24, dpi, 96);
+    s_st.headRect.bottom = padTop + rowH;
 
     s_st.bodyRect.left = pad;
-    s_st.bodyRect.top = pad + headH + gap;
+    s_st.bodyRect.top = padTop + rowH + gap;
     s_st.bodyRect.right = w - pad;
     s_st.bodyRect.bottom = s_st.bodyRect.top + bodyH;
+
+    if (metaW > 0) {
+        s_st.metaRect.left = w - pad - metaW;
+        s_st.metaRect.top = padTop;
+        s_st.metaRect.right = w - pad;
+        s_st.metaRect.bottom = padTop + rowH;
+    } else {
+        SetRect(&s_st.metaRect, 0, 0, 0, 0);
+    }
 
     s_st.w = w;
     s_st.h = h;
@@ -361,6 +401,14 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
     SelectObject(s_colDC, s_st.fBody ? s_st.fBody : GetStockObject(DEFAULT_GUI_FONT));
     DrawTextW(s_colDC, s_st.msg.body ? s_st.msg.body : L"", -1, &br,
               DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
+
+    if (s_st.metaRect.bottom > s_st.metaRect.top) {
+        RECT mr = s_st.metaRect;
+        SetTextColor(s_colDC, C_TEXT_META);
+        SelectObject(s_colDC, s_st.fHead ? s_st.fHead : GetStockObject(DEFAULT_GUI_FONT));
+        DrawTextW(s_colDC, s_st.msg.meta ? s_st.msg.meta : L"", -1, &mr,
+                  DT_SINGLELINE | DT_RIGHT | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+    }
 
     /* ---- 蒙版层：抗锯齿圆角矩形（黑底白形，R 通道即覆盖度） ---- */
     {
@@ -433,6 +481,7 @@ static LRESULT CALLBACK ToastProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             FreeState();
         }
         free(m->head);
+        free(m->meta);
         free(m->body);
         free(m);
         return 0;
@@ -513,7 +562,7 @@ static BOOL ToastEnsure(void) {
 
 /* ---------- 对外 ---------- */
 
-void ToastShow(BOOL fail, const WCHAR* headline, const WCHAR* body) {
+void ToastShow(BOOL fail, const WCHAR* title, const WCHAR* meta, const WCHAR* body) {
     if (!ToastEnsure()) return;
 
     ToastMsg* m = (ToastMsg*)calloc(1, sizeof(ToastMsg));
@@ -521,10 +570,13 @@ void ToastShow(BOOL fail, const WCHAR* headline, const WCHAR* body) {
     m->fail = fail ? TRUE : FALSE;
 
     int shown = 0;
-    m->head = _wcsdup(headline ? headline : L"");
+    m->head = _wcsdup(title ? title : L"");
     m->body = TruncateBody(body ? body : L"", &shown);
+    /* 计数行可以缺省（失败提示没有它）；拷贝失败就当作没有，不让整条提示消失 */
+    if (meta && *meta) m->meta = _wcsdup(meta);
     if (!m->head || !m->body) {
         free(m->head);
+        free(m->meta);
         free(m->body);
         free(m);
         return;
@@ -532,6 +584,7 @@ void ToastShow(BOOL fail, const WCHAR* headline, const WCHAR* body) {
 
     if (!PostMessageW(s_hwnd, WM_TOAST_SHOW, 0, (LPARAM)m)) {
         free(m->head);
+        free(m->meta);
         free(m->body);
         free(m);
     }
