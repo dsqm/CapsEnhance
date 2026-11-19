@@ -94,6 +94,7 @@
 #define ACT_PGDOWN   22              /* 下翻页（=）：发 VK_NEXT，光标/滚动类 -> 可重复、可带选区 */
 #define ACT_PIN      23              /* 窗口置顶开关（T）：翻转类 -> 单发，见 pin.cpp */
 #define ACT_INFO     24              /* 窗口信息（F12）：拉起独立 exe 列出窗口/进程详情 */
+#define ACT_COPYTEXT 25              /* 超级复制（C）：取光标下控件的文字 -> 剪贴板 -> 预览浮层 */
 
 #define DIR_LEFT 0
 #define DIR_RIGHT 1
@@ -111,6 +112,7 @@
 #define ACTF_HELP        0x40   /* 按键帮助：由 main.c 直接在和弦上开合（见 help.c），不走按键发送 */
 #define ACTF_PIN         0x100  /* 窗口置顶：交给 pin.c 的置顶线程（投递窗口句柄），不走按键发送 */
 #define ACTF_INFO        0x200  /* 窗口信息：由 main.c 直接拉起/前置独立 exe（见 info.c），不走按键发送 */
+#define ACTF_COPYTEXT    0x400  /* 超级复制：交给 textgrab.c（跨进程无障碍查询 + 剪贴板），不走按键发送 */
 
 /* ---------- 修饰（和弦）模式 ----------
    按住 C 期间生效的"组合修饰"。**激活键是编译期常量，不读配置**（见下面

@@ -82,6 +82,11 @@ static void RunJob(const ActJob* j) {
                所以这条分支**不会**把后面的动作堵在队列里（文件头那条"队列是
                FIFO"的顾虑对它不成立）。 */
             FolderOpenRequest(j->hwnd);
+        } else if (ActHasFlag(act, ACTF_COPYTEXT)) {
+            /* 控件复制（Caps+C）：跨进程查无障碍树（UIA / MSAA）可能卡住几百
+               毫秒，还可能要重试几次 + 抢剪贴板 —— 全部是文件头列的那类阻塞，
+               所以只能在这一层做。内部自带总预算（见 textgrab.c）。 */
+            TextGrabRun(j->pt);
         } else {
             /* 诊断：按键动作"发了"与"目标程序认了"是两件事 —— 用户看到
                "按了没反应"时，只有回读光标才能区分。只在记录模式下读，

@@ -26,6 +26,10 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\test_config.obj test\test_config.c || exit /b 1
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
    /Isrc /c /Foobj\test_child.obj test\test_child.c || exit /b 1
+rem 控件复制的纯文本处理：test_copytext.c **直接 include src\copy_text.c**，
+rem 所以这里只编它一个 TU（与 test_child.c 同一做法）
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /TP ^
+   /Isrc /c /Foobj\test_copytext.obj test\test_copytext.c || exit /b 1
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\test_nav.obj obj\nav_test.obj obj\navword_test.obj obj\send_test.obj ^
    obj\config_test.obj ^
@@ -45,6 +49,10 @@ rem test_child.c includes src\child.c directly, so link only its own obj
 cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
    obj\test_child.obj ^
    /link /OUT:obj\test\test_child.exe user32.lib /SUBSYSTEM:CONSOLE || exit /b 1
+rem test_copytext.c includes src\copy_text.c directly
+cl /nologo /MT /utf-8 /DUNICODE /D_UNICODE ^
+   obj\test_copytext.obj ^
+   /link /OUT:obj\test\test_copytext.exe user32.lib /SUBSYSTEM:CONSOLE || exit /b 1
 echo [OK] compiled. running test_nav (word-jump algorithm)...
 ".\obj\test\test_nav.exe"
 set NAVRC=%errorlevel%
@@ -60,7 +68,12 @@ echo.
 echo [OK] running test_child (subprocess lifetime: job + death notify)...
 ".\obj\test\test_child.exe"
 set CHILDRC=%errorlevel%
+echo.
+echo [OK] running test_copytext (control-copy text handling)...
+".\obj\test\test_copytext.exe"
+set COPYRC=%errorlevel%
 if not "%NAVRC%"=="0" exit /b %NAVRC%
 if not "%SCIRC%"=="0" exit /b %SCIRC%
 if not "%CFGRC%"=="0" exit /b %CFGRC%
-exit /b %CHILDRC%
+if not "%CHILDRC%"=="0" exit /b %CHILDRC%
+exit /b %COPYRC%

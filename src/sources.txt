@@ -18,3 +18,6 @@ src\help.c
 src\child.c
 src\lane.c
 src\info.c
+src\textgrab.c
+src\toast.c
+src\copy_text.c

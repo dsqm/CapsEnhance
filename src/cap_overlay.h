@@ -71,3 +71,18 @@ BOOL ChildWatchPid(ChildWatch* w, DWORD pid, HWND notify, UINT msg);
                     /* 盯着这个 pid：它一结束就给 notify 发 msg。已经在盯则直接返回 */
 void ChildWatchStop(ChildWatch* w);
                     /* 拆掉等待（等回调跑完）并复位结构 */
+
+/* ---------- 复制结果预览浮层（`Caps+C`；窗口在本体的**独立线程**里） ----------
+   为什么这次不进独立 exe：它是一次性、短寿命、不接收任何输入的提示，没有
+   按键图那种常驻位图，也没有窗口信息那种编辑状态。为它加第 5 个 exe 会把
+   build.bat / sources.txt / CI 上传清单 / README 一次全撑大，而收益只是
+   几十 kb 的隔离 —— 帮助与窗口信息拆进程是因为它们**要自己管生命周期与
+   事件循环**，这个浮层只需要一个窗口和一只定时器。
+
+   ★ 采样前必须 ToastHideNow()：浮层就挂在屏幕下方居中，光标恰好停在它上面
+     （比如复制任务栏或底部工具栏上的字）时，无障碍命中测试会先命中**我们自己
+     的窗口**，取回一堆提示文字。这是"浮层会污染取样"那条坑的落地。 */
+void ToastHideNow(void);   /* 同步隐藏（SendMessage 到窗口线程，返回时已隐藏） */
+void ToastShow(BOOL fail, const WCHAR* headline, const WCHAR* body);
+                           /* 显示一次提示；几何/字体/透明度读 [General] 的 Copy* 键。
+                              fail 只决定强调色与停留时长取哪一个。 */

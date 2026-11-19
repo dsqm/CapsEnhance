@@ -263,6 +263,11 @@ static void PostAct(int act, int fillAct, int count, BOOL keep) {
        postTick 不在这里填：投递时刻由 act.c 的 ActPost 写。 */
     j.hwnd    = (ActHasFlag(act, ACTF_OPENFOLDER) || ActHasFlag(act, ACTF_PIN))
                     ? GetForegroundWindow() : NULL;
+    /* 控件复制（Caps+C）：要的是**按下那一刻**的光标坐标 —— 用户按下之后
+       手一抖，"取的是哪个字"就变了，而这件事全由这个点决定。与 hwnd 同一
+       个快照时机、同一个理由（执行线程是异步的）。 */
+    j.pt.x = j.pt.y = 0;
+    if (ActHasFlag(act, ACTF_COPYTEXT)) GetCursorPos(&j.pt);
     ActPost(&j);
 }
 

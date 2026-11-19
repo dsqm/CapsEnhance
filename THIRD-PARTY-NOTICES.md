@@ -99,3 +99,33 @@ Ditto 以 GPL-3.0 授权，与本项目 GPL-3.0-or-later 兼容，全文见根�
 | miniz | 多作者 | Public domain |
 
 各子组件的完整声明见对应源文件头部。
+
+---
+
+## 6. Textify —— GPL-3.0
+
+- 上游：<https://github.com/rammichael/Textify>（本地参考快照 1.10.4.0）
+- 引入位置：`src/textgrab.c`
+- 引入内容：**取词通道的调用序列与仲裁规则**——按屏幕坐标用 UI Automation
+  `ElementFromPoint` 与 MSAA `AccessibleObjectFromPoint` 查询元素、两个通道各查
+  两次（Chromium 的"第一次常返回错元素"怪癖）、沿**同进程**父链依次读取
+  `Name` / `Value` / `Description`（标题栏角色跳过 Description）、两路都出结果时
+  取包围盒**严格更小**（更内层）的那个。
+- **未引入**：WTL 依赖与 `DoModal` 对话框框架、托盘、鼠标钩子触发、自更新。
+  上游的取词函数只用到 ATL（`CComPtr` / `CComBSTR` / `CString` / `CRect`），
+  本项目按 `src/comptr.h` 的最小智能指针 + CINTERFACE 写法重写，因此不引 ATL/WTL。
+- 与上游的**有意差异**（均在 `src/textgrab.c` 文件头写明）：每次跨进程查询有
+  时间预算与超时放弃、取不到文本时不写剪贴板（上游会把占位串写进去）、
+  对懒加载控件短间隔重查、写剪贴板重试 10×20ms 并在失败时把全文写进日志。
+
+```
+Textify: Copyright (C) Ramen Software
+         https://github.com/rammichael/Textify
+```
+
+**许可说明（与上面几节的差别要看清）**：Textify 的 LICENSE 是 GPL-3.0 全文，
+附录里那段 "either version 3 … or any later version" 属于 GPL 自带的样板措辞，
+上游**没有另外给出** or-later 的授权声明。本项目整体以 GPL-3.0-or-later 发布，
+所以：**包含上述移植部分的分发物按 GPL-3.0 约束，不带 or-later 授权**；其余
+不受该移植影响的部分仍是 GPL-3.0-or-later。两者不冲突（GPLv3 是本项目
+or-later 声明里就包含的选项）。

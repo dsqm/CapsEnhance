@@ -41,9 +41,12 @@
    滚轮若停在**某个列表框上**，滚的是那个列表框而不是整个表单
    （见 WndProc 的 WM_MOUSEWHEEL / ScrollListBy）。
 
-   页签：表单分两页 —— 「常规」（数值 / 开关这些配置项）与
-   「名单」（五份按程序 / 窗口生效的名单：按词跳转 / 自动屏蔽 / 整格滚动 /
-   拖动的两份黑名单）。分页是结构性的：配置项全在常规页、名单全在名单页，
+   页签：表单分三页 —— 「常规」（数值 / 开关这些配置项）、「超级复制」
+   （超级复制预览浮层的**全部**参数：停留时长 / 位置 / 宽度 / 透明度 / 圆角 /
+   字体 / 显示量）、「名单」（五份按程序 / 窗口生效的名单：按词跳转 / 自动屏蔽 /
+   整格滚动 / 拖动的两份黑名单）。第三页是后加的：那批参数有十二项，混在常规页
+   里会把"按词跳转 / 滚动"那几段挤到很下面，而它们与取词是完全独立的两件事。
+   分页是结构性的：配置项按 group 归页（见 FieldPage），名单全在名单页，
    页签只决定"显示哪些控件" —— 控件仍全是主窗口的子窗口，Load / Save 与
    WM_COMMAND 照旧按 id 找、不分页（见 kTabNames / g_curTab / Layout）。
    页签**外观自绘**（PaintTab：comctl 默认的浮凸小块太旧，改成"文本 +
@@ -83,12 +86,19 @@
 /* 控件 ID 全在 settings_int.h（两个编译单元共用，见那里的说明）。 */
 
 /* ---- 页签 ----
-   两页：常规 = 全部配置项（kFields），名单 = 全部名单（kLists）。分页是
-   **结构性的**（按程序 / 窗口生效的东西全在名单页，见文件头"页签"段），
-   所以两张表里不需要页签列。页签只决定显隐：控件本体不分家，Load / Save /
-   WM_COMMAND 照旧按 id 找 —— 显隐的落点在 Layout 的"显隐轮"。 */
-enum { TAB_GENERAL = 0, TAB_LISTS = 1, TAB_N = 2 };
-static const WCHAR* const kTabNames[TAB_N] = { L"常规", L"名单" };
+   三页：常规 = 通用/按键类配置项（kFields 里除"超级复制"之外的段），
+   超级复制 = 预览浮层那一批参数，名单 = 全部名单（kLists）。
+   分页是**结构性的**（按程序 / 窗口生效的东西全在名单页，浮层参数单独一页，
+   见文件头"页签"段），所以表里不需要显式的页签列 —— 归页由 FieldPage 按
+   group 现算：group 是「超级复制」的整段归第二页，其余归常规页。
+   页签只决定显隐：控件本体不分家，Load / Save / WM_COMMAND 照旧按 id 找。 */
+enum { TAB_GENERAL = 0, TAB_COPY = 1, TAB_LISTS = 2, TAB_N = 3 };
+static const WCHAR* const kTabNames[TAB_N] = { L"常规", L"超级复制", L"名单" };
+
+/* 配置项归哪一页：按 group 现算（实现在 kFields 之后，因为要遍历它）。
+   按 group 算而不是给 Field 加一列 —— 同一段的行必须连排，所以"段 -> 页"
+   是天然的一对多；再加一列就多一处可能与 group 不一致的状态。 */
+#define COPY_GROUP_NAME L"超级复制"
 
 /* ---------- 字段表：控件的"是什么"，不是"长什么样" ----------
    加一个配置项 = 这里加一行（另两处是 config.c 的 kCfg 表与 README 的配置表）。
@@ -122,8 +132,31 @@ static Field kFields[] = {
     { IDC_INFO_FONT,   CFG_INFO_FONT,          L"字体（留空 = 依次回落 Cascadia Mono / Consolas / 微软雅黑）", NULL, 0, 1, 0, 0, 0, L"窗口信息" },
     { IDC_INFO_FSIZE,  CFG_INFO_FONT_SIZE,     L"字号",                                            L"磅",     0, 0, 0, 0, 0,      L"窗口信息" },
     { IDC_INFO_FONTBTN, -1,                    L"选择字体…",                                       NULL,     0, 0, 1, 0, 0,      L"窗口信息" },
+    /* 超级复制（Caps+C）的预览浮层。顺序即界面顺序：先"什么时候消失"，
+       再"摆在哪、长什么样"，最后"显示多少"。
+       两处文案要点：① 停留时长分成功/失败两个（失败那句原因要读完才决定
+       下一步，默认更长）；② 行数/字数**只影响浮层显示**，剪贴板永远是全文 ——
+       不写清楚的话，用户会以为复制被截断了。 */
+    { IDC_COPY_STAY,      CFG_COPY_STAY_MS,       L"复制成功提示停留（0 无效，最小 500）",             L"毫秒",   0, 0, 0, 0, 0,      L"超级复制" },
+    { IDC_COPY_FAILSTAY,  CFG_COPY_FAIL_STAY_MS,  L"复制失败提示停留（原因要读完再决定怎么办，通常更长）", L"毫秒", 0, 0, 0, 0, 0,      L"超级复制" },
+    { IDC_COPY_POS,       CFG_COPY_POS_PERCENT,   L"浮层纵向位置（工作区高度百分比，水平恒为居中）",    L"%",      0, 0, 0, 0, 0,      L"超级复制" },
+    { IDC_COPY_WMAX,      CFG_COPY_WIDTH_MAX,     L"浮层宽度上限（96 DPI 逻辑像素，窄内容会自动收窄）", L"px",     0, 0, 0, 0, 0,      L"超级复制" },
+    { IDC_COPY_ALPHA,     CFG_COPY_ALPHA,         L"浮层不透明度（0..255，242 ≈ 95%）",                NULL,      0, 0, 0, 0, 0,      L"超级复制" },
+    { IDC_COPY_RADIUS,    CFG_COPY_RADIUS,        L"浮层圆角半径（0 = 直角）",                         L"px",     0, 0, 0, 0, 0,      L"超级复制" },
+    { IDC_COPY_FONT,      CFG_COPY_FONT,          L"字体（留空 = 系统默认 UI 字体；标题 9 磅 / 正文 10 磅固定）", NULL, 0, 1, 0, 0, 0, L"超级复制" },
+    { IDC_COPY_FONTBTN,   -1,                     L"选择字体…",                                       NULL,      0, 0, 1, 0, 0,      L"超级复制" },
+    { IDC_COPY_MAXLINES,  CFG_COPY_MAX_LINES,     L"预览最多显示行数（超出用 … 截断，剪贴板仍是全文）",  L"行",     0, 0, 0, 0, 0,      L"超级复制" },
+    { IDC_COPY_MAXCHARS,  CFG_COPY_MAX_CHARS,     L"预览最多显示字数（同上）",                         L"字",     0, 0, 0, 0, 0,      L"超级复制" },
+    { IDC_COPY_SHOWCOUNT, CFG_COPY_SHOW_COUNT,    L"标题行显示「来源程序 · 字数 · 行数」",             NULL,      1, 0, 0, 0, 0,      L"超级复制" },
+    { IDC_COPY_STRIPTAIL, CFG_COPY_STRIP_TAIL,    L"复制时去掉尾部空白与换行（内部换行不受影响）",      NULL,      1, 0, 0, 0, 0,      L"超级复制" },
 };
 #define FIELD_N ((int)(sizeof(kFields) / sizeof(kFields[0])))
+
+/* 配置项归哪一页（见 kTabNames 处的说明）。 */
+static int FieldPage(int i) {
+    const WCHAR* g = kFields[i].group;
+    return (g && wcscmp(g, COPY_GROUP_NAME) == 0) ? TAB_COPY : TAB_GENERAL;
+}
 
 /* 值域从 config.c 的表灌进来（界面不再写第二份 min/max）。
    表是运行期可变的，所以在这里填一次；建控件之前调用。 */
@@ -873,36 +906,38 @@ static void Layout(int w, int h) {
     /* 显隐轮：分页是结构性的（配置项 <-> 名单，见 kTabNames 处的说明），
        所以按"控件属于哪张表"整批显隐，不逐项记状态 —— 每次全量重排的
        同一个道理：状态与布局不脱节。 */
-    BOOL fieldPage = (g_curTab == TAB_GENERAL);
+    BOOL generalPage = (g_curTab == TAB_GENERAL);
+    BOOL listPage    = (g_curTab == TAB_LISTS);
     for (int i = 0; i < FIELD_N; i++) {
+        BOOL on = (FieldPage(i) == g_curTab);
         int id = kFields[i].id;
-        ShowCtrl(GetDlgItem(g_hwnd, id), fieldPage);
-        ShowCtrl(GetDlgItem(g_hwnd, id + 500), fieldPage);
-        ShowCtrl(GetDlgItem(g_hwnd, id + 600), fieldPage);
+        ShowCtrl(GetDlgItem(g_hwnd, id), on);
+        ShowCtrl(GetDlgItem(g_hwnd, id + 500), on);
+        ShowCtrl(GetDlgItem(g_hwnd, id + 600), on);
         /* 段头随段显隐。id == 0 必须跳过：两个"窗框"曾经以 hMenu=NULL 创建
            （控件 ID = 0），GetDlgItem(..., 0) 会命中它们 —— 名单页把底部
            窗框（按钮托盘）当段头藏掉，按钮整条消失（实测踩过）。窗框现在
            有正式 ID，这里再加 id 判断双保险。 */
         if (g_grpHead[i])
-            ShowCtrl(GetDlgItem(g_hwnd, g_grpHead[i]), fieldPage);
+            ShowCtrl(GetDlgItem(g_hwnd, g_grpHead[i]), on);
     }
     /* 「常用」字段编排属于常规页（窗口信息段之后） */
-    ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_HEAD), fieldPage);
-    ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_LIST), fieldPage);
+    ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_HEAD), generalPage);
+    ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_LIST), generalPage);
     for (int k = 0; k < 5; k++)
-        ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_ADD + k), fieldPage);
+        ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_ADD + k), generalPage);
     for (int i = 0; i < LIST_N; i++) {
         int base = IDC_LIST0 + i * LIST_STRIDE;
         for (int k = 0; k <= 5; k++)      /* 组内控件占 0..5 六个 id */
-            ShowCtrl(GetDlgItem(g_hwnd, base + k), !fieldPage);
+            ShowCtrl(GetDlgItem(g_hwnd, base + k), listPage);
     }
 
     int y = viewTop + S(4);
     for (int i = 0; i < FIELD_N; i++) {
-        if (!fieldPage) break;            /* 名单页：配置项一行都不排 */
+        if (FieldPage(i) != g_curTab) continue;   /* 不属于本页：一行都不排 */
         if (g_grpHead[i]) {               /* 换段：先排段头。首段不额外加空 ——
                                              页签条下面已经留了呼吸感 */
-            if (i) y += S(12);
+            if (i && FieldPage(i - 1) == g_curTab) y += S(12);
             MoveWindow(GetDlgItem(g_hwnd, g_grpHead[i]), x, y - off, w - x * 2, S(20), TRUE);
             y += S(26);
         }
@@ -946,7 +981,7 @@ static void Layout(int w, int h) {
        子段头 + 左侧有序列表 + 右侧竖排五颗按钮。按钮贴着列表，动的是哪个
        列表不用猜。列表给足默认那 11 项的高度（行高随字体走，所以按 DIP
        折算而不是按"行数"写死，高分屏上不会只剩半截）；再多它自己出滚动条。 */
-    if (fieldPage) {
+    if (generalPage) {
         int cmnW = S(240), cmnRow = S(26), cmnGap = S(4);
         int cmnH = S(170);
         int bx = x + cmnW + S(8), bw = S(96);
@@ -969,7 +1004,7 @@ static void Layout(int w, int h) {
     int listW = w - x * 2;
     if (listW > S(328)) listW = S(328);
     for (int i = 0; i < LIST_N; i++) {
-        if (fieldPage) break;             /* 常规页：名单一组都不排 */
+        if (!listPage) break;             /* 非名单页：名单一组都不排 */
         int base = IDC_LIST0 + i * LIST_STRIDE;
         MoveWindow(GetDlgItem(g_hwnd, base + 4), x, y - off, w - x * 2, S(18), TRUE);  /* 标题 */
         y += S(20);
@@ -1571,6 +1606,39 @@ static void PickInfoFont(void) {
     UpdateDirty();
 }
 
+/* 「选择字体…」（超级复制预览浮层）。与 PickInfoFont 同一套做法，只差两点：
+     · 只回填**字体名**，没有字号行 —— 浮层的字号是固定的（标题 9 磅 / 正文
+       10 磅），一个只活一两秒的提示不需要字号旋钮；
+     · 因此不做 CF_LIMITSIZE，选中的磅数直接丢弃。 */
+static void PickCopyFont(void) {
+    HWND edFace = GetDlgItem(g_hwnd, IDC_COPY_FONT);
+    if (!edFace) return;
+
+    WCHAR face[LF_FACESIZE] = L"";
+    GetWindowTextW(edFace, face, LF_FACESIZE);
+    if (!face[0]) _snwprintf_s(face, LF_FACESIZE, _TRUNCATE, L"%s", L"Microsoft YaHei UI");
+
+    LOGFONTW lf;
+    memset(&lf, 0, sizeof(lf));
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfHeight  = -MulDiv(10, g_dpi, 72);   /* 与 toast.c 的正文字号同一算法 */
+    _snwprintf_s(lf.lfFaceName, LF_FACESIZE, _TRUNCATE, L"%s", face);
+
+    CHOOSEFONTW cf;
+    memset(&cf, 0, sizeof(cf));
+    cf.lStructSize = sizeof(cf);
+    cf.hwndOwner   = g_hwnd;
+    cf.lpLogFont   = &lf;
+    cf.Flags       = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_FORCEFONTEXIST |
+                     CF_NOVERTFONTS;
+    if (!ChooseFontW(&cf)) return;
+
+    SetWindowTextW(edFace, lf.lfFaceName);
+    SetStatus(L"已选 %s —— 保存后生效", lf.lfFaceName);
+    UpdateDirty();
+}
+
+
 /* "窗框"（顶部与底部共用的实底子窗口类）：状态栏/按钮/页签条放在它上面。
    为什么要它：表单内容滚动时，滑出可视区的部分不会被自动裁掉 —— 底部会从
    状态栏/按钮周围的缝隙里露出来，顶部则直接盖到页签条上；窗框在 z 序上
@@ -1604,6 +1672,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         if (id == IDC_INFO_FONTBTN) { PickInfoFont(); return 0; }
+        if (id == IDC_COPY_FONTBTN) { PickCopyFont(); return 0; }
         /* 「常用」字段编排（窗口信息弹窗的两个视图之一） */
         if (id == IDC_CMN_ADD)  { CmnAddDlg(); return 0; }
         if (id == IDC_CMN_DEL)  { CmnDel(); return 0; }

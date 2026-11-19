@@ -251,6 +251,11 @@ static WCHAR g_infoFont[LF_FACESIZE];
 static WCHAR g_infoCommon[INFO_COMMON_CHARS];
 #define INFO_COMMON_CAP ((int)(sizeof(g_infoCommon) / sizeof(g_infoCommon[0])))
 
+/* 复制结果预览浮层的字体名（CFG_COPY_FONT）。与 InfoFont 用各自独立的缓冲：
+   一个是长期摆在一边的编辑器，一个是闪一下就走的提示，两者没有理由共用。 */
+static WCHAR g_copyFont[LF_FACESIZE];
+#define COPY_FONT_CAP ((int)(sizeof(g_copyFont) / sizeof(g_copyFont[0])))
+
 static CfgDef kCfg[CFG_COUNT] = {
     { "runasadmin", "RunAsAdmin", CFG_F_BOOL, 0, 0, 1, 0, NULL, 0,
       "; 以管理员身份运行：启用后启动时自动申请管理员权限（会弹 UAC）\n"
@@ -365,6 +370,64 @@ static CfgDef kCfg[CFG_COUNT] = {
       "; 留空 = 用默认那 11 项（标题 / 进程 / 位置 / 路径 / PID / 类名 / 句柄 /\n"
       "; 父 / 根 / 根所有者 / 运行权限）。建议在设置程序「窗口信息」段里增删排序，\n"
       "; 不必手改。\n" },
+
+    /* ---- 超级复制（Caps + C；取词在 src/textgrab.c，浮层在 src/toast.c）----
+       十一个键都住在 [General]，理由同上（增量写回只写这一段）。出厂值就是
+       设计时定下的那一套：纵向 72% / 宽度上限 720 / 不透明度 242 / 圆角 16 /
+       成功 1800ms / 失败 2800ms / 10 行 / 500 字。
+
+       ★ 这里**刻意不提供**"启用开关"：本程序所有按键动作都不可单独关闭，
+         一致性比多一个旋钮重要；万一 Caps+C 在某个程序里抢键，逃生口是
+         "先按 C 再按 Caps"——那一整场会话都会整体透传（见 hook.c 的 g_capsSkip）。 */
+    { "copystayms", "CopyStayMs", 0, 1800, 500, 10000, 0, NULL, 0,
+      "; 复制**成功**提示的停留时长（毫秒）\n"
+      "; 范围 500..10000。成功时只需要瞥一眼「有没有字、是不是半截」，所以短；\n"
+      "; 失败那行原因是用来读的，见 CopyFailStayMs。\n" },
+
+    { "copyfailstayms", "CopyFailStayMs", 0, 2800, 500, 10000, 0, NULL, 0,
+      "; 复制**失败**提示的停留时长（毫秒）\n"
+      "; 范围 500..10000，默认比成功长：那句原因要引出不同的后续动作\n"
+      "; （权限不足要去提权 / 无响应要换个位置再按），1.8 秒常常是刚看到就没了。\n" },
+
+    { "copypospercent", "CopyPosPercent", 0, 72, 50, 90, 0, NULL, 0,
+      "; 预览浮层的纵向位置：所在显示器**工作区**高度的百分比（水平恒为居中）\n"
+      "; 范围 50..90，越大越靠下。72 在 1080p 上距顶约 778px、距任务栏约 160px。\n" },
+
+    { "copywidthmax", "CopyWidthMax", 0, 720, 200, 1600, 0, NULL, 0,
+      "; 预览浮层的宽度上限（96 DPI 逻辑像素；实际 = 值 × 该屏 DPI / 96）\n"
+      "; 内容窄时窗口跟着收（下限 280 逻辑像素），长文本才摊到上限。\n"
+      "; 范围 200..1600。\n" },
+
+    { "copyalpha", "CopyAlpha", 0, 242, 60, 255, 0, NULL, 0,
+      "; 预览浮层的不透明度（0..255，242 ≈ 95%）\n"
+      "; 逐像素 alpha（UpdateLayeredWindow）：背板与最外圈边缘按这个值半透明，\n"
+      "; 正文区域保持完全不透明 —— 整窗调透明度会把小字号一起稀释，看着发虚。\n" },
+
+    { "copyradius", "CopyRadius", 0, 16, 0, 40, 0, NULL, 0,
+      "; 预览浮层的圆角半径（96 DPI 逻辑像素），0 = 直角。范围 0..40。\n" },
+
+    { "copyfont", "CopyFont", CFG_F_TEXT, 0, 0, 0, COPY_FONT_CAP, g_copyFont, 0,
+      "; 预览浮层的字体名：留空 = 系统默认 UI 字体（SetWindowText/DEFAULT_GUI_FONT）。\n"
+      "; 设置界面「超级复制」段里可以点「选择字体…」挑，也可以直接填字体名。\n"
+      "; 字号不开放：标题 9 磅、正文 10 磅，按该屏 DPI 缩放 —— 提示只有一两秒寿命，\n"
+      "; 调字号属于「改一次就忘」的旋钮，不值得占一个配置项。\n" },
+
+    { "copymaxlines", "CopyMaxLines", 0, 10, 1, 50, 0, NULL, 0,
+      "; 预览最多显示几行（超出用 … 截断）。范围 1..50。\n"
+      "; ★ 只影响浮层显示：剪贴板里**永远是全文**，不存在「复制了一半」的情形。\n" },
+
+    { "copymaxchars", "CopyMaxChars", 0, 500, 50, 5000, 0, NULL, 0,
+      "; 预览最多显示几个字符（先按行、再按字截断）。范围 50..5000。\n"
+      "; 同样只影响显示，剪贴板始终是全文。\n" },
+
+    { "copyshowcount", "CopyShowCount", CFG_F_BOOL, 1, 0, 1, 0, NULL, 1,
+      "; 标题行是否显示「来源程序 · 字数 · 行数」\n"
+      "; 1=显示（默认，能一眼确认「这是从哪个程序取到的、是不是只取到半截」），0=只显示来源程序\n" },
+
+    { "copystriptail", "CopyStripTail", CFG_F_BOOL, 1, 0, 1, 0, NULL, 1,
+      "; 复制时是否去掉文本尾部的空白与换行（1=去掉，默认）\n"
+      "; 内部换行与缩进**不受影响**；终端类窗口常在末尾多一个换行，不去掉就会\n"
+      "; 粘出一个空行。0 = 原样保留。\n" },
 };
 
 /* 三键与 CFG_IME_* 三个编号必须同序连排（ConfigGetImeMode 靠下标直取） */

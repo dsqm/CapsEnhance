@@ -94,6 +94,20 @@ BOOL InfoHandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
 }
 static void ResetInfoRec(void) { g_infoOpen = 0; }
 
+/* ---- 控件复制桩（src/textgrab.c 与 src/toast.c 不进本测试）----
+   真实现要跨进程查无障碍树、重试、抢剪贴板，还要在另一条线程上建分层窗口 ——
+   本测试既不查真实的树（CI 上没有稳定的 UI 可查），也不该动剪贴板与屏幕。
+   桩成记账之后，能离线钉住的全是**接线语义**：C 只接这一个动作、单发、
+   不发键、目标坐标取"按下那一刻"的光标（见场景 AK）。 */
+static int   g_grabRun = 0;
+static POINT g_grabPt;
+void TextGrabRun(POINT pt) { g_grabRun++; g_grabPt = pt; }
+void ToastShow(BOOL fail, const WCHAR* head, const WCHAR* body) {
+    (void)fail; (void)head; (void)body;
+}
+void ToastHideNow(void) { }
+static void ResetGrabRec(void) { g_grabRun = 0; g_grabPt.x = g_grabPt.y = 0; }
+
 
 
 /* ---- 捕获钩子：记录注入的完整事件序列（按下/抬起），并可统计次数 ---- */
@@ -2301,6 +2315,41 @@ int main(void) {
         Sim(CLI_CAPS, FALSE); Pump(20);
         CHECK(g_infoOpen == 1, "AJ: 松开 Caps 不重复拉起");
         Sim(VK_F12, FALSE);   Pump(20);
+        Drain();
+    }
+
+    /* ---- 场景AK：控件复制（C+C）----
+       取词本体要真实的无障碍树 + 剪贴板 + 屏幕，离线测不了；能钉住的是接线
+       语义（取词与浮层在桩里记账，见文件头的 TextGrabRun / ToastShow）：
+         ① 'C' 原本是空的，现在只接到这一个动作；
+         ② 属性 = 走 textgrab + 单发 + 不吃选区修饰 + 不发任何键；
+         ③ 按下只开火一次，抬起与松开 Caps 都不重复 —— 不单发的话，长按
+            C+C 会每 35ms 抢一次剪贴板并刷一次浮层；
+         ④ 目标坐标必须是**按下那一刻**的光标：用户按下后手一抖，"取的是
+            哪个字"就变了（main.c 的 PostAct 快照，见 ActJob.pt）。 */
+    {
+        CHECK(ActOfVk('C') == ACT_COPYTEXT, "AK: 触发键 C -> 控件复制动作");
+        CHECK(ActHasFlag(ACT_COPYTEXT, ACTF_COPYTEXT) &&
+              ActHasFlag(ACT_COPYTEXT, ACTF_SINGLE_SHOT) &&
+              ActHasFlag(ACT_COPYTEXT, ACTF_NO_SHIFT),
+              "AK: 属性 = 由 textgrab 执行 + 单发 + 不吃选区修饰");
+        CHECK(ActOutVk(ACT_COPYTEXT) == 0, "AK: 该动作不发任何键");
+
+        ResetGrabRec();
+        SetCursorPos(321, 654);            /* 失败也不影响 ③④ 的其余判定 */
+        POINT before;
+        GetCursorPos(&before);
+
+        Sim(CLI_CAPS, TRUE);  Pump(20);
+        Sim('C', TRUE);       Pump(20);
+        CHECK(g_grabRun == 1, "AK: 按下 C+C -> 取词一次");
+        CHECK(g_grabPt.x == before.x && g_grabPt.y == before.y,
+              "AK: 取词目标 = 按下那一刻的光标坐标（不是执行时现读）");
+
+        Sim('C', FALSE);      Pump(20);
+        CHECK(g_grabRun == 1, "AK: 抬起不重复取词");
+        Sim(CLI_CAPS, FALSE); Pump(20);
+        CHECK(g_grabRun == 1, "AK: 松开 Caps 不重复取词");
         Drain();
     }
 

@@ -36,9 +36,12 @@ typedef struct {
     BOOL shf;       /* 开火快照：选区模式（带 Shift）             */
     int  count;     /* fillAct 的已发送次数（补齐时用）           */
     BOOL keep;      /* 引擎复位（松开 C）时是否保留，见 act.c 的 ActClearKeepFill */
-    HWND hwnd;      /* 开火快照：目标窗口（只有 ACTF_OPENFOLDER 用）。
+    HWND hwnd;      /* 开火快照：目标窗口（ACTF_OPENFOLDER / ACTF_PIN 用）。
                        捕获时机必须与 enh/shf 一样是"按下触发键的那一刻"（见 main.c 的 PostAct）：
                        执行线程是异步的，等它跑到时前台窗口可能已经换了。 */
+    POINT pt;       /* 开火快照：光标屏幕坐标（只有 ACTF_COPYTEXT 用）。
+                       同样必须在按下那一刻取：用户按下 Caps+C 之后手一抖，光标就
+                       不在他想复制的那个字上了，而"复制的到底是哪个字"全由这个点决定。 */
     ULONGLONG postTick; /* 投递时刻（GetTickCount64）：诊断打点用，不参与判定 */
 } ActJob;
 
@@ -170,3 +173,9 @@ BOOL SendHyperLive(void);        /* 三键此刻真按着且配置开启（滚�
 void SendHyperSuspend(void);     /* 发键突发前摘三键（可跨线程嵌套） */
 void SendHyperResume(void);      /* 突发结束；全部突发都结束后才按回 */
 void SendHyperReset(void);       /* 收尾：计数归零并抬起三键（暂停/重启、ActStop） */
+
+/* ---------- 超级复制（src/textgrab.c） ----------
+   Caps+C 的取词入口。**只在动作执行线程上调用**：UIA / MSAA 的跨进程查询
+   最长可卡数百毫秒，跑在主线程（钩子宿主）上就是全局输入卡顿 + 钩子被系统
+   摘掉。内部自带总预算（见 textgrab.c 的 TG_TOTAL_BUDGET_MS）。 */
+void TextGrabRun(POINT pt);
