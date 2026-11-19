@@ -739,10 +739,12 @@ void TextGrabRun(POINT pt) {
 
     WCHAR head[256];
     if (CfgBool(CFG_COPY_SHOW_COUNT)) {
-        int lines = 1;
-        for (int i = 0; i < cleanLen; i++) if (clean[i] == L'\n') lines++;
+        /* 字数按**码点**数（代理对算一个字），不能用 cleanLen —— 那是 UTF-16
+           码元数，𰻝 / emoji 会被算成两个字。 */
+        int chars = CopyCountChars(clean, cleanLen);
+        int lines = CopyCountLines(clean, cleanLen);
         _snwprintf_s(head, _countof(head), _TRUNCATE, L"%s · %d 字 · %d 行",
-                     proc, cleanLen, lines);
+                     proc, chars, lines);
     } else {
         _snwprintf_s(head, _countof(head), _TRUNCATE, L"%s", proc);
     }

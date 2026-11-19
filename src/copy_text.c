@@ -33,6 +33,34 @@ int CopyClean(const WCHAR* src, int len, BOOL stripTail, WCHAR* out, int cap) {
     return o;
 }
 
+/* 一个"字"在 UTF-16 里可能是两个 WCHAR（代理对）。凡是要数数或按位置截断的
+   地方都必须按**码点**走，否则 𰻝 会被算成两个字、还可能被截成半个代理对
+   （显示成方块，粘出去是坏字符）。 */
+static int IsHighSurrogateAt(const WCHAR* s, int i, int len) {
+    return (i + 1 < len) && (s[i] >= 0xD800 && s[i] <= 0xDBFF) &&
+           (s[i + 1] >= 0xDC00 && s[i + 1] <= 0xDFFF);
+}
+
+int CopyCountChars(const WCHAR* src, int len) {
+    if (!src || len <= 0) return 0;
+    int n = 0;
+    for (int i = 0; i < len; ) {
+        if (src[i] == L'\n' || src[i] == L'\r') { i++; continue; }
+        i += IsHighSurrogateAt(src, i, len) ? 2 : 1;
+        n++;
+    }
+    return n;
+}
+
+int CopyCountLines(const WCHAR* src, int len) {
+    if (!src || len <= 0) return 1;
+    int lines = 1;
+    for (int i = 0; i < len; i++) {
+        if (src[i] == L'\n') lines++;
+    }
+    return lines;
+}
+
 int CopyPreviewLen(const WCHAR* src, int len, int maxChars, int maxLines, BOOL* truncated) {
     if (truncated) *truncated = FALSE;
     if (!src || len <= 0) return 0;
@@ -41,13 +69,18 @@ int CopyPreviewLen(const WCHAR* src, int len, int maxChars, int maxLines, BOOL* 
 
     int cut = len;
     int lines = 1;
-    for (int i = 0; i < len; i++) {
+    int chars = 0;
+    for (int i = 0; i < len; ) {
         if (src[i] == L'\n') {
             lines++;
             if (lines > maxLines) { cut = i; break; }
+            i++;
+            continue;
         }
+        chars++;
+        if (chars > maxChars) { cut = i; break; }
+        i += IsHighSurrogateAt(src, i, len) ? 2 : 1;   /* 不拆代理对 */
     }
-    if (cut > maxChars) cut = maxChars;
 
     if (truncated) *truncated = (cut < len);
     return cut;

@@ -23,4 +23,12 @@ int CopyClean(const WCHAR* src, int len, BOOL stripTail, WCHAR* out, int cap);
    ★ 只服务显示：剪贴板永远写全文。 */
 int CopyPreviewLen(const WCHAR* src, int len, int maxChars, int maxLines, BOOL* truncated);
 
+/* 按**码点**统计字数：UTF-16 代理对（𰻝、绝大多数 emoji）算一个字，不是两个。
+   统计口径必须与实际显示一致 —— 否则"N 字"和用户数出来的对不上。
+   换行符不计入字数。 */
+int CopyCountChars(const WCHAR* src, int len);
+
+/* 行数：换行符个数 + 1（空串算 1 行，与编辑器状态栏的口径一致）。 */
+int CopyCountLines(const WCHAR* src, int len);
+
 #endif /* COPY_TEXT_H */

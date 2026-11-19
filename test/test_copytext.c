@@ -69,6 +69,26 @@ int main(void) {
         EXPECT(n == 0 && !cut, "空串不截");
     }
 
+    printf("copy_text: 码点计数（代理对）\n");
+    {
+        /* 𰻝 = U+30EDD，UTF-16 里是 D883 DEDD 两个码元、一个码点 */
+        static const WCHAR kPair[] = { 0xD883, 0xDEDD, 0 };
+        EXPECT(CopyCountChars(kPair, 2) == 1, "代理对算一个字（𰻝 = 1，不是 2）");
+        EXPECT(CopyCountChars(L"ab", 2) == 2, "普通字符照常逐个计数");
+        EXPECT(CopyCountChars(L"a\nb", 3) == 2, "换行符不计入字数");
+        EXPECT(CopyCountChars(NULL, 0) == 0, "空输入 -> 0");
+        EXPECT(CopyCountLines(L"a\nb\nc", 5) == 3, "行数 = 换行数 + 1");
+        EXPECT(CopyCountLines(NULL, 0) == 1, "空输入按 1 行（与编辑器状态栏同口径）");
+    }
+    {
+        /* 截断不能把一个代理对切成两半：maxChars=1 时只能留下完整的那一个字 */
+        BOOL cut = FALSE;
+        int n = CopyPreviewLen(L"\xD883\xDEDD\xD883\xDEDD", 4, 1, 10, &cut);
+        EXPECT(n == 2 && cut, "按码点截断：两个代理对只留第一个（2 个码元）");
+        n = CopyPreviewLen(L"\xD883\xDEDD", 2, 1, 10, &cut);
+        EXPECT(n == 2 && !cut, "只有一个代理对且限额 1 -> 完整保留、不算被截");
+    }
+
     printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");
     return fails ? 1 : 0;
 }
