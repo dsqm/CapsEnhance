@@ -20,6 +20,7 @@
 #define IDC_HEADER  121   /* 顶部"窗框"托盘 */
 #define IDC_FOOTER  122   /* 底部"窗框"托盘（hMenu 传 NULL 的窗口控件 ID 是 0，
                              会撞上"段头 id 为 0"这类查询 —— 必须给正式 ID） */
+#define IDC_FORM    123   /* 承载窗：全部表单控件的父窗口（纯容器，滚动只挪它） */
 #define IDC_GROUP0  400   /* 常规页段头（每段一个 STATIC，见 kFields 的 group 列） */
 #define GROUP_MAX   8     /* 段数上限；超出的段不带头（数据里目前 6 段，纯保底） */
 
@@ -101,7 +102,7 @@ typedef struct {
 extern HWND  g_hwnd;        /* 设置窗口 */
 extern int   g_dpi;         /* 当前窗口 DPI（96 = 100%） */
 extern HFONT g_font;        /* 系统消息字体（按 DPI 取） */
-extern HFONT g_fontBold;    /* 半粗体：段头 / 选中页签 */
+extern HFONT g_fontHead;    /* 段头 / 选中页签字体：同族 + 真 Bold（见 MakeFont） */
 
 void SetStatus(const WCHAR* fmt, ...);
 void UpdateDirty(void);          /* 重新判定"有未保存改动"：与基线比对（装载期自动屏蔽） */

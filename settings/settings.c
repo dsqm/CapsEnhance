@@ -36,24 +36,29 @@
    当前 DPI 取系统消息字体，所有像素尺寸经 S() 缩放；拖到不同缩放的显示器
    上时按 WM_DPICHANGED 重建字体并重排（见 MakeFont / Layout）。
 
-   滚动：一页的内容（数值项 + 名单）比窗口高时出竖向滚动条，滚轮和滚动条
-   都能滚；底部按钮与状态栏是"窗框"，不参与滚动（见 SetScroll / Layout）。
+   滚动：一页的内容比可视区高时出竖向滚动条，滚轮和滚动条都能滚；底部按钮与
+   状态栏是"窗框"，不参与滚动。实现上全部表单控件住在一个**承载窗**里，滚动 =
+   每帧只挪这一个窗口（**不再逐控件重排**），滚轮按系统"每次滚 N 行"折算步长、
+   帧由高精度计时器按刷新周期的一半出（240Hz → 2ms 一帧），按时间做 ease-out
+   缓动 —— 详见下文"滚动：只挪一个承载窗"一节的取舍与踩坑史。
    滚轮若停在**某个列表框上**，滚的是那个列表框而不是整个表单
    （见 WndProc 的 WM_MOUSEWHEEL / ScrollListBy）。
 
-   页签：表单分三页 —— 「常规」（数值 / 开关这些配置项）、「超级复制」
+   页签：表单分四页 —— 「常规」（数值 / 开关这些配置项）、「超级复制」
    （超级复制预览浮层的**全部**参数：停留时长 / 位置 / 宽度 / 透明度 / 圆角 /
-   字体 / 显示量）、「名单」（五份按程序 / 窗口生效的名单：按词跳转 / 自动屏蔽 /
-   整格滚动 / 拖动的两份黑名单）。第三页是后加的：那批参数有十二行，混在常规页
-   里会把"按词跳转 / 滚动"那几段挤到很下面，而它们与取词是完全独立的两件事。
+   字体 / 显示量）、「窗口信息」（C+F12 弹窗的字体 / 字号，以及「常用」视图的
+   有序字段编排）、「名单」（五份按程序 / 窗口生效的名单：按词跳转 / 自动屏蔽 /
+   整格滚动 / 拖动的两份黑名单）。后两页都是"独立一件事"才拆出来的：浮层参数
+   有十几行、窗口信息那组带一个可增删排序的字段列表，混在常规页里会把
+   "按词跳转 / 滚动"那几段挤到很下面。
    分页是结构性的：配置项按 group 归页（见 FieldPage），名单全在名单页，
-   页签只决定"显示哪些控件" —— 控件仍全是主窗口的子窗口，Load / Save 与
+   页签只决定"显示哪些控件" —— 控件都在承载窗里，Load / Save 与
    WM_COMMAND 照旧按 id 找、不分页（见 kTabNames / g_curTab / Layout）。
    页签**外观自绘**（PaintTab：comctl 默认的浮凸小块太旧，改成"文本 +
    强调色下划线"的现代样式，行为不动）；常规页的配置项按 group 列**分段**
-   渲染半粗段头（见 kFields 的 group 列 / InitGroups）。常规页最后还有一块
-   「常用字段」编排：窗口信息弹窗（C+F12）的「常用」视图显示哪些字段、按什么
-   顺序，就在这里增删排序（见"窗口信息「常用」视图的字段编排"一节）。
+   渲染段头（同族 + 真 Bold，见 kFields 的 group 列 / InitGroups）。「窗口信息」页末尾是
+   那块「常用字段」编排：弹窗「常用」视图显示哪些字段、按什么顺序，就在这里
+   增删排序（见"窗口信息「常用」视图的字段编排"一节）。
    ============================================================ */
 #define WIN32_LEAN_AND_MEAN
 #include "cap.h"
@@ -80,25 +85,29 @@
 #define APP_TITLE   L"CapsEnhance 设置"
 #define WND_CLASS   L"CapsEnhanceSettingsMain"
 #define FOOTER_CLASS L"CapsEnhanceSettingsFooter"
+#define FORM_CLASS  L"CapsEnhanceSettingsForm"   /* 承载窗（表单内容容器，见"滚动"一节） */
+#define WM_SCROLL_TICK (WM_APP + 1)  /* 滚动动画帧（帧线程 -> UI 线程，见 AnimThreadProc） */
 #define INI_NAME    L"CapsEnhance.ini"
 #define MAIN_EXE    L"CapsEnhance.exe"
 
 /* 控件 ID 全在 settings_int.h（两个编译单元共用，见那里的说明）。 */
 
 /* ---- 页签 ----
-   三页：常规 = 通用/按键类配置项（kFields 里除"超级复制"之外的段），
-   超级复制 = 预览浮层那一批参数，名单 = 全部名单（kLists）。
+   四页：常规 = 通用/按键类配置项（kFields 里除"超级复制""窗口信息"之外的段），
+   超级复制 = 预览浮层那一批参数，窗口信息 = C+F12 弹窗的字体/字号 +「常用」
+   字段编排，名单 = 全部名单（kLists）。
    分页是**结构性的**（按程序 / 窗口生效的东西全在名单页，浮层参数单独一页，
-   见文件头"页签"段），所以表里不需要显式的页签列 —— 归页由 FieldPage 按
-   group 现算：group 是「超级复制」的整段归第二页，其余归常规页。
+   窗口信息那组又带一个"有序字段列表"这种非标量控件，见文件头"页签"段），
+   所以表里不需要显式的页签列 —— 归页由 FieldPage 按 group 现算。
    页签只决定显隐：控件本体不分家，Load / Save / WM_COMMAND 照旧按 id 找。 */
-enum { TAB_GENERAL = 0, TAB_COPY = 1, TAB_LISTS = 2, TAB_N = 3 };
-static const WCHAR* const kTabNames[TAB_N] = { L"常规", L"超级复制", L"名单" };
+enum { TAB_GENERAL = 0, TAB_COPY = 1, TAB_INFO = 2, TAB_LISTS = 3, TAB_N = 4 };
+static const WCHAR* const kTabNames[TAB_N] = { L"常规", L"超级复制", L"窗口信息", L"名单" };
 
 /* 配置项归哪一页：按 group 现算（实现在 kFields 之后，因为要遍历它）。
    按 group 算而不是给 Field 加一列 —— 同一段的行必须连排，所以"段 -> 页"
    是天然的一对多；再加一列就多一处可能与 group 不一致的状态。 */
 #define COPY_GROUP_NAME L"超级复制"
+#define INFO_GROUP_NAME L"窗口信息"
 
 /* ---------- 字段表：控件的"是什么"，不是"长什么样" ----------
    加一个配置项 = 这里加一行（另两处是 config.c 的 kCfg 表与 README 的配置表）。
@@ -107,7 +116,7 @@ static const WCHAR* const kTabNames[TAB_N] = { L"常规", L"超级复制", L"名
    标签只写中文说明 —— ini 里的键名属于配置文件的内部拼法，界面不重复；
    数值单位（KB / 毫秒 …）单独一列，显示在输入框右侧。
    group 一列是**归属段**（例如「通用」「滚动」「输入法」）：
-   每段第一行渲染一个半粗段头，同一段的行必须连排（段头按"换段"渲染）。
+   每段第一行渲染一个段头（同族 + 真 Bold），同一段的行必须连排（段头按"换段"渲染）。
    ★ 这个 struct 本身住在 settings_int.h。 */
 
 static Field kFields[] = {
@@ -155,7 +164,11 @@ static Field kFields[] = {
 /* 配置项归哪一页（见 kTabNames 处的说明）。 */
 static int FieldPage(int i) {
     const WCHAR* g = kFields[i].group;
-    return (g && wcscmp(g, COPY_GROUP_NAME) == 0) ? TAB_COPY : TAB_GENERAL;
+    if (g) {
+        if (wcscmp(g, COPY_GROUP_NAME) == 0) return TAB_COPY;
+        if (wcscmp(g, INFO_GROUP_NAME) == 0) return TAB_INFO;
+    }
+    return TAB_GENERAL;
 }
 
 /* 值域从 config.c 的表灌进来（界面不再写第二份 min/max）。
@@ -227,10 +240,24 @@ static BOOL   g_dirty   = FALSE;
 static BOOL   g_loading = FALSE;         /* 装载期屏蔽 EN_CHANGE，否则一打开就"未保存" */
 int    g_dpi     = 96;                  /* 当前窗口 DPI（96 = 100%） */
 HFONT  g_font    = NULL;
-HFONT  g_fontBold = NULL;               /* 半粗体：段头 / 选中页签（建不出就与 g_font 同柄） */
+HFONT  g_fontHead = NULL;               /* 段头 / 选中页签：同族 + FW_BOLD（真 Bold 字面，见 MakeFont） */
+static HWND   g_form    = NULL;          /* 承载窗：**全部表单控件**的父窗口（滚动只挪它） */
 static int    g_viewH    = 0;            /* 内容可视区高度（底部按钮/状态栏不算） */
+static int    g_viewTop  = 0;            /* 内容可视区上沿（页签条窗框的下沿） */
 static int    g_contentH = 0;            /* 内容总高；比可视区高就出滚动条 */
-static int    g_laidScroll = -1;         /* 子控件当前是按哪个滚动位置排的 */
+static int    g_off      = 0;            /* 当前滚动偏移（像素，0 = 内容顶与可视区顶对齐） */
+static int    g_target   = 0;            /* 缓动目标偏移（滚轮只改它，每帧追一点） */
+static int    g_wheelRem = 0;            /* 滚轮小数刻度累计（高精度滚轮单条 delta < 120） */
+static volatile LONG g_anim = FALSE;     /* 缓动是否在跑（帧线程每帧读它） */
+static HANDLE s_animGo   = NULL;         /* 自动复位事件：唤醒帧线程 */
+static HANDLE s_animThread = NULL;       /* 帧线程：高精度计时器按刷新周期的一半出帧 */
+static volatile LONG s_animQuit = FALSE; /* 退出标记（WM_DESTROY 置位） */
+static volatile LONG s_tickPending = 0;  /* 已投递、还没被处理的帧（UI 线程跟不上时合并） */
+static LARGE_INTEGER s_qpcFreq;          /* 动画时钟（QPC 计数/秒），见 AnimTick */
+static LONGLONG g_animT0 = 0;            /* 本轮动画的起点（QPC 计数） */
+static int    g_animFrom = 0;            /* 本轮动画的起点偏移 */
+static int    g_animDur  = 120;          /* 本轮动画时长（毫秒，按距离取 90..200） */
+static int    g_tickMs   = 0;            /* 帧间隔（刷新周期的一半，见 AnimKick；0 = 还没算） */
 static HWND   g_tab     = NULL;          /* 页签条（comctl32 页签控件；建失败则退回单页滚动） */
 static int    g_curTab  = TAB_GENERAL;   /* 当前页：换页 = 改它 + Layout（显隐在 Layout 里） */
 static int    g_tabPadDpi = 0;           /* 页签内边距是按哪个 DPI 设的（变了就重设） */
@@ -238,6 +265,11 @@ static int    g_tabPadDpi = 0;           /* 页签内边距是按哪个 DPI 设�
 /* 像素按 DPI 缩放：所有尺寸常量都必须过一遍它，否则高分屏上控件挤成一团
    （96 DPI 下量出来的坐标在 200% 屏上只有一半大）。 */
 static int S(int v) { return MulDiv(v, g_dpi, 96); }
+
+/* 表单控件的统一取柄：它们全都住在**承载窗**里（见"滚动"一节），不是主窗口的
+   直接子窗口。页签 / 状态栏 / 底部四颗按钮不在内 —— 它们住在 header/footer 窗框，
+   各自用 GetDlgItem(g_header|g_footer, …) 取。 */
+static HWND Ctl(int id) { return g_form ? GetDlgItem(g_form, id) : NULL; }
 
 /* ---------------- 小工具 ---------------- */
 
@@ -308,7 +340,7 @@ static BOOL GetCheck(HWND btn) {
 
 static WCHAR g_baseCommon[CMN_TEXT_MAX];                /* 已保存基线（拼接文本，与落盘同口径） */
 
-static HWND CmnList(void) { return GetDlgItem(g_hwnd, IDC_CMN_LIST); }
+static HWND CmnList(void) { return Ctl(IDC_CMN_LIST); }
 
 /* 第 i 项的字段编号（存在 LB_SETITEMDATA 里；无效返回 -1） */
 static int CmnIdAt(int i) {
@@ -405,10 +437,10 @@ static void CmnSyncButtons(void) {
     int n   = (int)SendMessageW(CmnList(), LB_GETCOUNT, 0, 0);
     int sel = (int)SendMessageW(CmnList(), LB_GETCURSEL, 0, 0);
     BOOL has = (sel >= 0 && sel != LB_ERR);
-    EnableWindow(GetDlgItem(g_hwnd, IDC_CMN_DEL),  has && n > 1);
-    EnableWindow(GetDlgItem(g_hwnd, IDC_CMN_UP),   has && sel > 0);
-    EnableWindow(GetDlgItem(g_hwnd, IDC_CMN_DOWN), has && sel < n - 1);
-    EnableWindow(GetDlgItem(g_hwnd, IDC_CMN_ADD),  n < IF_COUNT);
+    EnableWindow(Ctl(IDC_CMN_DEL),  has && n > 1);
+    EnableWindow(Ctl(IDC_CMN_UP),   has && sel > 0);
+    EnableWindow(Ctl(IDC_CMN_DOWN), has && sel < n - 1);
+    EnableWindow(Ctl(IDC_CMN_ADD),  n < IF_COUNT);
 }
 
 /* 「添加…」：弹出"还没有的字段"菜单（按窗口层 / 进程层分两段），选中即追加到
@@ -433,7 +465,7 @@ static void CmnAddDlg(void) {
         SetStatus(L"全部字段都已经在常用里了");
         return;
     }
-    HWND btn = GetDlgItem(g_hwnd, IDC_CMN_ADD);
+    HWND btn = Ctl(IDC_CMN_ADD);
     RECT r;
     if (!btn || !GetWindowRect(btn, &r)) { DestroyMenu(m); return; }
     int pick = (int)TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
@@ -522,7 +554,7 @@ static WCHAR g_snapTmp[LIST_SNAP_MAX];        /* 比对时的临时缓冲（一�
 /* 第 i 个字段的当前值 -> 文本 */
 static void FieldSnapshot(int i, WCHAR* out, size_t cap) {
     const Field* f = &kFields[i];
-    HWND c = GetDlgItem(g_hwnd, f->id);
+    HWND c = Ctl(f->id);
     if (!c) { out[0] = 0; return; }
     if (f->isBool) { out[0] = GetCheck(c) ? L'1' : L'0'; out[1] = 0; return; }
     GetWindowTextW(c, out, (int)cap);
@@ -530,7 +562,7 @@ static void FieldSnapshot(int i, WCHAR* out, size_t cap) {
 
 /* 第 i 份名单的当前内容 -> 文本（'\n' 连接，顺序即界面顺序） */
 static void ListSnapshot(int i, WCHAR* out, size_t cap) {
-    HWND lb = GetDlgItem(g_hwnd, IDC_LIST0 + i * LIST_STRIDE);
+    HWND lb = Ctl(IDC_LIST0 + i * LIST_STRIDE);
     out[0] = 0;
     if (!lb) return;
     int n = (int)SendMessageW(lb, LB_GETCOUNT, 0, 0);
@@ -613,11 +645,28 @@ static UINT QueryDpi(void) {
     return d ? d : 96;
 }
 
+/* 字体平滑质量：系统开了 ClearType 就用 CLEARTYPE_QUALITY，否则退化成不抗锯齿。
+   为什么要显式设：NONCLIENTMETRICS 给的消息字体 `lfQuality` 是 0（DEFAULT_QUALITY，
+   走灰度抗锯齿），粗体在灰度 AA 下笔画会糊成一团 —— 这正是"加粗显示不太好"的
+   主因（不是合成了粗体：实测 FW_BOLD/600 都映射到 msyhbd.ttc 里 700 的真字面，
+   `GetTextMetrics` 返回 tmWeight=700）。 */
+static BYTE FontQuality(void) {
+    BOOL smooth = FALSE;
+    if (SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &smooth, 0) && smooth)
+        return CLEARTYPE_QUALITY;
+    return NONANTIALIASED_QUALITY;
+}
+
 /* 按当前 DPI 建字体：优先用系统为这个 DPI 算好的消息字体（NONCLIENTMETRICS
    里的 lfMessageFont 已经缩放过），拿不到就按 DPI 自己算一个字号。
-   半粗体与正体同源（只改字重），给段头与选中页签做强调用。 */
+   段头 = 同一套字族 + **FW_BOLD（700）**：Windows 的 CJK UI 字体族里
+   `Microsoft YaHei UI` 带真 Bold 字面（msyhbd.ttc），所以这里是真粗体、
+   不是 GDI 合成加粗；再配上 ClearType 才有"强调"且不糊。
+   （若某台机器只装了 Light/Regular，GDI 会回落到合成加粗 —— 那种情况下
+   显示会差一些，但没有更好的选择：换 SimHei / 等线是另一套字形，混排更怪。） */
 static void MakeFont(void) {
-    HFONT nf = NULL, bf = NULL;
+    HFONT nf = NULL, hf = NULL;
+    BYTE q = FontQuality();
     HMODULE u = GetModuleHandleW(L"user32.dll");
     if (u) {
         PFN_SystemParametersInfoForDpi p =
@@ -627,35 +676,38 @@ static void MakeFont(void) {
             memset(&ncm, 0, sizeof(ncm));
             ncm.cbSize = sizeof(ncm);
             if (p(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, (UINT)g_dpi)) {
-                nf = CreateFontIndirectW(&ncm.lfMessageFont);
-                LOGFONTW lb = ncm.lfMessageFont;
-                lb.lfWeight = FW_SEMIBOLD;
-                bf = CreateFontIndirectW(&lb);
+                LOGFONTW lf = ncm.lfMessageFont;
+                lf.lfQuality = q;
+                lf.lfWeight  = FW_NORMAL;
+                nf = CreateFontIndirectW(&lf);
+                LOGFONTW lb = lf;
+                lb.lfWeight = FW_BOLD;
+                hf = CreateFontIndirectW(&lb);
             }
         }
     }
     if (!nf) {
-        nf = CreateFontW(-MulDiv(12, g_dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        nf = CreateFontW(-MulDiv(9, g_dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                         DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-        bf = CreateFontW(-MulDiv(12, g_dpi, 96), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                         q, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+        hf = CreateFontW(-MulDiv(9, g_dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                         DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                         q, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
     }
-    if (!nf) { nf = (HFONT)GetStockObject(DEFAULT_GUI_FONT); bf = nf; }
-    if (!bf) bf = nf;
+    if (!nf) { nf = (HFONT)GetStockObject(DEFAULT_GUI_FONT); hf = nf; }
+    if (!hf) hf = nf;
     if (g_font && g_font != nf) DeleteObject(g_font);
     g_font = nf;
-    /* bf 可能与 nf 同柄（兜底路径），同柄时绝不能在这里删掉 */
-    if (g_fontBold && g_fontBold != bf && g_fontBold != g_font) DeleteObject(g_fontBold);
-    g_fontBold = bf;
+    /* hf 可能与 nf 同柄（兜底路径），同柄时绝不能在这里删掉 */
+    if (g_fontHead && g_fontHead != hf && g_fontHead != g_font) DeleteObject(g_fontHead);
+    g_fontHead = hf;
 }
 
 static BOOL CALLBACK FontApplyCb(HWND h, LPARAM lp) {
-    /* 段头（含「常用字段」那块子段头）走半粗体，其余控件统一消息字体 */
+    /* 段头（含「常用字段」那块子段头）走粗体，其余控件统一消息字体 */
     int id = GetDlgCtrlID(h);
     HFONT f = ((id >= IDC_GROUP0 && id < IDC_GROUP0 + GROUP_MAX) || id == IDC_CMN_HEAD)
-                  ? g_fontBold : g_font;
+                  ? g_fontHead : g_font;
     SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE);
     (void)lp;
     return TRUE;
@@ -681,15 +733,15 @@ static void LoadConfig(void) {
     for (int i = 0; i < FIELD_N; i++) {
         const Field* f = &kFields[i];
         if (f->cfg < 0) continue;                  /* 纯界面控件不承载配置值 */
-        HWND c = GetDlgItem(g_hwnd, f->id);
+        HWND c = Ctl(f->id);
         if (!c) continue;
         if (f->isBool)      SetCheck(c, CfgBool(f->cfg));
         else if (f->isText) SetWindowTextW(c, CfgStr(f->cfg));
         else                SetIntField(c, CfgInt(f->cfg));
     }
     for (int i = 0; i < LIST_N; i++) {
-        FillList(GetDlgItem(g_hwnd, IDC_LIST0 + i * LIST_STRIDE), kLists[i].list);
-        SetWindowTextW(GetDlgItem(g_hwnd, IDC_NAME0 + i * LIST_STRIDE), L"");
+        FillList(Ctl(IDC_LIST0 + i * LIST_STRIDE), kLists[i].list);
+        SetWindowTextW(Ctl(IDC_NAME0 + i * LIST_STRIDE), L"");
     }
     CmnFill();           /* 「常用」字段的顺序（空 = 默认那 11 项，判据与弹窗同源） */
     CmnSyncButtons();
@@ -708,7 +760,7 @@ static BOOL SaveConfig(void) {
     for (int i = 0; i < FIELD_N; i++) {
         if (kFields[i].isBool || kFields[i].isText || kFields[i].isBtn) continue;
         /* 文本框与按钮没有"值域"可校验 */
-        HWND c = GetDlgItem(g_hwnd, kFields[i].id);
+        HWND c = Ctl(kFields[i].id);
         if (!c) continue;
         int v = 0;
         if (!ReadIntField(c, &kFields[i], &v)) {
@@ -725,7 +777,7 @@ static BOOL SaveConfig(void) {
     for (int i = 0; i < FIELD_N; i++) {
         const Field* f = &kFields[i];
         if (f->cfg < 0) continue;                  /* 按钮不承载配置值 */
-        HWND c = GetDlgItem(g_hwnd, f->id);
+        HWND c = Ctl(f->id);
         if (!c) continue;
         if (f->isBool) {
             CfgSetBool(f->cfg, GetCheck(c));
@@ -743,7 +795,7 @@ static BOOL SaveConfig(void) {
     /* 名单：以列表框为准整份替换（顺序即界面顺序）。
        条数上限由 ConfigSetList 在配置层守住。 */
     for (int i = 0; i < LIST_N; i++) {
-        HWND lb = GetDlgItem(g_hwnd, IDC_LIST0 + i * LIST_STRIDE);
+        HWND lb = Ctl(IDC_LIST0 + i * LIST_STRIDE);
         int n = (int)SendMessageW(lb, LB_GETCOUNT, 0, 0);
         static WCHAR   names[CFG_MAX_ENTRIES][CFG_NAME_MAX];
         static const WCHAR* ptr[CFG_MAX_ENTRIES];
@@ -825,14 +877,34 @@ static void CloseNoSave(void) {
 
 /* ---------------- 界面 ---------------- */
 
-/* ---------------- 滚动 ----------------
-   名单高度固定，内容总高因此可算：窗口装得下一屏铺完，装不下出竖向滚动条。
-   **滚动条位置是唯一事实来源**：子控件落位一律是"虚拟 y − 滚动条位置"，
-   每次滚动都按它全量重排。为什么不用 ScrollWindowEx 做增量平移：一是它
-   平移子控件时会顺带把它们的 z 序提到顶（溢出内容会盖住底部"窗框"），
-   二是滚动条可能被外部直接拨动（读屏 / UIA 走 Scroll 模式，不经过我们的
-   WM_VSCROLL），增量平移会让子控件位置和滚动位置永久脱节 —— 每次全量
-   重排（MoveWindow 不改 z 序）这两个坑都没有。 */
+/* ---------------- 滚动：**只挪一个承载窗** ----------------
+   结构：主窗口 → 承载窗（g_form）→ 全部表单控件；页签 / 状态栏 / 四颗按钮住在
+   顶部与底部的"窗框"里，不归承载窗管。滚动 = 把承载窗整体上下挪 g_off 像素，
+   子控件相对它一动不动。重排（Layout）只在建窗 / 换页 / 缩放 / DPI 变化时跑，
+   **滚动路径里没有 Layout**。
+
+   ★ 为什么不再"逐个子控件按虚拟 y − off 重排"（旧写法）：
+     ① 每滚一格要 MoveWindow 几十个子控件，每个都带一次失效/重绘 —— 观感是
+        几十次重排叠出来的顿挫，也就是"总感觉是跳过去的"；
+     ② 上一个版本试过 DeferWindowPos + WM_SETREDRAW + 手动 FillRect +
+        RedrawWindow(RDW_UPDATENOW) 去治顿挫，结果更糟：同步整帧重画要几十
+        毫秒，消息循环回不去，系统就把后续滚轮**回落给焦点窗口** —— 表现是
+        "设置页滚动，背后的程序跟着滚"。那次改动已整体回退（git a5defb0 引入、
+        64c8637 / 9454402 回退），而回退后的旧写法从未出现该现象 —— 因为
+        "处理得慢"才是那个 bug 的燃料（WM_MOUSEWHEEL 发给**焦点窗口**，
+        DefWindowProc 只沿父链往上冒泡；悬停滚动是系统额外加的一层路由，
+        它等不及就落回去）。
+     ③ 承载窗把每帧代价从 N 次窗口移动降到 **1 次 SetWindowPos**：滚轮消息
+        只改一个目标值就返回，绝不阻塞消息循环。两条硬约束（不跳、不把滚轮
+        漏给背后程序）因此同时成立。
+   ★ 为什么不是 ScrollWindowEx(SW_SCROLLCHILDREN) 直接滚主窗口：MSDN 写明
+     子窗口只露出一部分时，系统**不会**正确擦除/重绘滚出源矩形的部分
+     （文档建议这种场景改用 DeferWindowPos）—— 那正是以前"拖影"的来源。
+     承载窗里的子控件永远完整地呆在它的客户区内，不存在"部分可见的子控件
+     被人挪了"这种没人负责的像素。
+
+   滚动条仍由主窗口的 WS_VSCROLL 持有（外部 UIA / 读屏也能拨它）；g_off 是
+   本进程的事实来源，两者在 WM_PAINT 里对账（外部拨动直接对齐，不补动画）。 */
 
 static int MaxScroll(void) {
     return g_contentH > g_viewH ? g_contentH - g_viewH : 0;
@@ -851,7 +923,7 @@ static void UpdateScrollBar(int pos) {
     SCROLLINFO si;
     memset(&si, 0, sizeof(si));
     si.cbSize = sizeof(si);
-    si.fMask  = SIF_RANGE | SIF_PAGE | SIF_POS;
+    si.fMask  = SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL;
     si.nMin   = 0;
     si.nMax   = g_contentH > 0 ? g_contentH - 1 : 0;
     si.nPage  = (UINT)(g_viewH > 0 ? g_viewH : 1);
@@ -859,8 +931,223 @@ static void UpdateScrollBar(int pos) {
     SetScrollInfo(g_hwnd, SB_VERT, &si, TRUE);
 }
 
+/* 把承载窗挪到当前偏移。**整条滚动路径上唯一真正干活的调用**。
+   oldOff 用来算出让出来的那一条：内容往上走时承载窗底边也在上移，露在可视区
+   里的那截归主窗口的背景负责（其余被页签窗框 / 底部窗框盖住）。只失效这一条，
+   不碰任何子控件 —— 它们相对承载窗没动，没有重画的理由。 */
+static void MoveHost(int oldOff) {
+    if (!g_form) return;
+    RECT rc;
+    GetClientRect(g_hwnd, &rc);
+    int hostH = g_contentH > g_viewH ? g_contentH : g_viewH;   /* 与 Layout 同一口径 */
+    int oldBottom = g_viewTop - oldOff + hostH;
+    int newBottom = g_viewTop - g_off + hostH;
+    SetWindowPos(g_form, NULL, 0, g_viewTop - g_off, 0, 0,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+    if (newBottom < oldBottom) {
+        RECT strip;
+        strip.left   = 0;
+        strip.right  = rc.right;
+        strip.top    = newBottom;
+        strip.bottom = oldBottom;
+        if (strip.top < 0) strip.top = 0;
+        if (strip.bottom > rc.bottom) strip.bottom = rc.bottom;
+        if (strip.bottom > strip.top) InvalidateRect(g_hwnd, &strip, TRUE);
+    }
+}
+
+/* 缓动帧的来源：**高精度可等待计时器 + 常驻帧线程**。
+   这条路上踩过三层坑，都记在这里，别再回头试：
+     ① SetTimer 的周期下限是 USER_TIMER_MINIMUM（10ms），怎么设都到不了 100fps
+        以上；240Hz 屏一次刷新只有 ~4.17ms，60/100fps 的动画每帧要被合成 2~4 次
+        —— 这就是"台阶"的来源。
+     ② CreateTimerQueueTimer(4ms) 实测**仍然**是 ~16ms 一帧：Windows 会把计时器
+        队列按系统节拍（15.6ms）合并，timeBeginPeriod(1) 也救不了它（实测同进程
+        Sleep(4) 是 4.7ms，队列计时器还是 17ms）。
+     ③ DwmFlush 跟着合成器出帧看着最理想，但**没有合成时它不返回** —— 实测动画
+        会整个卡在第一帧。不能用。
+   现在：帧线程里用 CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 的等时器（实测 2ms
+   请求落在 2.3~3.7ms，且不需要改全局计时精度）。间隔取**刷新周期的一半**
+   （240Hz → 2ms，60Hz → 8ms）：保证每次合成都有新状态可取，又不在低刷屏上
+   白烧 CPU。UI 线程跟不上时用 s_tickPending 合并 —— 曲线按时间算，丢的只是
+   采样点，不会拖慢到位时间。 */
+static DWORD WINAPI AnimThreadProc(LPVOID p) {
+    (void)p;
+    HANDLE timer = CreateWaitableTimerExW(NULL, NULL,
+                                          CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                          TIMER_ALL_ACCESS);
+    for (;;) {
+        if (WaitForSingleObject(s_animGo, INFINITE) != WAIT_OBJECT_0) break;
+        if (s_animQuit) break;
+        while (g_anim) {
+            if (InterlockedExchange(&s_tickPending, 1) == 0)
+                PostMessageW(g_hwnd, WM_SCROLL_TICK, 0, 0);
+            DWORD ms = (DWORD)(g_tickMs > 0 ? g_tickMs : 4);
+            if (timer) {
+                LARGE_INTEGER due;
+                due.QuadPart = -((LONGLONG)ms * 10000);   /* 相对时刻，单位 100ns */
+                if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE))
+                    WaitForSingleObject(timer, 500);
+                else
+                    Sleep(ms);
+            } else {
+                Sleep(ms);      /* 没有高精度计时器：Sleep 会被节拍放大，但至少能走 */
+            }
+        }
+    }
+    if (timer) CloseHandle(timer);
+    return 0;
+}
+
+static void AnimStop(void) {
+    g_anim = FALSE;      /* 线程每帧检查；当前这一帧最多再走完一次就退出内层 */
+}
+
+/* 窗口所在显示器的刷新率（拿不到返回 0）。按**显示器**问而不是查屏幕 DC：
+   窗口拖到副屏（60Hz 主屏 + 240Hz 副屏）时，帧间隔要跟着副屏走。 */
+static int ScreenHz(void) {
+    MONITORINFOEXW mi;
+    memset(&mi, 0, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    HMONITOR mon = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+    if (mon && GetMonitorInfoW(mon, (MONITORINFO*)&mi)) {
+        DEVMODEW dm;
+        memset(&dm, 0, sizeof(dm));
+        dm.dmSize = sizeof(dm);
+        if (EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) &&
+            dm.dmDisplayFrequency >= 30 && dm.dmDisplayFrequency <= 500)
+            return (int)dm.dmDisplayFrequency;
+    }
+    return 0;
+}
+
+/* 起/续一轮缓动。已经有一条动画在跑时只"换目标 + 重算时长"：连续滚轮时目标
+   每几毫秒就可能变一次，重建帧源反而更抖。 */
+static void AnimKick(void) {
+    int dist = g_target - g_off;
+    if (dist < 0) dist = -dist;
+    g_animFrom = g_off;
+    {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        g_animT0 = now.QuadPart;
+    }
+    g_animDur  = 70 + dist * 45 / 100;      /* 距离越长给的时间越长 */
+    if (g_animDur < 90)  g_animDur = 90;
+    if (g_animDur > 200) g_animDur = 200;
+    if (!g_tickMs) {
+        /* 帧间隔 = 刷新周期的一半（见文件头"滚动"一节）。拿不到就按 120Hz 算 */
+        int hz = ScreenHz();
+        if (hz < 30) hz = 120;
+        g_tickMs = 500 / hz;
+        if (g_tickMs < 2) g_tickMs = 2;
+        if (g_tickMs > 8) g_tickMs = 8;
+    }
+    if (g_anim) return;
+    if (!s_animThread || !s_animGo) {
+        /* 帧线程没建起来（极端资源不足）：直接落到目标，别把界面卡在半路 */
+        int old = g_off;
+        g_off = g_target;
+        MoveHost(old);
+        UpdateScrollBar(g_off);
+        return;
+    }
+    g_anim = TRUE;
+    SetEvent(s_animGo);
+}
+
+/* 缓动本身：**按时间算**（ease-out cubic），不是"每帧吃掉固定比例的剩余距离"。
+   按帧算的曲线在 240Hz 上会比 60Hz 上更早到位，手感与刷新率绑定；按时间算则
+   同一时长在任何刷新率下都是同一条曲线，帧只是采样点。
+   ★ 时间必须用 QueryPerformanceCounter，不能用 GetTickCount：后者只有 ~15.6ms
+     分辨率，帧间隔 2~8ms 时会出现"同一毫秒里连画几帧位置不动、跨过这 15.6ms
+     才跳一大步"—— 帧源再快也白搭（这是实测踩到的）。
+   ★ 刻意**不**跟随系统"动画效果"开关（SPI_GETCLIENTAREAANIMATION）：这不是
+     装饰动画，它就是滚动本体 —— 跟随的话，关掉系统动画的用户拿到的仍是
+     一跳一跳的滚动。这一条是明确决策，别"顺手"补成跟随。 */
+static void AnimTick(void) {
+    if (!g_anim) return;                    /* 停掉之后可能还残留一条已投递的帧 */
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double el = (double)(now.QuadPart - g_animT0) * 1000.0 / (double)s_qpcFreq.QuadPart;
+    int pos;
+    if (el >= (double)g_animDur) {
+        pos = g_target;
+    } else {
+        double p = el / (double)g_animDur;
+        double q = 1.0 - p;
+        double e = 1.0 - q * q * q;         /* ease-out cubic：起步快、收尾稳 */
+        pos = g_animFrom + (int)((g_target - g_animFrom) * e);
+    }
+    if (pos != g_off) {
+        int old = g_off;
+        g_off = pos;
+        MoveHost(old);
+        UpdateScrollBar(g_off);
+    }
+    if (el >= (double)g_animDur) AnimStop();
+}
+
+/* 滚到指定位置（钳位）。animate = FALSE 用于：滚动条拖拽（必须 1:1 跟手）、
+   外部拨动（自愈不补动画）、换页归零。 */
+static void ScrollTo(int pos, BOOL animate) {
+    if (pos < 0) pos = 0;
+    if (pos > MaxScroll()) pos = MaxScroll();
+    if (!animate) {
+        int old = g_off;
+        AnimStop();
+        g_off = g_target = pos;
+        MoveHost(old);
+        UpdateScrollBar(g_off);
+        return;
+    }
+    g_target = pos;
+    if (g_off == g_target) { AnimStop(); return; }
+    AnimKick();
+}
+
+/* 滚轮：一格 = 系统"每次滚 N 行" × 表单一行（S(30)）≈ 90 逻辑像素。
+   与 ScrollListBy 同一口径：系统设 0 行 = 不滚、设"一屏" = 一页。
+   ★ 小数刻度必须累计：高精度滚轮 / 触控板一条 WM_MOUSEWHEEL 的 delta 常常
+     只有 30、60（甚至 1），旧写法 `delta / WHEEL_DELTA` 是整数除法，直接截成
+     0 —— 表现为"触控板滚设置页完全不动"。累计够一格才走一步。 */
+static void WheelScroll(int delta) {
+    DWORD lines = 3;
+    if (!SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0)) lines = 3;
+    if (lines == 0) return;                 /* 系统设置：不使用滚轮滚动 */
+    int step = (lines == WHEEL_PAGESCROLL) ? (g_viewH - S(40)) : (int)lines * S(30);
+    if (step < 1) step = 1;
+    g_wheelRem += delta;
+    int notches = g_wheelRem / WHEEL_DELTA;
+    if (!notches) return;
+    g_wheelRem -= notches * WHEEL_DELTA;
+    ScrollTo(g_target - notches * step, TRUE);   /* 滚轮向上 = delta 正 = 内容下移 */
+}
+
+/* 「选择字体…」这类**动作按钮**的宽度：按文字实测宽度 + 左右内边距，不再拉满
+   整行。拉满整行会把它画成"一块区域"而不是"一个按钮"，也把这一行的视觉重心
+   从输入框上抢走。上限仍是整行宽（极长文案时不会被裁）。 */
+static int BtnTextW(HWND btn, int maxW) {
+    WCHAR txt[128] = L"";
+    if (btn) GetWindowTextW(btn, txt, 128);
+    int tw = 0;
+    HDC dc = btn ? GetDC(btn) : NULL;
+    if (dc) {
+        HGDIOBJ of = SelectObject(dc, g_font ? g_font : GetStockObject(DEFAULT_GUI_FONT));
+        SIZE sz;
+        if (GetTextExtentPoint32W(dc, txt, (int)wcslen(txt), &sz)) tw = sz.cx;
+        SelectObject(dc, of);
+        ReleaseDC(btn, dc);
+    }
+    int bw = tw + S(28);
+    if (bw < S(104)) bw = S(104);
+    if (bw > maxW)   bw = maxW;
+    return bw;
+}
+
 /* 行高是固定的，位置按"从上往下排"算 —— 比手填坐标不容易错位。
-   每次都全量落位（虚拟 y − 滚动位置），见"滚动"一节的总注释。
+   落位坐标是**承载窗内部坐标**（0 = 内容顶），与滚动偏移无关：滚动只挪承载窗，
+   不改任何子控件的坐标（见"滚动"一节）。
    显隐也在这一轮（"显隐轮"）：先把两页的控件按当前页藏好/放开，再只给
    当前页落位 —— 显隐的**唯一事实来源**是这里，别处只改 g_curTab，
    不自己动 ShowWindow。 */
@@ -884,6 +1171,7 @@ static void Layout(int w, int h) {
         MoveWindow(g_tab, x, tabTop, w - x * 2, tabH, TRUE);
     }
     int viewTop = tabTop + tabH + S(4);   /* 内容可视区的上沿 */
+    g_viewTop = viewTop;
 
     /* 内容可视区 = 页签条以下、底部固定区（状态栏 + 按钮 + 空隙）以上。
        窗口被拖得很矮时内容区保底 S(120)，此时底部窗框会被挤得薄于 S(60)、
@@ -891,107 +1179,99 @@ static void Layout(int w, int h) {
     g_viewH = (h - S(60)) - viewTop;
     if (g_viewH < S(120)) g_viewH = S(120);
 
-    /* 滚动量以滚动条为准；窗口变矮后原位置可能越界，先钳位写回 */
-    int off = ScrollPos();
-    if (off > MaxScroll()) {
-        off = MaxScroll();
-        SCROLLINFO si;
-        memset(&si, 0, sizeof(si));
-        si.cbSize = sizeof(si);
-        si.fMask  = SIF_POS;
-        si.nPos   = off;
-        SetScrollInfo(g_hwnd, SB_VERT, &si, TRUE);
-    }
+    /* 布局 = 尺度变了：动画收掉；偏移等算完新内容高之后再钳（见承载窗那段） */
+    AnimStop();
 
     /* 显隐轮：分页是结构性的（配置项 <-> 名单，见 kTabNames 处的说明），
        所以按"控件属于哪张表"整批显隐，不逐项记状态 —— 每次全量重排的
        同一个道理：状态与布局不脱节。 */
-    BOOL generalPage = (g_curTab == TAB_GENERAL);
+    BOOL infoPage    = (g_curTab == TAB_INFO);
     BOOL listPage    = (g_curTab == TAB_LISTS);
     for (int i = 0; i < FIELD_N; i++) {
         BOOL on = (FieldPage(i) == g_curTab);
         int id = kFields[i].id;
-        ShowCtrl(GetDlgItem(g_hwnd, id), on);
-        ShowCtrl(GetDlgItem(g_hwnd, id + 500), on);
-        ShowCtrl(GetDlgItem(g_hwnd, id + 600), on);
+        ShowCtrl(Ctl(id), on);
+        ShowCtrl(Ctl(id + 500), on);
+        ShowCtrl(Ctl(id + 600), on);
         /* 段头随段显隐。id == 0 必须跳过：两个"窗框"曾经以 hMenu=NULL 创建
            （控件 ID = 0），GetDlgItem(..., 0) 会命中它们 —— 名单页把底部
            窗框（按钮托盘）当段头藏掉，按钮整条消失（实测踩过）。窗框现在
            有正式 ID，这里再加 id 判断双保险。 */
         if (g_grpHead[i])
-            ShowCtrl(GetDlgItem(g_hwnd, g_grpHead[i]), on);
+            ShowCtrl(Ctl(g_grpHead[i]), on);
     }
-    /* 「常用」字段编排属于常规页（窗口信息段之后） */
-    ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_HEAD), generalPage);
-    ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_LIST), generalPage);
+    /* 「常用」字段编排属于「窗口信息」页（紧跟那一段的三行字体设置） */
+    ShowCtrl(Ctl(IDC_CMN_HEAD), infoPage);
+    ShowCtrl(Ctl(IDC_CMN_LIST), infoPage);
     for (int k = 0; k < 5; k++)
-        ShowCtrl(GetDlgItem(g_hwnd, IDC_CMN_ADD + k), generalPage);
+        ShowCtrl(Ctl(IDC_CMN_ADD + k), infoPage);
     for (int i = 0; i < LIST_N; i++) {
         int base = IDC_LIST0 + i * LIST_STRIDE;
         for (int k = 0; k <= 5; k++)      /* 组内控件占 0..5 六个 id */
-            ShowCtrl(GetDlgItem(g_hwnd, base + k), listPage);
+            ShowCtrl(Ctl(base + k), listPage);
     }
 
-    int y = viewTop + S(4);
+    int y = S(4);                     /* 承载窗内部坐标：0 = 内容顶 */
     for (int i = 0; i < FIELD_N; i++) {
         if (FieldPage(i) != g_curTab) continue;   /* 不属于本页：一行都不排 */
         if (g_grpHead[i]) {               /* 换段：先排段头。首段不额外加空 ——
                                              页签条下面已经留了呼吸感 */
             if (i && FieldPage(i - 1) == g_curTab) y += S(12);
-            MoveWindow(GetDlgItem(g_hwnd, g_grpHead[i]), x, y - off, w - x * 2, S(20), TRUE);
+            MoveWindow(Ctl(g_grpHead[i]), x, y, w - x * 2, S(20), TRUE);
             y += S(26);
         }
         int id = kFields[i].id;
-        HWND c = GetDlgItem(g_hwnd, id);
+        HWND c = Ctl(id);
         if (!c) continue;
         if (kFields[i].isBtn) {
-            MoveWindow(c, x, y - off, w - x * 2, S(24), TRUE);
+            /* 动作按钮按文字宽走（见 BtnTextW），不拉满整行 */
+            MoveWindow(c, x, y, BtnTextW(c, w - x * 2), S(24), TRUE);
             y += rowBool;
         } else if (kFields[i].isBool) {
-            MoveWindow(c, x, y - off, w - x * 2, rowBool - S(2), TRUE);
+            MoveWindow(c, x, y, w - x * 2, rowBool - S(2), TRUE);
             y += rowBool;
         } else if (kFields[i].isText) {
             /* 文本行：**标签独占一行、输入框占满下一行**。
                照数字行那样"框在左、标签吃剩下的"是行不通的 —— 路径要看得全，
                框必须撑满；而标签是一整句，塞不进一行的剩余宽度。 */
-            HWND lab = GetDlgItem(g_hwnd, id + 500);
-            if (lab) MoveWindow(lab, x, y - off, w - x * 2, S(18), TRUE);
+            HWND lab = Ctl(id + 500);
+            if (lab) MoveWindow(lab, x, y, w - x * 2, S(18), TRUE);
             y += S(20);
-            MoveWindow(c, x, y - off, w - x * 2, S(22), TRUE);
+            MoveWindow(c, x, y, w - x * 2, S(22), TRUE);
             y += S(24);
         } else {
             /* 数字框放**左边**、单位紧跟在框右侧、标签吃剩下的空间：
                标签是长句，把输入框放在标签之后的话，窗口一窄它就被挤出
                客户区 —— 用户看到"有说明、没地方填"。输入框与单位宽固定。 */
-            HWND lab  = GetDlgItem(g_hwnd, id + 500);
-            HWND unit = GetDlgItem(g_hwnd, id + 600);
+            HWND lab  = Ctl(id + 500);
+            HWND unit = Ctl(id + 600);
             int ux = x + editW + S(4), unitW = S(52);
-            MoveWindow(c, x, y - off, editW, S(22), TRUE);
+            MoveWindow(c, x, y, editW, S(22), TRUE);
             if (unit)
-                MoveWindow(unit, ux, y + S(4) - off, unitW, S(18), TRUE);
+                MoveWindow(unit, ux, y + S(4), unitW, S(18), TRUE);
             if (lab)
-                MoveWindow(lab, ux + unitW + S(8), y + S(4) - off,
+                MoveWindow(lab, ux + unitW + S(8), y + S(4),
                            w - (ux + unitW + S(8)) - x, S(18), TRUE);
             y += rowInt;
         }
         y += gap;
     }
 
-    /* 「常用」字段编排（紧跟「窗口信息」段，那是 kFields 的最后一段）：
+    /* 「常用」字段编排（「窗口信息」页，紧跟字体那三行）：
        子段头 + 左侧有序列表 + 右侧竖排五颗按钮。按钮贴着列表，动的是哪个
        列表不用猜。列表给足默认那 11 项的高度（行高随字体走，所以按 DIP
        折算而不是按"行数"写死，高分屏上不会只剩半截）；再多它自己出滚动条。 */
-    if (generalPage) {
+    if (infoPage) {
         int cmnW = S(240), cmnRow = S(26), cmnGap = S(4);
         int cmnH = S(170);
         int bx = x + cmnW + S(8), bw = S(96);
         y += S(12);
-        MoveWindow(GetDlgItem(g_hwnd, IDC_CMN_HEAD), x, y - off, w - x * 2, S(20), TRUE);
+        MoveWindow(Ctl(IDC_CMN_HEAD), x, y, w - x * 2, S(20), TRUE);
         y += S(24);
-        MoveWindow(GetDlgItem(g_hwnd, IDC_CMN_LIST), x, y - off, cmnW, cmnH, TRUE);
+        MoveWindow(Ctl(IDC_CMN_LIST), x, y, cmnW, cmnH, TRUE);
         for (int k = 0; k < 5; k++)
-            MoveWindow(GetDlgItem(g_hwnd, IDC_CMN_ADD + k),
-                       bx, y + k * (cmnRow + cmnGap) - off, bw, cmnRow, TRUE);
+            MoveWindow(Ctl(IDC_CMN_ADD + k),
+                       bx, y + k * (cmnRow + cmnGap), bw, cmnRow, TRUE);
         y += cmnH + S(6);
     }
 
@@ -1006,19 +1286,36 @@ static void Layout(int w, int h) {
     for (int i = 0; i < LIST_N; i++) {
         if (!listPage) break;             /* 非名单页：名单一组都不排 */
         int base = IDC_LIST0 + i * LIST_STRIDE;
-        MoveWindow(GetDlgItem(g_hwnd, base + 4), x, y - off, w - x * 2, S(18), TRUE);  /* 标题 */
+        MoveWindow(Ctl(base + 4), x, y, w - x * 2, S(18), TRUE);  /* 标题 */
         y += S(20);
-        MoveWindow(GetDlgItem(g_hwnd, base), x, y - off, listW, listH, TRUE);
+        MoveWindow(Ctl(base), x, y, listW, listH, TRUE);
         y += listH + S(4);
-        MoveWindow(GetDlgItem(g_hwnd, base + 1), x, y - off, S(220), S(24), TRUE);     /* 名字输入 */
-        MoveWindow(GetDlgItem(g_hwnd, base + 2), x + S(228), y - off, S(70), S(24), TRUE);
-        MoveWindow(GetDlgItem(g_hwnd, base + 3), x + S(304), y - off, S(70), S(24), TRUE);
-        MoveWindow(GetDlgItem(g_hwnd, base + 5), x + S(380), y - off, S(88), S(24), TRUE);  /* 选取窗口 */
+        MoveWindow(Ctl(base + 1), x, y, S(220), S(24), TRUE);     /* 名字输入 */
+        MoveWindow(Ctl(base + 2), x + S(228), y, S(70), S(24), TRUE);
+        MoveWindow(Ctl(base + 3), x + S(304), y, S(70), S(24), TRUE);
+        MoveWindow(Ctl(base + 5), x + S(380), y, S(88), S(24), TRUE);  /* 选取窗口 */
         y += S(28) + S(8);
     }
-    /* 内容总高**相对可视区上沿**算：MaxScroll = contentH − viewH，
-       滚到头时内容底正好贴可视区底（可视区不在客户区顶部，而是页签条下面） */
-    g_contentH = (y + S(6)) - viewTop;
+    /* 内容总高 = 承载窗高度。MaxScroll = contentH − viewH，滚到头时内容底正好
+       贴可视区底。偏移在这里钳位（尺度假定已经变了），动画已在开头收掉。 */
+    g_contentH = y + S(6);
+    if (g_off > MaxScroll()) g_off = MaxScroll();
+    if (g_off < 0) g_off = 0;
+    g_target = g_off;
+
+    /* 承载窗：宽度铺满客户区、高度 = max(内容总高, 可视区高)，位置 = 可视区
+       上沿 − 偏移。**高度取 max 是有意的**：内容比可视区矮时也让承载窗铺满
+       可视区，这样视口里永远没有"主窗口的空白"要擦 —— 切页/滚动时的重绘
+       全部收敛在承载窗自己身上。
+       用 SetWindowPos 而不是 MoveWindow(..., TRUE)：布局只改几何，重画交给
+       控件自己的失效（换页另有整帧重画，见 WM_NOTIFY）。
+       z 序：它在两个"窗框"之下（窗框在下面各自钉顶），移动时用 SWP_NOZORDER
+       不许它把自己抬上来 —— 否则滚上去的内容会盖住页签条。 */
+    if (g_form) {
+        int hostH = g_contentH > g_viewH ? g_contentH : g_viewH;
+        SetWindowPos(g_form, NULL, 0, viewTop - g_off, w, hostH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 
     /* 顶部"窗框"：从客户区顶一直盖到内容可视区上沿，页签条是它的子控件 ——
        滚动中爬到可视区上方的内容滑到它底下被挡住，不会盖到页签条上。
@@ -1050,24 +1347,7 @@ static void Layout(int w, int h) {
     MoveWindow(GetDlgItem(g_footer, IDC_SAVE),     w - x - bw * 2 - bg,     fby, bw, S(26), TRUE);
     MoveWindow(GetDlgItem(g_footer, IDC_EXIT),     w - x - bw,              fby, bw, S(26), TRUE);
 
-    UpdateScrollBar(off);
-    g_laidScroll = off;
-}
-
-/* 滚到指定位置（钳位）并按新位置全量重排。滚动条与子控件位置的同步
-   只有这一条路径，WM_VSCROLL / 滚轮都汇聚到这里。 */
-static void SetScroll(int pos) {
-    if (pos < 0) pos = 0;
-    if (pos > MaxScroll()) pos = MaxScroll();
-    SCROLLINFO si;
-    memset(&si, 0, sizeof(si));
-    si.cbSize = sizeof(si);
-    si.fMask  = SIF_POS;
-    si.nPos   = pos;
-    SetScrollInfo(g_hwnd, SB_VERT, &si, TRUE);
-    RECT rc;
-    GetClientRect(g_hwnd, &rc);
-    Layout(rc.right, rc.bottom);
+    UpdateScrollBar(g_off);
 }
 
 /* ---------------- 按钮的自绘 ----------------
@@ -1184,7 +1464,7 @@ static BOOL TabIsTab(HWND h) {
 }
 
 /* 页签条自绘：comctl 页签的默认样式还是 Win95 的浮凸小块，整个接管它的
-   WM_PAINT —— 平底、一条浅灰分隔线贯穿脚下；选中页 = 半粗强调色文本 +
+   WM_PAINT —— 平底、一条浅灰分隔线贯穿脚下；选中页 = 强调色文本 +
    压在分隔线上的强调条（现代设置页的"下划线页签"）；悬停 = 淡蓝圆角底
    （与次级按钮悬停同色）。
    **行为不动**：点击、方向键、TCN_SELCHANGE 仍走控件默认过程 —— 点击判定
@@ -1237,8 +1517,9 @@ static void PaintTab(HWND h, HDC dc) {
             DeleteObject(hb);
         }
 
-        HFONT f = (i == sel) ? g_fontBold
-                             : (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+        /* 选中页**不加粗**：粗体只留给段头；页签靠强调色 + 脚下那条下划线区分。
+           好处是选中/未选中切换时文字宽度不跳，整条页签不会因为变粗而抖一下。 */
+        HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
         if (!f) f = g_font;
         HGDIOBJ of = SelectObject(dc, f);
         SetBkMode(dc, TRANSPARENT);
@@ -1351,7 +1632,7 @@ static LRESULT CALLBACK ChildProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 static int ListIndexFromHwnd(HWND h) {
     if (!h) return -1;
     for (int i = 0; i < LIST_N; i++)
-        if (h == GetDlgItem(g_hwnd, IDC_LIST0 + i * LIST_STRIDE)) return i;
+        if (h == Ctl(IDC_LIST0 + i * LIST_STRIDE)) return i;
     return -1;
 }
 
@@ -1384,7 +1665,7 @@ static void HookChild(HWND h) {
    （匹配时两边都去），界面显示的样子就该是**真正存进去的样子**。 */
 static BOOL AddListEntry(int i, const WCHAR* raw) {
     int base = IDC_LIST0 + i * LIST_STRIDE;
-    HWND lb = GetDlgItem(g_hwnd, base);
+    HWND lb = Ctl(base);
     WCHAR trim[CFG_NAME_MAX];
     _snwprintf_s(trim, CFG_NAME_MAX, _TRUNCATE, L"%s", raw);
 
@@ -1409,7 +1690,7 @@ static BOOL AddListEntry(int i, const WCHAR* raw) {
 
 static void AddName(int i) {
     int base = IDC_LIST0 + i * LIST_STRIDE;
-    HWND ed = GetDlgItem(g_hwnd, base + 1);
+    HWND ed = Ctl(base + 1);
     WCHAR raw[CFG_NAME_MAX] = L"";
     GetWindowTextW(ed, raw, CFG_NAME_MAX);
     if (AddListEntry(i, raw)) UpdateDirty();
@@ -1419,7 +1700,7 @@ static void AddName(int i) {
 
 static void DelName(int i) {
     int base = IDC_LIST0 + i * LIST_STRIDE;
-    HWND lb = GetDlgItem(g_hwnd, base);
+    HWND lb = Ctl(base);
     int sel = (int)SendMessageW(lb, LB_GETCURSEL, 0, 0);
     if (sel == LB_ERR) return;
     SendMessageW(lb, LB_DELETESTRING, (WPARAM)sel, 0);
@@ -1554,7 +1835,7 @@ static void PickFinish(void) {
     /* ★ 只**填进输入框**，不直接加进名单 —— 由用户确认后点"添加"。
        这样能先看清取到的是什么、也能顺手改一改（比如只留进程名的主体）。 */
     {
-        HWND ed = GetDlgItem(g_hwnd, IDC_LIST0 + i * LIST_STRIDE + 1);
+        HWND ed = Ctl(IDC_LIST0 + i * LIST_STRIDE + 1);
         SetWindowTextW(ed, name);
         SetFocus(ed);
         SendMessageW(ed, EM_SETSEL, 0, -1);     /* 全选：直接打字就能覆盖 */
@@ -1569,8 +1850,8 @@ static void PickFinish(void) {
    "选窗只把名字填进输入框"同一套礼貌：看得见、改得动、可反悔。
    CF_NOVERTFONTS：@ 开头的竖排字体对横排正文没有意义，列出来只会让人选错。 */
 static void PickInfoFont(void) {
-    HWND edFace = GetDlgItem(g_hwnd, IDC_INFO_FONT);
-    HWND edSize = GetDlgItem(g_hwnd, IDC_INFO_FSIZE);
+    HWND edFace = Ctl(IDC_INFO_FONT);
+    HWND edSize = Ctl(IDC_INFO_FSIZE);
     if (!edFace || !edSize) return;
 
     WCHAR face[LF_FACESIZE] = L"";
@@ -1611,7 +1892,7 @@ static void PickInfoFont(void) {
        10 磅），一个只活一两秒的提示不需要字号旋钮；
      · 因此不做 CF_LIMITSIZE，选中的磅数直接丢弃。 */
 static void PickCopyFont(void) {
-    HWND edFace = GetDlgItem(g_hwnd, IDC_COPY_FONT);
+    HWND edFace = Ctl(IDC_COPY_FONT);
     if (!edFace) return;
 
     WCHAR face[LF_FACESIZE] = L"";
@@ -1647,6 +1928,30 @@ static void PickCopyFont(void) {
    子控件的通知（按钮点击、页签的 WM_NOTIFY）原样转给主窗口，处理逻辑不分家。 */
 static LRESULT CALLBACK FooterProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_COMMAND || m == WM_NOTIFY) {
+        SendMessageW(g_hwnd, m, w, l);
+        return 0;
+    }
+    /* 窗框上的空白（状态栏两侧、页签条右边）也要能滚表单：与子控件那一份
+       同一去向，处理逻辑只在主窗口里有一份。 */
+    if (m == WM_MOUSEWHEEL) {
+        SendMessageW(g_hwnd, m, w, l);
+        return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+/* 承载窗（表单内容容器）的过程。它本身不画东西，只做两件事：
+    ① 把子控件的通知转给主窗口 —— 按钮的 WM_COMMAND、编辑框的 EN_CHANGE、
+       列表框的 LBN_* 都是发给**父窗口**的，而它们的父现在是承载窗；
+    ② 把落在承载窗空白处（不在任何子控件上）的滚轮转给主窗口。
+   ★ 承载窗**不许**自己滚：滚动只由主窗口的 WM_MOUSEWHEEL / WM_VSCROLL 驱动、
+     只改 g_target。一旦在这里就地重排，滚轮路径就又变长了 —— 那正是
+     "滚轮漏给背后程序"那个 bug 的成因（见文件头"滚动"一节）。 */
+static LRESULT CALLBACK FormProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_COMMAND:
+    case WM_NOTIFY:
+    case WM_MOUSEWHEEL:
         SendMessageW(g_hwnd, m, w, l);
         return 0;
     }
@@ -1697,19 +2002,53 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     }
     case WM_NOTIFY: {
-        /* 页签切换（TCN_SELCHANGE 在选完之后发，取当前页即可）：改 g_curTab
-           再 SetScroll(0) —— 换页后内容总高变了，旧滚动位置没有意义；
-           SetScroll 会走 Layout，显隐轮与全量重排都在那里。 */
+        /* 页签切换（TCN_SELCHANGE 在选完之后发，取当前页即可）：改 g_curTab、
+           偏移归零，再走一趟 Layout —— 换页后内容总高变了，旧偏移没有意义；
+           显隐轮与全量重排都在 Layout 里。归零走"不播动画"的那条路。 */
         NMHDR* nm = (NMHDR*)l;
         if (nm->idFrom == IDC_TAB && nm->code == TCN_SELCHANGE) {
             int t = (int)SendMessageW(g_tab, TCM_GETCURSEL, 0, 0);
             if (t >= 0 && t < TAB_N) g_curTab = t;
-            SetScroll(0);
-            /* 本窗口的 WM_PAINT 只 Validate、从不擦底（见 WM_PAINT 分支）：
-               换页藏掉一批控件后，露出来的区域必须自己擦一遍，否则旧页
-               控件会留影。RDW_ERASE 让父窗口按类底色重铺，子窗口全部重画。 */
-            RedrawWindow(h, NULL, NULL, RDW_INVALIDATE | RDW_ERASE |
-                                        RDW_ALLCHILDREN | RDW_UPDATENOW);
+            /* 先把页签条的新选中态**立刻**画出来，再干下面那些重活：换页要做
+               冻结、整页重排、整帧重画（几十毫秒）；如果等高亮一起排到最后，
+               用户看到的就是"点了没反应，过一会儿下划线才跳过去"。这个
+               UpdateWindow 只重画页签条本身，代价极小。 */
+            if (g_tab) { InvalidateRect(g_tab, NULL, FALSE); UpdateWindow(g_tab); }
+            /* 换页：整段在"关重绘"里完成，最后一次性画完。
+               为什么不能边藏边露：旧页控件一个个 ShowWindow(SW_HIDE)，每次都会
+               让承载窗 / 主窗露出一块背景并被擦成灰底；240Hz 下这些中间状态会被
+               合成器采样到 —— 用户看到的就是"闪一下"。关掉重绘后中间状态一个都
+               不上屏，最后按下面顺序只画一次：
+                 ① 承载窗空白处（控件之间的缝）铺底色；
+                 ② 子控件各自重画（**不擦** —— 避免出现"先全灰、再出字"的一帧）；
+                 ③ 主窗口自己的空白（承载窗铺满视口，通常什么也没有）。
+               这是**用户点击**路径，不是滚轮路径 —— 这里同步重画是安全的
+               （滚轮路径才绝不能同步重画，见文件头"滚动"一节）。 */
+            SendMessageW(h, WM_SETREDRAW, FALSE, 0);
+            if (g_form) SendMessageW(g_form, WM_SETREDRAW, FALSE, 0);
+            AnimStop();
+            g_off = g_target = 0;
+            g_wheelRem = 0;
+            {
+                RECT rc;
+                GetClientRect(h, &rc);
+                Layout(rc.right, rc.bottom);
+            }
+            if (g_form) SendMessageW(g_form, WM_SETREDRAW, TRUE, 0);
+            SendMessageW(h, WM_SETREDRAW, TRUE, 0);
+            if (g_form) {
+                /* ★ 这里必须是 RDW_ALLCHILDREN。只擦承载窗自己的空白是不够的：
+                   WS_CLIPCHILDREN 会把**已经隐藏**的子控件矩形也一起裁掉，
+                   父窗的擦除永远够不到"旧控件让出来的那块像素"（实测：外部
+                   强制 InvalidateRect+UpdateWindow 之后残影依旧，而加上
+                   ALLCHILDREN 的那次重画立刻干净）。代价是这一帧要把新页的
+                   几十个控件同步画一遍 —— 换页是用户点击，几十毫秒可以接受；
+                   页签高亮在上面已经先画出来了，不会跟着一起等。 */
+                RedrawWindow(g_form, NULL, NULL,
+                             RDW_INVALIDATE | RDW_ERASE |
+                             RDW_ALLCHILDREN | RDW_UPDATENOW);
+            }
+            RedrawWindow(h, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
             return 0;
         }
         break;
@@ -1742,53 +2081,74 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             SetStatus(L"选窗已取消");
         }
         return 0;
+    case WM_ERASEBKGND: {
+        /* 主窗口只负责**承载窗够不着的地方**：内容比可视区矮时的那一条、以及
+           滚动时承载窗让出来的那条。子控件区域被 WS_CLIPCHILDREN 排除，
+           这里不可能擦到表单内容上（擦到就是闪烁）。 */
+        RECT rc;
+        GetClientRect(h, &rc);
+        FillRect((HDC)w, &rc, GetSysColorBrush(COLOR_BTNFACE));
+        return 1;
+    }
     case WM_PAINT:
-        /* 滚动条可能被外部（读屏 / UIA 的 Scroll 模式）直接拨动而不经过
-           WM_VSCROLL：画之前对一下账，位置和上次落位不一致就整体重排（自愈） */
-        if (g_hwnd && ScrollPos() != g_laidScroll) {
-            RECT rc;
-            GetClientRect(g_hwnd, &rc);
-            Layout(rc.right, rc.bottom);
+        /* 滚动条可能被外部（读屏 / UIA 的 Scroll 模式）直接拨动而不经过我们的
+           WM_VSCROLL：画之前对一下账。以滚动条为准**直接对齐** —— 谁来拨谁就该
+           立刻看到结果，外部拨动不补动画。 */
+        if (g_hwnd && !g_anim) {
+            int sp = ScrollPos();
+            if (sp != g_off) ScrollTo(sp, FALSE);
         }
         ValidateRect(h, NULL);
         return DefWindowProcW(h, m, w, l);
+    case WM_SCROLL_TICK:
+        InterlockedExchange(&s_tickPending, 0);   /* 这一帧开始处理：允许投下一帧 */
+        AnimTick();
+        return 0;
     case WM_VSCROLL: {
-        int cmd = LOWORD(w), pos = ScrollPos();
-        switch (cmd) {
-        case SB_LINEUP:          pos -= S(40); break;
-        case SB_LINEDOWN:        pos += S(40); break;
-        case SB_PAGEUP:          pos -= g_viewH - S(40); break;
-        case SB_PAGEDOWN:        pos += g_viewH - S(40); break;
-        case SB_THUMBPOSITION:
-        case SB_THUMBTRACK:      pos = (int)HIWORD(w); break;
-        default:                 return 0;    /* SB_ENDSCROLL 等 */
+        /* 行/页以**目标值**为基准（不是当前偏移）：连着点时命令要累加，
+           否则动画还没走完的第二次点击会被"当前偏移"吃掉一半。 */
+        switch (LOWORD(w)) {
+        case SB_LINEUP:        ScrollTo(g_target - S(30), TRUE); break;
+        case SB_LINEDOWN:      ScrollTo(g_target + S(30), TRUE); break;
+        case SB_PAGEUP:        ScrollTo(g_target - (g_viewH - S(40)), TRUE); break;
+        case SB_PAGEDOWN:      ScrollTo(g_target + (g_viewH - S(40)), TRUE); break;
+        case SB_TOP:           ScrollTo(0, TRUE); break;
+        case SB_BOTTOM:        ScrollTo(MaxScroll(), TRUE); break;
+        case SB_THUMBTRACK:    /* 拖拽 = 1:1 跟手，绝不缓动 */
+        case SB_THUMBPOSITION: ScrollTo((int)HIWORD(w), FALSE); break;
+        default:               return 0;    /* SB_ENDSCROLL 等 */
         }
-        SetScroll(pos);
         return 0;
     }
     case WM_MOUSEWHEEL: {
-        /* 子控件（见 ChildProc）把滚轮转到这里。规则：
+        /* 子控件（ChildProc）、承载窗（FormProc）、窗框（FooterProc）与页签都把
+           滚轮转到这里 —— 只有这一处做决定：
              ① 选窗态下滚轮无意义 -> 吞掉；
-             ② 光标停在某个**名单列表框**上 -> 滚那个列表框（以前滚轮只滚整个表单，
-                列表框只能拖滚动条）；
-             ③ 否则滚整个表单。 */
+             ② 光标停在**列表框**上（五份名单 + 「窗口信息」页的「常用」字段）
+                -> 滚那个列表框。列表框比整页短，滚列表比滚整页更符合直觉；
+                而且「窗口信息」页本身没有可滚空间，不同样处理的话就是"滚不动"；
+             ③ 否则滚整个表单。
+           ★ 返回 0 = 已消费。**不要**在这里重排 / 同步重画：处理得慢，系统就会
+             把后续滚轮回落给焦点窗口（背后的程序跟着滚）—— 这条是踩过的坑。 */
         if (g_pickList >= 0) return 0;
         POINT pt;
         pt.x = (LONG)(short)LOWORD(l);
         pt.y = (LONG)(short)HIWORD(l);
         HWND over = WindowFromPoint(pt);
-        if (ListIndexFromHwnd(over) >= 0) {
+        if (ListIndexFromHwnd(over) >= 0 || over == Ctl(IDC_CMN_LIST)) {
             ScrollListBy(over, (int)(short)HIWORD(w));
             return 0;
         }
-        SetScroll(ScrollPos() - ((short)HIWORD(w)) / WHEEL_DELTA * S(48));
+        WheelScroll((int)(short)HIWORD(w));
         return 0;
     }
     case WM_DPICHANGED:
         /* 拖到另一块不同缩放的显示器上：DPI 变了 -> 字体与所有尺寸都要重算，
-           并按系统给的建议矩形调整窗口（否则窗口大小不变、内容挤在一起）。 */
+           并按系统给的建议矩形调整窗口（否则窗口大小不变、内容挤在一起）。
+           顺带把帧间隔作废重算 —— 新屏的刷新率可能与旧屏不同（60 ↔ 240）。 */
         g_dpi = (int)HIWORD(w);
         if (g_dpi < 96) g_dpi = 96;
+        g_tickMs = 0;
         MakeFont();
         ApplyFont();
         if (l) {
@@ -1798,6 +2158,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
         return 0;
+    case WM_MOVE:
+        /* 换显示器 = 刷新率可能变（60Hz 副屏 ↔ 240Hz 主屏）：帧间隔作废重算 */
+        g_tickMs = 0;
+        break;
     case WM_SIZE:
         Layout(LOWORD(l), HIWORD(l));
         return 0;
@@ -1805,6 +2169,17 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         CloseNoSave();
         return 0;
     case WM_DESTROY:
+        /* 帧线程是常驻的（平时阻塞在 s_animGo 上）：窗口没了必须叫醒它退出，
+           否则它会继续往一个已销毁的窗口 PostMessage。 */
+        AnimStop();
+        s_animQuit = TRUE;
+        if (s_animGo) SetEvent(s_animGo);
+        if (s_animThread) {
+            WaitForSingleObject(s_animThread, 300);
+            CloseHandle(s_animThread);
+            s_animThread = NULL;
+        }
+        if (s_animGo) { CloseHandle(s_animGo); s_animGo = NULL; }
         PostQuitMessage(0);
         return 0;
     default:
@@ -1893,6 +2268,12 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     fc.lpszClassName = FOOTER_CLASS;
     if (!RegisterClassW(&fc)) return 1;
 
+    /* 承载窗类：表单内容的容器。滚动只挪它一个窗口（见"滚动"一节与 FormProc） */
+    WNDCLASSW mc = wc;
+    mc.lpfnWndProc = FormProc;
+    mc.lpszClassName = FORM_CLASS;
+    if (!RegisterClassW(&mc)) return 1;
+
     /* DPI 要在**建窗之前**知道：窗口尺寸本身就得按它算（否则 200% 屏上
        窗口只有一半大）。QueryDpi 在没有 hwnd 时退回查屏幕 DC。 */
     g_dpi = (int)QueryDpi();
@@ -1940,8 +2321,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     g_header = CreateWindowExW(WS_EX_CONTROLPARENT, FOOTER_CLASS, L"",
                                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
                                0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)IDC_HEADER, hInst, NULL);
-    /* 页签条：只决定"显示哪些控件"（显隐轮在 Layout）—— 控件本体仍是
-       主窗口的（孙）子窗口，Load / Save / WM_COMMAND 全按 id 找，不分页。
+    /* 页签条：只决定"显示哪些控件"（显隐轮在 Layout）。控件本体住在下面的
+       承载窗里，Load / Save / WM_COMMAND 全按 id 找，不分页。
        换页的 WM_NOTIFY 由窗框原样转给主窗口（见 FooterProc）。 */
     g_tab = CreateWindowExW(0, WC_TABCONTROLW, L"",
                             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
@@ -1957,28 +2338,37 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         HookChild(g_tab);    /* 滚轮转发 / Ctrl+S：与其它子控件同一待遇 */
     }
 
+    /* 承载窗：**全部表单控件**的父窗口。它被当作一个整体上下移动 —— 这是
+       "滚动不跳、也不把滚轮漏给背后程序"的结构前提（见"滚动"一节）。
+       WS_EX_CONTROLPARENT 让 IsDialogMessage 的 Tab 焦点能进到它的子控件；
+       WS_CLIPCHILDREN 保证它擦自己底色时不会覆盖子控件（反过来也一样）。 */
+    g_form = CreateWindowExW(WS_EX_CONTROLPARENT, FORM_CLASS, L"",
+                             WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                             0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)IDC_FORM, hInst, NULL);
+    if (!g_form) return 1;
+
     for (int i = 0; i < FIELD_N; i++) {
         int id = kFields[i].id;
-        if (g_grpHead[i])                 /* 段头：普通 STATIC，字体走 FontApplyCb 的半粗分支 */
-            MakeLabel(hInst, g_hwnd, kFields[i].group, g_grpHead[i]);
+        if (g_grpHead[i])                 /* 段头：普通 STATIC，字体走 FontApplyCb 的段头分支 */
+            MakeLabel(hInst, g_form, kFields[i].group, g_grpHead[i]);
         if (kFields[i].isBtn) {
             /* 按钮自己就是一行：它不承载配置值，点击行为在 WM_COMMAND 里按 id 分支 */
             HWND b = CreateWindowExW(0, L"BUTTON", kFields[i].label,
                                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
-                                     0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)id, hInst, NULL);
+                                     0, 0, 10, 10, g_form, (HMENU)(INT_PTR)id, hInst, NULL);
             HookChild(b);
         } else if (kFields[i].isBool) {
             HWND b = CreateWindowExW(0, L"BUTTON", kFields[i].label,
                                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX | WS_TABSTOP,
-                                     0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)id, hInst, NULL);
+                                     0, 0, 10, 10, g_form, (HMENU)(INT_PTR)id, hInst, NULL);
             HookChild(b);
         } else {
-            MakeLabel(hInst, g_hwnd, kFields[i].label, id + 500);
+            MakeLabel(hInst, g_form, kFields[i].label, id + 500);
             if (kFields[i].unit)
-                MakeLabel(hInst, g_hwnd, kFields[i].unit, id + 600);  /* 输入框右侧的单位 */
+                MakeLabel(hInst, g_form, kFields[i].unit, id + 600);  /* 输入框右侧的单位 */
             HWND e = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | ES_AUTOHSCROLL | WS_TABSTOP,
-                                     0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)id, hInst, NULL);
+                                     0, 0, 10, 10, g_form, (HMENU)(INT_PTR)id, hInst, NULL);
             /* 数字框：限 8 位（最大值 60000 也远用不完），防止粘进一大段文本。
                文本框按配置项自己的上限来限，不是 8 —— 路径比数字长得多。 */
             SendMessageW(e, EM_LIMITTEXT,
@@ -1989,39 +2379,39 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     /* 「常用」字段编排（窗口信息弹窗的「常用」视图）：子段头 + 有序列表 +
        添加…/删除/上移/下移。列表项的文本是友好名，字段编号存在项数据里。 */
-    MakeLabel(hInst, g_hwnd,
+    MakeLabel(hInst, g_form,
               L"「常用」视图的字段（自上而下就是弹窗里的顺序）",
               IDC_CMN_HEAD);
     HookChild(CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
                               WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS |
                               WS_VSCROLL | WS_TABSTOP |
                               LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-                              0, 0, 10, 10, g_hwnd,
+                              0, 0, 10, 10, g_form,
                               (HMENU)(INT_PTR)IDC_CMN_LIST, hInst, NULL));
-    MakeBtn(hInst, g_hwnd, L"添加…", IDC_CMN_ADD);
-    MakeBtn(hInst, g_hwnd, L"删除",  IDC_CMN_DEL);
-    MakeBtn(hInst, g_hwnd, L"上移",  IDC_CMN_UP);
-    MakeBtn(hInst, g_hwnd, L"下移",  IDC_CMN_DOWN);
-    MakeBtn(hInst, g_hwnd, L"重置默认", IDC_CMN_RESET);
+    MakeBtn(hInst, g_form, L"添加…", IDC_CMN_ADD);
+    MakeBtn(hInst, g_form, L"删除",  IDC_CMN_DEL);
+    MakeBtn(hInst, g_form, L"上移",  IDC_CMN_UP);
+    MakeBtn(hInst, g_form, L"下移",  IDC_CMN_DOWN);
+    MakeBtn(hInst, g_form, L"重置默认", IDC_CMN_RESET);
 
     for (int i = 0; i < LIST_N; i++) {
         int base = IDC_LIST0 + i * LIST_STRIDE;
-        MakeLabel(hInst, g_hwnd, kLists[i].label, base + 4);
+        MakeLabel(hInst, g_form, kLists[i].label, base + 4);
         HookChild(CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
                                   WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS |
                                   WS_VSCROLL | WS_HSCROLL | WS_TABSTOP |
                                   LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-                                  0, 0, 10, 10, g_hwnd,
+                                  0, 0, 10, 10, g_form,
                                   (HMENU)(INT_PTR)base, hInst, NULL));
         HWND ed = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                   WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | ES_AUTOHSCROLL | WS_TABSTOP,
-                                  0, 0, 10, 10, g_hwnd,
+                                  0, 0, 10, 10, g_form,
                                   (HMENU)(INT_PTR)(base + 1), hInst, NULL);
         SendMessageW(ed, EM_LIMITTEXT, CFG_NAME_MAX - 1, 0);
         HookChild(ed);
-        MakeBtn(hInst, g_hwnd, L"添加", base + 2);
-        MakeBtn(hInst, g_hwnd, L"删除", base + 3);
-        MakeBtn(hInst, g_hwnd, L"选取窗口", base + 5);   /* 只填输入框，还得点"添加" */
+        MakeBtn(hInst, g_form, L"添加", base + 2);
+        MakeBtn(hInst, g_form, L"删除", base + 3);
+        MakeBtn(hInst, g_form, L"选取窗口", base + 5);   /* 只填输入框，还得点"添加" */
     }
 
     /* 底部"窗框"最后建：z 序压在表单内容之上，滚动时挡住溢出的内容 */
@@ -2047,6 +2437,16 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     SetForegroundWindow(g_hwnd);
     BringWindowToTop(g_hwnd);
     UpdateWindow(g_hwnd);
+
+    /* 动画时钟：QPC 是唯一有亚毫秒精度的选择（见 AnimTick 的说明） */
+    QueryPerformanceFrequency(&s_qpcFreq);
+
+    /* 滚动动画的帧线程：跟着合成器走（见 AnimThreadProc）。常驻，但只在动画
+       期间干活，其余时间阻塞在事件上 —— 与"闲时零流量"的要求不冲突。
+       建不出来（极端资源不足）也不致命：AnimKick 会退化成直接跳到目标。 */
+    s_animGo = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (s_animGo)
+        s_animThread = CreateThread(NULL, 0, AnimThreadProc, NULL, 0, NULL);
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
