@@ -318,8 +318,9 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
     } else {
         /* 需要折行：用满上限宽度 */
         w = maxW;
-        /* 标题 + 计数比正文上限还宽（长程序名 + 极短正文）时，宁可让窗口宽一点，
-           也不把计数挤出行外 */
+        /* 标题 + 计数比正文上限还宽（长程序名 + 极短正文）时把窗口撑到这个宽度；
+           撑过 maxW 的部分仍会被下面的上限夹回来 —— 那时标题按省略号截断，
+           计数照旧贴右边（两者不重叠见后面对 headRect 的处理）。 */
         if (rowW + 2 * pad > w) w = rowW + 2 * pad;
     }
     if (w < minW) w = minW;
@@ -359,12 +360,20 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
     if (x < work.left) x = work.left;
 
     /* 顶部一行：标题在左、计数贴右。标题的右边界让出计数所占的宽度，
-       两者永远不会重叠（标题过长时按 DT_END_ELLIPSIS 截）。 */
+       两者不重叠（标题过长时按 DT_END_ELLIPSIS 截）。
+
+       ★ 24px 的最小标题宽度只能在**没有计数**时用：有计数时它可能越过计数的
+       左边界，两条文字就叠在一起了（长程序名 + 窄窗口，如 200px 的
+       CopyWidthMax）。有计数时宁可把标题压到只剩省略号，也不让它压在字数上。 */
     s_st.headRect.left = pad;
     s_st.headRect.top = padTop;
     s_st.headRect.right = (metaW > 0) ? (w - pad - metaW - metaGapX) : (w - pad);
-    if (s_st.headRect.right < s_st.headRect.left + MulDiv(24, dpi, 96))
-        s_st.headRect.right = s_st.headRect.left + MulDiv(24, dpi, 96);
+    if (metaW <= 0) {
+        int minRight = s_st.headRect.left + MulDiv(24, dpi, 96);
+        if (s_st.headRect.right < minRight) s_st.headRect.right = minRight;
+    }
+    if (s_st.headRect.right < s_st.headRect.left)
+        s_st.headRect.right = s_st.headRect.left;   /* 空间实在不够：空标题，不越界 */
     s_st.headRect.bottom = padTop + rowH;
 
     s_st.bodyRect.left = pad;
