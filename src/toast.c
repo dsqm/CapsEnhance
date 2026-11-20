@@ -13,15 +13,19 @@
    本线程只在被显示时才画一帧，闲时只有一个隐藏窗口，没有周期性流量。
 
    ★ 渲染方式：**逐像素 alpha（UpdateLayeredWindow）**，不是整窗 alpha。
-   整窗 alpha（SetLayeredWindowAttributes + LWA_ALPHA）实现简单，但有三个
+   整窗 alpha（SetLayeredWindowAttributes + LWA_ALPHA）实现简单，但有两个
    真实缺点，都在实测里撞到过：
      1. 圆角只能靠 SetWindowRgn 裁 —— 那是 1 bit 的裁剪，四角全是硬锯齿；
-     2. 连正文一起被 5% 的底色稀释，小字号看着发虚；
-     3. 边框只能沿矩形画，四角的线正好在裁剪区外，"直边有框、转角没框"。
-   逐像素之后：圆角与边框由 GDI+ 抗锯齿绘制，正文区域 alpha 保持 255
-   （完全不与桌面混色），只有最外圈 1~2 px 做羽化。
+     2. 边框只能沿矩形画，四角的线正好在裁剪区外，"直边有框、转角没框"。
+   逐像素之后：圆角与边框由 GDI+ 抗锯齿绘制，形状边缘按蒙版覆盖度羽化。
 
-   ★ 窗口样式仍是四件套 + 一个额外约束：
+   ★ 透明度口径（与实现一致，别再按"只有边缘半透明"理解）：合层时**整张表面
+     统一乘 CopyAlpha** —— 背板、正文、边框落在同一个不透明度上（默认 242 ≈
+     95%）。逐像素 alpha 在这里换来的是"圆角与边框能抗锯齿"，不是"正文保持
+     不透明"；要后者得换成 `a = 255 - (255-cov)*(255-alphaCfg)/255` 那种只让
+     边缘衰减的合成。
+
+   ★ 窗口样式是五件套：
      WS_EX_LAYERED     —— 逐像素 alpha 的前提。
      WS_EX_NOACTIVATE  —— 绝不抢焦点（抢焦点会把用户正在输入的目标切走）。
      WS_EX_TOPMOST     —— 盖在别的窗口之上，但不激活它们。
@@ -457,7 +461,8 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
         g.FillPath(&white, &path);
     }
 
-    /* ---- 合层：预乘 alpha，正文区（覆盖度 255）保持完全不透明 ---- */
+    /* ---- 合层：预乘 alpha。整张表面统一乘 CopyAlpha（正文也一样），
+       逐像素只负责按蒙版把圆角边缘羽化 —— 见文件头的「透明度口径」段 ---- */
     int alphaCfg = CfgInt(CFG_COPY_ALPHA);
     if (alphaCfg < 60)  alphaCfg = 60;
     if (alphaCfg > 255) alphaCfg = 255;

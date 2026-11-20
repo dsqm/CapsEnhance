@@ -2318,13 +2318,13 @@ int main(void) {
         Drain();
     }
 
-    /* ---- 场景AK：控件复制（C+C）----
+    /* ---- 场景AK：控件复制（Caps+C）----
        取词本体要真实的无障碍树 + 剪贴板 + 屏幕，离线测不了；能钉住的是接线
        语义（取词与浮层在桩里记账，见文件头的 TextGrabRun / ToastShow）：
          ① 'C' 原本是空的，现在只接到这一个动作；
          ② 属性 = 走 textgrab + 单发 + 不吃选区修饰 + 不发任何键；
          ③ 按下只开火一次，抬起与松开 Caps 都不重复 —— 不单发的话，长按
-            C+C 会每 35ms 抢一次剪贴板并刷一次浮层；
+            Caps+C 会每 35ms 抢一次剪贴板并刷一次浮层；
          ④ 目标坐标必须是**按下那一刻**的光标：用户按下后手一抖，"取的是
             哪个字"就变了（main.c 的 PostAct 快照，见 ActJob.pt）。 */
     {
@@ -2342,7 +2342,7 @@ int main(void) {
 
         Sim(CLI_CAPS, TRUE);  Pump(20);
         Sim('C', TRUE);       Pump(20);
-        CHECK(g_grabRun == 1, "AK: 按下 C+C -> 取词一次");
+        CHECK(g_grabRun == 1, "AK: 按下 Caps+C -> 取词一次");
         CHECK(g_grabPt.x == before.x && g_grabPt.y == before.y,
               "AK: 取词目标 = 按下那一刻的光标坐标（不是执行时现读）");
 

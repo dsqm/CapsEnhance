@@ -399,15 +399,16 @@ static CfgDef kCfg[CFG_COUNT] = {
       "; 范围 200..1600。\n" },
 
     { "copyalpha", "CopyAlpha", 0, 242, 60, 255, 0, NULL, 0,
-      "; 预览浮层的不透明度（0..255，242 ≈ 95%）\n"
-      "; 逐像素 alpha（UpdateLayeredWindow）：背板与最外圈边缘按这个值半透明，\n"
-      "; 正文区域保持完全不透明 —— 整窗调透明度会把小字号一起稀释，看着发虚。\n" },
+      "; 预览浮层的不透明度（范围 60..255，242 ≈ 95%）\n"
+      "; 逐像素 alpha（UpdateLayeredWindow）负责把圆角与边框画成抗锯齿的，但\n"
+      "; 合成时**整张表面统一乘这个值**：背板、正文、边框落在同一个不透明度上。\n" },
 
     { "copyradius", "CopyRadius", 0, 16, 0, 40, 0, NULL, 0,
       "; 预览浮层的圆角半径（96 DPI 逻辑像素），0 = 直角。范围 0..40。\n" },
 
     { "copyfont", "CopyFont", CFG_F_TEXT, 0, 0, 0, COPY_FONT_CAP, g_copyFont, 0,
-      "; 预览浮层的字体名：留空 = 系统默认 UI 字体（SetWindowText/DEFAULT_GUI_FONT）。\n"
+      "; 预览浮层的字体名：留空 = Microsoft YaHei UI（toast.c 里写死的回落，\n"
+      "; 不是系统 UI 字体 —— CreateFontIndirectW 拿到空 face 名会回落到一个怪字体）。\n"
       "; 设置界面「超级复制」段里可以点「选择字体…」挑，也可以直接填字体名。\n"
       "; 字号不开放：标题 9 磅、正文 10 磅，按该屏 DPI 缩放 —— 提示只有一两秒寿命，\n"
       "; 调字号属于「改一次就忘」的旋钮，不值得占一个配置项。\n" },

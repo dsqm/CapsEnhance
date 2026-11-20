@@ -21,7 +21,7 @@
 #define IDC_FOOTER  122   /* 底部"窗框"托盘（hMenu 传 NULL 的窗口控件 ID 是 0，
                              会撞上"段头 id 为 0"这类查询 —— 必须给正式 ID） */
 #define IDC_GROUP0  400   /* 常规页段头（每段一个 STATIC，见 kFields 的 group 列） */
-#define GROUP_MAX   8     /* 段数上限；超出的段不带头（数据里目前 5 段，纯保底） */
+#define GROUP_MAX   8     /* 段数上限；超出的段不带头（数据里目前 6 段，纯保底） */
 
 #define IDC_RUN_ADMIN  200
 #define IDC_LOG_KB     201

@@ -85,8 +85,9 @@ void ChildWatchStop(ChildWatch* w);
 void ToastHideNow(void);   /* 同步隐藏（SendMessage 到窗口线程，返回时已隐藏） */
 void ToastShow(BOOL fail, const WCHAR* title, const WCHAR* meta, const WCHAR* body);
                            /* 显示一次提示：title = 顶部小字（来源程序 / 失败标题），
-                              meta = **右下角**那一行计数（"124 字 · 5 行"；NULL 或空串
-                              = 不显示这一行，浮层也就不会多出那段高度），
+                              meta = **标题行右侧**的计数（"124 字 · 5 行"；NULL 或
+                              空串 = 不显示，标题独占整行）。它只影响窗口宽度，
+                              从不增加高度；标题过长时按省略号截断，两者不重叠。
                               body = 正文预览。
                               几何/字体/透明度读 [General] 的 Copy* 键；
                               fail 只决定强调色与停留时长取哪一个。 */

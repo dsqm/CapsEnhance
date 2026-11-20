@@ -64,12 +64,12 @@ enum {
     CFG_COPY_FAIL_STAY_MS,     /* [General] CopyFailStayMs（失败提示的停留毫秒） */
     CFG_COPY_POS_PERCENT,      /* [General] CopyPosPercent（浮层纵向位置：工作区高度的百分比） */
     CFG_COPY_WIDTH_MAX,        /* [General] CopyWidthMax（浮层宽度上限，96 DPI 逻辑像素） */
-    CFG_COPY_ALPHA,            /* [General] CopyAlpha（整窗不透明度 0..255） */
+    CFG_COPY_ALPHA,            /* [General] CopyAlpha（浮层不透明度 60..255） */
     CFG_COPY_RADIUS,           /* [General] CopyRadius（圆角半径，96 DPI 逻辑像素） */
     CFG_COPY_FONT,             /* [General] CopyFont（预览浮层字体名，文本项） */
     CFG_COPY_MAX_LINES,        /* [General] CopyMaxLines（预览最多显示几行） */
     CFG_COPY_MAX_CHARS,        /* [General] CopyMaxChars（预览最多显示几字） */
-    CFG_COPY_SHOW_COUNT,       /* [General] CopyShowCount（标题行显示 来源·字数·行数） */
+    CFG_COPY_SHOW_COUNT,       /* [General] CopyShowCount（标题行右侧显示 字数·行数） */
     CFG_COPY_STRIP_TAIL,       /* [General] CopyStripTail（复制时去掉尾部空白与换行） */
     CFG_COUNT
 };

@@ -44,7 +44,7 @@
    页签：表单分三页 —— 「常规」（数值 / 开关这些配置项）、「超级复制」
    （超级复制预览浮层的**全部**参数：停留时长 / 位置 / 宽度 / 透明度 / 圆角 /
    字体 / 显示量）、「名单」（五份按程序 / 窗口生效的名单：按词跳转 / 自动屏蔽 /
-   整格滚动 / 拖动的两份黑名单）。第三页是后加的：那批参数有十二项，混在常规页
+   整格滚动 / 拖动的两份黑名单）。第三页是后加的：那批参数有十二行，混在常规页
    里会把"按词跳转 / 滚动"那几段挤到很下面，而它们与取词是完全独立的两件事。
    分页是结构性的：配置项按 group 归页（见 FieldPage），名单全在名单页，
    页签只决定"显示哪些控件" —— 控件仍全是主窗口的子窗口，Load / Save 与
@@ -141,9 +141,9 @@ static Field kFields[] = {
     { IDC_COPY_FAILSTAY,  CFG_COPY_FAIL_STAY_MS,  L"复制失败提示停留（原因要读完再决定怎么办，通常更长）", L"毫秒", 0, 0, 0, 0, 0,      L"超级复制" },
     { IDC_COPY_POS,       CFG_COPY_POS_PERCENT,   L"浮层纵向位置（工作区高度百分比，水平恒为居中）",    L"%",      0, 0, 0, 0, 0,      L"超级复制" },
     { IDC_COPY_WMAX,      CFG_COPY_WIDTH_MAX,     L"浮层宽度上限（96 DPI 逻辑像素，窄内容会自动收窄）", L"px",     0, 0, 0, 0, 0,      L"超级复制" },
-    { IDC_COPY_ALPHA,     CFG_COPY_ALPHA,         L"浮层不透明度（0..255，242 ≈ 95%）",                NULL,      0, 0, 0, 0, 0,      L"超级复制" },
+    { IDC_COPY_ALPHA,     CFG_COPY_ALPHA,         L"浮层不透明度（60..255，242 ≈ 95%）",                NULL,      0, 0, 0, 0, 0,      L"超级复制" },
     { IDC_COPY_RADIUS,    CFG_COPY_RADIUS,        L"浮层圆角半径（0 = 直角）",                         L"px",     0, 0, 0, 0, 0,      L"超级复制" },
-    { IDC_COPY_FONT,      CFG_COPY_FONT,          L"字体（留空 = 系统默认 UI 字体；标题 9 磅 / 正文 10 磅固定）", NULL, 0, 1, 0, 0, 0, L"超级复制" },
+    { IDC_COPY_FONT,      CFG_COPY_FONT,          L"字体（留空 = Microsoft YaHei UI；标题 9 磅 / 正文 10 磅固定）", NULL, 0, 1, 0, 0, 0, L"超级复制" },
     { IDC_COPY_FONTBTN,   -1,                     L"选择字体…",                                       NULL,      0, 0, 1, 0, 0,      L"超级复制" },
     { IDC_COPY_MAXLINES,  CFG_COPY_MAX_LINES,     L"预览最多显示行数（超出用 … 截断，剪贴板仍是全文）",  L"行",     0, 0, 0, 0, 0,      L"超级复制" },
     { IDC_COPY_MAXCHARS,  CFG_COPY_MAX_CHARS,     L"预览最多显示字数（同上）",                         L"字",     0, 0, 0, 0, 0,      L"超级复制" },
