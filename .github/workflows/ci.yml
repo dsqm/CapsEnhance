@@ -86,8 +86,9 @@ jobs:
         shell: cmd
         run: call test\build_wpsjump.bat
 
-      # 三个 exe 一起发布：托盘按同目录找 CapsEnhanceSettings.exe，和弦按同目录
-      # 拉起 CapsEnhanceHelp.exe —— 少带一个就等于那项功能在用户那里直接不可用。
+      # 四个 exe 一起发布：托盘按同目录找 CapsEnhanceSettings.exe，和弦按同目录
+      # 拉起 CapsEnhanceHelp.exe / CapsEnhanceInfo.exe —— 少带一个就等于那项功能
+      # 在用户那里直接不可用（C+F1 或 C+F12 拉不起对应窗口）。
       - name: Upload exes
         uses: actions/upload-artifact@v5
         with:
@@ -96,4 +97,5 @@ jobs:
             bin/CapsEnhance.exe
             bin/CapsEnhanceSettings.exe
             bin/CapsEnhanceHelp.exe
+            bin/CapsEnhanceInfo.exe
             bin/BUILD-FINGERPRINT.txt
