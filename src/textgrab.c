@@ -81,6 +81,7 @@
 #define TG_ERR_CLIP    6   /* 剪贴板被别的程序占着                     */
 #define TG_ERR_EMPTY   7   /* 取到了文本，清洗后为空                   */
 #define TG_ERR_NOINPUT 8   /* 命中的输入框是空的（只剩占位提示）        */
+#define TG_ERR_INTERNAL 9  /* 取词线程起不来（内存/线程耗尽），与目标无关 */
 
 /* ---------- 采样结果 ---------- */
 typedef struct {
@@ -507,13 +508,48 @@ static void UiaSample(POINT pt, TgSample* out) {
 /* ================= 限时执行器 =================
    一次查询 = 一条一次性线程 + 一个参数块。理由见文件头第 1 条差异，以及
    nav.c 里 ComRun 的完整取舍（为什么不常驻通道线程）。超时则线程与参数块
-   一并作废：它可能永远卡在目标进程里，只能随进程退出回收。 */
+   一并作废：它可能永远卡在目标进程里，只能随进程退出回收。
+
+   ★ 超时线程**不是无上限地丢**：卡在目标进程里的线程要等它自己返回，期间
+     占着一条线程栈、一份 COM 引用和参数块。目标持续无响应时连按几次就能
+     堆出几十条永久线程。这里用一张固定大小的槽位表记住它们，每次取词前顺手
+     回收已经返回的；槽位全被卡死线程占满时**不再起新线程**，直接按"资源
+     不可用"报错 —— 宁可这一发失败，也不让线程无上限堆积。 */
 
 typedef struct {
     POINT    pt;
     int      which;
     TgSample out;
 } TgJob;
+
+/* 结果：不是"成功/失败"两态 —— 起不了线程与目标无响应是两回事，浮层要说
+   的原因也不同（见 TgReason 与 TextGrabRun 的分类）。 */
+#define TG_RUN_OK          0   /* 跑完了，结果在 *out        */
+#define TG_RUN_TIMEOUT     1   /* 预算内没跑完（目标可能卡死）  */
+#define TG_RUN_UNAVAILABLE 2   /* 压根起不了线程 / 卡死线程已满 */
+
+#define TG_STUCK_MAX 8
+static TgJob*  s_stuckJ[TG_STUCK_MAX];
+static HANDLE  s_stuckH[TG_STUCK_MAX];
+
+/* 回收已经返回的超时线程。只在动作执行线程上调用（取词是串行的）。 */
+static void TgReapStuck(void) {
+    for (int i = 0; i < TG_STUCK_MAX; i++) {
+        if (!s_stuckH[i]) continue;
+        if (WaitForSingleObject(s_stuckH[i], 0) != WAIT_OBJECT_0) continue;
+        CloseHandle(s_stuckH[i]);
+        free(s_stuckJ[i]->out.text);   /* 结果已无人接收，文本一并放掉 */
+        free(s_stuckJ[i]);
+        s_stuckH[i] = NULL;
+        s_stuckJ[i] = NULL;
+    }
+}
+
+static int TgStuckCount(void) {
+    int n = 0;
+    for (int i = 0; i < TG_STUCK_MAX; i++) if (s_stuckH[i]) n++;
+    return n;
+}
 
 static DWORD WINAPI TgWorker(LPVOID p) {
     TgJob* j = (TgJob*)p;
@@ -524,24 +560,43 @@ static DWORD WINAPI TgWorker(LPVOID p) {
     return 0;
 }
 
-/* TRUE = 在 ms 内跑完了（结果在 *out）；FALSE = 超时或压根起不了线程。 */
-static BOOL TgRun(int which, POINT pt, DWORD ms, TgSample* out) {
-    if (ms < 50) return FALSE;
+/* 把一条超时线程记进槽位表。槽位满时关掉句柄、只能任其泄漏（这条路径在
+   起线程前已经被 TgStuckCount 挡住，正常不会走到）。 */
+static void TgParkStuck(TgJob* j, HANDLE th) {
+    for (int i = 0; i < TG_STUCK_MAX; i++) {
+        if (s_stuckH[i]) continue;
+        s_stuckJ[i] = j;
+        s_stuckH[i] = th;
+        return;
+    }
+    CloseHandle(th);
+}
+
+static int TgRun(int which, POINT pt, DWORD ms, TgSample* out) {
+    TgReapStuck();
+    /* 预算不足（< 50ms）算"没跑完"，不是资源问题：这时时间已经被前面的通道
+       用掉了，说明目标确实慢。 */
+    if (ms < 50) return TG_RUN_TIMEOUT;
+    if (TgStuckCount() >= TG_STUCK_MAX) return TG_RUN_UNAVAILABLE;
+
     TgJob* j = (TgJob*)calloc(1, sizeof(TgJob));
-    if (!j) return FALSE;
+    if (!j) return TG_RUN_UNAVAILABLE;
     j->pt = pt;
     j->which = which;
     HANDLE th = CreateThread(NULL, 0, TgWorker, j, 0, NULL);
     if (!th) {
         free(j);
-        return FALSE;
+        return TG_RUN_UNAVAILABLE;
     }
     DWORD w = WaitForSingleObject(th, ms);
+    if (w != WAIT_OBJECT_0) {
+        TgParkStuck(j, th);      /* 没跑完：交给槽位表，等它自己返回再回收 */
+        return TG_RUN_TIMEOUT;
+    }
     CloseHandle(th);
-    if (w != WAIT_OBJECT_0) return FALSE;   /* 超时：j 有意泄漏，见上 */
     *out = j->out;
     free(j);
-    return TRUE;
+    return TG_RUN_OK;
 }
 
 /* ================= 死区 / 仲裁 ================= */
@@ -622,6 +677,8 @@ static const WCHAR* TgReason(int err) {
         return L"取到的文本是空的";
     case TG_ERR_NOINPUT:
         return L"这个输入框是空的，没有可复制的文字";
+    case TG_ERR_INTERNAL:
+        return L"取词线程没能启动（系统资源不足），稍后再按一次";
     default:
         return L"没有取到文本";
     }
@@ -639,6 +696,7 @@ void TextGrabRun(POINT pt) {
     TgSample best;
     memset(&best, 0, sizeof(best));
     BOOL timedOut = FALSE;
+    BOOL unavailable = FALSE;   /* 取词线程起不来（与目标程序无关） */
 
     for (int attempt = 0; attempt < TG_TRIES_MAX; attempt++) {
         ULONGLONG now = GetTickCount64();
@@ -649,18 +707,26 @@ void TextGrabRun(POINT pt) {
 
         TgSample uia;
         memset(&uia, 0, sizeof(uia));
-        BOOL okU = TgRun(TG_CH_UIA, pt, msU, &uia);
-        if (!okU) timedOut = TRUE;
+        int rU = TgRun(TG_CH_UIA, pt, msU, &uia);
+        BOOL okU = (rU == TG_RUN_OK);
+        if (rU == TG_RUN_TIMEOUT)     timedOut = TRUE;
+        else if (rU == TG_RUN_UNAVAILABLE) unavailable = TRUE;
 
         now = GetTickCount64();
         TgSample msaa;
         memset(&msaa, 0, sizeof(msaa));
-        BOOL okM = FALSE;
+        int rM = TG_RUN_OK;
+        BOOL triedM = FALSE;    /* 预算耗尽而跳过时不算"资源不可用" */
         if (now < deadline) {
             DWORD msM = (DWORD)(deadline - now);
             if (msM > TG_CHANNEL_MS) msM = TG_CHANNEL_MS;
-            okM = TgRun(TG_CH_MSAA, pt, msM, &msaa);
-            if (!okM) timedOut = TRUE;
+            rM = TgRun(TG_CH_MSAA, pt, msM, &msaa);
+            triedM = TRUE;
+        }
+        BOOL okM = triedM && (rM == TG_RUN_OK);
+        if (triedM) {
+            if (rM == TG_RUN_TIMEOUT)          timedOut = TRUE;
+            else if (rM == TG_RUN_UNAVAILABLE) unavailable = TRUE;
         }
 
         /* 分类标记：只要任一路见到了元素/拒绝，就算"见到了" */
@@ -715,6 +781,7 @@ void TextGrabRun(POINT pt) {
         int err;
         if (best.denied)              err = TG_ERR_DENIED;
         else if (timedOut && !best.sawElem) err = TG_ERR_TIMEOUT;
+        else if (unavailable && !best.sawElem) err = TG_ERR_INTERNAL;
         else if (best.shell)          err = TG_ERR_NOA11Y;
         else if (!best.sawElem)       err = TG_ERR_NOELEM;
         else if (best.emptyEdit)      err = TG_ERR_NOINPUT;
