@@ -343,7 +343,10 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
     int minH = MulDiv(40, dpi, 96);
     if (h < minH) h = minH;
 
-    /* 位置：所在显示器工作区**水平居中**、纵向在 pct% 处（默认 72%）。 */
+    /* 位置：所在显示器工作区**水平居中**、纵向在 pct% 处（默认 90%）。
+       90% 只是"顶边"的锚点：单行提示（约 53px）底边离工作区底还有约 50px；
+       浮层高过约工作区高度的 10% 时才会撞上下面那条「底边距底 8px」的钳位，
+       此时（高内容）等效于贴底。 */
     RECT work;
     MonitorWork(mon, &work);
     int workW = work.right - work.left;
