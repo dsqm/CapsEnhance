@@ -315,6 +315,17 @@ static void MsaaSample(POINT pt, TgSample* out) {
         SysFreeString(bsDesc);
 
         int kind = TgKindFromRole(rolev);
+        /* 无效名判据必须落在**元素名**上：桌面外壳 / 渲染器兜底壳的名字挂在这类
+           容器元素上，而容器按设计只取 Value、Name 这一层就被丢掉了。原先拿
+           取出的文本去比对黑名单，于是这四个名字永远匹配不上，指针停在桌面时
+           被报成"控件没暴露文字"而不是"无障碍没开"。 */
+        if (TgIsInvalidName(pName)) {
+            out->shell = TRUE;
+            free(pName);
+            free(pValue);
+            free(pDesc);
+            break;
+        }
         const WCHAR* pick = TgPickField(kind, pName, pValue, pDesc);
         if (pick) BufAddBlock(&buf, pick);
         /* 空输入框单独算一类：它"有元素、有占位提示，但没有内容"，
@@ -454,10 +465,20 @@ static void UiaSample(POINT pt, TgSample* out) {
         WCHAR* pValue = (v.vt == VT_BSTR) ? BstrDup(v.bstrVal) : NULL;
         VariantClear(&v);
 
-        const WCHAR* pick = TgPickField(kind, pName, pValue, NULL);
-        if (pick) BufAddBlock(&buf, pick);
-        if (!pick && kind == TGK_EDIT && pName && *pName)
-            out->emptyEdit = TRUE;
+        /* 无效名判据见 MSAA 通道同一处注释：桌面 / 渲染器外壳的名字在 Name 上，
+           而容器元素按设计不取 Name —— 这里必须在选字段之前判。 */
+        if (TgIsInvalidName(pName)) {
+            out->shell = TRUE;
+            free(pName);
+            free(pValue);
+            pName = NULL;
+            pValue = NULL;
+        } else {
+            const WCHAR* pick = TgPickField(kind, pName, pValue, NULL);
+            if (pick) BufAddBlock(&buf, pick);
+            if (!pick && kind == TGK_EDIT && pName && *pName)
+                out->emptyEdit = TRUE;
+        }
 
         free(pName);
         free(pValue);
@@ -645,16 +666,10 @@ void TextGrabRun(POINT pt) {
         if (okM && msaa.denied)  best.denied = TRUE;
         if (okU && uia.emptyEdit)  best.emptyEdit = TRUE;
         if (okM && msaa.emptyEdit) best.emptyEdit = TRUE;
-
-        /* 无效名（桌面外壳 / 渲染器兜底壳）不算文本 */
-        if (okU && uia.text && TgIsInvalidName(uia.text)) {
-            free(uia.text); uia.text = NULL; uia.len = 0;
-            best.shell = TRUE;
-        }
-        if (okM && msaa.text && TgIsInvalidName(msaa.text)) {
-            free(msaa.text); msaa.text = NULL; msaa.len = 0;
-            best.shell = TRUE;
-        }
+        /* 无效名（桌面外壳 / 渲染器兜底壳）由各通道在选字段之前判定并置位，
+           这里只做汇总 —— 判据必须落在元素名上，见 MsaaSample 的注释。 */
+        if (okU && uia.shell)  best.shell = TRUE;
+        if (okM && msaa.shell) best.shell = TRUE;
 
         /* 仲裁：两路都有文本时取包围盒**严格更小**（更内层）的那个 */
         TgSample* pick = NULL;
