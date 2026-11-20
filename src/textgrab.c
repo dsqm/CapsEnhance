@@ -536,35 +536,42 @@ static BOOL TgStrictlyInside(const RECT* inner, const RECT* outer) {
 /* ================= 剪贴板 =================
    重试 10×20ms：剪贴板是全局单例，另一个程序正在用它时 OpenClipboard 会
    失败，而这在"刚复制过东西"的时序里很常见（参考文档同参数）。
-   成功时内存所有权归系统，**不要** GlobalFree。 */
+   成功时内存所有权归系统，**不要** GlobalFree。
+
+   ★ 两处顺序上的讲究：
+     1. **先分配、后 EmptyClipboard**。反过来的话，分配失败时用户原来的剪贴板
+        内容已经被清掉，而浮层报的是"剪贴板被占用" —— 既丢了数据又指错了原因。
+     2. 容量按 **2*len+1** 算，不是 len+1：写出去的是 CRLF，每个 \n 会多占一个
+        WCHAR。按 len+1 分配时，任何含换行的文本（多行代码、几行日志）都会把
+        堆块写越界 —— 越界长度正好等于换行数 + 1。 */
 static BOOL TgClipWrite(const WCHAR* text, int len) {
+    if (!text || len <= 0) return FALSE;
+
+    /* 先备好要交付的块：CRLF 展开 + 结尾 0，最坏 2*len+1 个 WCHAR */
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, ((size_t)len * 2 + 1) * sizeof(WCHAR));
+    if (!h) return FALSE;
+    WCHAR* p = (WCHAR*)GlobalLock(h);
+    if (!p) { GlobalFree(h); return FALSE; }
+    int o = 0;
+    for (int i = 0; i < len; i++) {
+        if (text[i] == L'\n') p[o++] = L'\r';   /* 剪贴板约定是 CRLF */
+        p[o++] = text[i];
+    }
+    p[o] = 0;
+    GlobalUnlock(h);
+
     int tries = 0;
     while (tries < 10) {
         if (OpenClipboard(NULL)) break;
         Sleep(20);
         tries++;
     }
-    if (tries >= 10) return FALSE;
+    if (tries >= 10) { GlobalFree(h); return FALSE; }
 
     BOOL ok = FALSE;
-    if (EmptyClipboard()) {
-        HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, ((size_t)len + 1) * sizeof(WCHAR));
-        if (h) {
-            WCHAR* p = (WCHAR*)GlobalLock(h);
-            if (p) {
-                /* 剪贴板约定是 CRLF：每个 \n 前补一个 \r */
-                int o = 0;
-                for (int i = 0; i < len; i++) {
-                    if (text[i] == L'\n') p[o++] = L'\r';
-                    p[o++] = text[i];
-                }
-                p[o] = 0;
-                GlobalUnlock(h);
-                if (SetClipboardData(CF_UNICODETEXT, h)) ok = TRUE;
-            }
-            if (!ok) GlobalFree(h);
-        }
-    }
+    if (EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, h))
+        ok = TRUE;                              /* 成功时所有权归系统 */
+    if (!ok) GlobalFree(h);
     CloseClipboard();
     return ok;
 }
