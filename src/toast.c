@@ -270,14 +270,25 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
     /* 正文宽度决策：**先量不折行的自然宽度**，再决定窗口多宽。
        超过上限就一律用满上限并折行 —— 折行宽度必须与绘制宽度是同一个数，
        否则"按 A 宽量、按 B 宽画"会多折出一行，最后一行被裁掉（实测症状：
-       必应搜索框那种长占位提示 + 一行内容，尾部少一个字）。 */
+       必应搜索框那种长占位提示 + 一行内容，尾部少一个字）。
+
+       ★ 自然宽度用 **DT_WORDBREAK + 一个足够大的矩形**量，不能用 DT_SINGLELINE：
+       后者不认换行，会把 "abc\ndef" 当成 "abcdef" 量成 42px 宽、19px 高。
+       而 DT_WORDBREAK 在宽度不受限时给出的正是**最长一行**的宽度与真实行数
+       （实测同一串：22px 宽、38px 高）—— 这才是"内容需要多宽、多高"的答案。 */
     const WCHAR* bodyText = s_st.msg.body ? s_st.msg.body : L"";
     SelectObject(dc, s_st.fBody ? s_st.fBody : GetStockObject(DEFAULT_GUI_FONT));
 
+    RECT nat;
+    SetRect(&nat, 0, 0, 0x7FFF, 0);
+    DrawTextW(dc, bodyText, -1, &nat,
+              DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
+    int bodyNaturalW = nat.right - nat.left;
+
+    /* 单行行高：拿一个必然单行的串量，与正文内容无关（空正文时也要有高度） */
     RECT one;
     SetRect(&one, 0, 0, 0, 0);
-    DrawTextW(dc, bodyText, -1, &one, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-    int bodyNaturalW = one.right - one.left;
+    DrawTextW(dc, L"Ag", -1, &one, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
     int lineH = one.bottom - one.top;
 
     /* 计数（可选）：与标题同处**顶部一行**，贴右边缘。
@@ -295,26 +306,32 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
     int rowW = headW + (metaW > 0 ? metaGapX + metaW : 0);
     int rowH = headH > metaH ? headH : metaH;
 
-    int w, bodyH;
+    int w;
     if (bodyNaturalW <= textW) {
         /* 一行放得下：窗口随内容收窄 */
         int contentW = rowW > bodyNaturalW ? rowW : bodyNaturalW;
         w = contentW + 2 * pad;
-        bodyH = lineH;
     } else {
-        /* 需要折行：用满上限宽度，按这个宽度量高度 */
+        /* 需要折行：用满上限宽度 */
         w = maxW;
-        RECT wrap;
-        SetRect(&wrap, 0, 0, textW, 0);
-        DrawTextW(dc, bodyText, -1, &wrap,
-                  DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
-        bodyH = wrap.bottom - wrap.top;
         /* 标题 + 计数比正文上限还宽（长程序名 + 极短正文）时，宁可让窗口宽一点，
            也不把计数挤出行外 */
         if (rowW + 2 * pad > w) w = rowW + 2 * pad;
     }
     if (w < minW) w = minW;
     if (w > maxW) w = maxW;
+
+    /* 正文高度：**按最终宽度、用与绘制同一套 flags 量**。
+       以前窄分支直接拿 DT_SINGLELINE 量出来的行高当高度，而它不认换行 ——
+       多行文本只要"拼成一行的宽度"没超上限，就只给了一行高，第二行起全被
+       窗口裁掉、也不出省略号。剪贴板里是全文、浮层只显示第一行，正好与
+       "只截显示"的设计意图相反。 */
+    RECT wrap;
+    SetRect(&wrap, 0, 0, w - 2 * pad, 0);
+    DrawTextW(dc, bodyText, -1, &wrap,
+              DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
+    int bodyH = wrap.bottom - wrap.top;
+    if (bodyH < lineH) bodyH = lineH;   /* 空正文时 CALCRECT 给 0，兜一行高 */
     DeleteDC(dc);
 
     int h = padTop + rowH + gap + bodyH + padBottom;
