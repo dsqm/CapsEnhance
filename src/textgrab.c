@@ -721,14 +721,13 @@ void TextGrabRun(POINT pt) {
 
     /* ---- 写剪贴板 ---- */
     if (!TgClipWrite(clean, cleanLen)) {
-        if (g_recording.load()) {
-            /* 全文进日志（截断到 4000 字，避免一行日志几十 MB）：浮层是纯只读的，
-               写不进剪贴板时这里就是用户唯一还能把文本捞回来的地方。 */
-            int cap = cleanLen > 4000 ? 4000 : cleanLen;
-            CapLog("  [复制] 剪贴板写入失败，全文如下（%d 字%s）：", cleanLen,
-                   cap < cleanLen ? "，已截断" : "");
-            CapLog("%.*ls", cap, clean);
-        }
+        /* 全文进日志（截断到 4000 字，避免一行日志几十 MB）：浮层是纯只读的，
+           写不进剪贴板时这里就是用户唯一还能把文本捞回来的地方 —— 所以这条
+           **不看记录模式**，否则浮层那句"文本已记入日志"就是假话。 */
+        int cap = cleanLen > 4000 ? 4000 : cleanLen;
+        CapLog("  [复制] 剪贴板写入失败，全文如下（%d 字%s）：", cleanLen,
+               cap < cleanLen ? "，已截断" : "");
+        CapLog("%.*ls", cap, clean);
         free(clean);
         ToastShow(TRUE, L"复制失败", NULL, TgReason(TG_ERR_CLIP));
         return;
@@ -762,7 +761,8 @@ void TextGrabRun(POINT pt) {
 
     if (g_recording.load())
         CapLog("  [复制] 成功 %d 字 %d 行 -> 剪贴板，原文前 60 字：%.*ls",
-               cleanLen, (int)wcslen(head), 60, clean);
+               CopyCountChars(clean, cleanLen), CopyCountLines(clean, cleanLen),
+               60, clean);
 
     ToastShow(FALSE, head, meta, clean);
     free(clean);
