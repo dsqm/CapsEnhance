@@ -67,15 +67,11 @@
 #define TG_RETRY_GAP_MS    200   /* 懒加载重查间隔；也计入总预算 */
 #define TG_TRIES_MAX       3     /* 总尝试次数（首次 + 最多 2 次重查），不是"重查 3 次" */
 
-#define TG_DEPTH_MAX       24    /* 父链最多爬几层（防环 / 防病态树） */
-
 /* 通道编号 */
-#define TG_CH_NONE 0
 #define TG_CH_UIA  1    /* UI Automation：新程序、Win11 任务栏支持更好       */
 #define TG_CH_MSAA 2    /* MSAA (IAccessible)：老程序、部分 Delphi/Win32    */
 
 /* 失败原因（浮层上的人话由 TgReason 给出） */
-#define TG_ERR_NONE    0
 #define TG_ERR_NOELEM  1   /* 光标下没有可访问元素（多半没对准文字）   */
 #define TG_ERR_NOTEXT  2   /* 有元素，但它没暴露任何文本               */
 #define TG_ERR_NOA11Y  3   /* 命中渲染器兜底壳 = 该程序没开无障碍       */
@@ -100,8 +96,8 @@ typedef struct {
 } TgSample;
 
 /* ---------- 动态宽字符串 ----------
-   只需要"追加一段 + 用 \r\n 分隔"，不引任何容器：本项目的配置里连
-   std::vector<std::string> 都不能用（无 /EHsc，见 DEVELOPMENT.md）。 */
+   只需要"追加一段"，不引任何容器：本项目的配置里连 std::vector<std::string>
+   都不能用（无 /EHsc，见 DEVELOPMENT.md）。 */
 typedef struct {
     WCHAR* p;
     int    len;
@@ -133,11 +129,11 @@ static void BufAppendN(TgBuf* b, const WCHAR* s, int n) {
     b->p[b->len] = 0;
 }
 
-/* 追加一个"字段块"。多字段之间用换行分隔 —— 与上游一致（它把 Name / Value /
-   Description 拼成一段可读文本，而不是二选一）。 */
+/* 追加一个"字段块"。每次取词只会有一个字段进来：按元素类别只挑一个，
+   不做 Name / Value / Description 的拼接（那是上游的做法，也是本项目
+   刻意改掉的语义，见文件头）。 */
 static void BufAddBlock(TgBuf* b, const WCHAR* s) {
     if (!s || !*s) return;
-    if (b->len > 0) BufAppendN(b, L"\n", 1);
     BufAppendN(b, s, (int)wcslen(s));
 }
 
@@ -293,7 +289,10 @@ static void MsaaSample(POINT pt, TgSample* out) {
     TgBuf buf;
     memset(&buf, 0, sizeof(buf));
 
-    for (int depth = 0; depth < TG_DEPTH_MAX; depth++) {
+    /* 最多两遍：第一遍读命中的元素本身；若命中的是"子项"（VT_I4 且不是
+       CHILDID_SELF），子项没有自己的元素对象，只能改读它所在的容器再读一次。
+       这不是爬父链（父链在本模块是明确不爬的，见文件头）。 */
+    for (int pass = 0; pass < 2; pass++) {
         /* 标题栏的 description 是窗口标题的重复，取出来只会得到
            "标题 + 标题"（上游为同一个理由跳过 ROLE_SYSTEM_TITLEBAR）。 */
         VARIANT role;
@@ -343,12 +342,8 @@ static void MsaaSample(POINT pt, TgSample* out) {
 
         if (buf.len > 0) break;
 
-        /* **不往上爬父链**。上游 Textify 会一直爬到"第一个有名字的祖先"，
-           但在浏览器里那条路的终点是页面标题 / aria-label —— 指针停在空白处
-           也会"成功"复制出一串与光标位置无关的文字（实测踩到）。
-           唯一还要走一步的是"命中的是子项"：子项没有自己的元素对象，只能
-           改读它所在的容器，这不是爬父链。 */
-        if (child.vt == VT_I4 && child.lVal != CHILDID_SELF) {
+        /* 第二遍只服务于"命中子项"：改读容器（CHILDID_SELF），不爬父链。 */
+        if (pass == 0 && child.vt == VT_I4 && child.lVal != CHILDID_SELF) {
             child.lVal = CHILDID_SELF;
             continue;
         }
@@ -756,7 +751,6 @@ void TextGrabRun(POINT pt) {
             free(best.text);
             best.text = pick->text;
             best.len  = pick->len;
-            best.rc   = pick->rc;
             best.hwnd = pick->hwnd;
             best.ch   = pick->ch;
             pick->text = NULL;          /* 所有权转移，别在下面被 free 两次 */

@@ -67,7 +67,6 @@ using namespace Gdiplus;
 #define C_BORDER_G   160
 #define C_BORDER_B   160
 #define C_BG_PANEL   RGB(252, 252, 252)
-#define C_BG_BORDER  RGB(C_BORDER_R, C_BORDER_G, C_BORDER_B)
 #define C_TEXT_HEAD  RGB(108, 108, 108)
 #define C_TEXT_META  RGB(154, 154, 154)   /* 标题行右侧的计数：比标题更淡一级 */
 #define C_TEXT_BODY  RGB(26, 26, 26)
@@ -86,8 +85,6 @@ typedef struct {
     RECT     headRect;   /* 已排版好的矩形（窗口坐标） */
     RECT     metaRect;
     RECT     bodyRect;
-    int      w, h;
-    int      radius;     /* 圆角半径（物理像素） */
 } ToastState;
 
 static ToastState      s_st;
@@ -136,18 +133,17 @@ static int DpiOfMonitor(HMONITOR mon) {
    ★ 只截**显示**：剪贴板里永远是全文（见 textgrab.c 的写入顺序 —— 它先写
    剪贴板再弹浮层，两者用的不是同一份文本）。截断规则本身在 copy_text.c，
    与清洗共用同一套换行语义。 */
-static WCHAR* TruncateBody(const WCHAR* src, int* outLen) {
+static WCHAR* TruncateBody(const WCHAR* src) {
     int len = (int)wcslen(src);
     BOOL cut = FALSE;
     int n = CopyPreviewLen(src, len, CfgInt(CFG_COPY_MAX_CHARS),
                            CfgInt(CFG_COPY_MAX_LINES), &cut);
 
     WCHAR* out = (WCHAR*)malloc(((size_t)n + 2) * sizeof(WCHAR));
-    if (!out) { *outLen = 0; return NULL; }
+    if (!out) return NULL;
     if (n > 0) memcpy(out, src, (size_t)n * sizeof(WCHAR));
     out[n] = 0;
     if (cut) wcscat_s(out, (size_t)n + 2, L"…");
-    *outLen = n + (cut ? 1 : 0);
     return out;
 }
 
@@ -394,10 +390,6 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
         SetRect(&s_st.metaRect, 0, 0, 0, 0);
     }
 
-    s_st.w = w;
-    s_st.h = h;
-    s_st.radius = radius;
-
     if (!EnsureBuffers(w, h)) return FALSE;
 
     /* ---- 颜色层：底色 + 抗锯齿圆角边框 + 正文 ---- */
@@ -604,9 +596,8 @@ void ToastShow(BOOL fail, const WCHAR* title, const WCHAR* meta, const WCHAR* bo
     if (!m) return;
     m->fail = fail ? TRUE : FALSE;
 
-    int shown = 0;
     m->head = _wcsdup(title ? title : L"");
-    m->body = TruncateBody(body ? body : L"", &shown);
+    m->body = TruncateBody(body ? body : L"");
     /* 计数行可以缺省（失败提示没有它）；拷贝失败就当作没有，不让整条提示消失 */
     if (meta && *meta) m->meta = _wcsdup(meta);
     if (!m->head || !m->body) {
