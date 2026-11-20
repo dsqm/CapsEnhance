@@ -210,6 +210,10 @@ static void FreeState(void) {
     free(s_st.msg.head);
     free(s_st.msg.meta);
     free(s_st.msg.body);
+    /* 字体可能还选在颜色层 DC 里 —— 仍被选中的 GDI 对象 DeleteObject 会**失败**
+       （对象不释放），于是每弹一次浮层泄漏一个 HFONT，长期使用会撞上进程
+       1 万句柄上限。先把 DC 的字体换回 stock 再删。 */
+    if (s_colDC) SelectObject(s_colDC, GetStockObject(DEFAULT_GUI_FONT));
     if (s_st.fHead) DeleteObject(s_st.fHead);
     if (s_st.fBody) DeleteObject(s_st.fBody);
     memset(&s_st, 0, sizeof(s_st));

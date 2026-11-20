@@ -361,6 +361,10 @@ static void MsaaSample(POINT pt, TgSample* out) {
     } else {
         BufFree(&buf);
     }
+    /* child 若是 VT_DISPATCH（子元素对象），里面攥着一个 IDispatch 引用：
+       AccessibleObjectFromPoint 交给我们之后必须由调用方释放。漏掉这一步
+       等于每取一次词就多欠目标程序一个 COM 引用。 */
+    VariantClear(&child);
     acc->lpVtbl->Release(acc);
 }
 
