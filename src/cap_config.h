@@ -19,6 +19,14 @@
 #define CFG_MAX_ENTRIES 128   /* 每份名单最多多少条 */
 #define CFG_NAME_MAX    64    /* 单条进程名的最大字符数（含结尾的 0） */
 
+/* 超级复制预览浮层的字号（磅）：只有**正文**这一个旋钮，标题行自动取它的
+   90%（出厂 10 磅 -> 9 磅）。默认值与值域放在这里而不是 config.c：设置程序的
+   字体对话框（CF_LIMITSIZE）与 toast.c 的排版都要用同一份，三处各写一个数
+   迟早会不一致。 */
+#define COPY_FONT_SIZE_DEFAULT 10
+#define COPY_FONT_SIZE_MIN      6
+#define COPY_FONT_SIZE_MAX     48
+
 /* 进程映像**全路径**的缓冲区（config.c 取路径 / folder.c 解析目标都用它）。
    刻意**不用 MAX_PATH**：Path 里有长目录、或程序装在长路径下时 260 会截断，
    而 QueryFullProcessImageNameW 支持更长的缓冲区 —— 拿到半截路径再去解析 PIDL
@@ -67,6 +75,7 @@ enum {
     CFG_COPY_ALPHA,            /* [General] CopyAlpha（浮层不透明度 60..255） */
     CFG_COPY_RADIUS,           /* [General] CopyRadius（圆角半径，96 DPI 逻辑像素） */
     CFG_COPY_FONT,             /* [General] CopyFont（预览浮层字体名，文本项） */
+    CFG_COPY_FONT_SIZE,        /* [General] CopyFontSize（预览浮层正文字号，磅） */
     CFG_COPY_MAX_LINES,        /* [General] CopyMaxLines（预览最多显示几行） */
     CFG_COPY_MAX_CHARS,        /* [General] CopyMaxChars（预览最多显示几字） */
     CFG_COPY_SHOW_COUNT,       /* [General] CopyShowCount（标题行右侧显示 字数·行数） */

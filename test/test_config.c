@@ -408,6 +408,28 @@ int main(void) {
            ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_OFF,
            "CFG: ConfigSetImeMode 钳制到 0..2，越界键号被忽略");
 
+    /* 超级复制预览浮层的字号 CopyFontSize（磅）。只有正文档位可调，标题行在
+       toast.c 里取它的 90% —— 所以默认 10 磅本身就是"标题 9 磅"那套观感的
+       保险丝；上下限与"非法回落默认"照配置层的通用语义走。 */
+    WriteIni("[General]\r\n\r\n");
+    ConfigLoadFrom(L"obj/test/cfgtest.ini");
+    EXPECT(CfgInt(CFG_COPY_FONT_SIZE) == 10, "CFG: CopyFontSize 缺省为 10 磅");
+    WriteIni("[General]\r\nCopyFontSize = 14\r\n");
+    ConfigLoadFrom(L"obj/test/cfgtest.ini");
+    EXPECT(CfgInt(CFG_COPY_FONT_SIZE) == 14, "CFG: CopyFontSize=14 生效");
+    WriteIni("[General]\r\nCopyFontSize = 2\r\n");
+    ConfigLoadFrom(L"obj/test/cfgtest.ini");
+    EXPECT(CfgInt(CFG_COPY_FONT_SIZE) == 6, "CFG: CopyFontSize 下限钳到 6");
+    WriteIni("[General]\r\nCopyFontSize = 999\r\n");
+    ConfigLoadFrom(L"obj/test/cfgtest.ini");
+    EXPECT(CfgInt(CFG_COPY_FONT_SIZE) == 48, "CFG: CopyFontSize 上限钳到 48");
+    WriteIni("[General]\r\nCopyFontSize = abc\r\n");
+    ConfigLoadFrom(L"obj/test/cfgtest.ini");
+    EXPECT(CfgInt(CFG_COPY_FONT_SIZE) == 10, "CFG: CopyFontSize 非法值回落默认 10");
+    WriteIni("[Other]\r\nCopyFontSize = 20\r\n");
+    ConfigLoadFrom(L"obj/test/cfgtest.ini");
+    EXPECT(CfgInt(CFG_COPY_FONT_SIZE) == 10, "CFG: 非 General 段的 CopyFontSize 不生效");
+
     /* 激活键列表 EnhanceKeys / ShiftKeys 已**从配置里去掉**（它们是"和弦语法"
        的一部分，不是给用户调的旋钮）：解析器不再认这两个键名、KeyMapInit 也
        不读配置 —— 激活键固定为 cap.h 的 MODE_*_KEYS_DEFAULT（Alt+D / F）。
@@ -430,6 +452,7 @@ int main(void) {
         EXPECT(CfgInt(CFG_AUTOSCROLL_INTERVAL) == 1500, "UPG: 补齐 AutoScrollInterval 默认值");
         EXPECT(CfgInt(CFG_WHEEL_SCROLL_MUL) == 3, "UPG: 补齐 WheelScrollMul 默认值");
         EXPECT(CfgInt(CFG_AUTOSCROLL_FAST_MS) == 60, "UPG: 补齐 AutoScrollFastMs 默认值");
+        EXPECT(CfgInt(CFG_COPY_FONT_SIZE) == 10, "UPG: 补齐 CopyFontSize 默认值");
         EXPECT(ConfigGetImeMode(IME_KEY_CAPS)   == IME_MODE_CN &&
                ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_EN &&
                ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_CN,
@@ -439,7 +462,7 @@ int main(void) {
                "UPG: 激活键是编译期常量（Alt+D / F），与配置文件无关");
         FILE* fc = NULL;
         int hasLog = 0, hasSteps = 0, hasMode = 0, hasWheel = 0;
-        int hasInterval = 0, hasHMul = 0, hasFast = 0;
+        int hasInterval = 0, hasHMul = 0, hasFast = 0, hasFontSize = 0;
         int hasImeCaps = 0, hasImeL = 0, hasImeR = 0;
         if (fopen_s(&fc, "obj/test/cfgtest.ini", "r") == 0 && fc) {
             char line[512];
@@ -450,6 +473,7 @@ int main(void) {
                 if (strstr(line, "WheelScrollMul = 3")) hasWheel = 1;
                 if (strstr(line, "AutoScrollFastMs = 60")) hasFast = 1;
                 if (strstr(line, "AutoScrollInterval = 1500")) hasInterval = 1;
+                if (strstr(line, "CopyFontSize = 10")) hasFontSize = 1;
                 if (strstr(line, "WheelHScrollMul = 1")) hasHMul = 1;
                 if (strstr(line, "ImeCapsMode = 1"))   hasImeCaps = 1;
                 if (strstr(line, "ImeLShiftMode = 2")) hasImeL = 1;
@@ -458,7 +482,7 @@ int main(void) {
             fclose(fc);
         }
         EXPECT(hasLog && hasSteps && hasMode && hasWheel && hasInterval
-               && hasHMul && hasFast,
+               && hasHMul && hasFast && hasFontSize,
                "UPG: 补齐块带注释写回文件（含新增项）");
         EXPECT(hasImeCaps && hasImeL && hasImeR,
                "UPG: 补齐块含三个输入法键（连默认值写回）");
@@ -562,6 +586,7 @@ int main(void) {
             { "imecapsmode",        "2"   },
             { "imelshiftmode",      "0"   },
             { "imershiftmode",      "2"   },
+            { "copyfontsize",       "14"  },
         };
         FILE* fo = NULL;
         if (fopen_s(&fo, "obj/test/cfgtest.ini", "wb") == 0 && fo) {
@@ -607,6 +632,8 @@ int main(void) {
                ConfigGetImeMode(IME_KEY_LSHIFT) == IME_MODE_OFF &&
                ConfigGetImeMode(IME_KEY_RSHIFT) == IME_MODE_EN,
                "UPG: 输入法键的自定义值不被覆盖（样本 2/0/2）");
+        EXPECT(CfgInt(CFG_COPY_FONT_SIZE) == 14,
+               "UPG: CopyFontSize 自定义值不被覆盖（默认 10、样本 14）");
         /* 未识别的键（含已废弃的 EnhanceKeys）不再被留存，也不影响任何取值：
            "通用字符串项"设施已随这两个键一起去掉，配置层只认上面具名解析的那些。 */
         EXPECT(CfgInt(CFG_WHEEL_HSCROLL_MUL) == 4,
@@ -799,6 +826,7 @@ int main(void) {
        （留着会让用户去改一个没人读的开关） */
     EXPECT(!TemplateHas("AutoScrollSmooth"), "CFG: 模板不再含 AutoScrollSmooth（已废弃）");
     EXPECT(TemplateHas("AllowScintillaRead = 1"),  "CFG: 模板含 AllowScintillaRead 默认值");
+    EXPECT(TemplateHas("CopyFontSize = 10"),       "CFG: 模板含 CopyFontSize 默认值");
     EXPECT(TemplateHas("ImeCapsMode = 1"),   "CFG: 模板含 ImeCapsMode 默认值（切中文）");
     EXPECT(TemplateHas("ImeLShiftMode = 2"), "CFG: 模板含 ImeLShiftMode 默认值（切英文）");
     EXPECT(TemplateHas("ImeRShiftMode = 1"), "CFG: 模板含 ImeRShiftMode 默认值（切中文）");

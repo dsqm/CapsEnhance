@@ -231,11 +231,23 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
     if (!GetCursorPos(&cur)) cur.x = cur.y = 0;
     HMONITOR mon = MonitorFromPoint(cur, MONITOR_DEFAULTTONEAREST);
     int dpi = DpiOfMonitor(mon);
-    int pad = MulDiv(14, dpi, 96);          /* 左右内边距 */
-    int padTop = MulDiv(9, dpi, 96);        /* 顶部：小字号的行高自带留白，按 14 会显得空 */
-    int padBottom = MulDiv(10, dpi, 96);
-    int gap = MulDiv(5, dpi, 96);           /* 标题行与正文之间 */
-    int metaGapX = MulDiv(14, dpi, 96);     /* 标题与右侧计数之间至少留这么远 */
+
+    /* 字号：正文可调（CopyFontSize），标题行取它的 90% —— 出厂 10 磅对 9 磅，
+       正是"小一号"的观感，用户不必再为标题单独调一个数。
+       ★ 留白与行距跟着字号等比放大（下面那些 MulDiv 的分母用 sdpi 而不是
+         dpi）：出厂那组数值是给 10 磅量的，字号调到 20 磅还留着 14px 左右边距
+         的话，字会显得把面板塞满了。sdpi 在 10 磅时恒等于 dpi，观感与改动前一致。 */
+    int bodyPt = CfgInt(CFG_COPY_FONT_SIZE);
+    if (bodyPt < COPY_FONT_SIZE_MIN) bodyPt = COPY_FONT_SIZE_MIN;
+    if (bodyPt > COPY_FONT_SIZE_MAX) bodyPt = COPY_FONT_SIZE_MAX;
+    int headPt = MulDiv(bodyPt, 9, 10);
+    int sdpi = MulDiv(dpi, bodyPt, COPY_FONT_SIZE_DEFAULT);
+
+    int pad = MulDiv(14, sdpi, 96);         /* 左右内边距 */
+    int padTop = MulDiv(9, sdpi, 96);       /* 顶部：小字号的行高自带留白，按 14 会显得空 */
+    int padBottom = MulDiv(10, sdpi, 96);
+    int gap = MulDiv(5, sdpi, 96);          /* 标题行与正文之间 */
+    int metaGapX = MulDiv(14, sdpi, 96);    /* 标题与右侧计数之间至少留这么远 */
     int maxW = MulDiv(CfgInt(CFG_COPY_WIDTH_MAX), dpi, 96);
     int minW = MulDiv(280, dpi, 96);
     int radius = MulDiv(CfgInt(CFG_COPY_RADIUS), dpi, 96);
@@ -243,8 +255,8 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
     if (radius < 0)  radius = 0;
     if (radius > 64) radius = 64;
 
-    /* 字体：名字留空就用系统默认 UI 字体（CreateFontIndirectW 用空 face 名会
-       拿到一个怪异的回退，所以显式给一个默认）。字号不开放，理由见 config.c。 */
+    /* 字体：名字留空就用设计时定的默认（CreateFontIndirectW 用空 face 名会
+       拿到一个怪异的回退，所以显式给一个默认）。字号与上面那组留白同源。 */
     const WCHAR* face = CfgStr(CFG_COPY_FONT);
     if (!face || !*face) face = L"Microsoft YaHei UI";
 
@@ -253,10 +265,10 @@ static BOOL Layout(HWND hwnd, ToastMsg* in) {
     lf.lfCharSet = DEFAULT_CHARSET;
     lf.lfQuality = CLEARTYPE_QUALITY;
     lf.lfWeight  = FW_NORMAL;
-    lf.lfHeight  = -MulDiv(10, dpi, 72);
+    lf.lfHeight  = -MulDiv(bodyPt, dpi, 72);
     wcscpy_s(lf.lfFaceName, LF_FACESIZE, face);
     s_st.fBody = CreateFontIndirectW(&lf);
-    lf.lfHeight = -MulDiv(9, dpi, 72);
+    lf.lfHeight = -MulDiv(headPt, dpi, 72);
     s_st.fHead = CreateFontIndirectW(&lf);
 
     HDC dc = CreateCompatibleDC(NULL);

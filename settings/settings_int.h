@@ -43,7 +43,8 @@
 #define IDC_INFO_FONTBTN 214
 
 /* 控件复制（Caps+C）预览浮层：几何 / 字体 / 显示量 / 停留时长（见 config.c 的
-   Copy* 键）。一次占 227..238，中间不跳号，方便一眼看出这一段的归属。 */
+   Copy* 键）。一次占 227..239，中间不跳号，方便一眼看出这一段的归属。
+   （239 = 字号，是后来补的一行；排在末尾就不必动既有的那些 id。） */
 #define IDC_COPY_STAY      227
 #define IDC_COPY_FAILSTAY  228
 #define IDC_COPY_POS       229
@@ -56,6 +57,7 @@
 #define IDC_COPY_MAXCHARS  236
 #define IDC_COPY_SHOWCOUNT 237
 #define IDC_COPY_STRIPTAIL 238
+#define IDC_COPY_FSIZE     239
 
 /* 窗口信息弹窗「常用」视图的字段编排：子段头 / 有序列表 / 添加… / 删除 / 上移 / 下移
    —— 列表与四颗按钮的 id 必须连排（Layout 的显隐轮按 ADD..DOWN 扫一段）。 */

@@ -46,7 +46,7 @@
 
    页签：表单分四页 —— 「常规」（数值 / 开关这些配置项）、「超级复制」
    （超级复制预览浮层的**全部**参数：停留时长 / 位置 / 宽度 / 透明度 / 圆角 /
-   字体 / 显示量）、「窗口信息」（C+F12 弹窗的字体 / 字号，以及「常用」视图的
+   字体 / 字号 / 显示量）、「窗口信息」（C+F12 弹窗的字体 / 字号，以及「常用」视图的
    有序字段编排）、「名单」（五份按程序 / 窗口生效的名单：按词跳转 / 自动屏蔽 /
    整格滚动 / 拖动的两份黑名单）。后两页都是"独立一件事"才拆出来的：浮层参数
    有十几行、窗口信息那组带一个可增删排序的字段列表，混在常规页里会把
@@ -152,7 +152,8 @@ static Field kFields[] = {
     { IDC_COPY_WMAX,      CFG_COPY_WIDTH_MAX,     L"浮层宽度上限（96 DPI 逻辑像素，窄内容会自动收窄）", L"px",     0, 0, 0, 0, 0,      L"超级复制" },
     { IDC_COPY_ALPHA,     CFG_COPY_ALPHA,         L"浮层不透明度（60..255，242 ≈ 95%）",                NULL,      0, 0, 0, 0, 0,      L"超级复制" },
     { IDC_COPY_RADIUS,    CFG_COPY_RADIUS,        L"浮层圆角半径（0 = 直角）",                         L"px",     0, 0, 0, 0, 0,      L"超级复制" },
-    { IDC_COPY_FONT,      CFG_COPY_FONT,          L"字体（留空 = Microsoft YaHei UI；标题 9 磅 / 正文 10 磅固定）", NULL, 0, 1, 0, 0, 0, L"超级复制" },
+    { IDC_COPY_FONT,      CFG_COPY_FONT,          L"字体（留空 = Microsoft YaHei UI）",                NULL,      0, 1, 0, 0, 0, L"超级复制" },
+    { IDC_COPY_FSIZE,     CFG_COPY_FONT_SIZE,     L"字号（正文；标题行自动取 90%）",                    L"磅",     0, 0, 0, 0, 0,      L"超级复制" },
     { IDC_COPY_FONTBTN,   -1,                     L"选择字体…",                                       NULL,      0, 0, 1, 0, 0,      L"超级复制" },
     { IDC_COPY_MAXLINES,  CFG_COPY_MAX_LINES,     L"预览最多显示行数（超出用 … 截断，剪贴板仍是全文）",  L"行",     0, 0, 0, 0, 0,      L"超级复制" },
     { IDC_COPY_MAXCHARS,  CFG_COPY_MAX_CHARS,     L"预览最多显示字数（同上）",                         L"字",     0, 0, 0, 0, 0,      L"超级复制" },
@@ -1887,22 +1888,30 @@ static void PickInfoFont(void) {
     UpdateDirty();
 }
 
-/* 「选择字体…」（超级复制预览浮层）。与 PickInfoFont 同一套做法，只差两点：
-     · 只回填**字体名**，没有字号行 —— 浮层的字号是固定的（标题 9 磅 / 正文
-       10 磅），一个只活一两秒的提示不需要字号旋钮；
-     · 因此不做 CF_LIMITSIZE，选中的磅数直接丢弃。 */
+/* 「选择字体…」（超级复制预览浮层）。与 PickInfoFont 同一套做法：字体名与
+   字号都只**回填到上面两行**，由用户点保存才落盘；CF_LIMITSIZE 的范围来自
+   config.c 的表（CfgLo / CfgHi），界面不写第二份。
+   字号只填**正文**那一行 —— 标题行取它的 90%，不是独立配置项，所以这里没有
+   第二根字号旋钮。 */
 static void PickCopyFont(void) {
     HWND edFace = Ctl(IDC_COPY_FONT);
-    if (!edFace) return;
+    HWND edSize = Ctl(IDC_COPY_FSIZE);
+    if (!edFace || !edSize) return;
 
     WCHAR face[LF_FACESIZE] = L"";
     GetWindowTextW(edFace, face, LF_FACESIZE);
     if (!face[0]) _snwprintf_s(face, LF_FACESIZE, _TRUNCATE, L"%s", L"Microsoft YaHei UI");
 
+    WCHAR sz[32] = L"";
+    GetWindowTextW(edSize, sz, 32);
+    int pt = _wtoi(sz);
+    int lo = CfgLo(CFG_COPY_FONT_SIZE), hi = CfgHi(CFG_COPY_FONT_SIZE);
+    if (pt < lo || pt > hi) pt = COPY_FONT_SIZE_DEFAULT;
+
     LOGFONTW lf;
     memset(&lf, 0, sizeof(lf));
     lf.lfCharSet = DEFAULT_CHARSET;
-    lf.lfHeight  = -MulDiv(10, g_dpi, 72);   /* 与 toast.c 的正文字号同一算法 */
+    lf.lfHeight  = -MulDiv(pt, g_dpi, 72);      /* 磅 -> 逻辑高度（与 toast.c 同一算法） */
     _snwprintf_s(lf.lfFaceName, LF_FACESIZE, _TRUNCATE, L"%s", face);
 
     CHOOSEFONTW cf;
@@ -1911,11 +1920,15 @@ static void PickCopyFont(void) {
     cf.hwndOwner   = g_hwnd;
     cf.lpLogFont   = &lf;
     cf.Flags       = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_FORCEFONTEXIST |
-                     CF_NOVERTFONTS;
+                     CF_NOVERTFONTS | CF_LIMITSIZE;
+    cf.nSizeMin    = lo;
+    cf.nSizeMax    = hi;
     if (!ChooseFontW(&cf)) return;
 
     SetWindowTextW(edFace, lf.lfFaceName);
-    SetStatus(L"已选 %s —— 保存后生效", lf.lfFaceName);
+    _snwprintf_s(sz, 32, _TRUNCATE, L"%d", cf.iPointSize / 10);   /* iPointSize 是 1/10 磅 */
+    SetWindowTextW(edSize, sz);
+    SetStatus(L"已选 %s %d 磅 —— 保存后生效", lf.lfFaceName, cf.iPointSize / 10);
     UpdateDirty();
 }
 
