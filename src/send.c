@@ -432,6 +432,89 @@ void SendClearStuckModifiers(BOOL protectSeededHolds) {
     }
 }
 
+/* ================= 纯文本粘贴的粘贴键（Caps+V） =================
+   见 plainpaste.c 的说明。这里只负责"把粘贴键正确地送出去"。
+   与上面两条硬规则的关系：规则 2 说的是**长序列**（逐格方向键一次塞几十个事件，
+   部分程序只认第一个）；这里批量的是 3~4 个事件的短组合，要的恰恰是
+   "这一小段内部不插进物理输入"——物理 Shift / Alt 还按着时，单独发 Ctrl+V 会
+   变成 Ctrl+Shift+V / Ctrl+Alt+V，多数程序直接不粘（clippi 为这条把整段注入
+   改成一次 SendInput 批量，见其 RELEASES.md）。
+   顺序：① 抬起物理按住的修饰键 -> ② 粘贴键 -> ③ 把修饰键按回去。
+   第①步里 Alt / Win 前面垫一个掩码键（同 ReleaseStuck）：单独一条"抬起"会被
+   系统解释成"按下并释放了 Alt/Win"，从而激活菜单栏或开始菜单。 */
+static void BatchKey(INPUT* in, int* n, int vk, BOOL up) {
+    INPUT* e = &in[*n];
+    memset(e, 0, sizeof(*e));
+    e->type = INPUT_KEYBOARD;
+    e->ki.wVk = (WORD)vk;
+    e->ki.wScan = (WORD)MapVirtualKeyW((UINT)vk, MAPVK_VK_TO_VSC);
+    if (IsExtendedVk(vk)) e->ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    if (up)               e->ki.dwFlags |= KEYEVENTF_KEYUP;
+    (*n)++;
+}
+
+void SendPasteCombo(BOOL shiftInsert) {
+    static const int kMods[] = { VK_LCONTROL, VK_RCONTROL, VK_LSHIFT, VK_RSHIFT,
+                                 VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN };
+    /* 容量：8 个修饰键 × (掩码 down/up + 抬起) = 24，粘贴键 4，按回 8，留余量 */
+    INPUT in[40];
+    int   n = 0;
+    int   held[8];
+    int   nHeld = 0;
+
+    /* Hyper 透传的三键由 send.c 自己的状态机管（下面 Suspend 会抬起它们，
+       之后 Resume 会按回）—— 这里既不该记进 held，也不该替它按回去。 */
+    BOOL hyperOn = SendHyperLive();
+    SendHyperSuspend();
+
+    memset(in, 0, sizeof(in));
+    for (int i = 0; i < (int)(sizeof(kMods) / sizeof(kMods[0])); i++) {
+        int vk = kMods[i];
+        if (hyperOn && (vk == VK_RWIN || vk == VK_RCONTROL || vk == VK_RSHIFT)) continue;
+        if (GetAsyncKeyState(vk) & 0x8000) held[nHeld++] = vk;
+    }
+
+    /* ① 抬起物理按住的修饰键 */
+    for (int i = 0; i < nHeld; i++) {
+        int vk = held[i];
+        if (vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN) {
+            BatchKey(in, &n, MASK_VK, FALSE);
+            BatchKey(in, &n, MASK_VK, TRUE);
+        }
+        BatchKey(in, &n, vk, TRUE);
+    }
+
+    /* ② 粘贴键 */
+    if (shiftInsert) {
+        BatchKey(in, &n, VK_LSHIFT, FALSE);
+        BatchKey(in, &n, VK_INSERT, FALSE);
+        BatchKey(in, &n, VK_INSERT, TRUE);
+        BatchKey(in, &n, VK_LSHIFT, TRUE);
+    } else {
+        BatchKey(in, &n, VK_LCONTROL, FALSE);
+        BatchKey(in, &n, 'V', FALSE);
+        BatchKey(in, &n, 'V', TRUE);
+        BatchKey(in, &n, VK_LCONTROL, TRUE);
+    }
+
+    /* ③ 把还按着的修饰键按回去：逻辑状态与物理对齐，用户接着按 Shift 选区不受影响 */
+    for (int i = 0; i < nHeld; i++)
+        BatchKey(in, &n, held[i], FALSE);
+
+    UINT sent = SendInput((UINT)n, in, sizeof(INPUT));
+    if (sent) {
+        /* 记账与逐条发送时等价（SendEvent 里那一步），否则退出时的补抬漏掉这批键 */
+        for (int i = 0; i < n; i++)
+            InjNote(in[i].ki.wVk, (in[i].ki.dwFlags & KEYEVENTF_KEYUP) ? TRUE : FALSE);
+    }
+    /* 目标程序的完整性级别高于本进程时 UIPI 会整批拒掉（返回 0）——
+       现象是"按了 Caps+V 什么都没发生"，只有日志能看出是被拒了。 */
+    if (sent != (UINT)n && g_recording.load())
+        CapLog("  !! 粘贴键注入被拒 sent=%u/%d err=%lu（目标权限更高？）",
+               (unsigned)sent, n, (unsigned long)GetLastError());
+    SendHyperResume();
+}
+
 /* ================= Hyper 透传（HyperPassthrough，默认关） =================
    **懒按下**：按住 C 期间三键（RWin+RCtrl+RShift）一律不按，只有真的按下
    一个未映射键时才按，最后一个这类键抬起就抬。目标与外部工具看到的是

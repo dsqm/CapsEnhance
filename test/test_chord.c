@@ -108,6 +108,16 @@ void ToastShow(BOOL fail, const WCHAR* title, const WCHAR* meta, const WCHAR* bo
 void ToastHideNow(void) { }
 static void ResetGrabRec(void) { g_grabRun = 0; g_grabPt.x = g_grabPt.y = 0; }
 
+/* ---- 纯文本粘贴桩（src/plainpaste.c 不进本测试）----
+   真实现要抢全局剪贴板、把内容收成纯文本写回、再注入粘贴键 —— 本测试既不读
+   也不改这台机器的剪贴板，更不该往别的程序里打字。桩成记账之后，能离线钉住
+   的全是**接线语义**：V 只接这一个动作、单发、不发键、目标窗口取"按下那一刻"
+   的前台窗口（见场景 AL）。 */
+static int  g_pasteRun = 0;
+static HWND g_pasteHwnd = NULL;
+void PlainPasteRun(HWND target) { g_pasteRun++; g_pasteHwnd = target; }
+static void ResetPasteRec(void) { g_pasteRun = 0; g_pasteHwnd = NULL; }
+
 
 
 /* ---- 捕获钩子：记录注入的完整事件序列（按下/抬起），并可统计次数 ---- */
@@ -2350,6 +2360,38 @@ int main(void) {
         CHECK(g_grabRun == 1, "AK: 抬起不重复取词");
         Sim(CLI_CAPS, FALSE); Pump(20);
         CHECK(g_grabRun == 1, "AK: 松开 Caps 不重复取词");
+        Drain();
+    }
+
+    /* ---- 场景AL：纯文本粘贴（Caps+V）----
+       粘贴本体要真剪贴板 + 真前台窗口 + 真注入，离线测不了；能钉住的是接线
+       语义：
+         ① 'V' 原本是空的（历史上的剪贴板历史动作已随整模块移除），现在只接这一个；
+         ② 属性 = 走 plainpaste + 单发 + 不吃选区修饰 + 不走通用发键通道
+            （它自己发粘贴键 Ctrl+V / Shift+Insert）；
+         ③ 按下只粘一次，抬起与松开 Caps 都不重复 —— 不单发的话，长按 Caps+V
+            会每 35ms 抢一次全局剪贴板；
+         ④ 目标窗口必须是**按下那一刻**的前台窗口（main.c 的 PostAct 快照，
+            见 ActJob.hwnd）：执行线程是异步的，粘错窗口比不粘更糟。 */
+    {
+        CHECK(ActOfVk('V') == ACT_PASTEPLAIN, "AM: 触发键 V -> 纯文本粘贴动作");
+        CHECK(ActHasFlag(ACT_PASTEPLAIN, ACTF_PASTEPLAIN) &&
+              ActHasFlag(ACT_PASTEPLAIN, ACTF_SINGLE_SHOT) &&
+              ActHasFlag(ACT_PASTEPLAIN, ACTF_NO_SHIFT),
+              "AM: 属性 = 由 plainpaste 执行 + 单发 + 不吃选区修饰");
+        CHECK(ActOutVk(ACT_PASTEPLAIN) == 0, "AM: 粘贴键由自己发，不走通用发键通道");
+
+        ResetPasteRec();
+        HWND fg = GetForegroundWindow();
+        Sim(CLI_CAPS, TRUE);  Pump(20);
+        Sim('V', TRUE);       Pump(20);
+        CHECK(g_pasteRun == 1, "AM: 按下 Caps+V -> 粘贴一次");
+        CHECK(g_pasteHwnd == fg, "AM: 目标 = 按下那一刻的前台窗口（不是执行时现读）");
+
+        Sim('V', FALSE);      Pump(20);
+        CHECK(g_pasteRun == 1, "AM: 抬起不重复粘贴");
+        Sim(CLI_CAPS, FALSE); Pump(20);
+        CHECK(g_pasteRun == 1, "AM: 松开 Caps 不重复粘贴");
         Drain();
     }
 

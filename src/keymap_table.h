@@ -46,6 +46,10 @@ typedef struct {
                          决定；不写 `|` 的才交给按宽度自动折行。
                          ★ 文案长没关系：帮助图的字号是**逐键帽实测**的，长文案的键
                          （如这里的 F4）会自动用小一号的字，不拖累其他键。 */
+    int      labelSizePx; /* 帮助图上这条功能名的**字号微调**（像素，负值 = 再小几像素；
+                          0 = 只按文案实测）。用于"实测结果看着仍偏大"的两行文案 ——
+                          例如 V 的"纯文本|粘贴"三字一行，实测能顶到最大档，但那样
+                          撑满键帽宽度、比同类两行文案显眼，需要单独降下来。 */
 } ActionDef;
 
 /* 顺序不敏感，ActOfVk 线性扫（表很小，且只在按键事件里查一次）。 */
@@ -85,13 +89,19 @@ static const ActionDef kActions[] = {
     /* 窗口信息：单发命令，同样不发键。窗口在独立 exe（CapsEnhanceInfo.exe）里，
        目标取 main.c 在开火那一刻快照的前台窗口 —— 与「打开所在文件夹」同一个
        快照时机、同一个理由（投递是异步的，等执行时前台可能已经换了）。 */
-    { ACT_INFO,      VK_F12,     0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_INFO, "窗口信息(F12)", "窗口信息" },
+    { ACT_INFO,      VK_F12,     0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_INFO, "窗口信息(F12)", "窗口|信息" },
     /* 超级复制（C）：单发命令，不发键。取**按下那一刻**光标所指控件的文字
        （目标的屏幕坐标由 main.c 的 PostAct 快照进 ActJob.pt，理由与窗口快照
        相同：投递是异步的），清洗后写剪贴板，再在屏幕下方弹一个不抢焦点的
        预览浮层。为什么必须单发：它会跨进程查无障碍树 + 抢剪贴板，长按重复
        就是连续抢两次剪贴板。 */
-    { ACT_COPYTEXT,  'C',        0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_COPYTEXT, "超级复制(C)", "超级复制" },
+    { ACT_COPYTEXT,  'C',        0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_COPYTEXT, "超级复制(C)", "超级|复制" },
+    /* 纯文本粘贴（V）：单发命令，不发键。V 这个键历史上是剪贴板历史
+       （ACT_CLIPLIST，随整个剪贴板模块一起移除）—— 语义一脉相承：
+       V 就是"剪贴板 -> 粘"。做法与 Ditto / clippi / QuickClipboard 一致：
+       把剪贴板收成纯文本格式，再注入目标程序认的粘贴键（控制台系是 Shift+Insert）。
+       为什么必须单发：每次都要抢全局剪贴板并注入按键，长按重复就是连刷剪贴板。 */
+    { ACT_PASTEPLAIN, 'V',       0,          -1, ACTF_SINGLE_SHOT | ACTF_NO_SHIFT | ACTF_PASTEPLAIN, "纯文本粘贴(V)", "纯文本|粘贴", -2 },
     /* 系统音量：走普通"发键"通道（outVk = 多媒体键，系统自己处理，与前台程序无关）。
        静音是**开关**：重复一次就多切一次（来回横跳），必须单发 —— 与 Caps(Tab) 同理。
        音量加减是**步进**：长按重复（与真实音量键的手感一致，重复节奏即引擎的
@@ -101,7 +111,7 @@ static const ActionDef kActions[] = {
     { ACT_VOLDOWN,   VK_F7,      VK_VOLUME_DOWN, -1, ACTF_NO_SHIFT, "音量-(F7)", "音量-" },
     { ACT_VOLUP,     VK_F8,      VK_VOLUME_UP,   -1, ACTF_NO_SHIFT, "音量+(F8)", "音量+" },
     /* 诊断：没有触发键（由 PROBE_KEY 的特殊路径投递，见 hook.c） */
-    { ACT_PROBE,     0,          0,          -1, ACTF_PROBE, "探测", "记录日志" },
+    { ACT_PROBE,     0,          0,          -1, ACTF_PROBE, "探测", "记录|日志" },
 };
 #define ACT_N ((int)(sizeof(kActions) / sizeof(kActions[0])))
 

@@ -19,5 +19,7 @@ src\child.c
 src\lane.c
 src\info.c
 src\textgrab.c
+src\plainpaste.c
+src\plain_text.c
 src\toast.c
 src\copy_text.c

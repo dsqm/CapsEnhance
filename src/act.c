@@ -82,6 +82,13 @@ static void RunJob(const ActJob* j) {
                所以这条分支**不会**把后面的动作堵在队列里（文件头那条"队列是
                FIFO"的顾虑对它不成立）。 */
             FolderOpenRequest(j->hwnd);
+        } else if (ActHasFlag(act, ACTF_PASTEPLAIN)) {
+            /* 纯文本粘贴（Caps+V）：抢全局剪贴板（OpenClipboard 会重试
+               10×20ms）+ 注入粘贴键，全是文件头列的那类阻塞，所以只能在这一层做。
+               目标窗口取 ActJob 里的**开火快照**（与打开文件夹 / 置顶同一个理由：
+               投递是异步的，等执行到这里时前台可能已经换了）；注入前还会再校验
+               一次前台没变，变了就不粘。 */
+            PlainPasteRun(j->hwnd);
         } else if (ActHasFlag(act, ACTF_COPYTEXT)) {
             /* 控件复制（Caps+C）：跨进程查无障碍树（UIA / MSAA）可能卡住几百
                毫秒，还可能要重试几次 + 抢剪贴板 —— 全部是文件头列的那类阻塞，

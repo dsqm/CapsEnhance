@@ -595,6 +595,82 @@ WPS 置位的回读校验返回**三态**：
 
 ---
 
+## 纯文本粘贴（`plainpaste.c` / `plain_text.c`，`Caps+V`）
+
+**为什么不"逐字打字"也不 `WM_PASTE`**：逐字 `SendInput` Unicode 在长文本上慢，
+中文与 emoji 要过输入法与框架，WPF / Electron / 终端还常常收不到；`WM_PASTE` /
+`EM_REPLACESEL` 只对经典 Edit / RichEdit 有效，等于只给记事本做功能。三家成熟
+实现（Ditto 的 `DoTextOnlyPaste`、clippi 的 `paste_plain_from_clipboard`、
+QuickClipboard 的 `PasteAction::PlainText`）走的是同一条路：**把剪贴板收成只
+含纯文本的格式，再注入目标程序自己认的粘贴键**。
+
+**只写 `CF_UNICODETEXT`**：不写 `CF_TEXT`（ANSI 版在中文系统上会把 CJK 写成
+乱码，Ditto 那边两个格式都写，因此它的纯文本路径有这条已知风险）；读的时候
+反过来——先 `CF_UNICODETEXT`，没有才退回 `CF_TEXT` 按 `CP_ACP` 转。
+
+**格式从哪算起**：文本优先（`CF_UNICODETEXT` / `CF_TEXT`），没有文本才看
+`CF_HDROP`，按**每行一个完整路径**、不加引号、**末行不带换行**拼出去（末行带
+换行时粘进终端等于顺手回车执行）。这条优先级与 Ditto 的 `PlainTextFilter` 一致
+（`foundText` 就删掉 HDrop）；没有文本也没有文件（只有图片）就什么都不做。
+
+**换行只在两侧各统一一次**：剪贴板里的 `CF_UNICODETEXT` 几乎都是 CRLF（Word /
+网页 / 表格都这样），而写回时还要把每个 `\n` 展开成 CRLF —— 不先归一就是
+`\r\r\n`，粘出来每两行之间多一个空行。所以读进来先用 `CopyClean`（与"超级复制"
+同一套换行语义，`stripTail=FALSE` 不去尾）把 CRLF / 裸 CR 归成 LF，写剪贴板时再
+统一成 CRLF。文件路径那份文本同样是 LF 内部表示（`PlainJoinPaths` 只用 `\n`）。
+
+**为什么摘掉物理修饰键**：Caps 是被钩子吞掉的，但用户完全可能同时按着真实的
+Shift / Alt / Win（`C+F+V` 的 F 是选区键、物理 Shift 也可能真按着）。这些修饰键
+对目标程序是**真的按下状态**，此时单独注入 `Ctrl+V`，目标收到的是
+`Ctrl+Shift+V`——多数程序直接不理。所以注入前用 `GetAsyncKeyState` 取快照，把
+按着的修饰键抬起、发完再按回去；整个「抬起 → 粘贴键 → 按回」压进**一次**
+`SendInput`（clippi 的结论：一批注入内部不会插进物理输入，串键窗口就此关掉）。
+注意这与 `send.c` 顶部规则 2（"逐条发送，批量在部分程序只认第一个键"）不冲突：
+那条说的是几十个事件的**长序列**，这里是 3~4 个事件的短组合，要的恰是原子性。
+Alt / Win 抬起前垫一个 `MASK_VK`（同 `ReleaseStuck`），否则"单独一条抬起"会被
+系统解释成按下并释放了 Alt/Win，进而激活菜单栏 / 开始菜单。
+
+**为什么注入前校验前台**：`Caps+V` 的执行发生在工作线程上，投递是异步的；用户
+按下后立刻切窗很常见，而"粘错窗口"比"没粘"糟糕得多。所以 `ActJob.hwnd` 记下
+按下那一刻的前台窗口，写剪贴板前后各比一次 `GetForegroundWindow()`，任一不等就
+放弃（剪贴板可能已经被改成纯文本，这是可接受的——它本来也不恢复）。
+
+**为什么不做"恢复原剪贴板"**：恢复要枚举所有格式并 `GlobalLock` 复制，而延迟
+渲染格式（Office 的大内容）根本没法安全快照——Ditto 的
+`CClipboardSaveRestore::Restore` 完整实现了这件事，但它自己的纯文本路径也
+**不调用**它（只给"复制缓冲"用），clippi 则明确接受写回保留。既然默认不恢复、
+也没有可靠的实现，就不做这个开关（少一个"看起来能用其实会丢格式"的旋钮）。
+写回时会打一条已注册的 `Clipboard Viewer Ignore` 私格式，剪贴板管理器（Ditto 等）
+因此不会把这份派生文本记成新历史项。
+
+**为什么零配置**：这个动作没有"口味"可调——粘贴键由目标决定（终端类自动
+`Shift+Insert`，其余 `Ctrl+V`）、内容必须原样、失败必须安静。给它加开关只会
+让人多一次"我是不是把它关了"的怀疑；真遇到个别程序不认，先在记录模式看日志。
+
+**终端类判据用窗口类名而不是进程名**：`ConsoleWindowClass` 是 conhost 的固定
+类名，cmd / PowerShell / WSL 全在里面；Windows Terminal 是
+`CASCADIA_HOSTING_WINDOW_CLASS`，另有 `mintty`、`PuTTY`（类名带序号，按前缀认）、
+`VirtualConsoleClass`。名单与归档的剪贴板历史（`archive/clipboard/clip/clip.c`
+的 `TargetIsConsole`）同源。
+
+**失败一律静默**：没有文本 / 纯空白文本 / 剪贴板被占 / 目标权限更高（UIPI 会把
+整批注入拒掉，`SendInput` 返回 0）/ 前台是桌面壳或本程序自己——全部不动作、
+不上屏、不响音，剪贴板一个字节都不动。唯一痕迹是记录模式里的一行 `[粘贴]`。
+
+**键位为什么是 `V`**：这个键历史上就是剪贴板历史（`ACT_CLIPLIST`，随整个剪贴板
+模块移除，见 `archive/clipboard/`）。语义一脉相承：`V` 就是"剪贴板 → 粘"。
+动作 id 用 26（17 是那次移除留下的空洞，26 是下一个空位），标志用 `0x800`
+（`0x400` 是 `ACTF_COPYTEXT`）。
+
+**测试**：`test/test_plainpaste.c` 直接 include `plain_text.c`，验空判定（含
+全角空格）/ 路径拼接（CRLF、末行不带换行、容量不足不写半截）/ 终端类名判定；
+`test/test_chord.c` 的场景 AM 把 `PlainPasteRun` 桩掉，钉住"`V` 只接这一个动作、
+单发、不走通用发键通道、目标窗口取按下那一刻的前台窗口"。真剪贴板与真注入由
+手测覆盖（记事本 / 浏览器 / Word / WPS / Excel / Windows Terminal / PuTTY /
+资源管理器复制文件）。
+
+---
+
 ## 子进程的收场（帮助浮层）
 
 主程序会拉起 `CapsEnhanceHelp.exe`（`C+F1` 按住期间的键位图）。它得**跟着主程序走** —— 主程序没了，谁去看那个窗口？这一节讲这件事怎么保证，实现在 `src/child.c`。

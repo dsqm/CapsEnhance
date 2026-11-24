@@ -257,11 +257,13 @@ static void PostAct(int act, int fillAct, int count, BOOL keep) {
     j.shf     = g_actShf;
     j.count   = count;
     j.keep    = keep;
-    /* 需要"目标窗口"的动作（打开所在文件夹 / 窗口置顶）在这里一并快照 ——
-       与 enh/shf 同一个时机（按下触发键的这一发）、同一个理由：执行线程是
-       异步的，等它跑到时前台窗口可能已经换了（见 cap.h 的 ActJob.hwnd）。
+    /* 需要"目标窗口"的动作（打开所在文件夹 / 窗口置顶 / 纯文本粘贴）在这里一并
+       快照 —— 与 enh/shf 同一个时机（按下触发键的这一发）、同一个理由：执行线程是
+       异步的，等它跑到时前台窗口可能已经换了（见 cap.h 的 ActJob.hwnd）。纯文本
+       粘贴拿到它只为**校验**：注入粘贴键前再比一次前台，不一样就不粘。
        postTick 不在这里填：投递时刻由 act.c 的 ActPost 写。 */
-    j.hwnd    = (ActHasFlag(act, ACTF_OPENFOLDER) || ActHasFlag(act, ACTF_PIN))
+    j.hwnd    = (ActHasFlag(act, ACTF_OPENFOLDER) || ActHasFlag(act, ACTF_PIN) ||
+                 ActHasFlag(act, ACTF_PASTEPLAIN))
                     ? GetForegroundWindow() : NULL;
     /* 控件复制（Caps+C）：要的是**按下那一刻**的光标坐标 —— 用户按下之后
        手一抖，"取的是哪个字"就变了，而这件事全由这个点决定。与 hwnd 同一

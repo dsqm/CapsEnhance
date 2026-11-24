@@ -36,9 +36,11 @@ typedef struct {
     BOOL shf;       /* 开火快照：选区模式（带 Shift）             */
     int  count;     /* fillAct 的已发送次数（补齐时用）           */
     BOOL keep;      /* 引擎复位（松开 C）时是否保留，见 act.c 的 ActClearKeepFill */
-    HWND hwnd;      /* 开火快照：目标窗口（ACTF_OPENFOLDER / ACTF_PIN 用）。
-                       捕获时机必须与 enh/shf 一样是"按下触发键的那一刻"（见 main.c 的 PostAct）：
-                       执行线程是异步的，等它跑到时前台窗口可能已经换了。 */
+    HWND hwnd;      /* 开火快照：目标窗口（ACTF_OPENFOLDER / ACTF_PIN /
+                        ACTF_PASTEPLAIN 用）。捕获时机必须与 enh/shf 一样是"按下
+                        触发键的那一刻"（见 main.c 的 PostAct）：执行线程是异步的，
+                        等它跑到时前台窗口可能已经换了；纯文本粘贴还拿它做注入前的
+                        前台校验（粘错窗口比不粘更糟）。 */
     POINT pt;       /* 开火快照：光标屏幕坐标（只有 ACTF_COPYTEXT 用）。
                        同样必须在按下那一刻取：用户按下 Caps+C 之后手一抖，光标就
                        不在他想复制的那个字上了，而"复制的到底是哪个字"全由这个点决定。 */
@@ -142,6 +144,12 @@ BOOL SendArrowsWasInterrupted(void);         /* 刚刚那次逐格输出是否�
                                                 打断 = 和弦已经松手，再发箭头就是在用户松手之后注键 */
 BOOL SendArrowsConflicts(int act);           /* act 是否与正在逐格输出的方向冲突 */
 void SendNativeWordJump(int dir, BOOL shift);/* 原生 Ctrl(+Shift)+方向：按词跳转兜底 */
+/* 纯文本粘贴的粘贴键（Caps+V，见 plainpaste.c）：一次 SendInput 批量发完
+   「释放物理按住的修饰键 -> 粘贴键 -> 把修饰键按回去」。
+   shiftInsert=TRUE 时发 Shift+Insert（控制台 / 终端系），否则 Ctrl+V。
+   为什么必须批量：物理 Shift 还按着时单独发 Ctrl+V 会变成 Ctrl+Shift+V，多数
+   程序直接不粘；一批注入内部不会插进物理输入（clippi 的做法）。 */
+void SendPasteCombo(BOOL shiftInsert);
 void SendWheelAccel(int delta, int mul);     /* 纵向放大：补发 (mul-1) 个同值刻度 */
 int  SendWheelExtraCount(int mul);           /* 倍数 -> 补发格数（单测用） */
 void SendWheelNotches(int delta, int n);     /* 补发 n 个同值刻度（持续滚动用） */
@@ -179,3 +187,11 @@ void SendHyperReset(void);       /* 收尾：计数归零并抬起三键（暂�
    最长可卡数百毫秒，跑在主线程（钩子宿主）上就是全局输入卡顿 + 钩子被系统
    摘掉。内部自带总预算（见 textgrab.c 的 TG_TOTAL_BUDGET_MS）。 */
 void TextGrabRun(POINT pt);
+
+/* ---------- 纯文本粘贴（src/plainpaste.c） ----------
+   Caps+V 的入口。**只在动作执行线程上调用**：要抢全局剪贴板（OpenClipboard
+   重试 10×20ms）并注入全局按键，都是钩子宿主线程上不能做的阻塞。
+   target 是开火那一刻的前台窗口（ActJob.hwnd）；内部在写剪贴板前后各校验一次
+   前台仍是它 —— 用户切了窗就什么都不做（静默失败，只在记录模式写一行日志）。
+   失败一律不打扰：没有文本 / 剪贴板被占用 / 目标权限更高 / 前台是桌面壳。 */
+void PlainPasteRun(HWND target);

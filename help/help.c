@@ -114,6 +114,11 @@
                                      这个数收窄是为了**把空间让给字号** —— 灰阶抗锯齿在
                                      小字号下发虚，而字号的上限就是键帽内宽 ÷ 每行字数。 */
 #define LABEL_PAD_K  0.03f        /* 标签再往里收一点，别贴到键帽边 */
+#define CAP_H_K      0.89f        /* 键帽高（单位 u）：上下各让出 0.055u */
+/* 两行功能名**每行**分到的高度（相对键帽高）。绘制与"字号能不能装下"的判定
+   必须用同一个数：只按宽度挑字号时，两行的文案会顶出自己的行框，看着比周围的字
+   大一号、上下两行也挤在一起（见 LabelLinesFit 的行高检查）。 */
+#define FUNC_LINE_H_K 0.34f
 #define PANEL_RADIUS 16.0f
 #define HELP_LIFE_ALPHA 242   /* 整窗不透明度（/255）：95% */
 
@@ -338,6 +343,20 @@ static const char* LabelOfVk(int vk) {
     return NULL;
 }
 
+/* 这个键的功能名字号微调（像素，来自键位表那条动作的 labelSizePx；0 = 不调）。
+   与 LabelOfVk 同一个查法：文案与"这条文案要多大的字"必须来自同一行数据。 */
+static int LabelSizeAdjOfVk(int vk) {
+    if (vk == VK_CAPITAL || vk == VK_LMENU || vk == 'D' || vk == 'F') return 0;
+    if (vk == VK_OEM_3) {
+        for (int i = 0; i < ACT_N; i++)
+            if (kActions[i].act == ACT_PROBE) return kActions[i].labelSizePx;
+        return 0;
+    }
+    for (int i = 0; i < ACT_N; i++)
+        if (kActions[i].vk && kActions[i].vk == vk) return kActions[i].labelSizePx;
+    return 0;
+}
+
 /* 圆角矩形（GDI+ 没有现成的：四段弧 + 闭合）。 */
 static void AddRoundRect(Gdiplus::GraphicsPath* p, float x, float y,
                          float w, float h, float r) {
@@ -369,7 +388,10 @@ static void AddRoundRect(Gdiplus::GraphicsPath* p, float x, float y,
 static const WCHAR* g_fontFace = L"Microsoft YaHei UI";
 
 /* GDI 字体 + DEFAULT_QUALITY。
-   lfHeight 负值 = 按字形（em）高度取。 */
+   lfHeight 负值 = 按字形（em）高度取。
+   ★ 字重恒为 FW_NORMAL：小字号的长文案看着比大字号轻，是 ClearType 的像素数
+   造成的（13px 的竖只有 1 个像素、23px 是 2 个），属于字号差异的必然结果；
+   靠给小字号换粗一档字面去"补偿"反而会把 13px 的中文糊成一块，不做。 */
 static HFONT MakeFontPx(int px) {
     LOGFONTW lf;
     memset(&lf, 0, sizeof(lf));
@@ -416,6 +438,20 @@ static BOOL LabelLinesFit(HDC dc, HFONT f, const KeyDef* k, float u) {
     float maxW = k->w * u - u * CAP_GAP_K - u * LABEL_PAD_K;
     WCHAR t[64];
     Utf8ToW(lab, t, 64);
+
+    /* 写了 `|` 的文案**一定**画成两行：除了宽度，行高也要装得进
+       DrawAllText 给每行分的那一档（FUNC_LINE_H_K × 键帽高）。少了这一条，
+       两行的文案只按宽度选字号就会顶出/压扁自己的行框 —— 3 字一行的
+       "纯文本|粘贴" 曾经就是这样比周围大一号。 */
+    if (wcschr(t, L'|')) {
+        TEXTMETRICW tm;
+        HGDIOBJ of = SelectObject(dc, f);
+        BOOL ok = GetTextMetricsW(dc, &tm);
+        SelectObject(dc, of);
+        if (ok && (float)tm.tmHeight > (u * CAP_H_K) * FUNC_LINE_H_K)
+            return FALSE;
+    }
+
     const WCHAR* seg = t;
     while (seg && *seg) {
         const WCHAR* bar = wcschr(seg, L'|');
@@ -468,6 +504,11 @@ static void PickFuncSizes(HDC dc, float u) {
             if (!f) break;
             if (LabelLinesFit(dc, f, k, u)) { got = h; break; }
         }
+        /* 键位表里写死的字号微调（负值 = 再小几像素）：实测能顶到最大档、但看着
+           仍偏大的文案在这条上收。只允许往小里调，且不低于 9px。 */
+        got += LabelSizeAdjOfVk(k->vk);
+        if (got < 9) got = 9;
+        if (got > g_fsFunc) got = g_fsFunc;
         g_funcSize[i] = got;
     }
 }
@@ -580,10 +621,10 @@ static void DrawAllText(HDC dc, float kbdX, float kbdY, float u, float capH) {
             DrawLineGdi(dc, lines[0], fF, cFunc, x, y + capH * 0.36f, w, capH * 0.60f,
                         DT_CENTER);
         } else {
-            DrawLineGdi(dc, lines[0], fF, cFunc, x, y + capH * 0.30f, w, capH * 0.34f,
-                        DT_CENTER);
-            DrawLineGdi(dc, lines[1], fF, cFunc, x, y + capH * 0.62f, w, capH * 0.34f,
-                        DT_CENTER);
+            DrawLineGdi(dc, lines[0], fF, cFunc, x, y + capH * 0.30f, w,
+                        capH * FUNC_LINE_H_K, DT_CENTER);
+            DrawLineGdi(dc, lines[1], fF, cFunc, x, y + capH * 0.62f, w,
+                        capH * FUNC_LINE_H_K, DT_CENTER);
         }
     }
 
@@ -714,7 +755,7 @@ static BOOL Render(void) {
     if (!g_memDC || !g_bmp) return FALSE;
 
     const float u = (float)g_unit;
-    const float capH = u - u * 0.11f;
+    const float capH = u * CAP_H_K;
     const float kbdX = g_pad;
     const float kbdY = g_pad + g_title;
 
