@@ -48,11 +48,13 @@ void CapLog(const char* fmt, ...) { (void)fmt; }
 #include "cap.h"
 #include "child.c"
 
+#include "test_fails.h"   /* 失败项清单：汇总时再列一遍，省得往上翻 */
+
 static int g_fails = 0;
 
 static void Check(BOOL cond, const char* name) {
     printf("  [%s] %s\n", cond ? "OK  " : "FAIL", name);
-    if (!cond) g_fails++;
+    if (!cond) { TfAddFail(name); g_fails++; }
 }
 
 /* 消息窗口：只为接 ChildGoneProc 的那一条 PostMessage。
@@ -128,6 +130,6 @@ int main(int argc, char** argv) {
           "ChildWatchStop 拆干净并复位结构");
 
     CloseHandle(hp);
-    printf(g_fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", g_fails);
+    TfSummary(g_fails);
     return g_fails ? 1 : 0;
 }

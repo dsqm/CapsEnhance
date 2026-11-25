@@ -11,10 +11,12 @@
 #include <windows.h>
 #include <stdio.h>
 
+#include "test_fails.h"   /* 失败项清单：汇总时再列一遍，省得往上翻 */
+
 static int fails = 0;
 #define EXPECT(cond, name) do { \
     if (cond) printf("  [OK]   %s\n", name); \
-    else      { printf("  [FAIL] %s\n", name); fails++; } } while (0)
+    else      { printf("  [FAIL] %s\n", name); TfAddFail(name); fails++; } } while (0)
 
 static HWND WaitMainWindow(int timeoutMs) {
     ULONGLONG end = GetTickCount64() + (ULONGLONG)timeoutMs;
@@ -197,6 +199,6 @@ int main(void) {
     if (hB) { WaitForSingleObject(hB, 3000); CloseHandle(hB); }
     CloseHandle(hA);
 
-    printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
+    TfSummary(fails);
     return fails;
 }

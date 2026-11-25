@@ -13,11 +13,13 @@
 #include "copy_text.h"
 #include "copy_text.c"      /* 纯函数：直接包含生产实现，不经链接 */
 
+#include "test_fails.h"   /* 失败项清单：汇总时再列一遍，省得往上翻 */
+
 static int fails = 0;
 
 #define EXPECT(cond, name) do {                                     \
     if (cond) printf("  [OK]   %s\n", name);                        \
-    else { printf("  [FAIL] %s\n", name); fails++; }                \
+    else { printf("  [FAIL] %s\n", name); TfAddFail(name); fails++; } \
 } while (0)
 
 static int Clean(const WCHAR* src, BOOL strip, WCHAR* out, int cap) {
@@ -89,6 +91,7 @@ int main(void) {
         EXPECT(n == 2 && !cut, "只有一个代理对且限额 1 -> 完整保留、不算被截");
     }
 
+    TfFailList();
     printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");
     return fails ? 1 : 0;
 }

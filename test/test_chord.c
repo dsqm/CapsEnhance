@@ -48,6 +48,7 @@ static void ResetImeRec(void) {
 #include "send.c"      /* hook.c 的 SendActOnce 现在走统一发送模块 */
 #include "act.c"       /* 动作实际由执行线程完成：本测试要能起/停/等它 */
 #include <stdio.h>
+#include "test_fails.h"   /* 失败项清单：汇总时再列一遍，省得往上翻 */
 
 /* 按词跳转桩：本测试只验证模式修饰/补齐/自动滚动，不测文本解析。
    g_slowJumpMs != 0 时模拟"真按词跳转要几百毫秒"（同步 IPC + COM 往返），
@@ -372,7 +373,7 @@ static void WriteChordIni(const char* body) {
     if (cond) printf("  [OK]   %s\n", name); \
     else      { printf("  [FAIL] %s   (captured: ", name); \
                for(int __i=0;__i<g_recN;__i++) printf("%d:%d ",g_rec[__i].vk,g_rec[__i].n);\
-               printf(")\n"); fails++; } } while (0)
+               printf(")\n"); TfAddFail(name); fails++; } } while (0)
 
 
 /* ---- AF 段的前置条件：探测点必须真的落在我们自己的窗口上 ----
@@ -2789,6 +2790,6 @@ int main(void) {
         CHECK(PinCornerRadiusFor(-1) == 0, "AL: 拿不到角偏好（Win10）-> 直角");
     }
 
-    printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
+    TfSummary(fails);
     return fails;
 }

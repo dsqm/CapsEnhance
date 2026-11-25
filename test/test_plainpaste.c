@@ -16,11 +16,13 @@
 #include "plain_text.h"
 #include "plain_text.c"     /* 纯函数：直接包含生产实现，不经链接 */
 
+#include "test_fails.h"   /* 失败项清单：汇总时再列一遍，省得往上翻 */
+
 static int fails = 0;
 
 #define EXPECT(cond, name) do {                                     \
     if (cond) printf("  [OK]   %s\n", name);                        \
-    else { printf("  [FAIL] %s\n", name); fails++; }                \
+    else { printf("  [FAIL] %s\n", name); TfAddFail(name); fails++; } \
 } while (0)
 
 static BOOL Blank(const WCHAR* s) { return PlainIsBlank(s, (int)wcslen(s)); }
@@ -82,6 +84,7 @@ int main(void) {
     EXPECT(!PlainIsConsoleClass(L""), "空类名不算");
     EXPECT(!PlainIsConsoleClass(NULL), "NULL 不算");
 
+    TfFailList();
     printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");
     return fails ? 1 : 0;
 }

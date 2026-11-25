@@ -26,10 +26,12 @@
 std::atomic<bool> g_recording{false};
 void CapLog(const char* fmt, ...) { (void)fmt; }
 
+#include "test_fails.h"   /* 失败项清单：汇总时再列一遍，省得往上翻 */
+
 static int fails = 0;
 #define CHECK(cond, name) do { \
     if (cond) printf("  [OK]   %s\n", name); \
-    else      { printf("  [FAIL] %s\n", name); fails++; } } while (0)
+    else      { printf("  [FAIL] %s\n", name); TfAddFail(name); fails++; } } while (0)
 
 typedef BOOL (WINAPI* PFN_SetProcessDpiAwarenessContext)(HANDLE);
 typedef UINT (WINAPI* PFN_GetAwarenessFromCtx)(HANDLE);
@@ -91,6 +93,6 @@ int main(void) {
             printf("  [--]   本机没有 SetProcessDpiAwarenessContext（很老的系统），跳过 PMv2 断言\n");
     }
 
-    printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
+    TfSummary(fails);
     return fails;
 }

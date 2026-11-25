@@ -192,12 +192,14 @@ static int PumpFor(int n, int ms) {
     return g_kd - base;
 }
 
+#include "test_fails.h"   /* 失败项清单：汇总时再列一遍，省得往上翻 */
+
 static int fails = 0;
 #define EXPECT(cond, name) do { \
     if (cond) printf("  [OK]   %s\n", name); \
     else      { printf("  [FAIL] %s (caret=%d anchor=%d kd=%d fg=%d)\n", name, \
                        g_caret, g_anchor, g_kd, \
-                       (int)(GetForegroundWindow() == h)); fails++; } } while (0)
+                       (int)(GetForegroundWindow() == h)); TfAddFail(name); fails++; } } while (0)
 
 int main(void) {
     WNDCLASSW wc = {0};
@@ -384,7 +386,7 @@ int main(void) {
         }
     }
 
-    printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
+    TfSummary(fails);
     DestroyWindow(h);
     return fails;
 }

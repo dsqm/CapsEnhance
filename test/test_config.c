@@ -16,10 +16,12 @@
 #define STR(x)  STR2(x)
 
 
+#include "test_fails.h"   /* 失败项清单：汇总时再列一遍，省得往上翻 */
+
 static int fails = 0;
 #define EXPECT(cond, name) do { \
     if (cond) printf("  [OK]   %s\n", name); \
-    else      { printf("  [FAIL] %s\n", name); fails++; } } while (0)
+    else      { printf("  [FAIL] %s\n", name); TfAddFail(name); fails++; } } while (0)
 
 static void WriteIni(const char* body) {
     FILE* f = NULL;
@@ -843,6 +845,6 @@ int main(void) {
     (void)IsRunElevated();
 
     DeleteFileW(L"obj/test/cfgtest.ini");
-    printf(fails ? "\n== %d 项失败 ==\n" : "\n== 全部通过 ==\n", fails);
+    TfSummary(fails);
     return fails;
 }
