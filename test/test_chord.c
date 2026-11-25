@@ -1187,7 +1187,10 @@ int main(void) {
           "R: 关掉后平滑重新开启（delta 回到不足一格）");
 
     ResetWheelRec();
-    Pump(300);                                    /* 顶档 1000ms/格，300ms 内至少 1 拍 */
+    /* 上限 2s 且**条件成立就退出**：注入跑在持续滚动通道自己的线程上，负载高的
+       CI 机器上几百毫秒还没轮到它是常态 —— 原来固定等 300ms 在 CI 上真红过一次。
+       正常机器仍是几十毫秒（第一拍启动时立刻发）。 */
+    for (int i = 0; i < 40 && !(g_wheelInj >= 1 && g_wheelSum > 0); i++) Pump(50);
     CHECK(g_wheelInj >= 1 && g_wheelSum > 0, "R: 连续滚动确实在持续注入上滚");
     CHECK(ActAutoScrollDelta() > 0 && ActAutoScrollDelta() < 120,
           "R: 顶档也是小数刻度（平滑提速靠加 delta，不是加格数）");
@@ -1208,7 +1211,8 @@ int main(void) {
     ActAutoScrollWheel(-120);              /* 下滚启动（方向 -1） */
     CHECK(ActAutoScrollActive() && ActAutoScrollDir() == -1, "R: 下滚启动（方向 -1）");
     CHECK(ActAutoScrollDelta() < 0, "R: 下滚时 delta 为负（带方向）");
-    Pump(300);
+    /* 同上的上限 2s + 条件退出：这条断言只问"方向对不对"，不该由调度延迟决定成败 */
+    for (int i = 0; i < 40 && g_wheelSum >= 0; i++) Pump(50);
     CHECK(g_wheelSum < 0, "R: 下滚方向正确（与上方上滚大致抵消）");
 
     /* ---- 终止规则（2026-09-11 改版）：**松手不再打断** ----
